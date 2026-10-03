@@ -69,18 +69,21 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, secrets,
-  delegation, files, deploy, templates, share, isolation, ops, public,
+  delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  push, ai, ledger, agents, addon, computers, hermes, sync, restart,
-  pathmode; `crates/e2e/src/lanes/mod.rs`). `computers` runs the stub
-  image (`images/stub`) in Docker; `hermes`, the real-Hermes lane, builds
+  push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
+  hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
+  in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
   (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
-  Chrome serves the whole run, a fresh browser context per section);
+  Chrome serves the whole run, a fresh browser context per section;
+  frames, and computers' frame checks, start one of their own that
+  blocks third-party cookies, as Safari does);
   `--only triggers` waits for a cron
   minute (up to a minute; a full run deploys its cron fragment sections
   earlier). A section that errors or panics is one FAIL and the sections
@@ -96,10 +99,10 @@ prebuilt bundle is in the debt ledger).
   when `cell/src` or `crates/` change,
   agents (`agent/`, goose's loop) beside it in the same process (the router
   hands them `/api/agents` and `/api/a/*`), whose model calls go through
-  the model route to the Workers AI fake on :8796 (echoes; dev never calls
-  a real model) and spend their owner's ledger (dev people are seats, with
-  the month's included credit; images and videos only with the key
-  `OPENROUTER_API_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  the model route to the Workers AI fake on :8796 (echoes, and draws
+  placeholder JPEGs for image steps; dev never calls a real model) and
+  spend their owner's ledger (dev people are seats, with the month's
+  included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -117,7 +120,7 @@ prebuilt bundle is in the debt ledger).
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank` and `calories`, which has a goose agent of its own); the
-  platform's "new" page offers all but `notes`.
+  shell's catalog offers `todo`, `inbox` and `blank`.
 - `cargo xtask deploy --config <file> [--branch <name>]`: builds and
   deploys to Cloudflare from a deployment's config, kept outside the repo
   (`deploy/example.jsonc`; xtask/src/deploy.rs). A branch is a complete
@@ -127,7 +130,7 @@ prebuilt bundle is in the debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, Workers AI, OpenRouter, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, WorkOS, a push service),
 
   `crates/devstack`, `crates/e2e`.
 - `images/` (the computer images: the bridge, the stub, our Hermes image;

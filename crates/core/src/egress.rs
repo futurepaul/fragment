@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn public_only() {
-        for ok in ["https://openrouter.ai/api/v1/chat", "http://example.com:8080/x?y=1", "https://1.1.1.1/", "https://[2606:4700::1111]/"] {
+        for ok in ["https://api.example.com/v1/chat", "http://example.com:8080/x?y=1", "https://1.1.1.1/", "https://[2606:4700::1111]/"] {
             assert!(check(ok, false).is_ok(), "{ok}");
         }
         for bad in [

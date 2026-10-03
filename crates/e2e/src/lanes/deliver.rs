@@ -2,14 +2,14 @@
 //! the delivery queue to a push service that checks VAPID and decrypts as
 //! a browser would; subscriptions that are gone, retries, the dead-letter
 //! report; `notifyUrls`; and AI as a job's steps: text through the model
-//! route (the Workers AI fake), images and video on OpenRouter with the
-//! deployment's key, generated media stored as files. What each paid step
-//! costs is the ledger section's.
+//! route and images on its transport (both the Workers AI fake, a lower
+//! rung at the vendor boundary), generated images stored as files, and
+//! video steps refused. What each paid step costs is the ledger section's.
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fragment_fakes::openrouter::{image_bytes, video_bytes};
+use fragment_fakes::workers_ai::{image_bytes, IMAGE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -23,6 +23,11 @@ const MEDIA_JSON: &[u8] = include_bytes!("../../fixtures/media.json");
 /// How long the slow push receiver takes to answer: well past the 2 s a
 /// delivery beside it in the batch must land within.
 const SLOW_RECEIVER: Duration = Duration::from_secs(4);
+
+/// The image model's calls, in order.
+fn images(s: &Suite) -> Vec<fragment_fakes::workers_ai::AiCall> {
+    s.ai.calls().into_iter().filter(|c| c.model == IMAGE_MODEL).collect()
+}
 
 fn events(api: &Api, keys: &Keys, name: &str) -> String {
     api.signed(keys, "GET", &format!("/api/f/{name}/events?since=0"), None).map(|r| r.text).unwrap_or_default()
@@ -65,6 +70,9 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     subscribe(s, "b", "solo", 5)?;
     let r = site("__push-sub", Some(json!({ "who": "x", "endpoint": format!("{}/push/z", s.push.url), "p256dh": "nope", "auth": "nope" })))?;
     s.ok("a subscription with bad keys is refused", r.status == 400, &r);
+    let sub = s.push.subscribe(&s.name("push-for-someone"), 9);
+    let r = site("__push-sub", Some(json!({ "who": "id:00112233445566778899aabbccddeeff", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth })))?;
+    s.ok("a who that names an identity is that identity's own: a link holder subscribes for no one (403)", r.status == 403, &r);
 
     // a mutation pushes to everyone, once it commits, once
     let r = api.op(&owner, &name, "notify_all", "n1", json!({ "title": "hello" }))?;
@@ -196,6 +204,8 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         let r = api.op(&owner, &name, op, id, input)?;
         Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait))
     };
+    // a run with no charge (none reserved, or one released) names no cost
+    let cost = |r: &Value| r["costMicros"].as_i64().unwrap_or(0);
 
     let r = run("t1", "summarize", json!({ "text": "the meeting notes" }))?;
     s.ok(
@@ -212,53 +222,76 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
     s.ok("a step on the high tier is refused, saying why (decision 23)", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("high tier is off")), &r);
 
-    let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.png" }))?;
+    let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
-        "an image step writes the image to main",
-        r["output"]["path"] == "art/lighthouse.png" && s.fake.file_at(&repo, "main", "art/lighthouse.png") == Some(image_bytes("a lighthouse")),
+        "an image step writes the model's JPEG to main",
+        r["output"]["path"] == "art/lighthouse.jpg" && r["output"]["mediaType"] == "image/jpeg" && s.fake.file_at(&repo, "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse")),
         &r,
     );
+    let call = images(s).last().cloned();
     s.ok(
-        "with the image model the plan names, on the deployment's own key",
-        s.openrouter.calls().iter().any(|c| c.1 == "/api/v1/images" && c.2 == "google/gemini-3.1-flash-lite-image" && c.3 == format!("Bearer {}", crate::OPENROUTER_KEY)),
-        "",
+        "drawn by FLUX.1 [schnell] on the model route's transport: the catalog's input (4 steps unless named), the payer by an opaque id",
+        call.as_ref().is_some_and(|c| c.body == json!({ "prompt": "a lighthouse", "steps": 4 }) && c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16)),
+        format!("{call:?}"),
+    );
+    let mid = image_bytes("a mid harbour");
+    let r = run("i-mid", "draw", json!({ "prompt": "a mid harbour", "path": "art/harbour.jpg", "steps": 8 }))?;
+    s.ok(
+        "a 300 KiB image, past an app's write limit and under a blob's size, is kept in git (bug 1), drawn at the steps the job named",
+        r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/harbour.jpg") == Some(mid) && images(s).last().is_some_and(|c| c.body["steps"] == 8),
+        &r,
     );
     let big = image_bytes("a large mural");
-    let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.png" }))?;
-    let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "art/mural.png").unwrap_or_default());
+    let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.jpg" }))?;
+    let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "art/mural.jpg").unwrap_or_default());
     s.ok(
         "a large image is a blob, its pointer in git",
         r["status"] == "succeeded" && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&big) && p.size == big.len() as u64),
         &r,
     );
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=art/mural.png"), None)?;
+    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=art/mural.jpg"), None)?;
     s.ok("and its bytes are served", r.status == 200 && r.bytes == big, format!("{} {} bytes", r.status, r.bytes.len()));
 
-    let r = run("v1", "film", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
-    let film = video_bytes(6);
-    let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "video/waves.mp4").unwrap_or_default());
+    // refused before any call: nothing is reserved, nothing reaches the model
+    let drawn = images(s).len();
+    let png = run("i-png", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.png" }))?;
+    let model = run("i-model", "draw", json!({ "prompt": "a lighthouse", "path": "art/l.jpg", "model": "google/gemini-3.1-flash-lite-image" }))?;
+    let steps = run("i-steps", "draw", json!({ "prompt": "a lighthouse", "path": "art/l.jpg", "steps": 9 }))?;
     s.ok(
-        "a video step starts, polls, and saves the video as a blob",
-        r["status"] == "succeeded" && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&film)),
-        &r,
+        "an image to a path no JPEG's (bug 5), naming a model, or past 8 steps is refused, saying why, before any call",
+        png["status"] == "held" && png["error"].as_str().is_some_and(|e| e.contains("ends in .jpg or .jpeg"))
+            && model["status"] == "held" && model["error"].as_str().is_some_and(|e| e.contains("unknown field `model`"))
+            && steps["status"] == "held" && steps["error"].as_str().is_some_and(|e| e.contains("steps is 1 to 8"))
+            && images(s).len() == drawn && [&png, &model, &steps].iter().all(|r| cost(r) == 0),
+        json!([png, model, steps]),
     );
+
+    let calls = s.ai.calls().len();
+    let r = run("v1", "film", json!({ "prompt": "waves", "path": "video/waves.mp4" }))?;
     s.ok(
-        "with the video model the plan names, asked as the job said",
-        s.openrouter.calls().iter().any(|c| c.0 == "POST" && c.1 == "/api/v1/videos" && c.2 == "minimax/hailuo-3-max"),
-        "",
+        "a video step is refused, saying why, and calls and reserves nothing",
+        r["status"] == "held"
+            && r["error"].as_str().is_some_and(|e| e.contains("video steps are off until they run on Cloudflare"))
+            && cost(&r) == 0
+            && s.ai.calls().len() == calls
+            && s.fake.file_at(&repo, "main", "video/waves.mp4").is_none(),
+        &r,
     );
 
     s.ai.fail_next(&[503]);
     let r = run("t2", "summarize", json!({ "text": "again" }))?;
     s.ok("the model's 503 is retried", r["output"]["text"] == "echo: again", &r);
-    s.openrouter.fail_next(&[503]);
-    let r = run("i3", "draw", json!({ "prompt": "a harbour", "path": "art/harbour.png" }))?;
-    s.ok("an OpenRouter 503 is retried", r["status"] == "succeeded", &r);
-    s.openrouter.fail_next(&[402]);
-    let r = run("i4", "draw", json!({ "prompt": "no money", "path": "art/none.png" }))?;
-    s.ok("OpenRouter out of credits holds the run, saying so", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("out of credits")), &r);
-
-    let everything = format!("{}{}", events(api, &owner, &name), api.signed(&owner, "GET", &format!("/api/f/{name}/runs?limit=200"), None)?.text);
-    s.ok("the key appears in no run or event", !everything.contains(crate::OPENROUTER_KEY), "the key leaked");
+    s.ai.fail_next(&[503]);
+    let r = run("i3", "draw", json!({ "prompt": "a harbour at dusk", "path": "art/dusk.jpg" }))?;
+    s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);
+    s.ai.fail_next(&[400]);
+    let r = run("i4", "draw", json!({ "prompt": "refused", "path": "art/none.jpg" }))?;
+    s.ok("its refusal holds the run, saying so, and charges nothing", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("the model answered 400")) && cost(&r) == 0, &r);
+    let r = run("i5", "draw", json!({ "prompt": "a png", "path": "art/junk.jpg" }))?;
+    s.ok(
+        "an answer that is no JPEG is refused, saying why, and nothing is written; the call is charged",
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
+        &r,
+    );
     Ok(())
 }

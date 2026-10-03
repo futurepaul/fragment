@@ -8,6 +8,10 @@
   // record (`*` AAAA 100::), which Universal SSL covers.
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "example.dev",
+  // A Cloudflare API token with Zone · DNS · Edit on the zone(s) (and
+  // Account · AI Gateway · Edit, to make the gateway below): with it, a
+  // deploy makes that record when it is missing. Without it, make it by hand.
+  // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
   // A deployment of its own names its hosts (production: "fragment.club"
   // and "fragment.boats", each a zone on the account). Without them,
   // `--branch <b>` deploys a branch at <b>.<zone>.
@@ -27,15 +31,13 @@
     "client_id_file": "~/.config/fragment/secrets/workos-client-id",
     "api_key_file": "~/.config/fragment/secrets/workos-api-key"
   },
-  // The AI Gateway the model route calls through: one of your own, named
-  // (never "default", which makes one that logs), with Unified Billing,
-  // zero data retention on and its logs off. Without it, models are off.
+  // The AI Gateway the model route and image steps call through: one of
+  // your own, named (never "default", which makes one that logs), with
+  // Unified Billing, zero data retention on and its logs off. Without it,
+  // models and images are off.
   // "ai_gateway": "fragment",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
-  // OpenRouter, for image and video steps until they move onto Cloudflare.
-  // Without it, they are off.
-  // "openrouter_api_key_file": "~/.config/fragment/secrets/openrouter-api-key",
   // npubs that grant credit, set plans, seats and overdrafts, and release
   // usernames.
   "operators": [],
@@ -46,8 +48,8 @@
     "default_image": "hermes",
     "images": {
       "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "images" }
-    },
-    "instance_type": "standard-2"
+    }
+    // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },
   // What a computer's swap offers: WorkOS Pipes providers (each enabled in
   // the WorkOS environment above) and the operator's keys, each with the

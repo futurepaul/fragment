@@ -2,8 +2,8 @@
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
 //! (ROADMAP decision 13): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
-//! code.storage key, the WorkOS API key, and the OpenRouter key are Worker
-//! secrets, read only by keys.rs.
+//! code.storage key, and the WorkOS API key are Worker secrets, read only
+//! by keys.rs.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -81,9 +81,6 @@ pub struct Config {
     /// `FRAGMENT_DELIVERY_RETRY_MAX_S`: the longest (default an hour, and
     /// never under the shortest; a test fleet sets both, for a fixed pace).
     pub delivery_retry_max_s: u32,
-    /// `OPENROUTER_API_URL`: where image and video steps go (default
-    /// https://openrouter.ai; the e2e's fake), until phase 7.
-    pub openrouter_url: String,
     /// `AI_GATEWAY_ID`: the AI Gateway the model route calls through
     /// (models.rs): the deployment's own, named, since `default` makes a
     /// gateway that logs (spike S4).
@@ -185,6 +182,17 @@ impl Config {
             host_label_suffix.as_deref().is_none_or(valid_label_suffix),
             "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (^--[a-z0-9][a-z0-9-]{{0,30}}$)"
         );
+        // the platform's origin is named in frames' `frame-ancestors` and
+        // messages' targets (fragment_core::frames), so it is one exactly
+        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
+        assert!(
+            platform_url.as_deref().is_none_or(fragment_core::frames::is_origin),
+            "FRAGMENT_PLATFORM_URL is an origin (scheme://host[:port], lower case, no path)"
+        );
+        assert!(
+            host_suffix.as_deref().is_none_or(|s| fragment_core::frames::is_origin(&format!("https://{s}"))),
+            "FRAGMENT_HOST_SUFFIX is a host name"
+        );
         Config {
             codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
                 let api =
@@ -207,12 +215,11 @@ impl Config {
             push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
             delivery_retry_s,
             delivery_retry_max_s: var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s),
-            openrouter_url: var(env, "OPENROUTER_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://openrouter.ai".into()),
             workos: var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
                 client_id,
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
-            platform_url: var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string()),
+            platform_url,
             default_plan: default_plan(env),
             ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");

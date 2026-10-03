@@ -1,0 +1,3 @@
+/* Shared action-icon size across the shell and embedded chat.
+   App artwork, agent avatars and filled status marks keep their own scale. */
+:root { --icon-size: 16px; }

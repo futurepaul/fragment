@@ -177,6 +177,10 @@ impl Browser {
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
                 "--disable-background-timer-throttling",
+                // a microphone that plays a tone, granted without a prompt:
+                // a chat's voice memo (the chat section) records from it
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
                 "about:blank",
             ])
             .stdin(Stdio::null())
@@ -359,6 +363,51 @@ impl Browser {
             params["browserContextId"] = json!(context);
         }
         self.send("Storage.setCookies", params, None)?;
+        Ok(())
+    }
+
+    /// `set_cookie` in another of the lease's contexts (a second person's browser).
+    pub fn set_cookie_in(&mut self, context: &BrowserContext, url: &str, name: &str, value: &str) -> Result<()> {
+        let params = json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }], "browserContextId": context.0 });
+        self.send("Storage.setCookies", params, None)?;
+        Ok(())
+    }
+
+    /// Text typed into the focused element, as a keyboard's input (the
+    /// page hears `input`, never a key it could tell from a person's).
+    pub fn type_text(&mut self, page: &Page, text: &str) -> Result<()> {
+        self.send("Input.insertText", json!({ "text": text }), Some(&page.session))?;
+        Ok(())
+    }
+
+    /// One key pressed and let go on the focused element (`Enter`, `Escape`,
+    /// `Tab`), with Shift held when `shift`.
+    pub fn press(&mut self, page: &Page, key: &str, shift: bool) -> Result<()> {
+        let code = match key {
+            "Enter" => 13,
+            "Escape" => 27,
+            "Tab" => 9,
+            _ => bail!("no key code for {key}"),
+        };
+        for kind in ["keyDown", "keyUp"] {
+            let mut event = json!({ "type": kind, "key": key, "code": key, "windowsVirtualKeyCode": code, "modifiers": if shift { 8 } else { 0 } });
+            // a key that types: Enter's keydown carries its character
+            if kind == "keyDown" && key == "Enter" {
+                event["text"] = json!("\r");
+            }
+            self.send("Input.dispatchKeyEvent", event, Some(&page.session))?;
+        }
+        Ok(())
+    }
+
+    /// Files chosen in the first file input `selector` matches, as a
+    /// person picks them (the page hears `change`).
+    pub fn choose_files(&mut self, page: &Page, selector: &str, files: &[&Path]) -> Result<()> {
+        let doc = self.send("DOM.getDocument", json!({ "depth": 0 }), Some(&page.session))?;
+        let found = self.send("DOM.querySelector", json!({ "nodeId": doc["root"]["nodeId"], "selector": selector }), Some(&page.session))?;
+        let node = found["nodeId"].as_u64().filter(|n| *n != 0).with_context(|| format!("nothing on the page matches {selector}"))?;
+        let files: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+        self.send("DOM.setFileInputFiles", json!({ "nodeId": node, "files": files }), Some(&page.session))?;
         Ok(())
     }
 

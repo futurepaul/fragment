@@ -1,8 +1,11 @@
 //! AI steps (a job's `ai.*`; docs/api.md, AI). Text goes through the
-//! platform's model route by tier (models.rs); images and videos go to
-//! OpenRouter with the deployment's own key until phase 7 (media.rs; the
-//! debt ledger). Generated images and videos are files written to `main`
-//! (a blob when 1 MiB or more), so they sync to folders like anything else.
+//! platform's model route by tier (models.rs); an image is FLUX.1
+//! [schnell] on Workers AI, on the model route's transport (the AI binding
+//! through the deployment's gateway), priced in neurons by its tiles and
+//! steps (fragment_core::media). A generated image is a file written to
+//! `main` (a blob when 1 MiB or more), so it syncs to folders like anything
+//! else. Video steps are refused until they run on Cloudflare (the debt
+//! ledger).
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
@@ -19,14 +22,10 @@
 //! land lands from the kept usage, and a commit that did not finish runs
 //! from the kept bytes. A step that fails for good before its call used
 //! anything releases its reservation (bug 3), as does any hold of a step
-//! whose retries ran out, or of a run that ended. A video's cost comes
-//! with the poll that sees it end; its reservation is held until then.
+//! whose retries ran out, or of a run that ended.
 
-use std::time::Duration;
-
-use base64::Engine;
 use fragment_core::ledger::{Release, Released, Reserve, Reserved, Settle, Spend};
-use fragment_core::media::{self, VideoEnd};
+use fragment_core::media;
 use fragment_core::models as bounds;
 use fragment_core::price::Usage;
 use fragment_core::steps::{AiText, Step};
@@ -42,22 +41,15 @@ use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ledger::{self, LedgerError};
 use crate::ops::JOB_ID_PREFIX;
 
-pub const IMAGE_MODEL: &str = "google/gemini-3.1-flash-lite-image";
-pub const VIDEO_MODEL: &str = "minimax/hailuo-3-max";
-/// A generated file the platform stores (a video is a blob).
-const MEDIA_MAX_BYTES: usize = 64 * 1024 * 1024;
-const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Holds released per pass, of runs that ended.
 const RELEASE_BATCH: i64 = 25;
 
-/// A failed OpenRouter answer: passing (429, 5xx) or lasting.
-fn failure(status: u16, body: &[u8]) -> StepFail {
-    let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
-    let message = v["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(body).chars().take(200).collect());
+/// A model's refusal: passing (429, 5xx) or lasting.
+fn model_failure(status: u16, body: &[u8]) -> StepFail {
+    let message = String::from_utf8_lossy(body).chars().take(500).collect::<String>();
     match status {
-        429 | 500..=599 => StepFail::Retry(format!("OpenRouter answered {status}: {message}")),
-        402 => permanent(format!("OpenRouter: out of credits ({message})")),
-        _ => permanent(format!("OpenRouter answered {status}: {message}")),
+        429 | 500..=599 => StepFail::Retry(format!("the model answered {status}: {message}")),
+        _ => permanent(format!("the model answered {status}: {message}")),
     }
 }
 
@@ -74,16 +66,6 @@ fn ledger_fail(e: LedgerError) -> StepFail {
 fn retry(e: CellError) -> StepFail {
     StepFail::Retry(e.message)
 }
-
-/// A media step on a deployment with no OpenRouter key fails before it
-/// reserves anything.
-fn no_key(env: &Env) -> Result<(), StepFail> {
-    match crate::keys::openrouter_key(env) {
-        Some(_) => Ok(()),
-        None => Err(permanent("this deployment has no OPENROUTER_API_KEY: image and video steps are off")),
-    }
-}
-
 
 /// A paid step's place on its payer's ledger.
 struct Paying {
@@ -182,7 +164,7 @@ impl FragmentCell {
             Reserved::Released => return Err(permanent("this step's reservation was released: replay the run to try it again")),
         }
         self.exec(
-            "INSERT INTO charges (ref, run, micros, held, video, at) VALUES (?, ?, 0, 1, NULL, ?) ON CONFLICT (ref) DO NOTHING",
+            "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, 0, 1, ?) ON CONFLICT (ref) DO NOTHING",
             vec![p.reference.as_str().into(), SqlStorageValue::Integer(p.run), SqlStorageValue::Integer(crate::js::now_ms())],
         )
         .map_err(retry)
@@ -193,7 +175,7 @@ impl FragmentCell {
     /// same.
     async fn settle(&self, owner: &str, reference: &str, usage: Option<Usage>) -> Result<i64, StepFail> {
         let settled = ledger::ask(&self.env, owner, &Settle { reference: reference.to_string(), usage }).await.map_err(ledger_fail)?;
-        self.exec("UPDATE charges SET micros = ?, held = 0, video = NULL WHERE ref = ?", vec![SqlStorageValue::Integer(settled.charge), reference.into()]).map_err(retry)?;
+        self.exec("UPDATE charges SET micros = ?, held = 0 WHERE ref = ?", vec![SqlStorageValue::Integer(settled.charge), reference.into()]).map_err(retry)?;
         Ok(settled.charge)
     }
 
@@ -213,7 +195,7 @@ impl FragmentCell {
         let released = ledger::ask(&self.env, owner, &Release { reference: reference.to_string() }).await;
         let _ = match released {
             Ok(Released::Back) | Err(LedgerError { refused: Some(_), .. }) => self.exec("DELETE FROM charges WHERE ref = ?", vec![reference.into()]),
-            Ok(Released::Settled { charge }) => self.exec("UPDATE charges SET micros = ?, held = 0, video = NULL WHERE ref = ?", vec![SqlStorageValue::Integer(charge), reference.into()]),
+            Ok(Released::Settled { charge }) => self.exec("UPDATE charges SET micros = ?, held = 0 WHERE ref = ?", vec![SqlStorageValue::Integer(charge), reference.into()]),
             // the ledger did not answer: the alarm releases it later (`release_ended_holds`)
             Err(_) => Ok(()),
         };
@@ -230,10 +212,10 @@ impl FragmentCell {
         }
     }
 
-    /// Holds of runs that ended (held, or done with a video still waiting
-    /// on its cost): nothing will settle them, so their reservations go
-    /// back. A replay reserves again. From a job that ended, and from the
-    /// alarm for runs ended any other way.
+    /// Holds of runs that ended before their calls settled (a release the
+    /// ledger did not answer, a run held mid-step): nothing will settle
+    /// them, so their reservations go back. A replay reserves again. From a
+    /// job that ended, and from the alarm for runs ended any other way.
     pub(crate) async fn release_ended_holds(&self) {
         let Ok(rows) = self.rows(
             "SELECT ref FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running')) LIMIT ?",
@@ -249,31 +231,10 @@ impl FragmentCell {
         }
     }
 
-    /// One OpenRouter call, with the deployment's key.
-    async fn openrouter(&self, method: Method, url: &str, body: Option<&Value>) -> Result<(u16, Vec<u8>), StepFail> {
-        let key = crate::keys::openrouter_key(&self.env).ok_or_else(|| permanent("this deployment has no OPENROUTER_API_KEY: image and video steps are off"))?;
-        let headers = Headers::new();
-        headers.set("authorization", &format!("Bearer {key}")).map_err(|e| permanent(e.to_string()))?;
-        headers.set("x-openrouter-title", "fragment").map_err(|e| permanent(e.to_string()))?;
-        let mut init = RequestInit::new();
-        init.with_method(method).with_headers(headers);
-        if let Some(b) = body {
-            init.headers.set("content-type", "application/json").map_err(|e| permanent(e.to_string()))?;
-            init.with_body(Some(b.to_string().into()));
-        }
-        let req = Request::new_with_init(url, &init).map_err(|e| permanent(e.to_string()))?;
-        let mut resp = crate::cs::fetch(req, CALL_TIMEOUT).await.map_err(|e| StepFail::Retry(format!("OpenRouter: {}", e.0)))?;
-        let status = resp.status_code();
-        let bytes = resp.bytes().await.map_err(|e| StepFail::Retry(format!("OpenRouter: {e}")))?;
-        Ok((status, bytes))
-    }
-
-    fn api(&self, path: &str) -> String {
-        format!("{}/api/v1/{path}", self.cfg.openrouter_url)
-    }
-
     /// Writes generated bytes to `path` on `main` once per step: in git, or
-    /// as a blob and its pointer when 1 MiB or more.
+    /// as a blob and its pointer when 1 MiB or more. The platform's own
+    /// commit, past an app's write limit (256 KiB), so the two limits meet
+    /// and an image between them is kept (bug 1).
     async fn store_media(&self, run: &RunRow, index: u32, path: &str, bytes: Vec<u8>) -> Result<Value, StepFail> {
         let sha = blob::sha256_hex(&bytes);
         let size = bytes.len() as u64;
@@ -283,10 +244,11 @@ impl FragmentCell {
         } else {
             bytes
         };
+        assert!(content.len() < blob::BLOB_MIN_BYTES, "what goes to git is under a blob's size");
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: generated {path}", run.op, run.id);
         let writes = [FileWrite { path: path.to_string(), bytes: Some(content) }];
-        self.commit_files(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
+        self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)?;
         Ok(json!({ "path": path, "size": size, "sha256": sha }))
     }
 
@@ -305,6 +267,7 @@ impl FragmentCell {
         match step {
             Step::AiText(t) => self.step_text(run, index, t).await,
             Step::AiImage(image) => {
+                let call = media::image_call(image).map_err(|why| permanent(why.message()))?;
                 let p = self.paying(run, index)?;
                 if let Some(kept) = self.kept(&p.key)? {
                     self.settle_kept(&p, &kept).await?;
@@ -313,100 +276,35 @@ impl FragmentCell {
                     out["mediaType"] = kept.result["mediaType"].clone();
                     return Ok(out);
                 }
-                no_key(&self.env)?;
-                self.reserve(&p, media::worst(step).expect("an image has a worst case")).await?;
-                let model = image.model.as_deref().unwrap_or(IMAGE_MODEL);
-                let mut body = json!({ "model": model, "prompt": image.prompt });
-                if let Some(a) = &image.aspect_ratio {
-                    body["aspect_ratio"] = json!(a);
-                }
-                let (status, bytes) = match self.openrouter(Method::Post, &self.api("images"), Some(&body)).await {
-                    Ok(answer) => answer,
-                    Err(failed) => return Err(self.unpaid(&p, failed).await),
-                };
+                self.reserve(&p, call.worst()).await?;
+                let (status, bytes, log_id) = crate::models::run(&self.env, media::IMAGE_MODEL, &call.input, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
                 if status != 200 {
-                    return Err(self.unpaid(&p, failure(status, &bytes)).await);
+                    return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
                 }
-                let v: Value = serde_json::from_slice(&bytes).map_err(|e| StepFail::Retry(format!("OpenRouter images: {e}")))?;
-                let usage = self.reported(&p, v["usage"]["cost"].as_f64());
-                let decoded = v["data"][0]["b64_json"].as_str().and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
-                let Some(decoded) = decoded.filter(|d| d.len() <= MEDIA_MAX_BYTES) else {
-                    // it was billed: charged, then refused
-                    self.settle(&p.owner, &p.reference, usage).await?;
-                    return Err(permanent(format!("OpenRouter's image is missing or over {MEDIA_MAX_BYTES} bytes")));
+                let drawn = match media::image_of(&bytes) {
+                    Ok(drawn) => drawn,
+                    Err(fault) => {
+                        // it answered, so it was paid for: charged its reservation, then refused
+                        self.settle(&p.owner, &p.reference, None).await?;
+                        self.event("ai.image-refused", &format!("{}: {}; charged its reservation", p.reference, fault.message()), json!({ "ref": p.reference, "logId": log_id }));
+                        return Err(permanent(format!("{}: its call is charged at its worst case", fault.message())));
+                    }
                 };
-                let sha = blob::sha256_hex(&decoded);
+                let usage = call.usage(drawn.width, drawn.height);
+                let sha = blob::sha256_hex(&drawn.bytes);
                 // the bytes first, then the note of them: a step tried again finds both
-                self.put_blob_bytes(&sha, decoded.clone()).await.map_err(retry)?;
-                let kept = json!({ "sha256": sha, "size": decoded.len(), "mediaType": v["data"][0]["media_type"] });
-                self.keep(&p, &kept, usage.as_ref())?;
-                self.settle_kept(&p, &Kept { result: kept.clone(), usage, settled: false }).await?;
+                self.put_blob_bytes(&sha, drawn.bytes.clone()).await.map_err(retry)?;
+                let kept = json!({ "sha256": sha, "size": drawn.bytes.len(), "mediaType": media::IMAGE_MEDIA_TYPE, "width": drawn.width, "height": drawn.height });
+                self.keep(&p, &kept, Some(&usage))?;
+                self.settle_kept(&p, &Kept { result: kept.clone(), usage: Some(usage), settled: false }).await?;
                 // test fleets: a failure after the paid call (bug 2's), which the retry survives
                 self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
-                let mut out = self.store_media(run, index, &image.path, decoded).await?;
+                let mut out = self.store_media(run, index, &image.path, drawn.bytes).await?;
                 out["mediaType"] = kept["mediaType"].clone();
                 Ok(out)
             }
-            Step::AiVideoStart(video) => {
-                let p = self.paying(run, index)?;
-                if let Some(kept) = self.kept(&p.key)? {
-                    // its cost comes with the poll that sees it end
-                    return Ok(kept.result);
-                }
-                no_key(&self.env)?;
-                self.reserve(&p, media::worst(step).expect("a video has a worst case")).await?;
-                let mut body = json!({ "model": video.model.as_deref().unwrap_or(VIDEO_MODEL), "prompt": video.prompt });
-                if let Some(d) = video.duration {
-                    body["duration"] = json!(d);
-                }
-                if let Some(r) = &video.resolution {
-                    body["resolution"] = json!(r);
-                }
-                if let Some(a) = &video.aspect_ratio {
-                    body["aspect_ratio"] = json!(a);
-                }
-                let (status, bytes) = match self.openrouter(Method::Post, &self.api("videos"), Some(&body)).await {
-                    Ok(answer) => answer,
-                    Err(failed) => return Err(self.unpaid(&p, failed).await),
-                };
-                if !matches!(status, 200 | 202) {
-                    return Err(self.unpaid(&p, failure(status, &bytes)).await);
-                }
-                let v: Value = serde_json::from_slice(&bytes).map_err(|e| StepFail::Retry(format!("OpenRouter videos: {e}")))?;
-                let id = v["id"].as_str().ok_or_else(|| StepFail::Retry("OpenRouter videos: no id in the answer".into()))?.to_string();
-                let started = json!({ "id": id });
-                self.keep(&p, &started, None)?;
-                self.exec("UPDATE charges SET video = ? WHERE ref = ?", vec![id.as_str().into(), p.reference.as_str().into()]).map_err(retry)?;
-                Ok(started)
-            }
-            Step::AiVideoPoll { id } => {
-                let (status, bytes) = self.openrouter(Method::Get, &self.api(&format!("videos/{id}")), None).await?;
-                if status != 200 {
-                    return Err(failure(status, &bytes));
-                }
-                let v: Value = serde_json::from_slice(&bytes).map_err(|e| StepFail::Retry(format!("OpenRouter videos: {e}")))?;
-                let status = v["status"].as_str().unwrap_or("");
-                let end = media::video_end(status);
-                if let Some(end) = end {
-                    self.video_done(id, status, end, v["usage"]["cost"].as_f64()).await?;
-                }
-                Ok(json!({ "status": v["status"], "ended": end.is_some(), "error": v["error"], "urls": v["unsigned_urls"], "usage": v["usage"] }))
-            }
-            Step::AiVideoSave { id, path, url } => {
-                let url = match url {
-                    Some(u) if u.starts_with(&self.cfg.openrouter_url) => u.clone(),
-                    Some(u) => return Err(permanent(format!("the video is at {u}, outside OpenRouter"))),
-                    None => self.api(&format!("videos/{id}/content?index=0")),
-                };
-                let (status, video) = self.openrouter(Method::Get, &url, None).await?;
-                if status != 200 {
-                    return Err(failure(status, &video));
-                }
-                if video.len() > MEDIA_MAX_BYTES {
-                    return Err(permanent(format!("the video is over {MEDIA_MAX_BYTES} bytes")));
-                }
-                self.store_media(run, index, path, video).await
-            }
+            // nothing is reserved: no call is made
+            Step::AiVideo {} => Err(permanent(media::Refusal::VideoOff.message())),
             other => unreachable!("only AI steps are performed here, not {}", other.kind()),
         }
     }
@@ -419,16 +317,6 @@ impl FragmentCell {
             self.release(&p.owner, &p.reference).await;
         }
         failed
-    }
-
-    /// What OpenRouter reported a call cost, as the usage the ledger
-    /// meters; none reported is settled at the reservation, and says so.
-    fn reported(&self, p: &Paying, cost_usd: Option<f64>) -> Option<Usage> {
-        let usage = media::billed(cost_usd);
-        if usage.is_none() {
-            self.event("ai.cost-missing", &format!("{}: OpenRouter reported no cost; the step is charged its reservation", p.reference), json!({ "ref": p.reference }));
-        }
-        usage
     }
 
     /// `job.ai.text`: the model route's call, unstreamed, kept, then settled.
@@ -456,12 +344,7 @@ impl FragmentCell {
         self.reserve(&p, bounded.worst(body_bytes)).await?;
         let (status, bytes, log_id) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
         if status != 200 {
-            let message = String::from_utf8_lossy(&bytes).chars().take(500).collect::<String>();
-            let failed = match status {
-                429 | 500..=599 => StepFail::Retry(format!("the model answered {status}: {message}")),
-                _ => permanent(format!("the model answered {status}: {message}")),
-            };
-            return Err(self.unpaid(&p, failed).await);
+            return Err(self.unpaid(&p, model_failure(status, &bytes)).await);
         }
         let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         let usage = bounds::usage_of(bounded.model, &v["usage"]);
@@ -474,35 +357,5 @@ impl FragmentCell {
         self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
-
-    }
-
-    /// Settles a video once its poll says it ended: completed, at the cost
-    /// reported (its reservation when none is); not delivered, at the cost
-    /// reported, else its reservation goes back. Its hold is found by its
-    /// id, kept by the step that started it.
-    async fn video_done(&self, id: &str, status: &str, end: VideoEnd, cost_usd: Option<f64>) -> Result<(), StepFail> {
-        let rows = self.rows("SELECT ref FROM charges WHERE video = ? AND held = 1", vec![id.into()]).map_err(retry)?;
-        // settled before (a poll step run again), or released with its run
-        let Some(reference) = rows.first().and_then(|r| r["ref"].as_str()).map(str::to_string) else { return Ok(()) };
-        let owner = self.must(MetaKey::Owner).map_err(retry)?;
-        let usage = media::billed(cost_usd);
-        match (end, usage) {
-            (VideoEnd::Completed, None) => {
-                self.event("ai.cost-missing", &format!("video {id}: OpenRouter reported no cost; it is charged its reservation"), json!({ "video": id }));
-                self.settle(&owner, &reference, None).await?;
-            }
-            (_, Some(usage)) => {
-                let charge = self.settle(&owner, &reference, Some(usage)).await?;
-                if end == VideoEnd::Undelivered {
-                    self.event("ai.video-undelivered", &format!("video {id} {status}; charged {}", fragment_core::price::dollars(charge)), json!({ "video": id, "status": status }));
-                }
-            }
-            (VideoEnd::Undelivered, None) => {
-                self.release(&owner, &reference).await;
-                self.event("ai.video-undelivered", &format!("video {id} {status}; charged nothing"), json!({ "video": id, "status": status }));
-            }
-        }
-        Ok(())
     }
 }

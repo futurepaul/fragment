@@ -14,6 +14,11 @@
 //! answer keeps to the request's `max_tokens` (`CHARS_PER_TOKEN` characters
 //! each): one longer is cut there and ends `length`.
 //!
+//! The image model (`IMAGE_MODEL`, FLUX.1 [schnell]) answers as its
+//! catalog's output schema says, `{"image": "<base64 JPEG>"}`, drawn from
+//! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
+//! its tiles and steps, which the cell counts itself.
+//!
 //! Replies are scripted (text, tool calls, nothing, or reasoning alone) and
 //! answered in order before falling back to an echo of the last message,
 //! or, for a real agent runtime (`transcripts`), to `transcript_reply`: a
@@ -26,9 +31,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::http::{Handler, Request, Response, Server};
+
+/// The image model's catalog id (fragment_core::media::IMAGE_MODEL).
+pub use fragment_core::media::IMAGE_MODEL;
 
 /// A scripted model reply.
 #[derive(Clone, Debug)]
@@ -245,6 +254,51 @@ fn problem(status: u16, message: &str) -> Response {
     Response::json(status, &json!({ "errors": [{ "message": message, "code": status }], "success": false }))
 }
 
+/// The size an image prompt draws at: 1536×1024 (six tiles) for one
+/// naming "wide", else the model's 1024×1024.
+pub fn image_size(prompt: &str) -> (u16, u16) {
+    if prompt.contains("wide") {
+        (1536, 1024)
+    } else {
+        (1024, 1024)
+    }
+}
+
+/// The bytes an image prompt draws: a JPEG's head (SOI, APP0, SOF0 of
+/// `image_size`, a scan's start), then the prompt as filler. One naming
+/// "large" is over 1 MiB (a blob), one naming "mid" is 300 KiB (between
+/// an app's write limit and a blob's size: bug 1's), any other 2 KiB. One
+/// naming "png" is a PNG instead, which the platform refuses.
+pub fn image_bytes(prompt: &str) -> Vec<u8> {
+    let n = if prompt.contains("large") {
+        1024 * 1024 + 4096
+    } else if prompt.contains("mid") {
+        300 * 1024
+    } else {
+        2048
+    };
+    if prompt.contains("png") {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        out.extend(prompt.bytes().cycle().take(n));
+        return out;
+    }
+    let (width, height) = image_size(prompt);
+    let mut out = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+    out.extend([0xFF, 0xC0, 0x00, 0x11, 8]);
+    out.extend(height.to_be_bytes());
+    out.extend(width.to_be_bytes());
+    out.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, 0xFF, 0xDA, 0x00, 0x0C]);
+    out.extend(prompt.bytes().cycle().take(n));
+    out
+}
+
+/// The image model's answer to `input`, as the binding answers it raw.
+fn image_answer(input: &Value, log_id: &str) -> Response {
+    let Some(prompt) = input["prompt"].as_str() else { return problem(400, "Type mismatch of '/prompt', 'undefined' not in 'string'") };
+    let image = base64::engine::general_purpose::STANDARD.encode(image_bytes(prompt));
+    Response::json(200, &json!({ "image": image })).with_header("cf-aig-log-id", log_id)
+}
+
 fn answer(s: &mut State, req: &Request) -> Response {
     let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
     if req.method != "POST" {
@@ -259,6 +313,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     }
     s.answers += 1;
     let log_id = format!("01FAKE{:020}", s.answers);
+    if model == IMAGE_MODEL {
+        return image_answer(&body, &log_id);
+    }
     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
     let scripted = s.script.pop_front();
     let used = s.usage.pop_front();
@@ -414,6 +471,22 @@ mod tests {
         assert!(text.ends_with("data: [DONE]\n\n"));
         let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
+    }
+
+    /// Goal: the image model answers as its catalog says, a JPEG the cell
+    /// reads its size from, in the bands the e2e needs. Method: the answer
+    /// through the core's own reader, for each kind of prompt.
+    #[test]
+    fn an_image_answers_as_the_catalog_says() {
+        let r = image_answer(&json!({ "prompt": "a wide lighthouse", "steps": 4 }), "01FAKE");
+        let drawn = fragment_core::media::image_of(&r.body).unwrap();
+        assert_eq!((drawn.width, drawn.height, drawn.bytes), (1536, 1024, image_bytes("a wide lighthouse")));
+        assert!(r.headers.iter().any(|(k, _)| k == "cf-aig-log-id"));
+        assert_eq!(fragment_core::media::jpeg_size(&image_bytes("a lighthouse")), Some((1024, 1024)));
+        assert!(image_bytes("a large mural").len() > fragment_core::blob::BLOB_MIN_BYTES);
+        assert!((256 * 1024..fragment_core::blob::BLOB_MIN_BYTES).contains(&image_bytes("a mid mural").len()));
+        assert_eq!(fragment_core::media::jpeg_size(&image_bytes("a png")), None);
+        assert_eq!(image_answer(&json!({ "steps": 4 }), "01FAKE").status, 400, "no prompt");
     }
 
     /// Goal: a runtime's transcript decides its answer, whatever else it

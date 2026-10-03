@@ -5,16 +5,22 @@
 //! (the real-Hermes lane runs the same flows on our Hermes image).
 //!
 //! A person makes their computer and assigns an agent fragment to it; the
-//! agent, an editor of its own fragment, joins a chat. Woken, the guest
-//! subscribes to the chat as the agent (a wake subscription, which only a
-//! computer's egress makes) and answers a message, a tool step on
-//! `work`. A page sees a reply's draft live, then the reply; the turn's
-//! asker stops a turn; only the agent's owner answers its prompt; a reply
-//! carries a file. Put to sleep, a record on the chat wakes it, its
-//! `/data` restored, and nothing is answered twice. A second agent on the
-//! same computer answers when @mentioned, the lead otherwise. Its ports
-//! answer its owner on its own origin through a one-time ticket, and no
-//! one else. A routine, its agent fragment's cron, wakes it asleep.
+//! agent, an editor of its own fragment, joins a chat, and the platform
+//! posts `joined` on the agent's `tasks` and wakes the computer (no one
+//! posts it by hand). Woken, the guest subscribes to the chat as the agent
+//! (a wake subscription, which only a computer's egress makes) and
+//! answers a message, a tool step on `work`. A page sees a reply's draft
+//! live, then the reply; the turn's asker stops a turn; only the agent's
+//! owner answers its prompt; a reply carries a file. The swap lends the
+//! agent every connection its owner has unless its owner narrows them
+//! (decision 44). Put to sleep, a record on the chat wakes it, its `/data`
+//! restored, and nothing is answered twice. A second agent on the same
+//! computer answers when @mentioned, the lead otherwise. Its ports answer
+//! its owner on its own origin through a one-time ticket, in a tab or in a
+//! frame of the platform's page (frames.rs, `computer_ports`), and no one
+//! else.
+//! A routine, its agent fragment's cron, wakes it asleep, and so does its
+//! agent being added to a new chat, which it then follows at once.
 
 use std::time::Duration;
 
@@ -64,6 +70,17 @@ pub(super) fn routine_app(chat: &str) -> String {
 
 pub(super) const ROUTINE_JSON: &[u8] = br#"{ "operations": { "routine": { "kind": "mutation", "role": "editor" } }, "channels": { "tasks": { "read": "editor", "post": "editor" } }, "triggers": [{ "cron": "* * * * *", "run": "routine" }] }"#;
 
+/// The `joined` records on an agent fragment's `tasks` for `fragment`
+/// (docs/chat-records.md): the platform posts one when the agent is added.
+pub(super) fn told(api: &Api, owner: &crate::Keys, agent: &str, fragment: &str) -> Vec<Value> {
+    records(api, owner, agent, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined" && r["body"]["fragment"] == fragment).collect()
+}
+
+/// A computer's phase, as its owner reads it.
+pub(super) fn phase(api: &Api, owner: &crate::Keys, id: &str) -> String {
+    api.signed(owner, "GET", &format!("/api/computers/{id}"), None).ok().and_then(|r| r.body["phase"].as_str().map(str::to_string)).unwrap_or_default()
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers") {
         return Ok(());
@@ -88,6 +105,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent fragment to it", r.status == 200 && identity.starts_with("id:") && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
+    s.ok(
+        "by default the agent may use every connection its owner has (decision 44)",
+        r.body["agents"][0].get("connections").is_some_and(Value::is_null),
+        &r,
+    );
+    s.ok("assigning it wakes nothing", r.body["phase"] == "asleep", &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{agent_name}/members"), None)?;
     let editor = r.body["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == identity.as_str() && m["role"] == "editor"));
     s.ok("the agent is an editor of its own fragment", editor, &r);
@@ -98,17 +121,24 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let chat = s.create(api, &owner, &chat_name)?;
     s.commit(&chat, &[("fragment.json", Some(CHAT_JSON))]);
     s.deploy(&chat);
+    // the platform tells the agent's computer it joined: no one posts `joined` by hand
+    let t0 = std::time::Instant::now();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("the agent joins the chat", r.status == 200, &r);
-    let joined = json!({ "id": "joined-1", "body": { "kind": "joined", "fragment": chat_name } });
-    let r = api.signed(&owner, "POST", &format!("/api/f/{agent_name}/channels/tasks"), Some(&joined))?;
-    s.ok("and its tasks hear so", r.status == 200, &r);
-
+    let agent_npub = agent["npub"].as_str().unwrap_or("").to_string();
+    let heard = s.eventually(Duration::from_secs(10), || told(api, &owner, &agent_name, &chat_name).len() == 1);
+    let notices = told(api, &owner, &agent_name, &chat_name);
+    s.ok(
+        "the platform posts joined on its agent's tasks, as the agent fragment itself",
+        heard && notices[0]["principal"] == agent_npub.as_str() && notices[0]["body"] == json!({ "kind": "joined", "fragment": chat_name }),
+        json!(notices),
+    );
     // awake, the guest follows the chat as the agent
-    let t0 = std::time::Instant::now();
-    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
-    s.ok("its owner wakes it", r.status == 200 && r.body["phase"] == "awake", &r);
+    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    s.ok("and wakes its computer, unasked", woke, phase(api, &owner, &id));
     println!("      (awake in {:.1?})", t0.elapsed());
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    s.ok("its owner's wake of it awake answers awake", r.status == 200 && r.body["phase"] == "awake", &r);
     let subscribed = s.eventually(WAKE, || {
         api.signed(&owner, "GET", &format!("/api/f/{chat_name}/subscriptions"), None)
             .ok()
@@ -200,32 +230,54 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let seen_before = s.upstream.seen().len();
     let said = fetched(s, 14, &format!("fetch {gh}"))?;
     replies_so_far += 1;
-    s.ok("an agent its owner has not allowed a connection is refused it", said.starts_with("fetched 403") && said.contains("may not use the github connection"), &said);
+    s.ok(
+        "by default it may use the connection, but its owner connected no account: refused, saying so",
+        said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"),
+        &said,
+    );
     s.ok("and nothing reaches the provider", s.upstream.seen().len() == seen_before, json!(s.upstream.seen()));
-    let allow = |who: &crate::Keys, list: Value| api.signed(who, "PUT", &format!("/api/computers/{id}/agents/{agent_name}/connections"), Some(&json!({ "connections": list })));
+    let connections = format!("/api/computers/{id}/agents/{agent_name}/connections");
+    let allow = |who: &crate::Keys, list: Value| api.signed(who, "PUT", &connections, Some(&json!({ "connections": list })));
     let r = allow(&stranger, json!([SWAP_CONNECTION]))?;
-    s.ok("no one else allows its agents connections", r.status == 404, &r);
+    s.ok("no one else narrows its agents' connections", r.status == 404, &r);
     let r = allow(&owner, json!(["notion"]))?;
     s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
-    let r = allow(&owner, json!([SWAP_CONNECTION]))?;
-    s.ok("its owner allows the agent the connection", r.status == 200 && r.body["agents"][0]["connections"] == json!([SWAP_CONNECTION]), &r);
+    let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
+    s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
+    let r = allow(&owner, json!([]))?;
+    let again = allow(&owner, json!([]))?;
+    s.ok(
+        "its owner narrows the agent to none (a role's specialization, decision 44); again is the same",
+        r.status == 200 && r.body["agents"][0]["connections"] == json!([]) && again.status == 200 && again.body["agents"] == r.body["agents"],
+        &r,
+    );
+    s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
+    let seen_before = s.upstream.seen().len();
     let said = fetched(s, 15, &format!("fetch {gh}"))?;
     replies_so_far += 1;
-    s.ok("allowed, but its owner connected no account: refused, saying so", said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"), &said);
-    s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
+    s.ok(
+        "narrowed, it is refused a connection its owner has",
+        said.starts_with("fetched 403") && said.contains("may not use the github connection") && s.upstream.seen().len() == seen_before,
+        &said,
+    );
+    let r = allow(&owner, Value::Null)?;
+    s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+    // the tokens this computer asks for, after any the run's earlier sections did
+    let minted_before = s.workos.tokens(SWAP_CONNECTION).len();
+    let minted = |s: &Suite| s.workos.tokens(SWAP_CONNECTION).split_off(minted_before);
     let said = fetched(s, 16, &format!("fetch {gh}"))?;
     replies_so_far += 1;
-    let tokens = s.workos.tokens(SWAP_CONNECTION);
+    let tokens = minted(s);
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(
-        "connected, the provider gets the owner's token from Pipes in the placeholder's place",
+        "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
         said.starts_with("fetched 200") && tokens.len() == 1 && seen["host"] == SWAP_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {}", tokens[0]),
         json!({ "said": said, "seen": seen, "tokens": tokens }),
     );
     s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
     let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
     replies_so_far += 1;
-    s.ok("a token is held until shortly before it expires", s.workos.tokens(SWAP_CONNECTION).len() == 1, json!(s.workos.tokens(SWAP_CONNECTION)));
+    s.ok("a token is held until shortly before it expires", minted(s).len() == 1, json!(minted(s)));
     s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
     let seen_before = s.upstream.seen().len();
     let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;
@@ -302,7 +354,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && maple_id.starts_with("id:") && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    // the guest reads its agents at start: a sleep and a wake follows the new one at once
+    // the stub's bridge reads its agents again every minute (the Hermes lane
+    // proves the seconds of our Hermes image): a sleep and a wake follows the
+    // new one at once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();
@@ -336,6 +390,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
+    // and in a frame of the platform's page (the shell's tab onto its screen)
+    super::frames::computer_ports(s, api, &owner, &id, &origin, cookie.as_deref().unwrap_or(""))?;
 
     // its image pin: an upgrade at the next wake, then a rollback, its data kept
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
@@ -372,7 +428,41 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let ran = s.eventually(Duration::from_secs(150), || routine(&records(api, &owner, &chat_name, "chat")));
     s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
     api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
-    let routines = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
+
+    // asleep, its agent added to a new chat wakes it, and it follows that
+    // chat before anyone speaks there (Paul, 2026-10-03)
+    let next_name = s.named(api, &owner, "chat-next")?;
+    let next = s.create(api, &owner, &next_name)?;
+    s.commit(&next, &[("fragment.json", Some(CHAT_JSON))]);
+    s.deploy(&next);
+    let deployed = s.eventually(Duration::from_secs(30), || {
+        api.signed(&owner, "GET", &format!("/api/f/{next_name}/channels"), None).is_ok_and(|r| r.body["channels"].as_array().is_some_and(|c| c.iter().any(|x| x["name"] == "chat")))
+    });
+    std::thread::sleep(QUEUE_DRAIN);
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    s.ok("asleep, with a new chat deployed", deployed && r.body["phase"] == "asleep", &r);
+    let t0 = std::time::Instant::now();
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    s.ok("its agent is added to the new chat", r.status == 200, &r);
+    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    s.ok("which wakes the sleeping computer", woke && told(api, &owner, &agent_name, &next_name).len() == 1, phase(api, &owner, &id));
+    let followed = s.eventually(WAKE, || {
+        api.signed(&owner, "GET", &format!("/api/f/{next_name}/subscriptions"), None)
+            .ok()
+            .is_some_and(|r| r.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat")))
+    });
+    println!("      (following the new chat {:.1?} after the agent was added)", t0.elapsed());
+    s.ok("and the guest follows the new chat as the agent, unasked", followed, "");
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    let all_joined = |api: &Api| records(api, &owner, &agent_name, "tasks").into_iter().filter(|r| r["body"]["kind"] == "joined").count();
+    let before = all_joined(api);
+    s.ok("adding it again is no new join: nothing is posted twice", r.status == 200 && told(api, &owner, &agent_name, &next_name).len() == 1, json!(told(api, &owner, &agent_name, &next_name)));
+    let stranger_id = api.identity(&stranger)?;
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
+    s.ok("a person added is no agent's join: nothing is posted", r.status == 200 && all_joined(api) == before, json!(all_joined(api)));
+    let r = api.signed(&owner, "POST", &format!("/api/f/{next_name}/channels/chat"), Some(&json!({ "id": "n1", "body": { "text": "hello in the new chat" } })))?;
+    let answered = s.eventually(WAKE, || agent_replies(&records(api, &owner, &next_name, "chat"), &identity).len() == 1);
+    s.ok("it answers there", r.status == 200 && answered, json!(agent_replies(&records(api, &owner, &next_name, "chat"), &identity)));
 
     // the platform crashes while it is awake: a new isolate takes the
     // computer over (lesson 6), and it answers what comes next, once
@@ -381,13 +471,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let api = s.start(false, true)?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
-    let after = s.eventually(WAKE, || agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == routines + 1);
+    // its own turn's replies: a routine's, on its cron minute, may land in
+    // the same window and is no second answer
+    let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let its = |api: &Api| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect::<Vec<_>>();
+    let after = s.eventually(WAKE, || its(&api).len() == 1);
     std::thread::sleep(Duration::from_secs(2));
-    let replies = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity);
+    let replies = its(&api);
     s.ok(
         "the computer answers it, once",
-        after && replies.len() == routines + 1 && replies.last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash"))),
-        json!(replies.len()),
+        after && replies.len() == 1 && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash")),
+        json!(replies),
     );
     std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;

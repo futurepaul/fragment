@@ -13,6 +13,8 @@ ended.
   what it writes.
 - `driver.rs`: the restore gate, the state file, followers, posting
   lanes, the keepalive.
+- `ready.rs`: which of the computer's agents to run, when the image says
+  (`BRIDGE_AGENTS_FILE`): a computer's agents may change while it runs.
 - `runtime/`: `relay` (Hermes' Relay connector) and `script` (a
   deterministic agent, the stub image's).
 - `screen.rs`: a screen page and an RFB proxy with Take over / Give back.
@@ -50,11 +52,11 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run or runs |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}` |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
-| `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined |
+| `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {username}}}`: what to call a writer |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
@@ -82,6 +84,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_RESTORED` | `/run/computer/restored` | |
 | `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state |
+| `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
@@ -93,7 +96,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run once by its first viewer |
+| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down, at most once a minute while it stays down |
 
 ## State, and what it never does twice
 

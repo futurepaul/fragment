@@ -2,10 +2,13 @@
 
 **Since the cut** (tag `celld-final`; docs/cloudflare-v1.md, decision
 33): the desktop, `__frame`, the `frame` capability and its grant, the
-share sheet's embed, and the e2e's listed shape and `frames` section are
-gone. A frame session's redeeming half stays, with nothing to mint one
-(docs/technical-debt-ledger.md); isolation, the asked-once sign-in, and
-the move stay, tested by the `isolation` section.
+share sheet's embed, and the e2e's listed shape are gone. A frame
+session's redeeming half stayed, and design C's mint came back on the
+platform's own origin for the shell's tabs: `/auth/frame`, for a frame
+of the platform's page only, its embedder the platform's origin
+(docs/api.md, Frame sessions; the e2e's `frames` section). Isolation,
+the asked-once sign-in, and the move stay, tested by the `isolation`
+section.
 
 Status: **decided 2026-09-25.** Paul answered the three open questions
 (Answers, at the end). Slice 1 (decisions 2–4: isolation, framed

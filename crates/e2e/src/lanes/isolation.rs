@@ -2,8 +2,9 @@
 //! slices 1 and 2). Which of a browser's cookies count on a fragment's
 //! origin follows the Fetch Metadata the browser sends, so another
 //! fragment's page (one site with it) reaches it only as a stranger would;
-//! a frame of a fragment signs in nowhere (no page mints a frame session
-//! since the desktop went at the cut: docs/technical-debt-ledger.md);
+//! a frame of a fragment signs in only through the platform's mint, for a
+//! frame of the platform's own page (the frames section), so another
+//! fragment's page signs no frame in, by the mint or without it;
 //! signing in and out cannot be set off from another page; and a fragment
 //! that is not yours, nor shared with you, asks before it learns who you
 //! are. A fragment's old host sends a browser on to its new one.
@@ -47,13 +48,13 @@ export class App extends DurableObject {
 "#;
 const POSTED_JSON: &str = r#"{ "operations": { "posts": { "kind": "query" } } }"#;
 
-fn label(name: &str) -> &str {
+pub(super) fn label(name: &str) -> &str {
     name.split('.').next().unwrap_or("")
 }
 
 /// A fragment of `owner`'s from `template`, `files` written and deployed
 /// over it, opened to `visibility`.
-fn made(api: &Api, owner: &Keys, label: &str, template: &str, files: Value, visibility: &str) -> Result<String> {
+pub(super) fn made(api: &Api, owner: &Keys, label: &str, template: &str, files: Value, visibility: &str) -> Result<String> {
     let name = api.qualified(owner, label)?;
     let r = api.create_with(owner, json!({ "name": name, "template": template }))?;
     anyhow::ensure!(r.status == 200, "making {name}: {r}");
@@ -69,18 +70,18 @@ fn made(api: &Api, owner: &Keys, label: &str, template: &str, files: Value, visi
 }
 
 /// The cookie `cookie` the browser holds for `name`'s host.
-fn cookie_of(chrome: &mut Browser, api: &Api, name: &str, cookie: &str) -> Option<Value> {
+pub(super) fn cookie_of(chrome: &mut Browser, api: &Api, name: &str, cookie: &str) -> Option<Value> {
     let host = api.site_url(name, "").split("//").nth(1)?.split(':').next()?.to_string();
     chrome.cookies().ok()?.into_iter().find(|c| c["name"] == cookie && c["domain"] == host.as_str())
 }
 
 /// Appends a frame of `src` to the page.
-fn frame(chrome: &mut Browser, page: &Page, src: &str) -> Result<Value> {
+pub(super) fn frame(chrome: &mut Browser, page: &Page, src: &str) -> Result<Value> {
     chrome.eval(page, &format!("(() => {{ const f = document.createElement('iframe'); f.src = {src:?}; document.body.append(f); return true; }})()"))
 }
 
 /// The text of the page's frame at `url_part`, once it holds `text`.
-fn frame_says(s: &Suite, chrome: &mut Browser, page: &Page, url_part: &str, text: &str, wait: Duration) -> bool {
+pub(super) fn frame_says(s: &Suite, chrome: &mut Browser, page: &Page, url_part: &str, text: &str, wait: Duration) -> bool {
     let expr = format!("(document.body?.innerText ?? '').includes({text:?})");
     s.eventually(wait, || chrome.eval_in_frame(page, url_part, &expr).ok() == Some(json!(true)))
 }
@@ -88,7 +89,7 @@ fn frame_says(s: &Suite, chrome: &mut Browser, page: &Page, url_part: &str, text
 /// A request as a browser sends it for `dest` (`document`, `iframe`,
 /// `image`, `empty`) from a page on `site` (`same-origin`, `same-site`,
 /// `cross-site`), with `cookie`.
-fn as_browser(api: &Api, method: &str, url: String, dest: &str, site: &str, cookie: &str) -> Result<Reply> {
+pub(super) fn as_browser(api: &Api, method: &str, url: String, dest: &str, site: &str, cookie: &str) -> Result<Reply> {
     let mode = if matches!(dest, "document" | "iframe") { "navigate" } else { "no-cors" };
     let extra = vec![("sec-fetch-dest", dest.to_string()), ("sec-fetch-site", site.to_string()), ("sec-fetch-mode", mode.to_string())];
     api.call(Call { method, url, cookie: Some(cookie.to_string()), extra, ..Call::default() })
@@ -220,8 +221,8 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a frame of it on another fragment's page (an iframe, an object) shows nothing", !shown, "");
     let without = as_browser(api, "GET", api.site_url(&x, ""), "iframe", "same-site", &format!("fragment_site={site_x}"))?;
     s.ok(
-        "(frame-ancestors: this origin's own pages; a frame with the site cookie alone is a stranger's, 401)",
-        without.header("content-security-policy") == "frame-ancestors 'self'" && without.status == 401,
+        "(frame-ancestors: this origin's own pages and the platform's; a frame with the site cookie alone is a stranger's, 401)",
+        without.header("content-security-policy") == format!("frame-ancestors 'self' {}", api.base) && without.status == 401,
         format!("{} {:?}", without.status, without.header("content-security-policy")),
     );
 
@@ -244,6 +245,15 @@ fn attacks(s: &mut Suite, api: &Api) -> Result<()> {
         "nor does a frame of it: the frame offers the fragment in a tab of its own instead",
         told && cookie_of(&mut chrome, api, &z, "fragment_site").is_none() && cookie_of(&mut chrome, api, &z, "fragment_frame").is_none(),
         "",
+    );
+    // the platform's mint, framed by this page: a frame of another site's
+    // page, which it refuses (its refusal shows in no frame)
+    frame(&mut chrome, &e, &format!("{}/auth/frame?name={z}&return=/", api.base))?;
+    std::thread::sleep(Duration::from_secs(2));
+    s.ok(
+        "nor can it frame the platform's mint for one: nothing signs in there",
+        cookie_of(&mut chrome, api, &z, "fragment_frame").is_none() && cookie_of(&mut chrome, api, &z, "fragment_site").is_none(),
+        json!(cookie_of(&mut chrome, api, &z, "fragment_frame")),
     );
 
     // ---- asked once: a fragment that is not yours, nor shared with you
@@ -380,11 +390,11 @@ fn by_url(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let framed = html_request(api, api.site_url(&own_too, ""), "iframe", "navigate", "same-site", None)?;
     s.ok(
-        "a frame's navigation is not sent to sign in (a frame cannot): it answers a page that says to, shown only in this origin's own pages",
+        "a frame's navigation is not sent to sign in (a frame cannot): it answers a page that says to, shown only in this origin's own pages and the platform's",
         framed.status == 401
             && framed.header("content-type").starts_with("text/html")
             && framed.text.contains("You need to sign in")
-            && framed.header("content-security-policy") == "frame-ancestors 'self'",
+            && framed.header("content-security-policy") == format!("frame-ancestors 'self' {}", api.base),
         format!("{framed} {:?}", framed.header("content-security-policy")),
     );
     let stale = html_request(api, api.site_url(&own, "?view=0123456789abcdef"), "document", "navigate", "none", None)?;

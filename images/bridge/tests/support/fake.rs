@@ -149,6 +149,16 @@ impl Drop for Fake {
     }
 }
 
+/// An agent's own fragment: its owner paul, the agent an editor of it,
+/// and its `tasks`.
+fn agent_fragment(identity: &str) -> Frag {
+    let mut f = Frag::default();
+    f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+    f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
+    f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
+    f
+}
+
 /// A person, by name: `id:<name>`.
 pub fn person(name: &str) -> String {
     format!("id:{name}")
@@ -164,12 +174,7 @@ impl Fake {
         world.names.insert("id:paul".into(), "paul".into());
         world.names.insert("id:skyler".into(), "skyler".into());
         for a in world.computer["agents"].as_array().cloned().unwrap_or_default() {
-            let (fragment, identity) = (a["fragment"].as_str().unwrap().to_string(), a["identity"].as_str().unwrap().to_string());
-            let mut f = Frag::default();
-            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-            f.members.push(Member { principal: identity, role: "editor".into(), kind: "agent".into(), added_at: 2 });
-            f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
-            world.fragments.insert(fragment, f);
+            world.fragments.insert(a["fragment"].as_str().unwrap().to_string(), agent_fragment(a["identity"].as_str().unwrap()));
         }
         let world = Arc::new(Mutex::new(world));
         let listener = tokio::net::TcpListener::bind(bind).await.expect("the fake listens");
@@ -207,6 +212,35 @@ impl Fake {
             w.fragments.insert(name.clone(), f);
         });
         name
+    }
+
+    /// Assigns the agent `label` to the computer while it runs (its
+    /// fragment `<label>.paul`, identity `id:<label>`), as its owner's
+    /// `PUT /api/computers/{id}/agents/{fragment}` does.
+    pub fn add_agent(&self, label: &str) {
+        self.with(|w| {
+            let (fragment, identity) = (format!("{label}.paul"), format!("id:{label}"));
+            w.fragments.insert(fragment.clone(), agent_fragment(&identity));
+            let agent = json!({ "fragment": fragment, "identity": identity, "name": label, "owner": "id:paul" });
+            w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent);
+        });
+    }
+
+    /// Unassigns the agent `label` from the computer.
+    pub fn remove_agent(&self, label: &str) {
+        let fragment = format!("{label}.paul");
+        self.with(|w| w.computer["agents"].as_array_mut().expect("the computer's agents").retain(|a| a["fragment"] != fragment.as_str()));
+    }
+
+    /// Adds the agent `label` to `fragment` as an editor, and posts `joined`
+    /// on its own `tasks`, as the platform does for an agent added to a
+    /// fragment (docs/computers.md).
+    pub fn join(&self, fragment: &str, label: &str) {
+        self.with(|w| {
+            let at = w.now();
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("id:{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
+            w.append(&format!("{label}.paul"), "tasks", "id:paul", json!({ "kind": "joined", "fragment": fragment }));
+        });
     }
 
     pub fn add_member(&self, fragment: &str, principal: &str, role: &str) {

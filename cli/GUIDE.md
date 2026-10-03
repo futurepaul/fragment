@@ -258,11 +258,13 @@ export class App extends DurableObject {
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.
 - **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning_effort})`,
-  `job.ai.image({prompt, path})`, `job.ai.video({prompt, path})`. Text
-  runs on a tier, `model: "cheap"` (the default) or `"medium"`; images and
-  video are written to `path` on `main`. You pay for them, from your
-  ledger (below). GLM can spend a small `max_tokens` thinking:
-  `reasoning_effort` is `low` unless you ask for `high`.
+  `job.ai.image({prompt, path, steps})`. Text runs on a tier,
+  `model: "cheap"` (the default) or `"medium"`; an image is a JPEG
+  (FLUX.1 [schnell], 1 to 8 `steps`, 4 by default) written to `path` on
+  `main`, which ends in `.jpg` or `.jpeg`. You pay for them, from your
+  ledger (below). `job.ai.video` is off until videos run on Cloudflare.
+  GLM can spend a small `max_tokens` thinking: `reasoning_effort` is
+  `low` unless you ask for `high`.
 
 ## An agent in your fragment
 
@@ -410,7 +412,11 @@ after a top-up or next month.
 - At zero, agents and AI stop; your fragments keep serving and taking
   writes.
 - $2 below zero, your fragments go read-only (reads still serve) until a
-  top-up brings you above zero.
+  top-up brings you above zero: their cron and triggers start no runs
+  meanwhile (each shows in `fragment runs` as `blocked`, saying why), and
+  you make no new fragment.
+- A guest makes no fragments (`fragment create` is refused, 403): they
+  edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
 
@@ -514,7 +520,7 @@ its wording:
 - `invalid_usage`: the command was called wrong (exit 2)
 - `invalid_request`: the host refused the request; the message says why (400)
 - `auth_failed`: no key here, or the host does not know it (401)
-- `forbidden`: signed, but your role does not allow it (403)
+- `forbidden`: signed, but your role, or your plan, does not allow it (403); the message says which (a guest makes no fragments)
 - `not_found`: no such fragment, route, or operation (404)
 - `name_taken`: it exists already (409)
 - `conflict`: the branch moved under a sync, a deploy, or a manifest-set

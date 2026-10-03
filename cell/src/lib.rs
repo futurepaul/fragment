@@ -34,6 +34,7 @@ mod ai;
 mod auth;
 mod blobs;
 mod config;
+mod connections;
 mod channels;
 mod computer;
 mod deliveries;
@@ -56,12 +57,15 @@ mod publish;
 mod push;
 mod registry;
 mod routed;
+mod search;
 mod runs_on;
 mod serve;
 mod share;
+mod shell;
 mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
+use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
 use fragment_nip98::Payload;
 use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
@@ -89,6 +93,9 @@ const PASSED_HEADERS: [&str; 9] =
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
+
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
+const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
 
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
@@ -124,6 +131,52 @@ pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u
         body.push(&chunk).map_err(too_large)?;
     }
     Ok(body.finish())
+}
+
+/// The header the shell's own requests carry: a request from another
+/// origin cannot send it without a preflight the platform never answers.
+pub const SHELL_HEADER: &str = "x-fragment-shell";
+
+/// Who asks an API request, unresolved: the key that signed it (NIP-98),
+/// or, from the platform's own page (the shell), the person's platform
+/// session.
+enum Caller {
+    Key(String),
+    Session(String),
+}
+
+/// A request's caller: its signature when it has one; else the platform
+/// session, only for the shell's own requests (`shell_session`); else the
+/// unsigned request's 401.
+fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
+    if req.headers().get("authorization")?.is_none() {
+        if let Some(token) = shell_session(Config::from_env(env), req, url)? {
+            return Ok(Caller::Session(token));
+        }
+    }
+    authenticate(req, url, payload).map(Caller::Key)
+}
+
+/// The platform session of a request from the shell: on the platform's
+/// host, `Sec-Fetch-Site: same-origin` (a fragment's page is one site with
+/// the platform where they share a zone, and its fetch carries the Lax
+/// cookie; only the fetch metadata tells them apart), the shell's header,
+/// and for a write the platform's exact Origin.
+fn shell_session(cfg: &Config, req: &Request, url: &Url) -> CellResult<Option<String>> {
+    let host = url.host_str().unwrap_or_default();
+    if !cfg.is_platform_host(host) || req.headers().get(SHELL_HEADER)?.as_deref() != Some("1") {
+        return Ok(None);
+    }
+    if req.headers().get("sec-fetch-site")?.as_deref() != Some("same-origin") {
+        return Ok(None);
+    }
+    if !matches!(req.method(), Method::Get | Method::Head) {
+        let platform = cfg.platform(url);
+        if req.headers().get("origin")?.is_none_or(|o| o.trim_end_matches('/') != platform) {
+            return Ok(None);
+        }
+    }
+    auth::platform_session_token(req, url)
 }
 
 /// The key that signed the request (NIP-98), not yet resolved.
@@ -204,22 +257,26 @@ pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8])
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it: a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
-    let key = authenticate(req, url, payload)?;
     let acting_for = acting_for(url)?;
-    let identity = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
+    let (identity, key) = match caller(env, req, url, payload)? {
+        Caller::Key(key) => (ask_registry(env, &calls::Resolve { key: key.clone() }).await?, Some(key)),
+        // the shell's: a person, signed in on the platform
+        Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
+    };
     if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
         return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
     }
-    Ok(Signed { identity, key: Some(key), acting_for })
+    Ok(Signed { identity, key, acting_for })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
 /// (verified here, which needs no registry: a bad one is still 401); a
 /// browser, its session on this origin, as far as its cookies count
-/// (`Fetched`), a frame's navigation by its frame cookie first.
-fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
+/// (`Fetched`), a frame's navigation by its frame cookie first. `payload`
+/// is the body a signature covers (a blob upload's, streamed: its hash).
+fn site_credential(req: &Request, url: &Url, payload: Payload<'_>, name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
     if req.headers().get("authorization")?.is_some() {
-        return Ok(Some(Credential::Key(authenticate(req, url, Payload::Read(body))?)));
+        return Ok(Some(Credential::Key(authenticate(req, url, payload)?)));
     }
     let path_mode = mode == Mode::Path;
     let site = if fetched.site { auth::site_token(req, name, url, path_mode)?.map(Credential::Session) } else { None };
@@ -259,8 +316,8 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 /// - a top-level navigation (GET or HEAD, from anywhere): the origin's own
 ///   (`fragment_site`, `fragview`, `fragment_anon`), as Lax means them;
 /// - a frame's navigation (an `iframe`, or an `object` or `embed`, which
-///   show a page too): the frame cookie (`__frame`), and the answer shows
-///   only in the page that framed it (`bound`);
+///   show a page too): the frame cookie (`/auth/frame`'s), and the answer
+///   shows only in the page that framed it (`bound`);
 /// - anything else from another page (an image, a script, a fetch, a form
 ///   or a POST navigation): none, so it is served as to a stranger;
 /// - no Fetch Metadata (a browser from before 2023, or not a browser): the
@@ -299,15 +356,16 @@ pub(crate) fn fetched(req: &Request) -> CellResult<Fetched> {
 }
 
 /// A navigation's answer: it differs by the kind of navigation (`Vary`),
-/// and a frame's shows only inside the page that framed it through
-/// `__frame` (its session's `embedder`), or, with no frame session, inside
-/// this origin's own pages, and is never reused from a cache without that.
-/// An app's own policy stays: a second one only narrows it.
-fn bound(resp: Response, framed: bool, embedder: Option<&str>) -> CellResult<Response> {
+/// and a frame's (`ancestors`: `fragment_core::frames::ancestors`) shows
+/// only in the pages that names: the platform's for a frame session its
+/// mint made (`/auth/frame`), this origin's own, or, for a stranger's
+/// answer, those and the platform's. It is never reused from a cache
+/// without that. An app's own policy stays: a second one only narrows it.
+fn bound(resp: Response, ancestors: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.append("vary", "sec-fetch-dest")?;
-    if framed {
-        h.append("content-security-policy", &format!("frame-ancestors {}", embedder.unwrap_or("'self'")))?;
+    if let Some(ancestors) = ancestors {
+        h.append("content-security-policy", &format!("frame-ancestors {ancestors}"))?;
         h.set("cache-control", "private, no-cache")?;
     }
     Ok(resp.with_headers(h))
@@ -344,9 +402,12 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
 }
 
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page. An agent makes one for its owner: the
-/// owner's (billed to them, in their list), under their username, with
-/// the agent an editor of it.
+/// (the shell's catalog calls it), the one door every fragment is made
+/// through (an agent's or a template's included). An agent makes one for
+/// its owner: the owner's (billed to them, in their list), under their
+/// username, with the agent an editor of it. Its maker's ledger is asked
+/// first: a guest makes none (Paul, 2026-10-03), nor does someone whose
+/// fragments are read-only past the overdraft.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
@@ -356,8 +417,10 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
+    assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
     create.name = qualify(&create.name, &username)?;
+    may_create(env, &maker.id).await?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
@@ -373,6 +436,23 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         }
     }
     Ok(made)
+}
+
+/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
+/// its refusal is theirs to read, 403 for a guest and 402 past the
+/// overdraft. A ledger that does not answer refuses nothing, as a write's
+/// does (meter.rs `writable`): making a fragment is the product, and an
+/// outage lets at most a guest's fragment through, billed nothing.
+async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
+    let may = ledger::MaySpend { spend: fragment_core::ledger::Spend::Create, fragment: None, by_owner: true };
+    match ledger::ask(env, maker, &may).await {
+        Ok(_) => Ok(()),
+        Err(e) if e.refused.is_some() => Err(CellError::new(e.code, e.message)),
+        Err(e) => {
+            console_error!("{}", json!({ "event": "create.standing-unknown", "maker": maker, "message": e.message }));
+            Ok(())
+        }
+    }
 }
 
 fn qualify(name: &str, username: &str) -> CellResult<String> {
@@ -543,12 +623,20 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
                 let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key }).await?)
+                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?)
             }
         };
     }
-    let signer_key = authenticate(&req, url, Payload::Read(&body))?;
-    let by = || calls::By::Key(signer_key.clone());
+    let caller = caller(env, &req, url, Payload::Read(&body))?;
+    let by = || match &caller {
+        Caller::Key(k) => calls::By::Key(k.clone()),
+        Caller::Session(t) => calls::By::Session(t.clone()),
+    };
+    // a key's proof names the key that signed the request: the shell signs none
+    let signer_key = || match &caller {
+        Caller::Key(k) => Ok(k.clone()),
+        Caller::Session(_) => Err(CellError::new(ErrorCode::Unauthenticated, "adding a key is signed by a key you hold (`fragment login`)")),
+    };
     match (method, rest) {
         (Method::Put, ["me", "username"]) => {
             /// `PUT /api/identities/me/username`'s body.
@@ -566,7 +654,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
             // Two round trips, on purpose: the bytes land in BLOBS before the
             // registry names them, so no one it does not know stores any.
-            ask_registry(env, &calls::Resolve { key: signer_key.clone() }).await?;
+            ask_registry(env, &calls::View { identity: None, by: by() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
             js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
             json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
@@ -578,7 +666,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         (Method::Post, [id, "keys"]) => {
             let identity = named_identity(id)?;
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let key = proven_key(&add.proof, &req, url, &signer_key)?;
+            let key = proven_key(&add.proof, &req, url, &signer_key()?)?;
             json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: by() })).await?)
         }
         (Method::Put, [id, "held"]) => {
@@ -636,6 +724,18 @@ struct Forward {
     inner: String,
     /// Headers this route passes on purpose (the inbox's token and hop count).
     extra: Vec<(&'static str, String)>,
+}
+
+/// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
+/// past that it is refused unread (the API's upload, and a page's at
+/// `__blob/<sha256>`).
+fn blob_length(req: &Request) -> CellResult<()> {
+    let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
+    match declared {
+        None => Err(CellError::invalid("a blob upload declares its content-length")),
+        Some(n) if n > limits::BLOB_MAX_BYTES => Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
+        Some(_) => Ok(()),
+    }
 }
 
 /// Bytes the router read, as a body to forward.
@@ -709,23 +809,55 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
     }
     own_page_socket(&req, cfg, url, name)?;
+    // a page's blob upload streams through, as the API's does: the router
+    // never holds its bytes (the fragment checks who uploads, and the hash)
+    let upload = match (req.method(), rest.strip_prefix("__blob/")) {
+        (Method::Put, Some(sha)) => {
+            blob_length(&req)?;
+            Some(sha)
+        }
+        _ => None,
+    };
     // a GET or HEAD has no body to wait for
     let body = match req.method() {
         Method::Get | Method::Head => Vec::new(),
+        _ if upload.is_some() => Vec::new(),
         _ => read_body(&mut req, limits::BODY_MAX_BYTES).await?,
     };
-    let mut credential = site_credential(&req, url, &body, name, mode, fetched)?;
+    let payload = match upload {
+        Some(sha) => Payload::Streamed { sha256_hex: sha },
+        None => Payload::Read(&body),
+    };
+    let mut credential = site_credential(&req, url, payload, name, mode, fetched)?;
     // a frame's page shows only in the page its session was made for: that
-    // session is asked for here, for the page's origin (`bound`)
-    let (mut signed, mut embedder) = (None, None);
+    // session is asked for here, for the page's origin (`bound`). Only the
+    // platform's page has one (its mint names it): a session for any
+    // other is no one's, so no answer names another page.
+    let platform = cfg.platform(url);
+    let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
         if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
-            (signed, embedder) = (Some(Signed::new(live.identity, None)), live.embedder);
+            if live.embedder.as_deref() == Some(platform.as_str()) {
+                (signed, framed) = (Some(Signed::new(live.identity, None)), Framed::Session);
+            }
         }
         credential = None;
     }
+    // an upload from no one is refused here, its bytes never forwarded
+    if upload.is_some() && signed.is_none() && credential.is_none() {
+        return Err(CellError::new(ErrorCode::Unauthenticated, "sign in on this fragment's page to upload a blob"));
+    }
+    // a frame whose navigation this origin's own cookies count in is one
+    // of its own page's (`fetched`: same-origin), as whoever they name
+    if framed == Framed::Stranger && fetched.site {
+        framed = Framed::OwnPage;
+    }
     let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
-    let mut resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    let body = match upload {
+        Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
+        None => bytes_body(body),
+    };
+    let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
         resp = match page {
@@ -737,7 +869,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         };
     }
     match fetched.navigation {
-        true => bound(resp, fetched.framed, embedder.as_deref()),
+        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
         false => Ok(resp),
     }
 }
@@ -800,7 +932,14 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
-        (_, [""] | ["settings"] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
+        (Method::Get | Method::Head, ["__shell", file @ ..]) => match shell::asset(&req, &file.join("/"))? {
+            Some(resp) => Ok(resp),
+            None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
+        },
+        // the shell, for everyone: signed out it asks them to sign in,
+        // without a username it asks for one; `/settings` opens its settings
+        (Method::Get, [""] | ["settings"]) => Ok(shell::page(&req, cfg, &url)?),
+        (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
@@ -808,7 +947,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
-        (Method::Get, ["healthz"]) => {
+        (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
             Ok(resp)
@@ -835,6 +974,32 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
+        }
+        // the signer's own view of a fragment of theirs (principal.rs): it
+        // changes nothing of the fragment's, nor anyone else's list
+        (Method::Put, ["api", "fragments", name, "archived"]) => {
+            let body = read_body(&mut req, ARCHIVED_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name, Some(&who))?;
+            let inner = json!({ "fragment": name, "archived": set.archived }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/archived", &init)?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
+        }
+        // search over the signer's own list (principal.rs): agents need none,
+        // and acting for someone (`for`) is not honored here
+        (Method::Get, ["api", "search"]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            let mut asked = url.query_pairs().filter(|(k, _)| k == "q").map(|(_, v)| v.into_owned());
+            let (Some(q), None) = (asked.next(), asked.next()) else {
+                return Err(CellError::invalid("name what to look for, once: ?q="));
+            };
+            let mut inner = Url::parse("https://principal.internal/search").map_err(|e| CellError::host(e.to_string()))?;
+            inner.query_pairs_mut().append_pair("q", &q);
+            let search = Request::new(inner.as_str(), Method::Get)?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(search).await?)
         }
         (_, ["api", "ledger", rest @ ..]) => {
             let rest = rest.to_vec();
@@ -867,6 +1032,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
             }
             release_username(env, username).await
+        }
+        (method, ["api", "connections", rest @ ..]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            let rest = rest.to_vec();
+            connections::route(env, &who.identity.id, who.identity.kind, method, &rest).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -901,12 +1071,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         // fragment checks the hash as they arrive. A payload tag may name
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
-            let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
-            match declared {
-                None => return Err(CellError::invalid("a blob upload declares its content-length")),
-                Some(n) if n > limits::BLOB_MAX_BYTES => return Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
-                Some(_) => {}
-            }
+            blob_length(&req)?;
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);

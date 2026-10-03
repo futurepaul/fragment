@@ -175,8 +175,9 @@ pub enum Effect {
     Runtime(Command),
     /// Hold the keepalive socket (true) or drop it.
     Keepalive(bool),
-    /// List the agent's fragments again (it joined one).
-    Discover { agent: String },
+    /// List the agent's fragments again (it joined one: `joined`, whose
+    /// members changed, so every view of it read before is stale).
+    Discover { agent: String, joined: Option<String> },
 }
 
 /// One step's result.
@@ -394,7 +395,7 @@ impl Engine {
                 let owner = agent.owner.clone();
                 self.admit(agent, &chat, cause, &owner, "your routine".into(), &m, 0, true);
             }
-            Task::Joined => self.out.push(Effect::Discover { agent: agent.fragment.clone() }),
+            Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             Task::Other => {}
         }
     }

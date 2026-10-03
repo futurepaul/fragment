@@ -5,11 +5,13 @@ mod agents;
 mod app;
 mod appfiles;
 mod blobs;
+mod chat;
 mod author;
 mod computers;
 mod control;
 mod delegation;
 mod deliver;
+mod frames;
 pub mod hermes;
 mod identities;
 mod isolation;
@@ -23,6 +25,7 @@ mod plane;
 mod posts;
 mod restart;
 mod share;
+mod shell;
 mod signin;
 mod site;
 mod sync;
@@ -55,6 +58,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     share::share,
     isolation::isolation,
+    frames::frames,
     app::ops,
     app::public,
     app::effects,
@@ -88,7 +92,10 @@ const LANES: &[Lane] = &[
     ledger::ledger_lane,
     agents::agents,
     addon::addon,
+    shell::shell_platform,
     computers::computers,
+    chat::chat,
+    shell::shell_ui,
     hermes::hermes,
     sync::folder_sync,
     restart::restart,

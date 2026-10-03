@@ -59,6 +59,7 @@ use fragment_proto::{
     limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
 };
+use fragment_templates::blessed;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
@@ -89,6 +90,13 @@ CREATE TABLE IF NOT EXISTS invites (
   expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, invitee TEXT);
 CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS search_log (
+  n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS search_outbox (
+  principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER);
+CREATE INDEX IF NOT EXISTS search_outbox_due ON search_outbox (next_at);
+CREATE TABLE IF NOT EXISTS joined_outbox (
+  principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (
   name TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS records (
@@ -105,7 +113,7 @@ CREATE TABLE IF NOT EXISTS code (
   modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
@@ -144,9 +152,8 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
 CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
 CREATE TABLE IF NOT EXISTS charges (
-  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, video TEXT, at INTEGER NOT NULL);
+  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS charges_run ON charges (run);
-CREATE INDEX IF NOT EXISTS charges_video ON charges (video) WHERE video IS NOT NULL;
 CREATE TABLE IF NOT EXISTS paid (
   key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS paid_run ON paid (run);
@@ -180,6 +187,9 @@ pub struct FragmentCell {
     pub(crate) standing: RefCell<crate::meter::StandingSeen>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
+    /// A record woke an idle search cursor, and the alarm is not armed for
+    /// it yet (search.rs `log_search`; channels.rs `published` arms it).
+    pub(crate) search_woke: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
 }
@@ -209,6 +219,7 @@ impl DurableObject for FragmentCell {
             live: RefCell::default(),
             standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
+            search_woke: Cell::new(false),
             dw_noted: RefCell::new(None),
         }
     }
@@ -356,6 +367,8 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
+    /// The title a blessed template's fragment starts with (`TemplatePending`'s).
+    TemplateTitle,
     /// What live's `agent` block declares, still to make so (agents.rs
     /// `sync_agent`): a new value each time live declares one.
     AgentPending,
@@ -380,6 +393,11 @@ pub(crate) enum MetaKey {
     ManifestMain,
     /// The live manifest's `meta`, as JSON text: a page's Open Graph tags.
     MetaLive,
+    /// The blessed template live runs and its release (`<name>@<release>`,
+    /// blessed.rs in crates/templates), when it names one.
+    Blessed,
+    /// What its members' lists show of it (`{kind, title}`), as last sent.
+    Face,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -441,6 +459,7 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
+            MetaKey::TemplateTitle => "template_title",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
@@ -452,6 +471,8 @@ impl MetaKey {
             MetaKey::LiveReadAt => "live_read_at",
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
+            MetaKey::Blessed => "blessed",
+            MetaKey::Face => "face",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -898,6 +919,12 @@ impl FragmentCell {
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
         self.meter_soon().await;
+        // a fragment on a blessed template runs the release this build
+        // serves (decision 40): one installed from an older release (the
+        // platform deployed since) installs again first, its code included
+        if let Err(e) = self.blessed_current().await {
+            self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
+        }
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;
@@ -1049,9 +1076,17 @@ impl FragmentCell {
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
         }
-        if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none()) {
-            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
+        if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
+            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
+        }
+        if let Some(title) = &body.title {
+            if body.template.as_deref().and_then(blessed::template).is_none() {
+                return Err(CellError::invalid("a title is a blessed template's fragment's (template chat or agent); others say theirs in fragment.json"));
+            }
+            if title.trim().is_empty() || title.chars().count() > 120 {
+                return Err(CellError::invalid("a title is 1 to 120 characters"));
+            }
         }
         let cs_cfg = self.cfg.codestorage()?;
         // Claim the name before the first await: a concurrent create for the
@@ -1113,10 +1148,19 @@ impl FragmentCell {
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
             ],
         )?;
-        self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
+            if let Some(title) = &body.title {
+                self.set_meta(MetaKey::TemplateTitle, title.trim())?;
+            }
+            // a blessed template's face is known now: the owner's list says
+            // it is a chat or an agent from the start, not once it installs
+            if let Ok(m) = blessed::manifest(t) {
+                let title = body.title.as_deref().map(str::trim).or(m.title());
+                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title))?;
+            }
         }
+        self.index_change(&owner, Some(Role::Owner))?;
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         // a template that did not land, or an agent it declares that did
@@ -1226,7 +1270,7 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs the index and delivery outboxes, due schedules,
+    /// The alarm runs the index, search, joined and delivery outboxes, due schedules,
     /// queued runs, and the pass: the poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
@@ -1235,6 +1279,8 @@ impl FragmentCell {
             return Ok(());
         }
         self.flush_index().await;
+        self.flush_search().await;
+        self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         } else if let Err(e) = self.sync_agent().await {
@@ -1247,7 +1293,7 @@ impl FragmentCell {
         // Settles pending mutations that are due; one that fails waits for
         // its own next try and never fails the alarm.
         self.sweep_due().await?;
-        self.fire_cron()?;
+        self.fire_cron().await?;
         self.launch_queued().await;
         let poll_at: i64 = self.meta(MetaKey::PollAt)?.and_then(|s| s.parse().ok()).unwrap_or(0);
         if poll_at <= js::now_ms() {
@@ -1295,7 +1341,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
+        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

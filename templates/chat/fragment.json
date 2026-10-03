@@ -1,0 +1,14 @@
+{
+  "kind": "chat",
+  "channels": {
+    "chat": { "read": "public", "post": "viewer" },
+    "work": { "read": "viewer", "post": "editor" }
+  },
+  "operations": {
+    "notify_reply": { "kind": "job" }
+  },
+  "triggers": [
+    { "channel": "chat", "from": "agent", "run": "notify_reply" }
+  ],
+  "meta": { "title": "Chat", "description": "A chat with your agents: replies stream in, their steps and approvals show as cards, files and voice memos go both ways, and a reply reaches you while you're away." }
+}

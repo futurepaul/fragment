@@ -18,8 +18,8 @@ export class App extends DurableObject {
     return { one: one.text, two: two.text };
   }
 
-  async draw({ prompt, path }, job) {
-    return await job.ai.image({ prompt, path });
+  async draw({ prompt, path, steps }, job) {
+    return await job.ai.image({ prompt, path, steps });
   }
 
   // anyone who can see the fragment may call it; its owner pays

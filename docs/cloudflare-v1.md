@@ -105,8 +105,9 @@ speaking Cloudflare's APIs) returns once this product works.
    people collaborate with you in other fragments, not in chats.
 9. **Chat in v1** comes from the chat template: streaming replies
    (drafts), tool steps as cards, approvals as buttons, Stop,
-   attachments both ways (blobs), voice input (an AI step running
-   Workers AI speech to text), push notifications (fragment push), and
+   attachments both ways (blobs), voice input (a voice memo, an audio
+   attachment the agent transcribes itself: the platform runs no speech
+   to text; Paul, 2026-10-03), push notifications (fragment push), and
    rename and archive. Search across chats, apps and messages is the
    shell's, over your fragments' channels and files.
 10. **First run:** choose a username, then "What should your first
@@ -232,9 +233,9 @@ speaking Cloudflare's APIs) returns once this product works.
 22. **Connections through WorkOS Pipes.** WorkOS holds and refreshes the
     tokens. The computer holds only placeholders. Its HTTPS intercept
     swaps in a short-lived token for an identity allowed that
-    connection. Templates ask before sending email, sharing files or
-    accepting invites. Per-agent limits are a guardrail, not a wall,
-    because agents share a computer.
+    connection: an agent may use every connection its owner has, unless
+    its owner narrows it to a list (decision 44). Templates ask before
+    sending email, sharing files or accepting invites.
 23. **Models through AI Gateway**, Unified Billing, with zero data
     retention on and the gateway's request logs off. Three tiers: GLM-5.3
     Flash (cheap), GLM-5.3 (medium), both on Workers AI, and Claude Opus
@@ -259,17 +260,23 @@ speaking Cloudflare's APIs) returns once this product works.
     Each meter batches into the payer's ledger, so no global object sits
     on a hot path.
 25. **Plans.** Guests sign in free and use fragments shared with them;
-    they have no agents. A $100 seat includes $50 of credit a month and
-    a computer that sleeps when idle. A $200 seat includes an always-on
-    computer (its awake time not metered), SimpleX, and $100 of credit.
-    More credit can be bought. Stripe arrives later through two hooks:
-    granting credit, and a seat's state.
+    they have no agents, and can't create fragments (Paul, 2026-10-03):
+    a fragment's hosting bills its owner, and a guest pays for nothing.
+    A guest still edits a paid person's fragment shared with them, which
+    bills that fragment's owner (decision 26). A $100 seat includes $50
+    of credit a month and a computer that sleeps when idle. A $200 seat
+    includes an always-on computer (its awake time not metered), SimpleX,
+    and $100 of credit. More credit can be bought. Stripe arrives later
+    through two hooks: granting credit, and a seat's state.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
 27. **At zero credit** agents stop: no turns, no wakes, no AI steps. The
     shell says why. Fragments keep serving and taking writes on a $2
-    overdraft, then go read-only until a top-up.
+    overdraft, then go read-only until a top-up. Read-only, their cron
+    and triggers start no runs either: each run they would have started
+    is recorded `blocked`, with the reason, and they start again once the
+    owner has credit (Paul, 2026-10-03).
 28. **Sign-up is invite-only** at cutover.
 
 ### Fragments, brains, sites
@@ -375,6 +382,13 @@ speaking Cloudflare's APIs) returns once this product works.
     found that traffic from the container, even a socket to another DO,
     doesn't count as activity; only a socket the Computer DO accepts
     does.
+
+    **Adding an agent wakes it too** (Paul, 2026-10-03: wake agents
+    aggressively to hide latency, and leave templates no convention to
+    remember). When an agent that runs on a computer becomes a member of
+    any fragment, the platform itself posts `{kind: "joined", fragment}`
+    on the agent fragment's `tasks` and wakes its computer, so the guest
+    follows the new fragment before anyone speaks there.
 40. **Blessed templates run the platform's current version.** A chat,
     agent, brain or skills fragment names its template, and it serves
     that template's code from the current platform release. One deploy
@@ -399,6 +413,22 @@ speaking Cloudflare's APIs) returns once this product works.
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing
     of ours.
+
+### A person's agents (Paul, 2026-10-03)
+
+44. **A person's agents aren't fenced from each other.** Paul: "agents
+    are owned by a person, they don't need to be super fenced from each
+    other." Assume that, in the end, every agent and computer a person
+    owns sees everything that person has on any of their agents or
+    computers. Roles, personas and permissions are a UX matter, and a way
+    to give agents some specialization; they are not walls between one
+    person's agents. So:
+    - an agent may use every connection its owner has, by default; its
+      owner may narrow one agent to a list (`connections: null` is every
+      one, a list only those: docs/computers.md);
+    - limits between one person's agents are specialization, never a
+      security boundary. Walls stand between people (decision 36), and
+      an agent is held below its owner only by its owner's choice.
 
 ## Lessons from cloudflare/agents
 
@@ -602,9 +632,10 @@ exit says.
    - Built: the `Ledger` Durable Object on the pure core; the model
      route (`cheap` and `medium` on Workers AI through the gateway,
      `high` refused) for the agents' Worker and, from phase 4, the
-     computer's intercept (`models::complete`); AI steps on it (images
-     and videos on OpenRouter with the deployment's key until phase 7,
-     metered as `Usage::Billed`; bugs 2 and 3 fixed); the gates (at
+     computer's intercept (`models::complete`); AI steps on it (bugs 2
+     and 3 fixed; since 2026-10-03 images are FLUX.1 [schnell] on Workers
+     AI, metered in neurons, bugs 1 and 5 fixed for them, and video steps
+     are off until they run on Cloudflare: OpenRouter is gone); the gates (at
      zero, agents and AI stop; past the overdraft, a fragment refuses
      writes); each fragment's meters (requests, dynamic workers,
      storage) through the `fragment-ledger` queue; `fragment ledger` and
@@ -660,6 +691,58 @@ exit says.
    through a platform-origin frame-session mint, with a frames lane; the
    shell replaces `/` and `/settings`. Exit: the browser lane at desktop
    and phone sizes, on a preview.
+
+   Status, 2026-10-03 (futurepaul/fragment#117; Skyler's design handoff
+   of 2026-10-02 for every part it draws):
+   - Built:
+     - **The shell** at `/` and `/settings` (cell/shell/; the server's
+       pages went):
+       - First run: a username, then "Creating your agent…". The person's
+         default agent, in charge, is made with its computer and its chat,
+         and the chat opens once the agent follows it (Paul, 2026-10-03:
+         no job asked, and no wait in the chat).
+       - A sidebar of agents, group chats and apps; per-person archive.
+       - Search over titles and messages (FTS5 in the Principal).
+       - Settings: the account, credit, computer, agents, connections,
+         the CLI, and the wallpaper's credit.
+       - An update prompt when the computer's image is behind.
+       - It calls the API with the platform session (docs/api.md, The
+         shell).
+     - **The frame mint** (`/auth/frame`). The shell's tabs, and a
+       computer's ports, sign in on their own origins with partitioned
+       cookies.
+     - **The blessed `agent` and `chat` templates** (decision 40),
+       served from the release, their app code included.
+       - The chat, on Skyler's design: drafts, steps as cards, approvals,
+         Stop, @mentions, and attachments both ways.
+       - Voice memos: an audio attachment the agent transcribes (decision
+         9, as Paul changed it).
+       - Push on an agent's final reply.
+     - **Paul's 2026-10-03 rules:**
+       - guests make no fragments;
+       - past the overdraft, triggers start no runs;
+       - the platform posts `joined` and wakes the computer;
+       - decision 44.
+     - A chat's files are kept while their records are.
+     - Computers start at the size their price names, decision 13's
+       2 vCPU and 6 GiB.
+     - `cargo xtask deploy` makes the proxied DNS record its routes need.
+   - Evidence:
+     - local, on workerd: `cargo xtask check` and the e2e (shell, shell-ui
+       in the browser at desktop and phone sizes, chat, frames, computers,
+       push, signin);
+     - the preview **p5.finite.place**: real WorkOS staging, code.storage,
+       Workers AI through the `fragment-dev` gateway, and a Hermes computer
+       on Containers. Paul signed in, made agents, and chatted; messages
+       queued, one turn at a time.
+   - Found on the preview:
+     - a computer's first start pulls the 3.8 GB image (about 29 s), now
+       hidden behind setup;
+     - an agent added to an awake Hermes computer had no profile (a 401):
+       hermes-boot now follows its computer's agents while it runs and has
+       Hermes take a new profile live (about 2 to 3 s from assign to its
+       first answer, nothing restarted; docs/computers.md).
+   - Not yet: the hosted e2e lane on the preview; files in search.
 6. **Brains, skills, sites.** The brain and skills templates, Hermes'
    fragment skills, screenshots. Exit: from a chat, an agent builds,
    publishes and shares an app, ingests into a brain and searches it;
@@ -934,7 +1017,9 @@ Each one needs a test in the phase that ports its feature.
    (`cell/src/ai.rs`) commits through `commit_files`, which caps a write
    at 256 KiB, while blobs start at 1 MiB. The error was "the files
    written is 347234 bytes; the limit is 262144". Phase 7: a generated
-   file is a blob from the first byte, or the two limits meet.
+   file is a blob from the first byte, or the two limits meet. *Fixed
+   2026-10-03:* `store_media` commits as the platform, past an app's
+   write limit, so the limits meet (the e2e's `ai` section).
 2. **A retried image step buys a new image.** Every `store_media` error
    is retryable, so each retry calls the model again, and only the last
    attempt is settled in the ledger. Phase 3/7: a storage failure after
@@ -951,6 +1036,8 @@ Each one needs a test in the phase that ports its feature.
 5. **An image is served by its path's extension, not its bytes.** A JPEG
    saved at `.png` is served as `image/png`. Phase 7: `job.ai.image`
    picks the extension from the media type, or `__file` sniffs it.
+   *Fixed for images 2026-10-03:* the model draws JPEGs, and
+   `job.ai.image` refuses a path that does not end in `.jpg` or `.jpeg`.
 6. **Small job-written files have no cacheable URL.** `__file` is
    `no-store`, and only blobs (1 MiB and up) have `__blob/<sha>`. Phase 7:
    a content-addressed, immutable URL for any committed file.
@@ -992,7 +1079,9 @@ Each one needs a test in the phase that ports its feature.
     swap;
   - restore time for a large `/data`.
 - **Isolation between agents.** Agents on one computer share it, so
-  per-agent connection limits are not a security boundary.
+  per-agent connection limits are not a security boundary. Decision 44
+  takes that as the design: one person's agents are not fenced from
+  each other, and a per-agent list is specialization.
 - **SimpleX cost.** An always-on computer costs about $42 a month at
   list price.
 

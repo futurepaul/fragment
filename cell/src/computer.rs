@@ -12,15 +12,22 @@
 //!   one-time tickets that sign a browser in to its ports.
 //! - **Its origin** (`<24 hex>--computer.<suffix>`: `serve_host`) serves
 //!   its ports to its owner, cross-site from the platform, so a page the
-//!   guest serves can act as no one.
+//!   guest serves can act as no one; in a tab of its own, or in a frame of
+//!   the platform's page (the shell's), the only page that may frame it.
 //! - **Its guest** reaches the platform only through the intercepts
 //!   (`ComputerEgress`): the API as its agents (each request signed by the
 //!   agent fragment it names, which checks it runs here), its own view,
 //!   and the keepalive socket that holds it awake. A request to a
 //!   connection's or an operator key's host has its placeholders swapped
 //!   for the credential (`egress_swap`, decisions 22 and 37), which this
-//!   cell resolves: only for an agent allowed it, and a connection's token
-//!   from WorkOS Pipes, held until shortly before it expires.
+//!   cell resolves: for an agent that runs here (any of its owner's
+//!   connections, unless its owner narrowed them: decision 44), and a
+//!   connection's token from WorkOS Pipes, held until shortly before it
+//!   expires.
+//! - **Its agents' new fragments** (`computer/joined`, from a fragment an
+//!   agent of its was added to): the agent's own fragment posts `joined`
+//!   on its `tasks`, and the fragment that added it then wakes the
+//!   computer (`Wake::Joined`; docs/computers.md).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -53,12 +60,20 @@ const SESSION_HEADER: &str = "x-fragment-computer-session";
 const SIGNER_HEADER: &str = "x-fragment-computer-signer";
 /// The header the guest names the agent it acts as with (docs/computers.md).
 const AGENT_HEADER: &str = "x-fragment-agent";
-/// The cookie that signs a browser in to a computer's origin.
+/// The cookies that sign a browser in to a computer's origin: a top-level
+/// visit's (SameSite=Lax), and a frame's in the platform's page (the
+/// shell's tab onto a port: SameSite=None, partitioned). Each is
+/// `__Host-` over https (`auth::set_cookie`): a fragment's page may set a
+/// cookie for the whole suffix, never one of those.
 const SESSION_COOKIE: &str = "fragment_computer";
+const FRAME_COOKIE: &str = "fragment_computer_frame";
 
+/// `agents.connections` is JSON: `null`, every connection the owner has
+/// (decision 44), or a list that narrows it. An agent's row names it as
+/// it is made (`computer/assign`), so the column's default is never read.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -223,7 +238,22 @@ struct Unassign {
 #[derive(Deserialize)]
 struct SetConnections {
     fragment: String,
-    connections: Vec<String>,
+    /// `None`: every connection the owner has (decision 44).
+    connections: Option<Vec<String>>,
+}
+
+/// What an agent may have swapped in, as `agents.connections` keeps it.
+fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
+    serde_json::from_str(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
+}
+
+/// `computer/joined`'s body: the agent `identity` was added to `fragment`,
+/// its membership made at `at` (which keys the notice: runs_on.rs).
+#[derive(Deserialize)]
+struct JoinedAsk {
+    identity: String,
+    fragment: String,
+    at: i64,
 }
 
 /// `computer/credential`'s body: what `agent` asked to have swapped in.
@@ -499,7 +529,10 @@ impl ComputerCell {
         let backup = if snapshot.is_none() { self.meta(MetaKey::Backup)? } else { None };
         let env = js::to_js(&self.guest_env(&id, &image, backup.is_some()));
         let snapshot_js = snapshot.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
-        self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, JsValue::NULL]).await?;
+        // the size its awake time is priced at (decision 13's, by default)
+        let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
+        let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
+        self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")));
@@ -566,21 +599,23 @@ impl ComputerCell {
     }
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
-        Ok(self
-            .rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?
-            .into_iter()
-            .map(|r| {
-                let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
-                let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
-                ComputerAgent {
-                    identity: r["identity"].as_str().unwrap_or_default().to_string(),
-                    owner: r["owner"].as_str().unwrap_or_default().to_string(),
-                    fragment,
-                    name,
-                    connections: serde_json::from_str(r["connections"].as_str().unwrap_or("[]")).unwrap_or_default(),
-                }
-            })
-            .collect())
+        let rows = self.rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?;
+        assert!(rows.len() as u64 <= AGENTS_MAX, "a computer runs at most AGENTS_MAX agents");
+        let mut agents = Vec::with_capacity(rows.len());
+        for r in rows {
+            let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
+            let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+            // a stored value that does not read is a host fault, never "all"
+            let connections = stored_connections(r["connections"].as_str().unwrap_or_default(), &fragment)?;
+            agents.push(ComputerAgent {
+                identity: r["identity"].as_str().unwrap_or_default().to_string(),
+                owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                fragment,
+                name,
+                connections,
+            });
+        }
+        Ok(agents)
     }
 
     fn view(&self) -> CellResult<ComputerView> {
@@ -655,8 +690,10 @@ impl ComputerCell {
                 if n.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= AGENTS_MAX {
                     return Err(CellError::invalid(format!("a computer runs at most {AGENTS_MAX} agents")));
                 }
+                // a new agent may use every connection its owner has (decision
+                // 44); assigned again, it keeps what its owner narrowed it to
                 self.exec(
-                    "INSERT INTO agents (fragment, identity, owner, added_at) VALUES (?, ?, ?, ?) ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
+                    "INSERT INTO agents (fragment, identity, owner, added_at, connections) VALUES (?, ?, ?, ?, 'null') ON CONFLICT (fragment) DO UPDATE SET identity = excluded.identity",
                     vec![b.fragment.as_str().into(), b.identity.as_str().into(), b.owner.as_str().into(), js::now_ms().into()],
                 )?;
                 json_response(&self.view()?)
@@ -679,22 +716,29 @@ impl ComputerCell {
             }
             "computer/connections" => {
                 let mut b: SetConnections = body_json(&mut req).await?;
-                b.connections.sort();
-                b.connections.dedup();
-                if let Some(c) = b.connections.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
-                    let offered: Vec<&String> = self.cfg.connections.keys().collect();
-                    return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                if let Some(list) = b.connections.as_mut() {
+                    list.sort();
+                    list.dedup();
+                    if let Some(c) = list.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
+                        let offered: Vec<&String> = self.cfg.connections.keys().collect();
+                        return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                    }
                 }
                 if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
                     return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
                 }
-                let list = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
-                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![list.into(), b.fragment.as_str().into()])?;
+                let text = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
+                assert_eq!(stored_connections(&text, &b.fragment)?, b.connections, "connections read back as they are written");
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
                 json_response(&self.view()?)
             }
             "computer/credential" => {
                 let b: CredentialAsk = body_json(&mut req).await?;
                 json_response(&self.credential(b).await?)
+            }
+            "computer/joined" => {
+                let b: JoinedAsk = body_json(&mut req).await?;
+                json_response(&self.joined(b).await?)
             }
             "computer/ticket" => {
                 let b: TicketAsk = body_json(&mut req).await?;
@@ -718,7 +762,8 @@ impl ComputerCell {
                 let Some(t) = rows.first().filter(|t| t["expires_at"].as_i64().unwrap_or(0) >= now) else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "this link was used or is too old: open the computer again"));
                 };
-                let session = js::random_hex::<24>();
+                // 32 bytes, as every session's: its cookie is read as one (`auth::cookie_of`)
+                let session = js::random_hex::<32>();
                 let identity = t["identity"].as_str().unwrap_or_default();
                 self.exec(
                     "INSERT INTO sessions (hash, identity, expires_at) VALUES (?, ?, ?)",
@@ -745,7 +790,10 @@ impl ComputerCell {
 
     /// The secret to swap in for `b`'s placeholder, when its agent runs here
     /// and may use it: `{secret, owner, identity}` (the agent's), so the
-    /// egress meters a key's call to its owner.
+    /// egress meters a key's call to its owner. An agent may use every
+    /// connection its owner has unless its owner narrowed it to a list
+    /// (decision 44: a person's agents are not fenced from each other, so
+    /// the list is a role's specialization, not a wall).
     async fn credential(&self, b: CredentialAsk) -> CellResult<Value> {
         let rows = self.rows("SELECT owner, identity, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
         let agent = rows.first().ok_or_else(|| CellError::new(ErrorCode::Forbidden, format!("{} does not run on this computer", b.agent)))?;
@@ -753,11 +801,15 @@ impl ComputerCell {
         let identity = agent["identity"].as_str().unwrap_or_default().to_string();
         let secret = match (b.connection, b.key) {
             (Some(provider), None) => {
-                let allowed: Vec<String> = serde_json::from_str(agent["connections"].as_str().unwrap_or("[]")).unwrap_or_default();
-                if !allowed.contains(&provider) {
+                let narrowed = stored_connections(agent["connections"].as_str().unwrap_or_default(), &b.agent)?;
+                if let Some(list) = narrowed.filter(|list| !list.contains(&provider)) {
                     return Err(CellError::new(
                         ErrorCode::Forbidden,
-                        format!("{} may not use the {provider} connection: its owner allows it on their computer", b.agent),
+                        format!(
+                            "{} may not use the {provider} connection: its owner narrowed it to {} on their computer (null lets it use every connection its owner has)",
+                            b.agent,
+                            if list.is_empty() { "none".to_string() } else { list.join(", ") }
+                        ),
                     ));
                 }
                 self.connection_token(&owner, &provider).await
@@ -782,6 +834,26 @@ impl ComputerCell {
             _ => Err(CellError::invalid("ask for one connection or one key")),
         }?;
         Ok(json!({ "secret": secret, "owner": owner, "identity": identity }))
+    }
+
+    /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
+    /// that fragment's outbox): when it runs here, its own fragment posts
+    /// `joined` on its `tasks` (once by the membership: a retry posts
+    /// nothing twice), so a guest that is awake lists its fragments again.
+    /// Answers `{runs}`: whether it runs here, and so whether there is a
+    /// computer to wake (its caller wakes it, on its own: a member's change
+    /// never waits for a start). Here is no one's computer, or the
+    /// identity no agent of it: nothing to tell.
+    async fn joined(&self, b: JoinedAsk) -> CellResult<Value> {
+        if !fragment_core::npub::is_identity(&b.identity) || !fragment_proto::valid_fragment_name(&b.fragment) || b.at <= 0 {
+            return Err(CellError::invalid("a join names an identity, a fragment and when it joined"));
+        }
+        let Some(id) = self.meta(MetaKey::Id)? else { return Ok(json!({ "runs": false })) };
+        let rows = self.rows("SELECT fragment FROM agents WHERE identity = ?", vec![b.identity.as_str().into()])?;
+        let Some(agent) = rows.first().and_then(|r| r["fragment"].as_str()).map(str::to_string) else { return Ok(json!({ "runs": false })) };
+        let posted = crate::fragment::ask(&self.env, &agent, "computer/joined", &json!({ "computer": id, "fragment": b.fragment, "at": b.at })).await?;
+        console_log!("{}", json!({ "computer": id, "joined": b.fragment, "agent": agent, "posted": posted["posted"] }));
+        Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
     /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
@@ -925,7 +997,8 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
-            json_response(&json!({ "computers": list }))
+            // the image a new computer gets: one pinned to another may update to it
+            json_response(&json!({ "computers": list, "defaultImage": Config::from_env(env).computer_image }))
         }
         (Method::Get, [id]) => json_response(&owned(env, who, id).await?),
         (Method::Post, [id, "wake"]) => {
@@ -951,9 +1024,16 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         }
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;
-            let b: AgentConnections = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if b.connections.len() > swap::CREDENTIALS_MAX || b.connections.iter().any(|c| !swap::valid_name(c)) {
-                return Err(CellError::invalid(format!("connections are at most {} provider names", swap::CREDENTIALS_MAX)));
+            let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            // a body that forgot the field is not a reset to every connection
+            if v.get("connections").is_none() {
+                return Err(CellError::invalid("name connections: a list of providers, or null for every connection its owner has"));
+            }
+            let b: AgentConnections = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if let Some(list) = &b.connections {
+                if list.len() > swap::CREDENTIALS_MAX || list.iter().any(|c| !swap::valid_name(c)) {
+                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", swap::CREDENTIALS_MAX)));
+                }
             }
             let set = json!({ "fragment": fragment, "connections": b.connections });
             json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
@@ -977,17 +1057,71 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
 
 /// A request to a computer's own origin: `/__ticket` signs a browser in
 /// (a ticket its owner minted becomes this origin's session cookie), and
-/// `/p/<port>/…` is that port, for its owner.
+/// `/p/<port>/…` is that port, for its owner. Its answers may be framed by
+/// the platform's page alone (the shell's tab onto a port: decisions 11
+/// and 41), never by a fragment's, which is one site with this origin.
 pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
+    let platform = Config::from_env(env).platform(url);
+    let answered = match host_answer(req, env, url, id, signer).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    framed_by(answered, &platform)
+}
+
+/// `resp` with `frame-ancestors <platform>` added (an image's own policy
+/// stays: a second one only narrows it). A socket's upgrade shows nothing,
+/// and keeps the answer it had.
+fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
+    assert!(fragment_core::frames::is_origin(platform), "frame-ancestors names the platform's origin alone");
+    if resp.status_code() == 101 {
+        return Ok(resp);
+    }
+    let h = resp.headers().clone();
+    h.append("content-security-policy", &format!("frame-ancestors {platform}"))?;
+    Ok(resp.with_headers(h))
+}
+
+/// Which of a browser's cookies name its session on a computer's origin,
+/// from the Fetch Metadata it sends, as on a fragment's (`crate::fetched`):
+/// every fragment's page is one site with this origin, so a SameSite=Lax
+/// cookie rides along on its images, fetches and frames, and the frame
+/// cookie, partitioned under the platform's page, on those of any page
+/// framed there. The session counts only on this origin's own page's
+/// requests, a top-level navigation (the site cookie), and a frame's
+/// navigation (the frame cookie, its answer shown only in the platform's
+/// page: `framed_by`); a socket only from this origin's own page.
+fn session_of(req: &Request, url: &Url) -> CellResult<Option<String>> {
+    let fetched = crate::fetched(req)?;
+    let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    // a socket has no CORS: one from any other page is refused before its cookies are read
+    if socket && req.headers().get("origin")?.is_some_and(|o| o != url.origin().ascii_serialization()) {
+        return Err(CellError::new(ErrorCode::Forbidden, "a computer's socket opens from its own page"));
+    }
+    let secure = url.scheme() == "https";
+    let site = if fetched.site { crate::auth::cookie_of(req, SESSION_COOKIE, secure, "/")? } else { None };
+    let frame = if fetched.frame { crate::auth::cookie_of(req, FRAME_COOKIE, secure, "/")? } else { None };
+    Ok(if fetched.framed { frame.or(site) } else { site.or(frame) })
+}
+
+async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
     let path = url.path().to_string();
+    let secure = url.scheme() == "https";
     if path == "/__ticket" {
         let q = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
         let ticket = q("t").ok_or_else(|| CellError::invalid("this link names no ticket"))?;
         let next = q("next").filter(|n| n.starts_with("/p/") && !n.contains("//")).unwrap_or_else(|| "/p/6080/".into());
         let s = ask(env, id, "computer/redeem", &json!({ "ticket": ticket })).await?;
         let session = s["session"].as_str().ok_or_else(|| CellError::host("the computer made no session"))?;
-        let secure = if url.scheme() == "https" { "; Secure" } else { "" };
-        let cookie = format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", s["maxAgeS"].as_i64().unwrap_or(0));
+        let max_age_s = s["maxAgeS"].as_i64().unwrap_or(0);
+        // In a frame (the platform's tab onto the port), the session is the
+        // frame's: a partitioned cookie for the page around it, which a
+        // browser that blocks third-party cookies keeps (CHIPS). The site
+        // cookie is SameSite=Lax, which a cross-site frame never sends.
+        let cookie = match crate::fetched(&req)?.framed {
+            true => crate::auth::frame_cookie(FRAME_COOKIE, session, "/", max_age_s, secure),
+            false => crate::auth::set_cookie(SESSION_COOKIE, session, "/", max_age_s, secure),
+        };
         let headers = Headers::new();
         headers.set("location", &next)?;
         headers.set("set-cookie", &cookie)?;
@@ -999,10 +1133,7 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
     };
     let (port, tail) = rest.split_once('/').unwrap_or((rest, ""));
     let port: u16 = port.parse().map_err(|_| CellError::invalid("a port is a number"))?;
-    let session = req
-        .headers()
-        .get("cookie")?
-        .and_then(|c| c.split(';').map(str::trim).find_map(|kv| kv.strip_prefix(&format!("{SESSION_COOKIE}=")).map(str::to_string)));
+    let session = session_of(&req, url)?;
     let headers = Headers::new();
     for k in ["accept", "content-type", "range", "if-none-match", "upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"] {
         if let Some(v) = req.headers().get(k)? {

@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{manifest, npub, site, webhook};
-use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_templates::blessed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,17 @@ pub(crate) struct TreeRow {
     pub last_commit: String,
 }
 
+/// A live commit's code as read: `app.mjs`, its `applib/` modules by path,
+/// and its identity.
+type LiveCode = (String, BTreeMap<String, String>, String);
+
+/// Where a live commit's app code comes from: the blessed template's
+/// release (crates/templates `blessed::code`), or the commit itself.
+enum Code {
+    Release(blessed::Code),
+    Live,
+}
+
 /// What the installed code declares, as its tables hold it: written with
 /// the code row in one step (no await between), and read by key.
 struct Installed<'a> {
@@ -89,7 +101,8 @@ fn store_installed(sql: &SqlStorage, code: &Installed<'_>) -> Result<()> {
     for (i, t) in code.triggers.iter().enumerate() {
         let (kind, target) = t.on.parts();
         let idx = SqlStorageValue::Integer(i64::try_from(i).expect("triggers are few"));
-        sql.exec("INSERT INTO code_triggers (idx, kind, target, run) VALUES (?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into()])?;
+        let from = t.from.map_or(SqlStorageValue::Null, |k| k.as_str().into());
+        sql.exec("INSERT INTO code_triggers (idx, kind, target, run, from_kind) VALUES (?, ?, ?, ?, ?)", vec![idx, kind.into(), target.into(), t.run.as_str().into(), from])?;
     }
     let count = |table: &str| -> Result<usize> {
         let rows: Vec<Value> = sql.exec(&format!("SELECT COUNT(*) AS n FROM {table}"), None)?.to_array()?;
@@ -113,7 +126,9 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 /// the operation table: a table from before gains the columns, and its
 /// channels take no posts, from anyone, and its mutations keep ledger rows.
 /// A blob's served type came after the blob table (blobs.rs): one from
-/// before is served untyped.
+/// before is served untyped. A channel trigger's posters (`from`) came
+/// after the trigger table: one from before fires for every record, as it
+/// was installed to.
 /// Runs in the constructor, before anything reads these tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
     for (table, column, decl) in [
@@ -121,6 +136,7 @@ pub(crate) fn migrate_code(sql: &SqlStorage) {
         ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"),
         ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "mime", "TEXT"),
+        ("code_triggers", "from_kind", "TEXT"),
     ] {
         let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
         if !cols.iter().any(|c| c["name"] == column) {
@@ -175,6 +191,7 @@ struct TriggerRow {
     kind: String,
     target: String,
     run: String,
+    from_kind: Option<String>,
 }
 
 impl FragmentCell {
@@ -319,8 +336,14 @@ impl FragmentCell {
     /// operations and `app.mjs` is the code. A live commit without
     /// `app.mjs` has no app (its schedules go; pauses and breakers stay for
     /// the next code to judge), and keeps only its manifest's channels:
-    /// people post to them with no app code at all (a chat). One with an
-    /// invalid manifest keeps the last good code and records why.
+    /// people post to them with no app code at all. One with an invalid
+    /// manifest keeps the last good code and records why.
+    ///
+    /// A fragment on a blessed template runs the release's manifest (with
+    /// its own face) and the release's code, when the template carries any
+    /// (a chat's push), under the release's identity: a platform deploy
+    /// that changes it is a fresh worker, as a new commit is. Its own repo
+    /// carries no code: a live commit with any is refused, saying to fork.
     async fn install_code(&self, live: Option<&str>) -> CellResult<()> {
         let repo = self.must(MetaKey::Repo)?;
         let Some(sha) = live else {
@@ -328,6 +351,7 @@ impl FragmentCell {
             clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
+            self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -344,6 +368,28 @@ impl FragmentCell {
                 }
             }
         };
+        // a blessed template's fragment runs the release's manifest, with its own face
+        let blessed = manifest.template.clone();
+        let manifest = match &blessed {
+            None => manifest,
+            Some(t) => match blessed::manifest(t).and_then(|b| manifest::on_template(&manifest, &b)) {
+                Ok(m) => m,
+                Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
+            },
+        };
+        // and the release's code, never its own (forking makes code its own)
+        let code = match &blessed {
+            Some(t) => {
+                if let Some(own) = self.tree_rows("live")?.into_iter().map(|r| r.path).find(|p| blessed::is_code(p)) {
+                    return self.code_refused(sha, &format!("a fragment on the {t} template carries no code of its own ({own}): fork it to change its code"));
+                }
+                match blessed::code(t) {
+                    Ok(code) => code.map(Code::Release),
+                    Err(fault) => return self.code_refused(sha, &format!("the {t} template's code: {}", fault.message())),
+                }
+            }
+            None => self.tree_row("live", "app.mjs")?.map(|_| Code::Live),
+        };
         // its agent's instructions are read here, so one that cannot be is refused with the rest
         let agent = match &manifest.agent {
             None => None,
@@ -352,12 +398,26 @@ impl FragmentCell {
                 Err(why) => return self.code_refused(sha, &why),
             },
         };
+        // the code's modules and identity, read before anything is written
+        let (source, modules, loader_id) = match code {
+            None => (None, BTreeMap::new(), String::new()),
+            Some(Code::Release(c)) => (Some(c.source.to_string()), c.modules.into_iter().map(|(p, s)| (p, s.to_string())).collect(), c.id),
+            Some(Code::Live) => match self.read_live_code(&cs, &repo, sha).await? {
+                Ok((source, modules, id)) => (Some(source), modules, id),
+                Err(why) => return self.code_refused(sha, &why),
+            },
+        };
         match &manifest.meta {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
         }
         self.set_agent_live(agent.as_ref())?;
-        if self.tree_row("live", "app.mjs")?.is_none() {
+        match &blessed {
+            Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
+            None => self.del_meta(MetaKey::Blessed)?,
+        }
+        self.face_is(manifest.kind(), manifest.title())?;
+        let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
             store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
@@ -367,53 +427,8 @@ impl FragmentCell {
             let summary = format!("live {} has no app.mjs ({} channels)", short(Some(sha)), manifest.channels.len());
             self.event("code.none", &summary, json!({ "sha": sha, "channels": manifest.channels.keys().collect::<Vec<_>>() }));
             return Ok(());
-        }
-        let source = match cs.read(&repo, sha, "app.mjs", limits::SOURCE_MAX_BYTES).await {
-            Ok(Some(b)) => match String::from_utf8(b) {
-                Ok(s) => s,
-                Err(_) => return self.code_refused(sha, "app.mjs is not UTF-8"),
-            },
-            Ok(None) => return self.code_refused(sha, "app.mjs vanished between the listing and the read"),
-            Err(e) if e.code == ErrorCode::TooLarge => return self.code_refused(sha, &e.message),
-            Err(e) => return Err(e),
         };
-        // applib/: the modules app.mjs imports, read with it from the same commit
-        let libs: Vec<String> = self
-            .tree_rows("live")?
-            .into_iter()
-            .map(|r| r.path)
-            .filter(|p| p.starts_with("applib/") && (p.ends_with(".mjs") || p.ends_with(".js")))
-            .collect();
-        if libs.len() > limits::APPLIB_FILES_MAX {
-            return self.code_refused(sha, &format!("applib/ has {} modules; the limit is {}", libs.len(), limits::APPLIB_FILES_MAX));
-        }
-        let mut modules = BTreeMap::new();
-        let mut total = source.len();
-        // the app's own modules; the platform code joins the id when it is
-        // loaded (ops.rs `facet`), since a cell deploy changes it, not this
-        let mut hasher = Sha256::new();
-        hasher.update(b"app.js\0");
-        hasher.update(source.as_bytes());
-        for path in libs {
-            let room = limits::APP_MODULES_MAX_BYTES.saturating_sub(total);
-            let text = match cs.read(&repo, sha, &path, room).await {
-                Ok(Some(b)) => String::from_utf8(b).map_err(|_| format!("{path} is not UTF-8")),
-                Ok(None) => Err(format!("{path} vanished between the listing and the read")),
-                Err(e) if e.code == ErrorCode::TooLarge => Err(format!("app.mjs and applib/ are over {} bytes", limits::APP_MODULES_MAX_BYTES)),
-                Err(e) => return Err(e),
-            };
-            let text = match text {
-                Ok(t) => t,
-                Err(why) => return self.code_refused(sha, &why),
-            };
-            total += text.len();
-            hasher.update(b"\0");
-            hasher.update(path.as_bytes());
-            hasher.update(b"\0");
-            hasher.update(text.as_bytes());
-            modules.insert(path, text);
-        }
-        let loader_id = format!("app:{}", hex::encode(hasher.finalize()));
+        assert!(!loader_id.is_empty(), "installed code has an identity");
         let notify = serde_json::to_string(&manifest.notify_urls).expect("urls serialize");
         let module_count = modules.len();
         // The code row and its tables, in one step: no await until they are all written.
@@ -423,7 +438,7 @@ impl FragmentCell {
                cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules, notify = excluded.notify",
             vec![
                 sha.into(),
-                loader_id.into(),
+                loader_id.as_str().into(),
                 source.into(),
                 SqlStorageValue::Integer(limits::APP_CPU_MS.into()),
                 SqlStorageValue::Integer(js::now_ms()),
@@ -437,24 +452,104 @@ impl FragmentCell {
         self.forget_undeclared_pauses()?;
         self.del_meta(MetaKey::CodeError)?;
         js::abort_app_facet(&self.raw, &self.app_facet()?, "new code from live")?;
+        let from = match &blessed {
+            Some(t) => format!("the {t} template's release ({loader_id}), live {}", short(Some(sha))),
+            None => format!("live {}", short(Some(sha))),
+        };
         self.event(
             "code.installed",
             &format!(
-                "app.mjs from live {} ({} operations, {} channels, {} triggers, {module_count} applib modules)",
-                short(Some(sha)),
+                "app.mjs from {from} ({} operations, {} channels, {} triggers, {module_count} applib modules)",
                 manifest.operations.len(),
                 manifest.channels.len(),
                 manifest.triggers.len()
             ),
-            json!({ "sha": sha, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
+            json!({ "sha": sha, "code": loader_id, "operations": manifest.operations.keys().collect::<Vec<_>>() }),
         );
         Ok(())
+    }
+
+    /// The live commit's `app.mjs` and `applib/` modules, and their
+    /// identity (`app:<hash>`), or why they are not code the cell installs.
+    async fn read_live_code(&self, cs: &Cs<'_>, repo: &str, sha: &str) -> CellResult<Result<LiveCode, String>> {
+        let source = match cs.read(repo, sha, "app.mjs", limits::SOURCE_MAX_BYTES).await {
+            Ok(Some(b)) => match String::from_utf8(b) {
+                Ok(s) => s,
+                Err(_) => return Ok(Err("app.mjs is not UTF-8".into())),
+            },
+            Ok(None) => return Ok(Err("app.mjs vanished between the listing and the read".into())),
+            Err(e) if e.code == ErrorCode::TooLarge => return Ok(Err(e.message)),
+            Err(e) => return Err(e),
+        };
+        // applib/: the modules app.mjs imports, read with it from the same commit
+        let libs: Vec<String> = self.tree_rows("live")?.into_iter().map(|r| r.path).filter(|p| p.starts_with("applib/") && blessed::is_code(p)).collect();
+        if libs.len() > limits::APPLIB_FILES_MAX {
+            return Ok(Err(format!("applib/ has {} modules; the limit is {}", libs.len(), limits::APPLIB_FILES_MAX)));
+        }
+        let mut modules = BTreeMap::new();
+        let mut total = source.len();
+        // the app's own modules; the platform code joins the id when it is
+        // loaded (ops.rs `facet`), since a cell deploy changes it, not this
+        let mut hasher = Sha256::new();
+        hasher.update(b"app.js\0");
+        hasher.update(source.as_bytes());
+        for path in libs {
+            let room = limits::APP_MODULES_MAX_BYTES.saturating_sub(total);
+            let text = match cs.read(repo, sha, &path, room).await {
+                Ok(Some(b)) => String::from_utf8(b).map_err(|_| format!("{path} is not UTF-8")),
+                Ok(None) => Err(format!("{path} vanished between the listing and the read")),
+                Err(e) if e.code == ErrorCode::TooLarge => Err(format!("app.mjs and applib/ are over {} bytes", limits::APP_MODULES_MAX_BYTES)),
+                Err(e) => return Err(e),
+            };
+            let text = match text {
+                Ok(t) => t,
+                Err(why) => return Ok(Err(why)),
+            };
+            total += text.len();
+            hasher.update(b"\0");
+            hasher.update(path.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(text.as_bytes());
+            modules.insert(path, text);
+        }
+        Ok(Ok((source, modules, format!("app:{}", hex::encode(hasher.finalize())))))
     }
 
     fn code_refused(&self, sha: &str, why: &str) -> CellResult<()> {
         self.set_meta(MetaKey::CodeError, &format!("live {}: {why}", short(Some(sha))))?;
         self.event("code.refused", &format!("live {} not installed: {why}", short(Some(sha))), json!({ "sha": sha }));
         Ok(())
+    }
+
+    /// Whether this fragment runs an older release of its blessed template
+    /// than the one this build serves (the platform deployed since): one
+    /// meta read, against a hash made once per isolate.
+    fn blessed_stale(&self) -> CellResult<bool> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(false) };
+        let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
+        Ok(blessed::release(t).as_deref() != Some(release))
+    }
+
+    /// A blessed fragment installed from an older release of its template
+    /// installs live again, from the release it now serves: one deploy of
+    /// the platform updates every chat, its manifest and its code, at its
+    /// next request (fragment.rs `route`) or pass. Asked again under the
+    /// plane's lock (a request beside it may have installed it meanwhile),
+    /// of the pin live is at then.
+    pub(crate) async fn blessed_current(&self) -> CellResult<()> {
+        if !self.blessed_stale()? {
+            return Ok(());
+        }
+        {
+            let _held = self.plane.lock().await;
+            if !self.blessed_stale()? {
+                return Ok(());
+            }
+            let live = self.meta(MetaKey::PinLive)?;
+            self.install_code(live.as_deref()).await?;
+        }
+        // the release's cron triggers, if it declares any, are due from now
+        self.schedule().await
     }
 
     /// Refreshes pins; a move of main notifies the change feed and starts
@@ -480,13 +575,20 @@ impl FragmentCell {
 
     async fn interpret_locked(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let _held = self.plane.lock().await;
+        // A move of main starts its file triggers' runs in the turn its pin
+        // moves, so the owner's standing (which blocks them past the
+        // overdraft) is read before, and only when there are any.
+        let read_only = match refs.contains(&"main") && self.triggers()?.iter().any(|t| matches!(t.on, TriggerOn::Files(_))) {
+            true => self.read_only().await?,
+            false => None,
+        };
         let mut out = vec![];
         for which in refs {
             let moved = self.refresh_pin(which).await?;
             if *which == "main" && moved.changed {
                 self.broadcast_change(moved.to.as_deref(), &moved.paths);
                 let depth = self.commit_depth(moved.to.as_deref())?;
-                self.fire_files(moved.to.as_deref(), &moved.paths, depth)?;
+                self.fire_files(moved.to.as_deref(), &moved.paths, depth, read_only)?;
             }
             self.follow(which).await?;
             out.push((which.to_string(), moved));
@@ -528,6 +630,9 @@ impl FragmentCell {
         if let Err(e) = self.interpret(&REFS).await {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
+        if let Err(e) = self.blessed_current().await {
+            self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
+        }
     }
 
     /// Whether the fragment's next pass (the poll backstop and the
@@ -535,9 +640,9 @@ impl FragmentCell {
     /// a day after the last: something outside the platform may have
     /// written its repo in the last day (a storage token was minted for it,
     /// or a webhook arrived), a run is in flight (each pass checks it
-    /// against its Workflow) or held with a video's reservation to give
-    /// back, or a template or a declared agent is still to land (each pass
-    /// tries again). The rest of the alarm's work has due times of its own.
+    /// against its Workflow) or ended with a reservation to give back, or a
+    /// template or a declared agent is still to land (each pass tries
+    /// again). The rest of the alarm's work has due times of its own.
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage twice.
     pub(crate) fn busy(&self) -> CellResult<bool> {
@@ -546,18 +651,18 @@ impl FragmentCell {
             outside_at: Option<String>,
             pending: i64,
             running: i64,
-            videos: i64,
+            holds: i64,
         }
         let rows: Vec<Busy> = self.typed(
             "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
                EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
-               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS videos",
+               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS holds",
             vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);
-        Ok(outside || b.pending != 0 || b.running != 0 || b.videos != 0)
+        Ok(outside || b.pending != 0 || b.running != 0 || b.holds != 0)
     }
 
     /// Something outside the platform may write the repo from now on (a
@@ -771,28 +876,39 @@ impl FragmentCell {
     /// The installed triggers, in their manifest's order (a cron trigger's
     /// schedule is keyed by that index).
     pub(crate) fn triggers(&self) -> CellResult<Vec<TriggerDecl>> {
-        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run FROM code_triggers ORDER BY idx", vec![])?;
+        let rows: Vec<TriggerRow> = self.typed("SELECT idx, kind, target, run, from_kind FROM code_triggers ORDER BY idx", vec![])?;
         let mut out = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
             if row.idx != i64::try_from(i).expect("triggers are few") {
                 return Err(stored(&format!("trigger {i}"), format!("it is stored at index {}", row.idx)));
             }
             let on = TriggerOn::from_parts(&row.kind, row.target).ok_or_else(|| stored(&format!("trigger {i}"), format!("kind {:?}", row.kind)))?;
-            out.push(TriggerDecl { on, run: row.run });
+            let from = match row.from_kind.as_deref() {
+                None => None,
+                Some(k) => Some(IdentityKind::parse(k).ok_or_else(|| stored(&format!("trigger {i}"), format!("from {k:?}")))?),
+            };
+            out.push(TriggerDecl { on, run: row.run, from });
         }
         Ok(out)
     }
 
-    /// The operations a record on `channel` starts: each once (two triggers
-    /// that run one operation start it once), in their first trigger's order.
-    pub(crate) fn channel_triggers(&self, channel: &str) -> CellResult<Vec<String>> {
+    /// The operations a record on `channel` posted by `poster` starts: each
+    /// once (two triggers that run one operation start it once), in their
+    /// first trigger's order. A trigger that names its posters' kind
+    /// (`from`) starts one only for a member of that kind: one statement.
+    pub(crate) fn channel_triggers(&self, channel: &str, poster: &str) -> CellResult<Vec<String>> {
         #[derive(Deserialize)]
         struct Run {
             run: String,
         }
         let on = TriggerOn::Channel(channel.to_string());
         let (kind, target) = on.parts();
-        let rows: Vec<Run> = self.typed("SELECT run FROM code_triggers WHERE kind = ? AND target = ? GROUP BY run ORDER BY MIN(idx)", vec![kind.into(), target.into()])?;
+        let rows: Vec<Run> = self.typed(
+            "SELECT run FROM code_triggers WHERE kind = ? AND target = ?
+               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = ?))
+             GROUP BY run ORDER BY MIN(idx)",
+            vec![kind.into(), target.into(), poster.into()],
+        )?;
         Ok(rows.into_iter().map(|r| r.run).collect())
     }
 }

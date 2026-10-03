@@ -3,7 +3,7 @@ name = "fragment-fakes"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Local stand-ins for the services the platform calls: code.storage (and, from slice F, OpenRouter and a web push service)."
+description = "Local stand-ins for the services the platform calls: code.storage, Workers AI, WorkOS, a web push service, and a computer swap's provider APIs."
 
 [dependencies]
 anyhow = "1"

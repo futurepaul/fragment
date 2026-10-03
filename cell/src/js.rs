@@ -385,6 +385,24 @@ pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u6
     Ok((size, hex::encode(bytes)))
 }
 
+/// Reads a request's body to its end, keeping nothing, when nothing read
+/// it: the router streams a blob upload from its client, and its stream
+/// still flowing after the answer is an error there ("can't read from
+/// request stream after response has been sent"), so an answer that
+/// needed none of the bytes (a refusal, bytes already stored) waits for
+/// them first.
+pub async fn drain(req: &worker::Request) -> CellResult<()> {
+    let inner = req.inner();
+    let Some(body) = inner.body() else { return Ok(()) };
+    if inner.body_used() || body.locked() {
+        return Ok(());
+    }
+    let sink_class: Function = get(&js_sys::global(), "WritableStream")?.dyn_into().map_err(|_| CellError::host("WritableStream is missing"))?;
+    let sink = Reflect::construct(&sink_class, &Array::new()).map_err(|e| CellError::host(format!("WritableStream: {}", js_message(&e))))?;
+    await_js(call(&body, "pipeTo", &[sink]), "draining the body").await?;
+    Ok(())
+}
+
 /// Sends messages to a queue binding (`sendBatch`, at most 100 a call),
 /// through the binding itself: its bodies are JSON values already.
 pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Value]) -> CellResult<()> {

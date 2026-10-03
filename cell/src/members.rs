@@ -7,7 +7,9 @@
 //! the registry resolves to the identity holding it. An agent member's
 //! owner is recorded beside it: the owner reads what the agent reads
 //! (fragment.rs, `standing`). Kinds and owners never change once
-//! registered, so the copy here cannot go stale.
+//! registered, so the copy here cannot go stale. A new agent member's
+//! computer is told it joined, through an outbox of its own (runs_on.rs):
+//! nothing that adds an agent need post `joined` itself.
 //!
 //! Each identity's list of fragments is an index in its `Principal` cell.
 //! The fragment is the authority: a change is written here with an outbox
@@ -15,7 +17,8 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! platform's page reads the owner's list alone.
+//! platform's page reads the owner's list alone. A person's search cursor
+//! (search.rs) follows their row: made with a role, gone without one.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
 //! username): only they may accept it, so a forwarded link admits no one
@@ -24,6 +27,7 @@
 use fragment_core::access;
 use fragment_core::npub;
 use fragment_proto::{
+    FragmentKind,
     limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
     Sharing, Visibility,
 };
@@ -85,16 +89,38 @@ pub(crate) fn migrate(sql: &SqlStorage) {
 
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
-    /// in the caller's turn, beside the membership write it mirrors.
+    /// in the caller's turn, beside the membership write it mirrors. Their
+    /// search cursor follows it (search.rs).
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
         let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
         self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
-        let role = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec(
             "INSERT INTO index_outbox (principal, role, version, attempts, next_at) VALUES (?, ?, ?, 0, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at",
-            vec![principal.into(), role, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
-        )
+            vec![principal.into(), stored, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        self.search_follows(principal, role)
+    }
+
+    /// What its members' lists show of it, at each install of live: its
+    /// kind and title. A change is sent to every member's list (at most
+    /// `MEMBERS_MAX`) and its owner's.
+    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
+        let face = face(kind, title);
+        if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::Face, &face)?;
+        let owner = self.must(MetaKey::Owner)?;
+        self.index_change(&owner, Some(Role::Owner))?;
+        for r in self.rows("SELECT principal, role FROM members", vec![])? {
+            let (Some(p), Some(role)) = (r["principal"].as_str(), r["role"].as_str().and_then(Role::parse)) else { continue };
+            if p != owner {
+                self.index_change(p, Some(role))?;
+            }
+        }
+        Ok(())
     }
 
     /// Who is in, or who may open it, changed: the owner's row in their
@@ -131,6 +157,12 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
+            // every row a role names: the fragment's face, as it is now
+            if row["role"].is_string() {
+                if let Ok(Some(face)) = self.meta(MetaKey::Face) {
+                    body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
+                }
+            }
             // the owner's row: the sharing now, which no later change undoes
             // (a later one sends a newer version, made after it)
             if principal == owner && row["role"].is_string() {
@@ -167,6 +199,13 @@ impl FragmentCell {
                 );
             }
         }
+        // a cursor made with a role is due at once: the alarm sends it
+        // (search.rs), after the row it follows is delivered here
+        if self.search_due_at().ok().flatten().is_some_and(|at| at <= js::now_ms()) {
+            if let Err(e) = self.schedule().await {
+                console_error!("{name}: the alarm was not armed for its search outbox ({:?}): {}", e.code, e.message);
+            }
+        }
     }
 
     fn actor_role(&self, caller: &Caller) -> CellResult<Option<Role>> {
@@ -187,9 +226,14 @@ impl FragmentCell {
 
     pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
+        json_response(&self.member_list()?)
+    }
+
+    /// Every member, the first added first (a chat's lead is its first
+    /// agent): the API's list, and a page's (`__members`, serve.rs).
+    pub(crate) fn member_list(&self) -> CellResult<MemberList> {
         let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
-        let members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
-        json_response(&MemberList { members })
+        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
     }
 
     /// A new member needs room under `MEMBERS_MAX`; a role change does not.
@@ -233,6 +277,7 @@ impl FragmentCell {
         }
         self.check_room(current)?;
         let by = self.caller_id(caller)?;
+        let now = js::now_ms();
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = excluded.people_only",
@@ -240,7 +285,7 @@ impl FragmentCell {
                 target.id.as_str().into(),
                 body.role.as_str().into(),
                 by.into(),
-                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(now),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
                 SqlStorageValue::Integer(i64::from(body.people_only)),
@@ -248,6 +293,11 @@ impl FragmentCell {
         )?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
+        // a new agent member's computer hears it joined (runs_on.rs); a
+        // role change is no join
+        if current.is_none() && target.kind == IdentityKind::Agent {
+            self.agent_added(&target.id, target.owner.as_deref(), now)?;
+        }
         // sharing with an agent says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
             Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
@@ -263,7 +313,9 @@ impl FragmentCell {
                 self.reopen_sockets(&format!("p:{owner}"), "your agent's role changed");
             }
         }
+        // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
+        self.flush_joined().await;
         let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
         json_response(&member_json(&row[0])?)
     }
@@ -290,6 +342,7 @@ impl FragmentCell {
         let owner = owner.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
+        self.agent_removed(&target)?;
         self.index_change(&target, None)?;
         self.sharing_changed()?;
         self.close_sockets(&format!("p:{target}"), "membership revoked");
@@ -434,6 +487,7 @@ impl FragmentCell {
         }
         // A full fragment refuses before the invite spends a use.
         self.check_room(current)?;
+        let now = js::now_ms();
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
@@ -441,7 +495,7 @@ impl FragmentCell {
                 who.as_str().into(),
                 role.as_str().into(),
                 format!("invite:{id}").into(),
-                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(now),
                 opt(caller.kind().map(IdentityKind::as_str)),
                 opt(caller.owner()),
             ],
@@ -449,8 +503,13 @@ impl FragmentCell {
         self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;
         self.index_change(&who, Some(role))?;
         self.sharing_changed()?;
+        // an agent that accepts an invite joins as one added does (runs_on.rs)
+        if current.is_none() && caller.kind() == Some(IdentityKind::Agent) {
+            self.agent_added(&who, caller.owner(), now)?;
+        }
         self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
+        self.flush_joined().await;
         json_response(&json!({ "name": name, "role": role, "joined": true }))
     }
 
@@ -568,4 +627,9 @@ impl FragmentCell {
         }
         json_response(&json!({ "ok": true, "removed": removed }))
     }
+}
+
+/// A fragment's face as its members' lists keep it (`MetaKey::Face`).
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>) -> String {
+    json!({ "kind": kind, "title": title }).to_string()
 }

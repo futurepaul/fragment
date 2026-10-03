@@ -29,6 +29,7 @@ use crate::api::{self, Api, ApiError};
 use crate::engine::{self, ChatView, Effect, Engine, Input, Settings, State};
 use crate::limits;
 use crate::net::Backoff;
+use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo};
 
@@ -45,6 +46,9 @@ pub struct Config {
     pub restore_pending: bool,
     pub restored: PathBuf,
     pub settings: Settings,
+    /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
+    /// none, every agent the platform lists.
+    pub agents_file: Option<PathBuf>,
 }
 
 /// Why the bridge stopped.
@@ -144,15 +148,35 @@ enum Msg {
 }
 
 /// What followers read of the engine without asking it: the cursors, as of
-/// the last step that was persisted.
+/// the last step that was persisted; and when an agent of this computer
+/// last joined each fragment, which makes every view of it read before
+/// stale (a follower of another agent there would miss the new one, and
+/// its lead answer an `@mention` of it).
 #[derive(Default)]
 struct Shared {
     cursors: Mutex<BTreeMap<String, u64>>,
+    joins: Mutex<HashMap<String, Instant>>,
 }
 
 impl Shared {
     fn cursor(&self, agent: &str, fragment: &str, channel: &str) -> u64 {
         self.cursors.lock().expect("cursors").get(&engine::cursor_key(agent, fragment, channel)).copied().unwrap_or(0)
+    }
+
+    /// An agent of this computer joined `fragment` now.
+    fn joined(&self, fragment: &str) {
+        let mut joins = self.joins.lock().expect("joins");
+        // a join older than a view's life makes no view stale that is not already
+        joins.retain(|_, at| at.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS));
+        if joins.len() >= limits::JOINS_HELD_MAX {
+            crate::ev!("joins.bounded", { "max": limits::JOINS_HELD_MAX });
+            joins.clear();
+        }
+        joins.insert(fragment.to_string(), Instant::now());
+    }
+
+    fn joined_at(&self, fragment: &str) -> Option<Instant> {
+        self.joins.lock().expect("joins").get(fragment).copied()
     }
 }
 
@@ -189,12 +213,23 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
 
     // The agents, before any record: a turn is handed to an agent it names.
+    // With a ready file, only those the image made ready (ready.rs).
+    let mut ready = cfg.agents_file.clone().map(Ready::new);
+    if let Some(r) = ready.as_mut() {
+        r.refresh();
+    }
+    let gated = |agents: Vec<Agent>, ready: &Option<Ready>| match ready {
+        Some(r) => crate::ready::gate(agents, r.agents()),
+        None => agents,
+    };
     let computer = tokio::select! {
         c = ask_until(&api, stop.clone()) => c,
         r = &mut runtime_task => return runtime_result(r, name),
     };
-    let Some(computer) = computer else { return Ok(()) };
-    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "runtime": name, "boot": engine.state().boot + 1 });
+    let Some(mut computer) = computer else { return Ok(()) };
+    let listed = computer.agents.len();
+    computer.agents = gated(computer.agents, &ready);
+    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1 });
 
     let lanes = Lanes::new(api.clone(), stop.clone());
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
@@ -215,7 +250,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
                 }
-                Effect::Discover { agent } => reread(&api, &inbox_tx, Some(agent)),
+                Effect::Discover { agent, joined } => {
+                    if let Some(fragment) = joined {
+                        shared.joined(&fragment);
+                    }
+                    reread(&api, &inbox_tx, Some(agent));
+                }
             }
         }
         Ok(())
@@ -243,12 +283,13 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 let step = match m {
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c, only) => {
-                        let s = engine.step(Input::Agents(c.agents.clone()), crate::log::now_ms());
-                        // An agent that left this computer is followed no more.
-                        follows.keep_only(&c.agents);
+                        let agents = gated(c.agents, &ready);
+                        let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
+                        // An agent that left this computer (or is not ready) is followed no more.
+                        follows.keep_only(&agents);
                         match only {
-                            Some(agent) => c.agents.iter().filter(|a| a.fragment == agent).for_each(|a| follows.discover(a.clone())),
-                            None => follows.rediscover_due(&c.agents),
+                            Some(agent) => agents.iter().filter(|a| a.fragment == agent).for_each(|a| follows.discover(a.clone())),
+                            None => follows.rediscover_due(&agents),
                         }
                         s
                     }
@@ -263,8 +304,11 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     break Err(e);
                 }
                 // The computer's agents are read again this often: one assigned
-                // to it while it is awake is followed from then.
-                if computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
+                // to it while it is awake is followed from then. A ready file
+                // that changed is read at once: an agent the image just made
+                // ready is followed within a tick.
+                let ready_changed = ready.as_mut().is_some_and(Ready::refresh);
+                if ready_changed || computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
                     computer_read = Instant::now();
                     reread(&api, &inbox_tx, None);
                 }
@@ -428,8 +472,10 @@ struct ViewCache {
 }
 
 impl ViewCache {
-    fn fresh(&self) -> bool {
-        self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS))
+    /// Read within its life, and after the last join of an agent of this
+    /// computer to the chat (`Shared::joined`).
+    fn fresh(&self, joined: Option<Instant>) -> bool {
+        self.read_at.is_some_and(|t| t.elapsed() < Duration::from_millis(limits::VIEW_TTL_MS) && joined.is_none_or(|j| j < t))
     }
 
     /// Reads the chat's agents (in the order they were added), its writers'
@@ -527,7 +573,7 @@ async fn follow_once(
             Err(e) => return ended_by(e),
         }
     }
-    if !tasks && !view.fresh() {
+    if !tasks && !view.fresh(shared.joined_at(fragment)) {
         if let Err(e) = view.read(api, agent, fragment, None).await {
             return ended_by(e);
         }
@@ -542,7 +588,7 @@ async fn follow_once(
         let full = page.records.len() as u32 >= limits::CATCHUP_PAGE_RECORDS;
         for r in page.records {
             last = last.max(r.seq);
-            if !feed(api, agent, fragment, r, inbox, view, tasks).await {
+            if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
                 return Ended::Stopped;
             }
         }
@@ -604,7 +650,7 @@ async fn follow_once(
                             continue;
                         }
                         last = r.seq;
-                        if !feed(api, agent, fragment, r, inbox, view, tasks).await {
+                        if !feed(api, agent, fragment, r, inbox, shared, view, tasks).await {
                             return Ended::Stopped;
                         }
                     }
@@ -624,7 +670,8 @@ async fn follow_once(
 
 /// One record into the engine, with the chat's view (fresh enough, and
 /// knowing its writer). False when the engine is gone.
-async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, view: &mut ViewCache, tasks: bool) -> bool {
+#[allow(clippy::too_many_arguments)]
+async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &mpsc::Sender<Msg>, shared: &Shared, view: &mut ViewCache, tasks: bool) -> bool {
     let (input_view, since) = if tasks {
         // A routine that fired while the computer was gone longer than this
         // is skipped, as cron skips a missed run.
@@ -632,7 +679,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         (None, since)
     } else {
         let unknown = record.principal.starts_with("id:") && !view.view.names.contains_key(&record.principal) && !view.view.agents.contains(&record.principal);
-        if !view.fresh() || unknown {
+        if !view.fresh(shared.joined_at(fragment)) || unknown {
             if let Err(e) = view.read(api, agent, fragment, Some(&record.principal)).await {
                 crate::ev!("view.unread", { "fragment": fragment, "error": e.to_string() });
             }

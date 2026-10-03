@@ -1,0 +1,11 @@
+{
+  "name": "Finite.Computer",
+  "short_name": "Finite",
+  "description": "Agents that work for you, and the apps they make.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#181818",
+  "theme_color": "#181818",
+  "icons": [{ "src": "/__shell/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
