@@ -115,12 +115,12 @@ struct Waiting {
 
 impl FragmentCell {
     /// `<name>@<incarnation>`: what the fragment's references start with.
-    fn meter_key(&self) -> CellResult<String> {
+    pub(crate) fn meter_key(&self) -> CellResult<String> {
         Ok(format!("{}@{}", self.name()?, self.must(MetaKey::CreatedAt)?))
     }
 
     /// Keeps a row in the outbox, once by its reference.
-    fn outbox(&self, reference: &str, usage: Usage, at_ms: i64) -> CellResult<()> {
+    pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64) -> CellResult<()> {
         let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent: None, computer: None, at_ms };
         assert!(fragment_core::price::printable(reference, fragment_core::ledger::ID_MAX_BYTES), "a meter's reference is one the ledger takes: {reference}");
         let text = serde_json::to_string(&row).expect("a meter row serializes");

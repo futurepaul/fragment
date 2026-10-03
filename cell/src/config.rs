@@ -362,6 +362,18 @@ impl Config {
         }
     }
 
+    /// A fragment's own origin as a visitor from outside reaches it, with
+    /// no request to take a scheme and port from (card.rs: the renderer
+    /// opens it): the platform's (`FRAGMENT_PLATFORM_URL`'s), else https.
+    /// `None` without a suffix: fragments served by path have no origin of
+    /// their own.
+    pub fn outside_origin(&self, name: &str) -> Option<String> {
+        self.host_suffix.as_ref()?;
+        let base = self.platform_url.as_deref().unwrap_or("https://platform.invalid");
+        let arrived = url::Url::parse(base).ok()?;
+        Some(self.origin(&arrived, name))
+    }
+
     /// A fragment's own origin, as a browser on its page names it in
     /// `Origin` (`scheme://host[:port]`): its host's, or, without a suffix,
     /// the one every fragment shares.

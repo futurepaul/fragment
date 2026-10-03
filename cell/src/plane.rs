@@ -554,7 +554,8 @@ impl FragmentCell {
 
     /// Refreshes pins; a move of main notifies the change feed and starts
     /// the runs its file triggers name, and the agent a new live declares
-    /// joins with its deploy (the alarm retries one that fails).
+    /// joins with its deploy (the alarm retries one that fails). A move of
+    /// live wants its preview card, shot later from the alarm (card.rs).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
         if let Err(e) = self.sync_agent().await {
@@ -566,6 +567,12 @@ impl FragmentCell {
             if which == "main" && moved.changed {
                 if let Err(e) = self.notify_urls(moved.to.as_deref(), &moved.paths).await {
                     self.event("notify.failed", &e.message, json!({ "code": e.code }));
+                }
+            }
+            // a move of live wants its preview card, which the alarm shoots (card.rs)
+            if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
+                if let Err(e) = self.card_wanted(live) {
+                    self.event("card.want-failed", &e.message, json!({ "code": e.code }));
                 }
             }
         }
