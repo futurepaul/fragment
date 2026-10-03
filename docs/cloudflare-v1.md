@@ -809,7 +809,35 @@ exit says.
    for the in-fragment agent's reply-operation answer path (the agents
    section's, since 2026-10-03).
 
-   Plan (2026-10-03, branch `claude/phase-7`): the hosted lane runs on a preview by each section's declared needs (`cargo xtask e2e --hosted --config <file> --branch <b>`; `--dry-run` for its plan, `--rehearse` for it on the local node), its people signing in through a branch-only, secret-gated, e2e-scoped lever, its paid calls lent from a capped budget.
+   Status, 2026-10-03 (futurepaul/fragment#118):
+   - Built:
+     - **The in-fragment agent's answer path** has its test, in the agents
+       section: valid, invalid, replay, and a crash after the answer.
+       - It found a bug: any 404 on posting an answer dropped the chat's
+         listen. Now only a refusal or a fragment that is gone does.
+     - **The hosted lane**: `cargo xtask e2e --hosted --config <file>
+       --branch <b>`, with `--dry-run` for its plan, `--rehearse` for it
+       on the local node, and `--sweep`.
+       - It runs on a branch preview, choosing sections by what each
+         declares it needs.
+       - Its people sign in through a branch-only, secret-gated,
+         e2e-scoped lever (docs/secrets.md); a deployment of its own
+         refuses the secret.
+       - Its paid calls are lent from a capped budget.
+   - Evidence:
+     - Local: the full e2e, 1475 passed, 0 failed, 2 skipped (both
+       hosted-only).
+     - Hosted, on **e2e.finite.place**, on real vendors: WorkOS staging,
+       code.storage, Workers AI through `fragment-dev`, Browser Rendering,
+       and our Hermes image on Containers.
+       - First run: 354 passed, 2 failed, 57 skipped, for 11 model calls,
+         $0.16. Both failures were the lane's timing on a real
+         deployment, fixed in it.
+       - The two sections again: 79 passed, 0 failed.
+       - Then a sweep removed the run's 25 fragments.
+   - Not yet hosted: jobs, triggers, push, AI steps, blobs, sync and
+     appfiles still need local fakes or servers, so they are green locally
+     and skipped on a preview (the debt ledger).
 8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.
