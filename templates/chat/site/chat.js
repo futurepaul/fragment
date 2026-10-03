@@ -1,6 +1,8 @@
 // The chat template's page (docs/chat-records.md; docs/cloudflare-v1.md,
-// decisions 8, 9 and 40). A chat is a fragment with two channels and no app
-// code, you and your agents its members:
+// decisions 8, 9 and 40). A chat is a fragment with two channels, you and
+// your agents its members, and one job of the template's (app.mjs, served
+// from the platform's release like this page) that pushes an agent's reply
+// to the chat's people who are away:
 //
 //   - `chat`: what is said. People's messages (`{text, to?, attachments?}`,
 //     posted here with an id of their own), agents' replies (`{text, turn,
@@ -19,7 +21,11 @@
 // fragment (`__members`: its agents, the lead first; `__people`: names and
 // pictures); an agent's color is chosen from its identity until agents
 // carry one, and the chat takes its lead's. Files go both ways as the chat's
-// blobs (`fragment.blob`, read at `__blob/<sha256>`).
+// blobs (`fragment.blob`, read at `__blob/<sha256>`); a voice memo is one,
+// recorded here (MediaRecorder) and shown as a player wherever audio is.
+// "Notify me" subscribes this browser for its person, from a click
+// (`fragment.push.register`), and the page's presence says whether the chat
+// is on screen (`looking`), so its person is not pushed while it is.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
 // runs. The look is Skyler's (the Fragment UI handoff, 2026-10-02).
@@ -60,6 +66,26 @@ const SUGGESTIONS = ["Build something", "Explore an idea", "Make a plan"];
 const SHA256 = /^[0-9a-f]{64}$/;
 // The images `__blob` serves as themselves (passive media), shown inline.
 const SHOWN_IMAGE = /^image\/(png|jpeg|webp|gif)$/;
+// The audio it serves as itself, shown as a player (a voice memo).
+const SHOWN_AUDIO = /^audio\/(webm|ogg|mp4|mpeg|wav)$/;
+// A voice memo: the recorder's audio, asked for in this order (Chrome and
+// Firefox record Opus, Safari AAC), at a voice's bitrate, for at most this
+// long (it stops itself, and is sent), named by its type.
+const MEMO_TYPES = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"];
+const MEMO_BITS_PER_S = 64000;
+const MEMO_MAX_MS = 5 * 60 * 1000;
+const MEMO_EXT = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/wav": "wav" };
+
+/// A media type without its parameters (`audio/webm;codecs=opus` is `audio/webm`).
+export function essence(type) {
+  return String(type ?? "").split(";")[0].trim().toLowerCase();
+}
+
+/// A duration as a clock shows it: `m:ss`.
+export function clock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
 /// The `@name` words of a message, lowercased, in order, as an agent's
 /// bridge reads them: a word is `[A-Za-z0-9_-]+` right after an `@` that
@@ -139,7 +165,11 @@ export function mount(root) {
         <textarea id="text" rows="1" aria-label="Message" maxlength="${TEXT_MAX_BYTES}" disabled></textarea>
         <div class="composer-actions">
           <button class="icon-button" id="attach" type="button" title="Attach files" aria-label="Attach files" disabled>${svg("plus")}</button>
+          <button class="icon-button" id="record" type="button" title="Record a voice memo" aria-label="Record a voice memo" aria-pressed="false" hidden disabled>${svg("mic")}</button>
+          <button class="icon-button" id="discard" type="button" title="Discard the voice memo" aria-label="Discard the voice memo" hidden>${svg("x")}</button>
+          <span class="recording" id="recording" role="status" hidden><i aria-hidden="true"></i><span id="recording-time">0:00</span></span>
           <span class="note" id="note"></span>
+          <button class="icon-button" id="notify" type="button" hidden>${svg("bell")}</button>
           <button class="send stop" id="stop" type="button" title="Stop reply" aria-label="Stop reply" hidden>${svg("stop")}</button>
           <button class="send" id="send" type="submit" title="Send message (Enter)" aria-label="Send" disabled>${svg("send")}</button>
         </div>
@@ -522,13 +552,24 @@ export function mount(root) {
     return wrap;
   }
 
-  // Files: an image the fragment serves as one shows; anything else is a
-  // chip that downloads it.
+  // Files: an image the fragment serves as one shows, audio (a voice memo)
+  // plays; anything else is a chip that downloads it.
   function attachmentsNode(list) {
     const files = el("div", "message-attachments");
     for (const a of list) {
       const href = `./__blob/${a.sha256}`;
-      if (SHOWN_IMAGE.test(a.type)) {
+      if (SHOWN_AUDIO.test(essence(a.type))) {
+        const memo = el("div", "attachment-audio");
+        memo.title = a.name || "a voice memo";
+        memo.innerHTML = svg("mic");
+        const audio = el("audio");
+        audio.controls = true;
+        audio.preload = "metadata";
+        audio.src = href;
+        audio.setAttribute("aria-label", a.name || "a voice memo");
+        memo.append(audio);
+        files.append(memo);
+      } else if (SHOWN_IMAGE.test(a.type)) {
         const link = el("a", "attachment-image");
         link.href = href;
         link.target = "_blank";
@@ -859,8 +900,9 @@ export function mount(root) {
   const canAttach = () => canPost() && atLeast(state.me.role, "editor") && state.me.principal.startsWith("id:");
   let attachments = []; // { file, name, size, type, uploading }
   let sending = false;
+  let recording = null; // the voice memo being recorded (`startMemo`)
   function refreshSend() {
-    $("send").disabled = sending || (!input.value.trim() && !attachments.length) || !canPost();
+    $("send").disabled = sending || (!input.value.trim() && !attachments.length && !recording) || !canPost();
   }
   function grow() {
     input.style.height = "auto";
@@ -929,6 +971,110 @@ export function mount(root) {
     addFiles([...e.dataTransfer.files]);
   });
 
+  // ---- a voice memo: the mic records (MediaRecorder) until it is pressed
+  // again (or Send, or MEMO_MAX_MS), then the clip is sent as the message's
+  // audio file, with whatever was typed; the x lets it go. A chat's files
+  // are its editors' (`canAttach`), so only they record. The platform does
+  // nothing with the audio: an agent's runtime hears it ----
+  const recordable = () => typeof MediaRecorder !== "undefined" && !!navigator.mediaDevices?.getUserMedia;
+  // the mic's face changes only with the state, so a press is never lost
+  // to its button being drawn again; the clock ticks on its own
+  function renderRecording() {
+    const on = !!recording;
+    const mic = $("record");
+    if (mic.classList.contains("on") !== on) {
+      mic.classList.toggle("on", on);
+      mic.innerHTML = svg(on ? "stop" : "mic");
+      const label = on ? "Stop and send the voice memo" : "Record a voice memo";
+      mic.setAttribute("aria-label", label);
+      if (mic.hasAttribute("title")) mic.title = label;
+      else mic.dataset.actionTitle = label;
+      mic.setAttribute("aria-pressed", String(on));
+      $("discard").hidden = !on;
+      $("recording").hidden = !on;
+    }
+    tickRecording();
+    refreshSend();
+  }
+  function tickRecording() {
+    if (recording) $("recording-time").textContent = clock(Date.now() - recording.startedAt);
+  }
+  async function startMemo() {
+    if (recording || !canAttach() || !recordable()) return;
+    if (attachments.length >= ATTACHMENTS_MAX) return problem(`A message carries at most ${ATTACHMENTS_MAX} files.`);
+    const memo = { recorder: null, stream: null, chunks: [], bytes: 0, startedAt: Date.now(), timer: 0, tick: 0, stopped: false, discard: false, failed: null, tooLarge: false };
+    // held while the browser asks for the microphone, so a second press waits
+    recording = memo;
+    renderRecording();
+    try {
+      memo.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const type = MEMO_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+      memo.recorder = new MediaRecorder(memo.stream, { ...(type ? { mimeType: type } : {}), audioBitsPerSecond: MEMO_BITS_PER_S });
+    } catch (err) {
+      memo.stream?.getTracks().forEach((t) => t.stop());
+      recording = null;
+      renderRecording();
+      return problem(err?.name === "NotAllowedError" ? "The microphone is off for this chat: allow it in your browser to record." : `Could not record: ${err?.message ?? err}`);
+    }
+    // pressed again while the browser asked: nothing was recorded to send
+    if (memo.stopped) {
+      memo.discard = true;
+      return finishMemo(memo);
+    }
+    memo.recorder.ondataavailable = (e) => {
+      if (!e.data?.size) return;
+      memo.chunks.push(e.data);
+      memo.bytes += e.data.size;
+      if (memo.bytes > ATTACHMENT_MAX_BYTES && memo.recorder.state !== "inactive") {
+        memo.tooLarge = true;
+        memo.recorder.stop();
+      }
+    };
+    memo.recorder.onerror = (e) => {
+      memo.failed = e.error?.message ?? "the recorder failed";
+      if (memo.recorder.state !== "inactive") memo.recorder.stop();
+    };
+    memo.recorder.onstop = () => finishMemo(memo);
+    memo.startedAt = Date.now();
+    // a piece a second, so its size is known as it grows
+    memo.recorder.start(1000);
+    memo.timer = setTimeout(() => stopMemo(false), MEMO_MAX_MS);
+    memo.tick = setInterval(tickRecording, 500);
+    renderRecording();
+  }
+  function stopMemo(discard) {
+    const memo = recording;
+    if (!memo) return;
+    memo.stopped = true;
+    memo.discard ||= discard;
+    // still asking for the microphone: it ends once the browser answers
+    if (!memo.recorder) return;
+    if (memo.recorder.state !== "inactive") memo.recorder.stop();
+    else finishMemo(memo);
+  }
+  function finishMemo(memo) {
+    clearTimeout(memo.timer);
+    clearInterval(memo.tick);
+    memo.stream?.getTracks().forEach((t) => t.stop());
+    if (recording !== memo) return;
+    recording = null;
+    renderRecording();
+    if (memo.discard) return;
+    if (memo.failed) return problem(`Your voice memo was not kept: ${memo.failed}`);
+    if (memo.tooLarge) return problem("That voice memo is over 25 MB, the most a chat takes.");
+    const type = essence(memo.recorder?.mimeType || memo.chunks[0]?.type);
+    if (!memo.bytes || !SHOWN_AUDIO.test(type)) return problem("Nothing was recorded.");
+    const file = new File(memo.chunks, `voice-memo.${MEMO_EXT[type]}`, { type });
+    attachments.push({ file, name: file.name, size: file.size, type, uploading: false });
+    renderAttachments();
+    send(input.value);
+  }
+  $("record").onclick = () => (recording ? stopMemo(false) : startMemo());
+  $("discard").onclick = () => {
+    stopMemo(true);
+    input.focus();
+  };
+
   // @mentions: the chat's agents whose name the word before the caret starts
   let picking = null; // { start, end, matches, index }
   function closeMentions() {
@@ -974,15 +1120,23 @@ export function mount(root) {
 
   // this page's typing, to everyone here: on while there is text and a key
   // came lately, off after a send or TYPING_MS of quiet
-  let typing = false;
+  // with whether the chat is on screen (`looking`), which keeps the
+  // chat's code from pushing its replies to this page's person (app.mjs)
+  const onScreen = () => document.visibilityState === "visible";
+  const shared = { typing: false, looking: onScreen() };
   let typingTimer = 0;
   function setTyping(on) {
     clearTimeout(typingTimer);
     if (on) typingTimer = setTimeout(() => setTyping(false), TYPING_MS);
-    if (on === typing) return;
-    typing = on;
-    fragment.presence.set({ typing: on });
+    if (on === shared.typing) return;
+    shared.typing = on;
+    fragment.presence.set({ ...shared });
   }
+  document.addEventListener("visibilitychange", () => {
+    if (onScreen() === shared.looking) return;
+    shared.looking = onScreen();
+    fragment.presence.set({ ...shared });
+  });
   input.addEventListener("input", () => {
     grow();
     setTyping(!!input.value.trim());
@@ -1013,6 +1167,8 @@ export function mount(root) {
   });
   composer.addEventListener("submit", (e) => {
     e.preventDefault();
+    // a memo being recorded goes with the message: it stops, then sends
+    if (recording) return stopMemo(false);
     send(input.value);
   });
 
@@ -1111,6 +1267,58 @@ export function mount(root) {
     }
   };
 
+  // ---- "Notify me": this browser subscribes for its person, from a click
+  // only (`fragment.push.register(<their identity>)`), and the chat's code
+  // pushes an agent's reply to its people while they are away (app.mjs).
+  // A browser keeps a framed chat from asking (a cross-origin frame may not
+  // ask for notifications): it says so, and opens the chat in a tab ----
+  const pushable = () => "serviceWorker" in navigator && typeof PushManager !== "undefined" && typeof Notification !== "undefined";
+  const canNotify = () => pushable() && canPost() && state.me.principal.startsWith("id:");
+  const NOTIFY = {
+    off: ["bell", "Notify me of replies while I'm away"],
+    working: ["loader", "Turning notifications on…"],
+    on: ["bell-ring", "Notifications are on: click to turn them off"],
+    denied: ["bell-off", "Notifications are blocked for this chat in your browser's settings"],
+    framed: ["bell", "Open this chat in its own tab to turn on notifications"],
+    failed: ["bell", "Notifications could not be turned on: click to try again"],
+  };
+  let notifying = "off";
+  function setNotify(to) {
+    notifying = to;
+    const b = $("notify");
+    const [icon, title] = NOTIFY[to];
+    b.innerHTML = svg(icon, to === "working" ? "spin" : "");
+    b.title = title;
+    b.setAttribute("aria-label", title);
+    b.classList.toggle("on", to === "on");
+    b.dataset.state = to;
+    b.disabled = to === "working" || to === "denied";
+  }
+  // what this browser holds already, asked without asking anything of the person
+  async function readNotify() {
+    $("notify").hidden = !canNotify();
+    if (!canNotify()) return;
+    if (Notification.permission === "denied") return setNotify(framed ? "framed" : "denied");
+    try {
+      const registration = await navigator.serviceWorker.getRegistration(location.href);
+      const subscribed = Notification.permission === "granted" && !!(await registration?.pushManager.getSubscription());
+      setNotify(subscribed ? "on" : "off");
+    } catch {
+      setNotify("off");
+    }
+  }
+  $("notify").onclick = async () => {
+    if (notifying === "framed") return void window.open(location.href, "_blank", "noopener");
+    if (notifying === "working" || !canNotify()) return;
+    const was = notifying;
+    setNotify("working");
+    const answer = was === "on" ? await fragment.push.unregister() : await fragment.push.register(state.me.principal);
+    if (answer.ok !== false) return setNotify(was === "on" ? "off" : "on");
+    if (answer.reason === "denied") return setNotify(framed ? "framed" : "denied");
+    setNotify(was === "on" ? "on" : "failed");
+    problem(`Notifications were not turned ${was === "on" ? "off" : "on"}: ${answer.error ?? answer.reason}`);
+  };
+
   // The shell that frames the chat may say light or dark. Only its frame
   // listens, and only to its parent; the theme is all a message can change.
   addEventListener("message", (event) => {
@@ -1122,7 +1330,7 @@ export function mount(root) {
   // ---- who this page is, then the channels it may read, and who is here ----
   fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft });
   readMembers();
-  fragment.presence.set({ typing: false });
+  fragment.presence.set({ ...shared });
   fragment.presence.on((list) => {
     state.here = list;
     schedule();
@@ -1146,6 +1354,9 @@ export function mount(root) {
       }
     }
     $("attach").disabled = !canAttach();
+    $("record").hidden = !recordable();
+    $("record").disabled = !canAttach();
+    readNotify();
     composer.dataset.ready = "1";
     render();
     grow();
@@ -1154,6 +1365,8 @@ export function mount(root) {
     problem(code === 4004 ? "This chat was deleted." : "Your access to this chat changed: reload the page.");
     input.disabled = true;
     $("attach").disabled = true;
+    stopMemo(true);
+    $("record").disabled = true;
   });
   render();
 }

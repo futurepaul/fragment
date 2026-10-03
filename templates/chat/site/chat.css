@@ -164,6 +164,10 @@ a.attachment-chip:hover { color: var(--text-primary); background: var(--bg-activ
 .attachment-chip.uploading svg { animation: spin 1s linear infinite; }
 .attachment-image { display: block; max-width: min(240px, 100%); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--bg-card); }
 .attachment-image img { display: block; max-width: 100%; max-height: 240px; object-fit: contain; }
+/* a voice memo: a quiet player, in a message and in a reply */
+.attachment-audio { display: flex; align-items: center; gap: 8px; width: min(320px, 100%); min-width: 0; padding: 4px 6px 4px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-muted); color: var(--text-tertiary); }
+.attachment-audio svg { width: 14px; height: 14px; }
+.attachment-audio audio { display: block; flex: 1; min-width: 0; height: 32px; }
 
 /* a turn's steps */
 details.tools { margin: 18px 0; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-subtle); overflow: hidden; }
@@ -242,6 +246,16 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 .send:active { transform: scale(.96); }
 .send:disabled { opacity: .48; cursor: default; }
 .send.stop svg { width: 11px; height: 11px; fill: currentColor; stroke: none; }
+/* recording a voice memo: the mic is its Stop, beside a quiet clock */
+#record.on { background: var(--danger-bg); color: var(--danger-text); }
+#record.on svg { width: 11px; height: 11px; fill: currentColor; stroke: none; }
+.recording { display: inline-flex; align-items: center; gap: 6px; padding: 0 4px; font-size: 13px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.recording i { width: 7px; height: 7px; border-radius: 50%; background: var(--danger-text); animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+/* "Notify me", beside Send */
+#notify { margin-left: auto; }
+#notify:not([hidden]) ~ .send { margin-left: 0; }
+#notify.on { color: var(--text-primary); }
 .banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px; border: 1px solid var(--danger-border); border-radius: 14px; background: var(--danger-bg); color: var(--danger-text); font-size: .9rem; }
 .banner span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .banner button { border: 1px solid var(--danger-border); background: none; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
@@ -252,6 +266,6 @@ details.tools[open] summary .chev { transform: rotate(90deg); }
 
 @media (max-width: 680px) { .column { padding-top: 12px; } }
 @media (prefers-reduced-motion: reduce) {
-  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg { animation: none; }
+  .msg.agent.streaming .cursor, .dots i, .spin, .attachment-chip.uploading svg, .recording i { animation: none; }
   .composer::before, .composer::after { transition: none; }
 }
