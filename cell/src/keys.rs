@@ -150,6 +150,15 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> Ce
     post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
 }
 
+/// A WorkOS Pipes consent URL for `user` to connect `provider`
+/// (`POST /data-integrations/{provider}/authorize`, spike S5): (status,
+/// WorkOS's answer, `{url, state}`).
+pub async fn pipes_authorize(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
+    assert!(fragment_core::swap::valid_name(provider), "a provider is checked before WorkOS is asked");
+    let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
+    post_json(&format!("{api}/data-integrations/{provider}/authorize"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+}
+
 /// The operator's key `name` (`swap::key_secret_name`), when the
 /// deployment holds it.
 pub fn operator_key(env: &Env, name: &str) -> Option<String> {

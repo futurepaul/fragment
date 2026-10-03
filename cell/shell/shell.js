@@ -594,7 +594,7 @@ async function openSettings() {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger] = await Promise.all([api("GET", "/api/ledger").catch(() => null)]);
+  const [ledger, linked] = await Promise.all([api("GET", "/api/ledger").catch(() => null), api("GET", "/api/connections").catch(() => null)]);
   const account = section("Account", line("Username", `@${state.me.username}`), line("Signed in as", state.me.email ?? "—"));
   const signout = el("form");
   signout.method = "post";
@@ -633,11 +633,40 @@ async function openSettings() {
     row.onclick = () => openApp(a.fragment);
     return row;
   }) : [el("p", "muted", "None yet.")]));
+  // connections (decision 22): the person's accounts their agents use,
+  // through WorkOS; connecting one opens its consent in a window
+  const connections = section("Connections");
+  const offered = linked?.connections ?? [];
+  connections.append(...(offered.length ? offered.map((c) => {
+    const row = el("p", "settings-line");
+    const name = c.provider.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
+    row.append(el("span", "settings-key", name));
+    if (c.status === "connected") row.append(el("span", "settings-value", "Connected"));
+    else {
+      const go = el("button", "quiet", c.status === "expired" ? "Connect again" : "Connect");
+      go.type = "button";
+      go.onclick = async () => {
+        go.disabled = true;
+        try {
+          const { url } = await api("POST", `/api/connections/${encodeURIComponent(c.provider)}/authorize`, {});
+          window.open(url, "_blank", "popup,width=520,height=720");
+          // back from the provider: the section says so
+          addEventListener("focus", () => openSettings().catch(() => {}), { once: true });
+        } catch (e) {
+          go.textContent = e.message;
+        } finally {
+          go.disabled = false;
+        }
+      };
+      row.append(go);
+    }
+    return row;
+  }) : [el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read.")]));
   const cli = section("The command line", el("p", null, "Your agents and you can publish apps from a terminal: install the `fragment` CLI and run `fragment login`; it opens this platform to approve its key."));
   const pair = el("a", "quiet", "Approve a CLI");
   pair.href = "/cli";
   cli.append(pair);
-  page.replaceChildren(account, credit, computer, agents, cli);
+  page.replaceChildren(account, credit, computer, agents, connections, cli);
 }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 

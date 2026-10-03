@@ -34,6 +34,7 @@ mod ai;
 mod auth;
 mod blobs;
 mod config;
+mod connections;
 mod channels;
 mod computer;
 mod deliveries;
@@ -929,6 +930,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
             }
             release_username(env, username).await
+        }
+        (method, ["api", "connections", rest @ ..]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            let rest = rest.to_vec();
+            connections::route(env, &who.identity.id, who.identity.kind, method, &rest).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

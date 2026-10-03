@@ -119,6 +119,21 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("a fragment on a template that declares code of its own is refused, saying to fork", r.status == 200 && refused, "");
 
+    // connections (decision 22): the deployment's offers, and the person's account at each
+    let status = |r: &Reply| r.body["connections"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["status"].clone());
+    let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
+    s.ok("the shell lists the connections the deployment offers, none connected yet", status(&r) == Some(json!("none")), &r);
+    let r = shell(api, &session, "POST", &format!("/api/connections/{}/authorize", crate::SWAP_CONNECTION), Some(&json!({})), &[])?;
+    let consent = r.body["url"].as_str().unwrap_or("").to_string();
+    s.ok("and starts one: a consent URL for the person's browser", r.status == 200 && consent.starts_with(&s.workos.url), &r);
+    let done = api.external(&consent)?;
+    let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
+    s.ok("followed, the account is connected", done.status == 200 && status(&r) == Some(json!("connected")), &r);
+    let again = api.external(&consent)?;
+    s.ok("(a consent is followed once)", again.status == 400, &again);
+    let r = shell(api, &session, "POST", "/api/connections/notion/authorize", Some(&json!({})), &[])?;
+    s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
+
     // a template that is not blessed is copied, and its kind is what it says
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "garden", "template": "todo", "title": "x" })), &[])?;
     s.ok("a title is a blessed template's alone", r.status == 400, &r);

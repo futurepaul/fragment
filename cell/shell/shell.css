@@ -312,7 +312,8 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 /* first run: one card, centred on the shell's dark */
 .first-run { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; background: var(--bg-sidebar); }
 .first-run-card { width: min(100%, 460px); display: flex; flex-direction: column; gap: 14px; }
-.first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 18px; }
+.first-run-card .brand { font-weight: 700; font-size: 15px; margin-bottom: 18px; padding: 0; }
+.first-run-card > .primary { align-self: flex-start; }
 .first-run-card h1 { margin: 0; font-size: 28px; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; }
 .first-run-card p { margin: 0; }
 .first-run-form { display: flex; flex-direction: column; gap: 10px; }

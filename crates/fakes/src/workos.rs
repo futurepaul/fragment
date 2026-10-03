@@ -7,9 +7,11 @@
 //! authorize, the codes and sessions it handed out.
 //!
 //! And Pipes' access tokens (https://workos.com/docs/reference/pipes/access-token):
-//! a user's account at a provider is connected by the test (`connect`), as
-//! the Pipes widget would, and may come to need authorizing again; each
-//! token asked for is new, and lasts an hour.
+//! a user's account at a provider is connected by the test (`connect`), or
+//! by the user's browser through the consent URL the authorize call gives
+//! (`POST /data-integrations/{provider}/authorize`, then `GET
+//! /pipes/consent`), and may come to need authorizing again; each token
+//! asked for is new, and lasts an hour.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -37,6 +39,8 @@ struct State {
     pipes: HashMap<(String, String), bool>,
     /// Tokens handed out, by provider.
     tokens: HashMap<String, Vec<String>>,
+    /// Consents given out and not yet followed: state → (user id, provider).
+    consents: HashMap<String, (String, String)>,
 }
 
 impl State {
@@ -105,6 +109,9 @@ impl WorkOs {
     pub fn start_on(port: u16, client_id: &str, api_key: &str) -> std::io::Result<WorkOs> {
         let state: Arc<Mutex<State>> = Arc::default();
         let (st, client, key) = (Arc::clone(&state), client_id.to_string(), api_key.to_string());
+        // where the fake answers, for the consent URLs it gives (known once it listens)
+        let base: Arc<Mutex<String>> = Arc::default();
+        let at = Arc::clone(&base);
         let handler: Handler = Arc::new(move |req: &Request| {
             let q = |k: &str| req.query.get(k).cloned().unwrap_or_default();
             let mut s = st.lock().expect("workos state");
@@ -177,6 +184,28 @@ impl WorkOs {
                         r => redirect(&r),
                     }
                 }
+                ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/authorize") => {
+                    if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
+                        return problem(401, "unauthorized", "the API key is wrong");
+                    }
+                    let provider = p["/data-integrations/".len()..p.len() - "/authorize".len()].to_string();
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                    let Some(user) = body["user_id"].as_str().filter(|u| s.users.iter().any(|x| x.id == *u)).map(str::to_string) else {
+                        return problem(404, "not_found", "no such user");
+                    };
+                    let state = s.next("pipes_state");
+                    s.consents.insert(state.clone(), (user, provider));
+                    let url = format!("{}/pipes/consent?state={state}", at.lock().expect("workos base"));
+                    Response::json(200, &json!({ "url": url, "state": state }))
+                }
+                // the user's browser, consenting: the account is connected
+                ("GET", "/pipes/consent") => match s.consents.remove(&q("state")) {
+                    Some((user, provider)) => {
+                        s.pipes.insert((user, provider.clone()), true);
+                        Response::bytes(200, "text/html; charset=utf-8", format!("<!doctype html><title>Connected</title><p>{provider} is connected. You can close this window.</p>").into_bytes())
+                    }
+                    None => problem(400, "invalid_request", "this consent was used or never given"),
+                },
                 ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
@@ -204,6 +233,7 @@ impl WorkOs {
             }
         });
         let server = Server::start(port, handler)?;
+        *base.lock().expect("workos base") = server.url.clone();
         Ok(WorkOs { url: server.url.clone(), client_id: client_id.to_string(), state, _server: server })
     }
 

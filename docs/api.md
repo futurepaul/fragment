@@ -1153,6 +1153,27 @@ turn}` and the steps to `work` when the fragment declares it postable,
 a chat's records (below). Its model calls are its owner's to
 pay.
 
+## Connections (decision 22)
+
+A person's accounts at the providers the deployment offers
+(`FRAGMENT_CONNECTIONS`), held and refreshed by WorkOS Pipes; their
+agents use them through the computer's swap (docs/computers.md).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/connections` | a person | → `{connections: [{provider, status}]}`: each offered provider, `connected`, `expired` (connect it again) or `none` |
+| `POST /api/connections/{provider}/authorize` | a person | → `{provider, url}`: Pipes' consent, for the person's browser; followed, the account is connected. A provider not offered is 404 |
+
+## The shell (phase 5)
+
+The platform's one page is `/` (cell/shell/, its files at
+`/__shell/<file>`). It calls the API with the person's platform session
+rather than a key: a request on the platform's host is taken as the
+signed-in person when it carries `x-fragment-shell: 1` and
+`Sec-Fetch-Site: same-origin`, and, writing, the platform's exact
+`Origin`. Anything else needs a signature as before. Adding a key still
+needs a key.
+
 ## Computers (docs/computers.md, phase 4)
 
 A person's computer runs an image (pinned per computer) and the agent
