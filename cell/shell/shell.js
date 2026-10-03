@@ -1012,6 +1012,7 @@ async function openSettings(push = true) {
     }
     return row;
   }) : [el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read.")]));
+  const skills = await skillsSection();
   // pairing the CLI: `fragment login` opens this platform to approve its key
   const cli = section(
     "The command line",
@@ -1020,7 +1021,84 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- skills (decision 17): the managed set, the person's skills fragment's
+// (the platform's release, which their computers install for every agent),
+// by category, and each agent's own (its fragment's skills/, which win on a
+// name). Both read as the agents' computers read them: the fragments' files.
+// A skill is skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md.
+function skillsIn(paths) {
+  const out = [];
+  for (const path of paths) {
+    const parts = path.split("/");
+    if (parts[0] !== "skills" || parts[parts.length - 1] !== "SKILL.md") continue;
+    if (parts.length === 4) out.push({ category: parts[1], name: parts[2] });
+    else if (parts.length === 3) out.push({ category: "", name: parts[1] });
+  }
+  return out.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+}
+const skillsFragmentOf = () => state.fragments.find((f) => f.kind === "skills" && own(f));
+// The person's skills fragment, made from the blessed template when they
+// have none (at setup, as their default agent is).
+async function skillsFragment() {
+  const have = skillsFragmentOf();
+  if (have) return have.name;
+  const made = await api("POST", "/api/fragments", { name: freeLabel("skills"), template: "skills" });
+  await load();
+  return made.name;
+}
+function skillNames(list) {
+  const value = el("span", "settings-value");
+  list.forEach((s, i) => {
+    if (i) value.append(", ");
+    const name = el("span", "skill", s.name);
+    name.dataset.skill = s.name;
+    value.append(name);
+  });
+  return value;
+}
+async function skillsSection() {
+  const s = section("Skills");
+  s.id = "settings-skills";
+  const filesOf = (name) => api("GET", `/api/f/${name}/files`).then((v) => (v.files ?? []).map((f) => f.path)).catch(() => null);
+  const mine = skillsFragmentOf();
+  if (!mine) {
+    const add = el("button", "quiet", "Add the managed skills");
+    add.type = "button";
+    add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
+    s.append(el("p", "muted", "Your agents have no managed skills yet."), add);
+  } else {
+    const paths = await filesOf(mine.name);
+    if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
+    else {
+      const groups = new Map();
+      for (const k of skillsIn(paths)) groups.set(k.category, [...(groups.get(k.category) ?? []), k]);
+      s.dataset.fragment = mine.name;
+      s.append(...[...groups].map(([category, list]) => {
+        const row = el("p", "settings-line");
+        row.dataset.category = category || "general";
+        row.append(el("span", "settings-key", (category || "general").replace(/-/g, " ")), skillNames(list));
+        return row;
+      }));
+      const open = el("button", "quiet", "Open your skills");
+      open.type = "button";
+      open.onclick = () => openApp(mine.name);
+      s.append(open);
+    }
+  }
+  // each agent's own skills, from its fragment
+  const agents = state.fragments.filter((f) => f.kind === "agent" && own(f));
+  const owns = await Promise.all(agents.map((a) => filesOf(a.name)));
+  agents.forEach((a, i) => {
+    const row = el("p", "settings-line");
+    row.dataset.agent = a.name;
+    const list = skillsIn(owns[i] ?? []);
+    row.append(el("span", "settings-key", `${titleOf(a.name)}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
+    s.append(row);
+  });
+  return s;
 }
 // The wallpaper's photographer, credited. A photo of the person's own
 // (later) is credited to no one: `credited(null)` is no section.
@@ -1089,6 +1167,8 @@ async function defaultAgent(step) {
   await load();
   const username = state.me.username;
   step("agent");
+  // the managed skills its computer installs at its first start (decision 17)
+  await skillsFragment();
   const computer = await computerOf();
   let agent = state.fragments.find((f) => f.kind === "agent" && f.role === "owner");
   if (!agent) {

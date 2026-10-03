@@ -29,12 +29,19 @@ fn images_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("images/").to_path_buf()
 }
 
-fn build(dockerfile: &str, tag: &str) -> Duration {
+/// The repo's root: the Hermes image's build context (it carries the
+/// fragment CLI, of the root workspace).
+fn repo_dir() -> PathBuf {
+    images_dir().parent().expect("the repo").to_path_buf()
+}
+
+/// Builds `dockerfile` (relative to `context`) as `tag`.
+fn build(context: &std::path::Path, dockerfile: &str, tag: &str) -> Duration {
     let t = Instant::now();
     if std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_ok() {
         return Duration::ZERO;
     }
-    let status = Command::new(docker()).args(["build", "--platform", "linux/amd64", "-f", dockerfile, "-t", tag, "."]).current_dir(images_dir()).status().expect("docker runs");
+    let status = Command::new(docker()).args(["build", "--platform", "linux/amd64", "-f", dockerfile, "-t", tag, "."]).current_dir(context).status().expect("docker runs");
     assert!(status.success(), "docker build {dockerfile}");
     t.elapsed()
 }
@@ -103,7 +110,7 @@ impl Container {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_stub_image() {
-    let built = build("stub/Dockerfile", "fragment-stub:test");
+    let built = build(&images_dir(), "stub/Dockerfile", "fragment-stub:test");
     eprintln!("stub: built in {:.1} s, {} MB", built.as_secs_f64(), size("fragment-stub:test") / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
@@ -144,7 +151,7 @@ async fn the_stub_image() {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_hermes_image() {
-    let built = build("hermes/Dockerfile", "fragment-hermes:test");
+    let built = build(&repo_dir(), "images/hermes/Dockerfile", "fragment-hermes:test");
     eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size("fragment-hermes:test") / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
@@ -152,12 +159,25 @@ async fn the_hermes_image() {
         f.files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Juniper, a careful gardener.\n"));
         f.files.insert("memories/MEMORY.md".into(), bytes::Bytes::from_static(b"Paul likes tomatoes.\n"));
         f.files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap"}"#));
+        // its own skills: one of its own, and one a managed skill also names
+        f.files.insert("skills/garden-notes/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: garden-notes\ndescription: Juniper's own notes on the garden.\n---\n# Garden notes\n"));
+        f.files.insert("skills/grill-me/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: grill-me\ndescription: Juniper's own grilling, which wins.\n---\n# Grill\n"));
     });
+    // paul's skills fragment: the managed set (the blessed template's release, served as its files)
+    let skills = fake.skills(
+        "skills",
+        &[
+            ("fragment.json", r#"{"template":"skills"}"#),
+            ("skills/research/arxiv-finite/SKILL.md", "---\nname: arxiv-finite\ndescription: Search arXiv.\n---\n# arXiv\n"),
+            ("skills/research/arxiv-finite/scripts/search.py", "print('search')\n"),
+            ("skills/grill-me/SKILL.md", "---\nname: grill-me\ndescription: The managed grilling.\n---\n# Grill\n"),
+        ],
+    );
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000")]);
+    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
@@ -209,6 +229,50 @@ async fn the_hermes_image() {
     assert!(c.exec(&["sh", "-c", "printf 'Paul likes tomatoes.\\nAnd basil.\\n' > /data/hermes/profiles/juniper-paul/memories/MEMORY.md"]));
     fake.until(30_000, "the memory committed back", |w| w.fragments["juniper.paul"].files.get("memories/MEMORY.md").is_some_and(|b| b.as_ref() == b"Paul likes tomatoes.\nAnd basil.\n")).await;
 
+    // The managed skills (decision 17): paul's skills fragment's `skills/`,
+    // installed read-only where every profile looks after its own, read as
+    // the agent acting for paul; its own skills win on a name.
+    let managed = "/data/hermes/managed-skills";
+    let installed = |path: &str| c.exec(&["test", "-f", &format!("{managed}/{path}")]);
+    let t_skills = Instant::now();
+    while !(installed("research/arxiv-finite/SKILL.md") && installed("grill-me/SKILL.md")) {
+        assert!(t_skills.elapsed() < Duration::from_secs(60), "the managed skills never installed; the container said:\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(installed("research/arxiv-finite/scripts/search.py") && !installed("fragment.json"), "the managed set is the fragment's skills/, nothing else of it");
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "true"]), "a command runs as Hermes' user");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo x > {managed}/research/arxiv-finite/SKILL.md")]), "the managed set is read-only to the agents");
+    fake.with(|w| {
+        let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills.paul/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
+        assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=id%3Apaul") && r.2.as_deref() == Some("juniper.paul") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
+    });
+    assert!(c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\"]")), "its profile names the managed skills");
+    // what Hermes itself finds for the profile: its own first, then the managed set
+    let found = c.exec_out(&[
+        "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
+        "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
+    ]);
+    let found: serde_json::Value = serde_json::from_str(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"));
+    eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
+    assert!(found["arxiv-finite"].as_str().is_some_and(|d| d.contains("Search arXiv")), "a managed skill: {found}");
+    assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
+    assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
+
+    let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:paul fragment login 2>&1; echo exit=$?"]);
+    assert!(login.contains("needs no login") && login.contains("exit=2"), "an agent logs in to nothing: {login}");
+
+    // a change to the managed set is followed while it runs
+    fake.with(|w| {
+        let f = w.fragments.get_mut(&skills).unwrap();
+        f.files.insert("skills/research/arxiv-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: arxiv-finite\ndescription: Search arXiv, again.\n---\n"));
+        f.files.remove("skills/research/arxiv-finite/scripts/search.py");
+    });
+    let t_follow = Instant::now();
+    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py")) {
+        assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));
     let t2 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", second["seq"].as_u64().unwrap());
@@ -220,9 +284,14 @@ async fn the_hermes_image() {
     let third = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal" }));
     let t3 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", third["seq"].as_u64().unwrap());
     fake.until(120_000, "the tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t3)).await;
+    // what the model was given last: each message's role and the start of its text
+    let model_saw = || {
+        let calls = model.calls.lock().unwrap();
+        calls.iter().rev().take(2).map(|c| c.body["messages"].as_array().map(|m| m.iter().rev().take(6).map(|m| format!("{}: {}", m["role"], m["content"].to_string().chars().take(160).collect::<String>())).collect::<Vec<_>>()).unwrap_or_default()).collect::<Vec<_>>()
+    };
     fake.with(|w| {
         let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t3).collect();
-        assert!(steps.iter().any(|s| s["tool"] == "terminal"), "a terminal step: {steps:?}");
+        assert!(steps.iter().any(|s| s["tool"] == "terminal"), "a terminal step: {steps:?}; the reply {:?}; the model saw (newest first) {:#?}", answered(w, &t3), model_saw());
         assert!(answered(w, &t3).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t3));
     });
 
@@ -275,6 +344,21 @@ async fn the_hermes_image() {
     }
     assert!(c.exec(&["grep", "-q", "Maple", "/data/hermes/profiles/maple-paul/SOUL.md"]), "its repo in its own profile");
     assert!(c.exec(&["grep", "-q", "maple.paul", "/var/lib/fragment-run/agents.json"]), "the bridge's ready file names it");
+
+    // Its terminal runs the fragment CLI as itself, acting for paul: the
+    // computer's API (here the fake) sees the agent named, no signature,
+    // and `for` its owner; the answer is paul's fragments.
+    let requests_before = fake.with(|w| w.requests.len());
+    let listed = fake.say(&chat, &person("paul"), json!({ "text": "run: fragment list --json" }));
+    let tl = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", listed["seq"].as_u64().unwrap());
+    fake.until(120_000, "the fragment CLI's answer", |w| answered(w, &tl).is_some()).await;
+    fake.with(|w| {
+        let reply = answered(w, &tl).unwrap();
+        let text = reply["text"].as_str().unwrap_or("");
+        assert!(text.contains("the tool said") && text.contains("skills.paul") && text.contains("talk.paul"), "paul's fragments, from the CLI: {reply}");
+        let cli: Vec<_> = w.requests[requests_before..].iter().filter(|r| r.0 == "GET /api/fragments").collect();
+        assert!(cli.iter().any(|r| r.2.as_deref() == Some("juniper.paul") && r.1 == "for=id%3Apaul" && !r.3), "as juniper, for paul, unsigned: {cli:?}");
+    });
 
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());

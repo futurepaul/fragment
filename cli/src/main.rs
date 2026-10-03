@@ -84,12 +84,20 @@ enum Cmd {
         /// Base URL, e.g. http://127.0.0.1:8790
         url: Option<String>,
     },
-    /// Create a fragment
+    /// Create a fragment (empty, or from one of the platform's templates)
     Create {
         name: String,
         /// public | link (default) | members
         #[arg(long)]
         visibility: Option<String>,
+        /// Start from one of the platform's templates: a blessed one (chat,
+        /// agent, skills, brain, …) runs the platform's current release, any
+        /// other is copied in as its first commit
+        #[arg(long)]
+        template: Option<String>,
+        /// Its title (a blessed template's fragment only)
+        #[arg(long, requires = "template")]
+        title: Option<String>,
         /// Show the share link, the webhook URL and the webhook secret (they
         /// are credentials: `fragment open` shows the links later)
         #[arg(long)]
@@ -575,7 +583,65 @@ const SAY_STATE_READS_MAX: u64 = 600_000 / AGENT_STATE_WAIT_MS_MAX + 1;
 // a read that waits the longest still answers inside a request's timeout
 const _: () = assert!(AGENT_STATE_WAIT_MS_MAX + 5_000 <= api::REQUEST_TIMEOUT_BASE.as_millis() as u64);
 
+/// The agent mode, inside a computer (docs/computers.md, cli/GUIDE.md "As an
+/// agent"): `FRAGMENT_AS_AGENT` names the agent fragment the computer's
+/// egress signs each request as, and `FRAGMENT_FOR` the person it acts for.
+/// Neither set: this machine's key signs, as ever.
+fn agent_mode() -> Result<Option<api::AgentMode>> {
+    agent_mode_of(std::env::var("FRAGMENT_AS_AGENT").ok(), std::env::var("FRAGMENT_FOR").ok())
+}
+
+fn agent_mode_of(agent: Option<String>, acting_for: Option<String>) -> Result<Option<api::AgentMode>> {
+    let set = |v: Option<String>| v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let (agent, acting_for) = (set(agent), set(acting_for));
+    let Some(agent) = agent else {
+        return match acting_for {
+            Some(_) => Err(usage("FRAGMENT_FOR names whom an agent acts for: set FRAGMENT_AS_AGENT too")),
+            None => Ok(None),
+        };
+    };
+    if !fragment_proto::valid_fragment_name(&agent) {
+        return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>.<username>), not {agent:?}")));
+    }
+    // an identity as the platform names one (`id:` and its opaque id: the
+    // platform checks it exactly, and only an agent's owner is honored)
+    let identity = |s: &str| s.strip_prefix("id:").is_some_and(|rest| (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric()));
+    if let Some(who) = &acting_for {
+        if !identity(who) {
+            return Err(usage(format!("FRAGMENT_FOR names an identity (id:…), not {who:?}")));
+        }
+    }
+    Ok(Some(api::AgentMode { agent, acting_for }))
+}
+
+/// Where an agent reaches the platform: `--host`, else `FRAGMENT_HOST`, else
+/// the computer's `FRAGMENT_API`. Never the config's host or the default:
+/// an agent's requests carry no signature until its computer's egress
+/// signs them, so they mean nothing anywhere else.
+fn agent_host(cli_host: &Option<String>, fragment_host: Option<String>, fragment_api: Option<String>) -> Result<String> {
+    let set = |v: Option<String>| v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    set(cli_host.clone())
+        .or_else(|| set(fragment_host))
+        .or_else(|| set(fragment_api))
+        .ok_or_else(|| usage("an agent reaches the platform through its computer's API: set FRAGMENT_HOST (or FRAGMENT_API) to it, e.g. http://api.fragment.internal"))
+}
+
+/// The platform's origin for a link a person opens (a join page, a webhook):
+/// the one the fragment's status names, else the host this CLI calls (an
+/// older host's status names none). From inside a computer the host is its
+/// internal API, which no person can open.
+fn platform_of(c: &api::Client, status: &FragmentStatus) -> String {
+    let named = status.urls.platform.trim_end_matches('/');
+    if named.is_empty() { c.host.clone() } else { named.to_string() }
+}
+
 fn require_client(cli_host: &Option<String>, verbose: bool) -> Result<api::Client> {
+    if let Some(mode) = agent_mode()? {
+        let host = agent_host(cli_host, std::env::var("FRAGMENT_HOST").ok(), std::env::var("FRAGMENT_API").ok())?;
+        let mut c = api::Client::new(&host, api::Signer::Agent(mode));
+        c.verbose = verbose;
+        return Ok(c);
+    }
     let cfg = load_config();
     let host = resolve_host(cli_host, &cfg);
     let sk = cfg.secret_key.ok_or_else(|| {
@@ -715,6 +781,10 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.cmd {
         Cmd::Login { force, no_wait, no_browser } => {
+            // an agent has no key to log in with: its computer signs for it
+            if let Some(mode) = agent_mode()? {
+                return Err(usage(format!("{} is an agent and needs no login: its computer signs each request as it (FRAGMENT_AS_AGENT)", mode.agent)));
+            }
             // the key this machine signs with: the one it has, or a new one
             let key_existed = !force && load_config().secret_key.is_some();
             if !key_existed {
@@ -729,13 +799,14 @@ fn run(cli: Cli) -> Result<()> {
                     _ => c.call_as(r).map(Some),
                 }
             };
+            let key = c.key()?;
             let mut done = me()?;
             if done.is_none() {
                 // the link carries this key's own proof (ten minutes good):
                 // approving it in a signed-in browser adds the key at once
-                let npub = c.id.npub();
+                let npub = key.npub();
                 let approve = format!("{}/cli/approve", c.host);
-                let proof = c.id.nip98_header("POST", &approve, &[]);
+                let proof = key.nip98_header("POST", &approve, &[]);
                 let proof = proof.strip_prefix("Nostr ").unwrap_or(&proof);
                 let url = format!("{}/cli?key={npub}&proof={}", c.host, encode_q(proof));
                 let tail = &npub[npub.len() - 8..];
@@ -763,10 +834,10 @@ fn run(cli: Cli) -> Result<()> {
             // never echo the key itself
             json_exit(
                 j,
-                &json!({ "npub": c.id.npub(), "id": v.id, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
+                &json!({ "npub": key.npub(), "id": v.id, "kind": v.kind, "owner": v.owner, "host": c.host, "config": config_path().display().to_string(), "existing": key_existed }),
             );
             println!("logged in as {} on {}", v.id, c.host);
-            println!("key: {}", c.id.npub());
+            println!("key: {}", key.npub());
             return Ok(());
         }
         Cmd::Host { url } => {
@@ -842,44 +913,58 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
             let v: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
-            json_exit(j, &json!({ "npub": c.id.npub(), "host": c.host, "identity": v }));
-            print_identity(&v, &c.id.npub());
+            if let Some(mode) = c.agent() {
+                // an agent: no key here, its computer's egress signs as it
+                json_exit(j, &json!({ "agent": mode.agent, "for": mode.acting_for, "host": c.host, "identity": v }));
+                print_identity(&v, "");
+                println!("agent: {} (its computer signs each request as it)", mode.agent);
+                if let Some(who) = &mode.acting_for {
+                    println!("acting for: {who}");
+                }
+                println!("host: {}", c.host);
+                return Ok(());
+            }
+            let npub = c.key()?.npub();
+            json_exit(j, &json!({ "npub": npub, "host": c.host, "identity": v }));
+            print_identity(&v, &npub);
             println!("host: {}", c.host);
         }
         Cmd::Keys { sub: Some(KeysCmd::Rotate) } => {
             let old = c;
+            let old_key = old.key()?.clone();
             let fresh = auth::Identity::generate();
             // 1. the old key adds the new one, which proves itself inside
             let url = format!("{}/api/identities/me/keys", old.host);
-            let proof = fresh.proof("POST", &url, old.id.pubkey_hex());
+            let proof = fresh.proof("POST", &url, old_key.pubkey_hex());
             old.call_as::<IdentityView>(old.post_json("/api/identities/me/keys", &json!({ "proof": proof }))?)?;
             // 2. this machine switches to it (both keys work until step 3)
             save_config("secret_key", &fresh.secret_hex())?;
             let new = require_client(&cli.host, cli.verbose)?;
             // 3. the new key revokes the old one
-            let revoked = new.call_as::<IdentityView>(new.delete(&format!("/api/identities/me/keys/{}", old.id.pubkey_hex()))?);
+            let revoked = new.call_as::<IdentityView>(new.delete(&format!("/api/identities/me/keys/{}", old_key.pubkey_hex()))?);
             if let Err(e) = &revoked {
-                eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old.id.npub());
+                eprintln!("the new key is in use, but revoking the old one failed: {e}\nrevoke it: fragment keys revoke {}", old_key.npub());
             }
             let v = revoked?;
-            json_exit(j, &json!({ "npub": new.id.npub(), "revoked": old.id.npub(), "identity": v }));
-            println!("{} replaces {} (revoked); every grant stays with {}", new.id.npub(), old.id.npub(), v.id);
+            let new_npub = new.key()?.npub();
+            json_exit(j, &json!({ "npub": new_npub, "revoked": old_key.npub(), "identity": v }));
+            println!("{new_npub} replaces {} (revoked); every grant stays with {}", old_key.npub(), v.id);
         }
         Cmd::Keys { sub: Some(KeysCmd::Revoke { npub }) } => {
             let hex = fragment_core::npub::parse(&npub).ok_or_else(|| anyhow!("{npub} is not an npub or a 64-hex key"))?;
-            if hex == c.id.pubkey_hex() {
+            if hex == c.key()?.pubkey_hex() {
                 anyhow::bail!("that is the key this machine signs with: rotate it instead (`fragment keys rotate`)");
             }
             let v: IdentityView = c.call_as(c.delete(&format!("/api/identities/me/keys/{hex}"))?)?;
             json_exit(j, &v);
             println!("revoked {npub}");
         }
-        Cmd::Create { name, visibility, show_tokens } => {
+        Cmd::Create { name, visibility, show_tokens, template, title } => {
             let visibility = match visibility.as_deref() {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None, title: None };
+            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template, title };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
@@ -895,8 +980,9 @@ fn run(cli: Cli) -> Result<()> {
             println!("  npub:         {}", v.npub);
             println!("  canonical:    {}", v.canonical);
             if show_tokens {
+                let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{}/status", v.name))?)?;
                 println!("  share link:   {}", share_link(&v.canonical, &v.view_token));
-                println!("  webhook URL:  {}/api/f/{}/inbox?t={}", c.host, v.name, v.inbox_token);
+                println!("  webhook URL:  {}/api/f/{}/inbox?t={}", platform_of(&c, &st), v.name, v.inbox_token);
             } else {
                 println!("  its share link and webhook URL: fragment open {}", v.name);
             }
@@ -1123,7 +1209,7 @@ fn run(cli: Cli) -> Result<()> {
                 (Visibility::Link, Some(tok)) => Some(share_link(&canon, tok)),
                 _ => None,
             };
-            let webhook = st.inbox_token.as_ref().map(|tok| format!("{}/api/f/{}/inbox?t={tok}", c.host, name));
+            let webhook = st.inbox_token.as_ref().map(|tok| format!("{}/api/f/{}/inbox?t={tok}", platform_of(&c, &st), name));
             if j {
                 let mut data = json!({
                     "canonical": canon,
@@ -1249,10 +1335,10 @@ fn run(cli: Cli) -> Result<()> {
             // push HMAC is only ever visible at create/rotate, and machine
             // consumers (dev harnesses registering push webhooks) need it
             json_exit(j, &v);
-            let canon = format!("{}/f/{}/", c.host, name);
+            let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             println!("rotated: {}", v.rotated.join(", "));
-            println!("New webhook URL: {}/api/f/{}/inbox?t={}", c.host, name, v.inbox_token);
-            println!("New share link: {}", share_link(&canon, &v.view_token));
+            println!("New webhook URL: {}/api/f/{}/inbox?t={}", platform_of(&c, &st), st.name, v.inbox_token);
+            println!("New share link: {}", share_link(&st.urls.canonical, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
             SecretCmd::Set { name, key, value: argv_value } => {
@@ -1295,11 +1381,12 @@ fn run(cli: Cli) -> Result<()> {
             // inbox is token-gated, no nostr signature
             let url = format!("{}/api/f/{}/inbox?t={}", c.host, name, token);
             let body = serde_json::to_vec(&json!({ "source": source, "payload": payload_v }))?;
-            let resp = reqwest::blocking::Client::new()
-                .post(&url)
-                .body(body)
-                .header("content-type", "application/json")
-                .send()?;
+            let mut req = reqwest::blocking::Client::new().post(&url).body(body).header("content-type", "application/json");
+            // a computer's egress answers only a request that names its agent
+            if let Some(mode) = c.agent() {
+                req = req.header(api::AGENT_HEADER, &mode.agent);
+            }
+            let resp = req.send()?;
             let resp = api::Resp { status: resp.status().as_u16(), body: resp.bytes()?.to_vec() };
             let v = c.call(resp)?;
             json_exit(j, &v);
@@ -1312,7 +1399,7 @@ fn run(cli: Cli) -> Result<()> {
                 Visibility::Public => canon.clone(),
                 _ => format!("{canon}?view={}", v.view_token.as_deref().unwrap_or("")),
             };
-            let webhook = format!("{}/api/f/{name}/inbox?t={}", c.host, v.inbox_token.as_deref().unwrap_or(""));
+            let webhook = format!("{}/api/f/{}/inbox?t={}", platform_of(&c, &v), v.name, v.inbox_token.as_deref().unwrap_or(""));
             json_exit(j, &json!({ "canonical": link, "shareLink": link, "webhookUrl": webhook }));
             println!("canonical:   {link}");
             println!("share link:  {link}");
@@ -1446,7 +1533,7 @@ fn run(cli: Cli) -> Result<()> {
                 // the link a person opens in a browser: the platform's join
                 // page (they sign in, see what it grants, then join)
                 let status: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-                let link = format!("{}/join/{}?token={token}", c.host.trim_end_matches('/'), status.name);
+                let link = format!("{}/join/{}?token={token}", platform_of(&c, &status), status.name);
                 if j {
                     let mut out = serde_json::to_value(&v)?;
                     out["link"] = json!(link);
@@ -1645,7 +1732,7 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, p
 }
 
 fn writer_id(c: &api::Client) -> String {
-    c.id.pubkey_hex().chars().take(8).collect()
+    c.writer_id()
 }
 
 /// typed sync/code.storage errors -> anyhow. CAS rejections map to the
@@ -1851,6 +1938,61 @@ fn uid() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn code_of(r: Result<impl std::fmt::Debug>) -> Code {
+        classify_err(&r.expect_err("a failure"))
+    }
+
+    /// Goal: the agent mode is on only when the computer names an agent, and
+    /// says exactly what is wrong otherwise. Valid: an agent, alone or acting
+    /// for an identity. Invalid: a name that is no agent fragment's, a `for`
+    /// that is no identity, a `for` with no agent.
+    #[test]
+    fn the_agent_mode_reads_what_the_computer_names() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(agent_mode_of(None, None).unwrap(), None, "no agent: this machine's key signs");
+        assert_eq!(agent_mode_of(s(""), s("  ")).unwrap(), None, "empty is unset");
+        assert_eq!(agent_mode_of(s("juniper.paul"), None).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: None }));
+        let id = "id:0123456789abcdef0123456789abcdef";
+        assert_eq!(agent_mode_of(s(" juniper.paul "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: s(id) }));
+        for bad in ["juniper", "Juniper.Paul", "a/b.paul", "juniper.paul?for=x"] {
+            assert_eq!(code_of(agent_mode_of(s(bad), None)), Code::InvalidUsage, "{bad}");
+        }
+        for bad in ["paul", "id:", "id:a b", "npub1xyz", "id:paul&x=1"] {
+            assert_eq!(code_of(agent_mode_of(s("juniper.paul"), s(bad))), Code::InvalidUsage, "{bad}");
+        }
+        assert_eq!(code_of(agent_mode_of(None, s(id))), Code::InvalidUsage, "for whom, with no agent?");
+    }
+
+    /// An agent reaches the platform only through its computer: `--host`,
+    /// then `FRAGMENT_HOST`, then `FRAGMENT_API`, and never a default.
+    #[test]
+    fn an_agent_calls_its_computers_api() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(agent_host(&s("http://a"), s("http://b"), s("http://c")).unwrap(), "http://a");
+        assert_eq!(agent_host(&None, s("http://b"), s("http://c")).unwrap(), "http://b");
+        assert_eq!(agent_host(&None, None, s("http://api.fragment.internal")).unwrap(), "http://api.fragment.internal");
+        assert_eq!(code_of(agent_host(&None, None, None)), Code::InvalidUsage);
+        assert_eq!(code_of(agent_host(&None, s(" "), None)), Code::InvalidUsage);
+    }
+
+    /// A link a person opens names the platform's own origin, which a
+    /// status says, never the internal host a computer's CLI calls.
+    #[test]
+    fn links_for_people_name_the_platform() {
+        let status = |platform: &str| -> FragmentStatus {
+            serde_json::from_value(json!({
+                "name": "g.paul", "npub": "n", "owner": "id:p", "role": "owner", "visibility": "link", "repo": "r",
+                "pins": { "main": null, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
+                "code": { "sha": null, "operations": {}, "error": null }, "viewToken": null, "inboxToken": null,
+                "urls": { "canonical": "https://g--paul.fragment.boats/", "platform": platform },
+            }))
+            .expect("a status")
+        };
+        let agent = api::Client::new("http://api.fragment.internal", api::Signer::Agent(api::AgentMode { agent: "j.paul".into(), acting_for: None }));
+        assert_eq!(platform_of(&agent, &status("https://fragment.club/")), "https://fragment.club");
+        assert_eq!(platform_of(&agent, &status("")), "http://api.fragment.internal", "an older host names none");
+    }
 
     /// Goal: a deploy of a folder mints one storage token, reads main's
     /// head once (its sync's), lists once, and nudges the pins once.

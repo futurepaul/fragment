@@ -364,7 +364,7 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     }
     match obj.get("kind") {
         None | Some(Value::Null) => {}
-        Some(Value::String(k)) => m.kind = Some(FragmentKind::parse(k).ok_or_else(|| format!("kind is app, chat, agent or brain, not {k:?}"))?),
+        Some(Value::String(k)) => m.kind = Some(FragmentKind::parse(k).ok_or_else(|| format!("kind is app, chat, agent, brain or skills, not {k:?}"))?),
         Some(_) => return Err("kind must be a string".into()),
     }
     match obj.get("template") {
@@ -383,6 +383,7 @@ mod tests {
     fn kinds_and_templates() {
         assert_eq!(parse(b"{}").unwrap().kind(), FragmentKind::App);
         assert_eq!(parse(br#"{"kind":"brain"}"#).unwrap().kind(), FragmentKind::Brain);
+        assert_eq!(parse(br#"{"kind":"skills"}"#).unwrap().kind(), FragmentKind::Skills);
         assert!(parse(br#"{"kind":"bot"}"#).is_err());
         assert!(parse(br#"{"template":"Chat"}"#).is_err());
         let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat","description":"d"},"channels":{"chat":{"read":"public","post":"viewer"}}}"#).unwrap();

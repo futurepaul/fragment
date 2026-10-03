@@ -477,6 +477,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
+    skills_ui(s, api, &mut b, &page, &session)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -512,6 +513,63 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The skills in settings (decision 17): the shell made the person's skills
+/// fragment at setup, and its Skills section lists exactly that fragment's
+/// managed set by category, then each agent's own skills (its fragment's
+/// `skills/`), as the agents' computers read them.
+fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let mine = |kind: &str| list.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == kind && f["role"] == "owner")).and_then(|f| f["name"].as_str()).map(str::to_string);
+    let (Some(skills), Some(agent)) = (mine("skills"), mine("agent")) else {
+        s.ok("the shell made the person's skills fragment at setup, beside their agent", false, &list);
+        return Ok(());
+    };
+    s.ok("the shell made the person's skills fragment at setup, beside their agent", true, &skills);
+    // what the fragment's files say: skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md
+    let skills_of = |paths: &[String]| -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = paths
+            .iter()
+            .filter_map(|p| {
+                let parts: Vec<&str> = p.split('/').collect();
+                match parts.as_slice() {
+                    ["skills", c, n, "SKILL.md"] => Some((c.to_string(), n.to_string())),
+                    ["skills", n, "SKILL.md"] => Some(("general".to_string(), n.to_string())),
+                    _ => None,
+                }
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let paths = |name: &str| -> Result<Vec<String>> {
+        let r = shell(api, session, "GET", &format!("/api/f/{name}/files"), None, &[])?;
+        Ok(r.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str().map(str::to_string)).collect()).unwrap_or_default())
+    };
+    let want = skills_of(&paths(&skills)?);
+    let shown = "JSON.stringify([...document.querySelectorAll('#settings-skills [data-category] [data-skill]')].map((e) => [e.closest('[data-category]').dataset.category, e.dataset.skill]).sort())";
+    let listed = b.until(page, &format!("{shown} !== '[]'"), wait);
+    let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
+    s.ok(
+        &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
+        listed && want.len() == 43 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
+    );
+    // an agent's own skill, from its fragment, shows beside it
+    let own = "---\nname: garden-notes\ndescription: What this garden needs.\n---\n";
+    let w = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "files": [{ "path": "skills/garden-notes/SKILL.md", "text": own }], "key": "own-skill" })), &[])?;
+    b.reload(page)?;
+    let beside = format!("!!document.querySelector('#settings-skills [data-agent={}] [data-skill=\"garden-notes\"]')", js(&agent));
+    let shows = b.until(page, &beside, wait);
+    let own_files = skills_of(&paths(&agent)?);
+    s.ok(
+        "and an agent's own skill shows beside it, as its fragment's files say",
+        w.status == 200 && shows && own_files.contains(&("general".to_string(), "garden-notes".to_string())),
+        json!({ "write": w.status, "own": own_files }),
+    );
     Ok(())
 }
 

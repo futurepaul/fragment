@@ -5,20 +5,38 @@
 # connector, hermes-boot around it, Litestream, sandbox-shim, the screen.
 # The image holds no secret.
 #
-# Build from images/: docker build --platform linux/amd64 -f hermes/Dockerfile .
+# Build from the repo root (it carries the fragment CLI, of the root
+# workspace; .dockerignore keeps the context to what the build reads):
+#   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
 
 ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
 
-# The bridge and hermes-boot, static (Alpine's Rust targets musl).
+# The bridge and hermes-boot, static (Alpine's Rust targets musl): the
+# images' own workspace.
 FROM rust:1.99-alpine AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY bridge bridge
-COPY hermes/boot hermes/boot
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+COPY images/Cargo.toml images/Cargo.lock ./
+COPY images/bridge bridge
+COPY images/hermes/boot hermes/boot
+RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=images-target,target=/src/target \
     cargo build --release --locked -p fragment-bridge -p hermes-boot \
  && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
+
+# The fragment CLI (cli/), static, for the agents' terminals: it acts as the
+# agent its profile names, through the computer's API egress, with no key
+# (cli/GUIDE.md, "As an agent"; docs/computers.md).
+FROM rust:1.99-alpine AS cli
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY cli cli
+COPY crates crates
+COPY templates templates
+COPY xtask xtask
+RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cli-target,target=/src/target \
+    cargo build --release --locked -p fragment-cli \
+ && mkdir -p /out && cp target/release/fragment /out/
 
 # noVNC, the screen page's RFB client (pinned by hash).
 FROM alpine:3.20 AS novnc
@@ -30,8 +48,9 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/
 ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
 COPY --from=build /out/ /opt/fragment/bin/
-COPY hermes/preload.py /opt/fragment/preload.py
-COPY hermes/screen /opt/fragment/screen
+COPY --from=cli /out/fragment /usr/local/bin/fragment
+COPY images/hermes/preload.py /opt/fragment/preload.py
+COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 

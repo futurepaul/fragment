@@ -1,0 +1,31 @@
+/* The skills fragment's page: the agent page's look (templates/agent). */
+:root {
+  --bg: #212121; --surface: #2a2a2a; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69;
+  --border: rgba(255,255,255,.085);
+  --font-sans: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f7f6f3; --surface: #ffffff; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+}
+:root[data-theme="light"] { --bg: #f7f6f3; --surface: #ffffff; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+:root[data-theme="dark"] { --bg: #212121; --surface: #2a2a2a; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69; --border: rgba(255,255,255,.085); color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text-primary); }
+body { font: 15px/1.5 var(--font-sans); -webkit-font-smoothing: antialiased; }
+.skills-page { max-width: 720px; margin: 0 auto; padding: 40px 20px 64px; }
+h1 { font-size: 24px; line-height: 1.25; font-weight: 600; margin: 0 0 6px; }
+.lede { margin: 0 0 24px; color: var(--text-secondary); }
+h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); margin: 28px 0 6px; }
+ul { list-style: none; padding: 0; margin: 0; }
+li button { display: block; width: 100%; text-align: left; font: inherit; color: inherit; background: none; border: 0; border-bottom: 1px solid var(--border); padding: 9px 0; cursor: pointer; }
+li button:hover strong { text-decoration: underline; }
+li small { display: block; color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.own { font-size: 11px; color: var(--text-tertiary); margin-left: 6px; }
+.muted { color: var(--text-tertiary); }
+dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 64px); border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--text-primary); padding: 20px; }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog h2 { margin-top: 0; text-transform: none; letter-spacing: 0; font-size: 17px; color: var(--text-primary); }
+dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 var(--font-mono); margin: 0; }
+.close { float: right; font-size: 20px; line-height: 1; background: none; border: 0; color: var(--text-secondary); cursor: pointer; }

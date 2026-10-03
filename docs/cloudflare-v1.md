@@ -164,6 +164,22 @@ speaking Cloudflare's APIs) returns once this product works.
     become one apps skill, and git, brain and Google are rewritten too.
     `fal-image-editing` moves to Cloudflare's own inference (Paul,
     2026-10-02: agents can do anything they could do in Finite).
+
+    Status, 2026-10-03 (branch `claude/skills`; templates/skills/README.md):
+    - Built: the blessed `skills` template, its repo the managed set (43
+      skills: finite-skills less shared-skills, apps, fragment git, brain,
+      Google through `fragment-connection:google`, image generation through
+      a fragment AI step, Finite-only paths and keys stripped). A fragment
+      on a blessed template lists and reads that template's data from the
+      release, beneath its own files (decision 40). The shell makes each
+      person's skills fragment at setup and lists it, by category, beside
+      each agent's own, in settings. Our Hermes image installs it into every
+      profile (`skills.external_dirs`, an agent's own winning on a name) and
+      carries the fragment CLI, whose agent mode acts as the agent through
+      the API egress with no key (docs/computers.md).
+    - Missing: image editing (FLUX.1 [schnell] is text to image), other
+      vendors' models in the model council, and operator keys or
+      connections a deployment does not offer (the README's table).
 18. **Backups are a computer feature.** `/data` is saved with
     `DirectoryBackup` every few minutes while written. A sleep is driven
     by the Computer DO, in this order:
@@ -748,6 +764,20 @@ exit says.
    fragment skills, screenshots. Exit: from a chat, an agent builds,
    publishes and shares an app, ingests into a brain and searches it;
    the skills list matches the skills fragment.
+
+   Status, 2026-10-03, skills (branch `claude/skills`; decision 17's
+   status):
+   - Evidence, local: the templates section (a skills fragment lists and
+     reads the release's managed set exactly, a file of its own wins), the
+     shell-ui section (the shell makes the skills fragment at setup; its
+     Skills section lists exactly that fragment's files by category, and an
+     agent's own skill beside it), the hermes section (a profile has the
+     managed set and its own, its own winning, as Hermes itself finds them;
+     its terminal runs `fragment` as itself, for its owner), and the
+     images' Docker lane.
+   - Not yet: an agent building and deploying an app from a chat (`fragment
+     deploy` reaches code.storage directly, which the local lane's
+     containers cannot), on a preview.
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
    blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
    for the in-fragment agent's reply-operation answer path, which has

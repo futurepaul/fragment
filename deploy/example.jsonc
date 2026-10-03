@@ -43,11 +43,12 @@
   "operators": [],
   // Computers (docs/computers.md): the images they run, by name, relative
   // to the repo, and the one a new computer is pinned to. Without this
-  // the deployment makes no computers.
+  // the deployment makes no computers. The Hermes image builds from the
+  // repo's root (it carries the fragment CLI); the stub, from images/.
   "computers": {
     "default_image": "hermes",
     "images": {
-      "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "images" }
+      "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
     }
     // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },

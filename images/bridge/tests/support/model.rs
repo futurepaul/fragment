@@ -31,6 +31,8 @@ pub struct Call {
     pub model: String,
     pub agent: Option<String>,
     pub stream: bool,
+    /// The request as it came (a failure's detail: what the model was given).
+    pub body: Value,
 }
 
 pub struct Model {
@@ -69,7 +71,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let has_terminal = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "terminal"));
+    // `run: <command>` on a line of what the user said: that command, and an
+    // answer that quotes what it printed
+    let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     if let Some(result) = tool_result {
+        if run.is_some() {
+            return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
+        }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
         return (format!("scripted: {ran}"), None);
     }
@@ -77,7 +85,9 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
     }
-    let command = if last_user.contains("risky") {
+    let command = if let Some(c) = run.as_deref() {
+        Some(c)
+    } else if last_user.contains("risky") {
         Some("rm -rf /tmp/fragment-risky && echo tool-ran")
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
@@ -105,7 +115,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
-    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream });
+    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone() });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
@@ -149,4 +159,9 @@ fn answers_are_the_transcripts() {
     assert!(call.is_some());
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "please use the terminal" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: the tool ran", None));
+    // `run:` runs its command, and the answer quotes what it printed
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list --json" }], "tools": tools }));
+    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "skills.paul (editor)" }], "tools": tools }));
+    assert_eq!(t, "scripted: the tool said: skills.paul (editor)");
 }

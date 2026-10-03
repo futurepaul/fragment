@@ -689,3 +689,20 @@ fragment.club until cutover (decisions 34–35).
   connection.
 - **Delete when:** the swap streams the body (its length passed on),
   proven by an upload larger than the cap.
+
+## An agent's sync and deploy reach code.storage directly
+
+- **Observed:** decision 17's branch (`claude/skills`). The fragment CLI
+  in our Hermes image acts as its agent through the API egress, with no
+  key (cli/GUIDE.md, "As an agent"), but `fragment sync`, `deploy`,
+  `rollback` and `drafts` still go to code.storage itself, with the
+  15-minute, repo-scoped token the platform mints for the agent.
+- **Risk:** that token is a credential in the guest, which otherwise
+  holds none (decision 43), for as long as the command runs; and the
+  local lanes cannot prove an agent's deploy at all, since a container
+  under `wrangler dev` cannot reach the dev stack's code.storage fake.
+- **First proof:** phase 6's exit, an agent building and deploying an
+  app from a chat, on a preview.
+- **Delete when:** a computer's sync and deploy go through its API egress
+  (the files and deploy routes, or a code.storage intercept that swaps
+  the token in), proven by the hermes lane deploying an app from a chat.
