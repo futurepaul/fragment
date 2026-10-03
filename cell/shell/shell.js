@@ -1017,8 +1017,8 @@ const PROVIDER_STATE = {
 // a provider's name for people: google-places is Google Places, xai xAI
 const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs" };
 const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
-// micro-dollars, to a tenth of a cent when small
-const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros && micros < 10_000 ? 4 : 2 });
+// micro-dollars, to a hundredth of a cent under a dollar (a call is often less than a cent)
+const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros < 1_000_000 ? 4 : 2 });
 function connectionsSection(linked, uses) {
   const s = section("Connections");
   s.id = "settings-connections";

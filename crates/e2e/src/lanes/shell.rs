@@ -591,6 +591,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
         counted && of(crate::SWAP_CONNECTION)[4] == json!([[lead, 1, 0]]) && of("perplexity")[4] == json!([[lead, 1, perplexity_charge]]),
         &got,
     );
+    b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
     let _ = b.screenshot(page, &s.dir("shell-ui").join("desktop-connections.png"));
     // a press narrows that agent from that provider, and the page says so
     b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
