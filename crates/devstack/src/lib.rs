@@ -148,11 +148,16 @@ const REMOTE_ONLY_BINDINGS: [&str; 1] = ["ai"];
 /// The project's config as a local node runs it: `wrangler.local.jsonc`,
 /// beside its own (so its paths resolve the same), less the remote-only
 /// bindings.
-fn local_config(project: &Path) -> Result<PathBuf> {
+fn local_config(project: &Path, containers: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    // computers on a sandcastle node (docs/self-host.md, seam 2): the
+    // runtime's own containers, and Docker for them, go unused
+    if !containers {
+        obj.remove("containers");
     }
     let path = project.join("wrangler.local.jsonc");
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
@@ -166,7 +171,7 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs"])
 }
 
 /// The binaries the node needs.
@@ -273,6 +278,28 @@ pub struct Fleet {
     /// The keys' prices (`FRAGMENT_KEY_PRICES`' JSON).
     pub key_prices: Option<String>,
     pub swap_upstream: Option<String>,
+    /// A self-hosted model upstream (docs/self-host.md, seam 3), in place
+    /// of `ai_url` and the gateway.
+    pub model_upstream: Option<ModelUpstreamVars>,
+    /// A sandcastle node new computers run on (docs/self-host.md, seam 2).
+    pub node: Option<NodeVars>,
+}
+
+/// An OpenAI-compatible model server as the cell reads it.
+pub struct ModelUpstreamVars {
+    /// Its base, with its `/v1`.
+    pub url: String,
+    /// `FRAGMENT_MODELS`' JSON: catalog id to the server's model.
+    pub models: String,
+    pub key: Option<String>,
+}
+
+/// A sandcastle node as the cell reads it.
+pub struct NodeVars {
+    pub url: String,
+    pub secret: String,
+    /// `FRAGMENT_NODE_IMAGES`' JSON: an image's name to its reference.
+    pub images: String,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -369,6 +396,18 @@ impl Fleet {
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
+        if let Some(m) = &self.model_upstream {
+            vars.push(("FRAGMENT_MODEL_URL", m.url.as_str()));
+            vars.push(("FRAGMENT_MODELS", m.models.as_str()));
+            if let Some(k) = &m.key {
+                vars.push(("FRAGMENT_MODEL_KEY", k.as_str()));
+            }
+        }
+        if let Some(n) = &self.node {
+            vars.push(("FRAGMENT_NODE_URL", n.url.as_str()));
+            vars.push(("FRAGMENT_NODE_SECRET", n.secret.as_str()));
+            vars.push(("FRAGMENT_NODE_IMAGES", n.images.as_str()));
+        }
         write_dev_vars(project, &vars)
     }
 }
@@ -439,6 +478,9 @@ pub struct NodeOptions {
     pub log_dir: PathBuf,
     /// wrangler's own debug logs in the log, beside the Workers' output.
     pub node_logs: bool,
+    /// The runtime's containers (Docker under `wrangler dev`); `false` when
+    /// computers run on a sandcastle node instead.
+    pub containers: bool,
 }
 
 /// Boots of one port whose logs one directory keeps; a start past this
@@ -489,7 +531,7 @@ impl Node {
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = Command::new(&tools.wrangler);
-        cmd.arg("dev").arg("-c").arg(local_config(&opts.project)?);
+        cmd.arg("dev").arg("-c").arg(local_config(&opts.project, opts.containers)?);
         for other in &opts.with {
             cmd.arg("-c").arg(other.join("wrangler.jsonc"));
         }

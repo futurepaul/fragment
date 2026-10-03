@@ -437,6 +437,8 @@ impl Suite {
             operator_key_values: vec![(SWAP_KEY.into(), SWAP_KEY_VALUE.into())],
             key_prices: Some(json!([{ "key": SWAP_KEY, "micros": SWAP_KEY_MICROS, "per": 1 }]).to_string()),
             swap_upstream: Some(self.upstream.node().url.clone()),
+            model_upstream: None,
+            node: None,
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
@@ -457,6 +459,7 @@ impl Suite {
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
             node_logs: true,
+            containers: true,
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);

@@ -164,3 +164,9 @@ pub async fn pipes_authorize(env: &Env, api: &str, provider: &str, user: &str) -
 pub fn operator_key(env: &Env, name: &str) -> Option<String> {
     secret(env, &fragment_core::swap::key_secret_name(name))
 }
+
+/// The self-hosted model upstream's key (`FRAGMENT_MODEL_KEY`), when it
+/// takes one (docs/self-host.md, seam 3).
+pub fn model_key(env: &Env) -> Option<String> {
+    secret(env, "FRAGMENT_MODEL_KEY")
+}
