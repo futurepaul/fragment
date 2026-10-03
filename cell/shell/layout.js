@@ -100,8 +100,11 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
   const onDouble = (gutter, fn) => gutter.addEventListener("mousedown", (e) => { if (e.detail === 2) fn(); });
   onDouble(gutterRight, () => { s.right = DEFAULTS.right; store.set(KEY, s); write(); });
 
+  // Fitted again whenever the grid's size changes: the window's, and the
+  // grid's own as it is first shown (it is made hidden, at zero width,
+  // where nothing fits).
   let frame = 0;
-  addEventListener("resize", () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(write); });
+  new ResizeObserver(() => { cancelAnimationFrame(frame); frame = requestAnimationFrame(write); }).observe(grid);
   narrow.addEventListener("change", () => { overlay = null; write(); });
   write();
 
