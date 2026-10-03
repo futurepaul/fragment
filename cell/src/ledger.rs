@@ -410,24 +410,24 @@ impl LedgerCell {
         if let (Some(sealed), Some(hash)) = (self.meta("or_key")?, self.meta("or_hash")?) {
             let set = format!("{period}:{allowance}");
             if self.meta("or_limit")?.as_deref() != Some(set.as_str()) {
-                let (status, answer) = keys::openrouter_keys(&self.env, "PATCH", Some(&hash), Some(&json!({ "limit": usd }))).await?.ok_or_else(no_ai)?;
+                let (status, answer) = keys::openrouter_keys(&self.env, &self.cfg.openrouter_url, Method::Patch, Some(&hash), Some(&json!({ "limit": usd }))).await?.ok_or_else(no_ai)?;
                 if status != 200 {
                     return Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter would not change the key's limit ({status}): {answer}")));
                 }
                 self.set_meta("or_limit", &set)?;
             }
-            let opened = keys::open(&self.env, &sealed, &org).await.map_err(|e| CellError::host(format!("the org's key: {}", e.message)))?;
+            let opened = keys::open(&self.env, &keys::scope("Ledger", &self.state), &sealed).map_err(|e| CellError::host(format!("the org's key: {}", e.message)))?;
             if let Some(fresh) = opened.resealed {
                 self.set_meta("or_key", &fresh)?;
             }
             return String::from_utf8(opened.plaintext).map_err(|_| CellError::host("the org's key is not text"));
         }
         let body = json!({ "name": format!("fragment {org}"), "limit": usd, "limit_reset": "monthly", "include_byok_in_limit": false });
-        let (status, answer) = keys::openrouter_keys(&self.env, "POST", None, Some(&body)).await?.ok_or_else(no_ai)?;
+        let (status, answer) = keys::openrouter_keys(&self.env, &self.cfg.openrouter_url, Method::Post, None, Some(&body)).await?.ok_or_else(no_ai)?;
         let (Some(key), Some(hash)) = (answer["key"].as_str(), answer["data"]["hash"].as_str()) else {
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter would not mint a key ({status})")));
         };
-        let sealed = keys::seal(&self.env, key.as_bytes()).await?;
+        let sealed = keys::seal(&self.env, &keys::scope("Ledger", &self.state), key.as_bytes())?;
         self.set_meta("or_key", &sealed)?;
         self.set_meta("or_hash", hash)?;
         self.set_meta("or_limit", &format!("{period}:{allowance}"))?;

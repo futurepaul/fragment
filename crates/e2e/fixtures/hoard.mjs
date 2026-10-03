@@ -1,4 +1,4 @@
-// Fills its own database a MiB at a time: the node caps it at 16 MiB.
+// Fills its own database a MiB at a time: the platform caps it at 16 MiB.
 import { DurableObject } from "cloudflare:workers";
 
 const MIB = "x".repeat(1024 * 1024);
@@ -14,12 +14,6 @@ export class App extends DurableObject {
   }
 
   add({ mib }) {
-    this.#put(mib);
-    return this.size();
-  }
-
-  // a query that writes anyway: the cap is the node's, not the platform's wrapper
-  sneak({ mib }) {
     this.#put(mib);
     return this.size();
   }

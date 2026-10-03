@@ -1,10 +1,41 @@
 {
   "name": "probe",
   "operations": {
-    "try_eval": { "kind": "query", "role": "viewer" },
-    "try_function": { "kind": "query", "role": "viewer" },
-    "try_wait": { "kind": "query", "role": "viewer" },
-    "bomb": { "kind": "query", "role": "viewer" },
-    "hello": { "kind": "query", "role": "viewer" }
+    "try_eval": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_function": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_wait": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "hello": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_alarm": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_transaction": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_put": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_facets": {
+      "kind": "query",
+      "role": "viewer"
+    },
+    "try_alarm_proto": {
+      "kind": "query",
+      "role": "viewer"
+    }
   }
 }

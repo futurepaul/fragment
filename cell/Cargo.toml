@@ -25,7 +25,7 @@ base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 url = "2.5"
 fragment-proto = { path = "../crates/proto" }
-fragment-nip98 = { path = "../crates/nip98" }
+fragment-nip98 = { path = "../crates/nip98", features = ["signer"] }
 fragment-core = { path = "../crates/core" }
 fragment-templates = { path = "../crates/templates" }
 

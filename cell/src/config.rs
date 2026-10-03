@@ -16,6 +16,10 @@ pub struct CodeStorageConfig {
     pub org: String,
     /// The API base, e.g. `https://api.<org>.code.storage`.
     pub api: String,
+    /// `CODESTORAGE_REPO_PREFIX`: what this deployment's repos are named
+    /// with first (a branch deployment's `<branch>--`), so deployments that
+    /// share an org never share a repo.
+    pub repo_prefix: String,
 }
 
 /// WorkOS AuthKit (phase 4 slice B): fragment's own environment.
@@ -45,6 +49,10 @@ pub struct Config {
     /// host under it sends a browser to its host under the suffix. It counts
     /// only beside a suffix, and one that differs from it.
     legacy_host_suffix: Option<String>,
+    /// `FRAGMENT_HOST_LABEL_SUFFIX` (`--<branch>`): a branch deployment's
+    /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
+    /// other branches' in one zone.
+    host_label_suffix: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -101,11 +109,10 @@ fn deploy_id(env: &Env) -> String {
 ///
 /// A cache, so its contract. Source: the deployment's Worker variables.
 /// Invalidation: a deploy (or, in dev, a change to `.dev.vars`, which
-/// rebuilds) starts new isolates, and each builds its own. Stale reads:
-/// impossible, because celld writes the variables into an isolate's `env`
-/// once, as literals, when it builds the isolate from its deployment's
-/// config (`build_env`), and never changes them under it; `from_env`
-/// checks that on every call against `FRAGMENT_DEPLOY_ID`.
+/// reloads) starts new isolates, and each builds its own. Stale reads:
+/// impossible, because a Worker version's variables are fixed for every
+/// isolate that runs it; `from_env` checks that on every call against
+/// `FRAGMENT_DEPLOY_ID`.
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
 impl Config {
@@ -114,7 +121,7 @@ impl Config {
         let cfg = CONFIG.get_or_init(|| Config::build(env));
         // one variable read, against the 19 a build takes: variables that
         // changed under a running isolate would break the contract above
-        assert_eq!(deploy_id(env), cfg.deploy_id, "celld changed a Worker variable under a running isolate");
+        assert_eq!(deploy_id(env), cfg.deploy_id, "a Worker variable changed under a running isolate");
         cfg
     }
 
@@ -123,14 +130,26 @@ impl Config {
         let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
         let host_suffix = suffix("FRAGMENT_HOST_SUFFIX");
         let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| host_suffix.as_ref().is_some_and(|s| s != l));
+        // a branch deployment's fragments share its zone with other branches'
+        let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
+        assert!(
+            host_label_suffix.as_deref().is_none_or(valid_label_suffix),
+            "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (^--[a-z0-9][a-z0-9-]{{0,30}}$)"
+        );
         Config {
             codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
                 let api =
                     var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
-                CodeStorageConfig { org, api }
+                let repo_prefix = var(env, "CODESTORAGE_REPO_PREFIX").unwrap_or_default();
+                assert!(
+                    repo_prefix.is_empty() || (repo_prefix.ends_with("--") && repo_prefix.len() <= 20 && repo_prefix.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')),
+                    "CODESTORAGE_REPO_PREFIX is a branch name and `--`"
+                );
+                CodeStorageConfig { org, api, repo_prefix }
             }),
             host_suffix,
             legacy_host_suffix,
+            host_label_suffix,
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local: var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow"),
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
@@ -168,6 +187,12 @@ impl Config {
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
             Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
         }
+    }
+
+    /// A branch deployment's mark on its fragments' labels (`--<branch>`),
+    /// or nothing.
+    pub fn host_label_suffix(&self) -> &str {
+        self.host_label_suffix.as_deref().unwrap_or("")
     }
 
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {
@@ -216,7 +241,12 @@ impl Config {
     /// fragment). celld does not vouch for `Host`, so this is the only way a
     /// host becomes a fragment: an exact single label under the suffix.
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
-        from_flat_name(&label_under(host, self.host_suffix.as_deref()?)?)
+        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let flat = match &self.host_label_suffix {
+            Some(branch) => label.strip_suffix(branch.as_str())?,
+            None => &label,
+        };
+        from_flat_name(flat)
     }
 
     /// The fragment an old host names (`<label>--<username>.<legacy
@@ -250,11 +280,24 @@ impl Config {
         match &self.host_suffix {
             Some(suffix) => {
                 let host = flat_name(name).unwrap_or_else(|| name.to_string());
-                format!("{}://{host}.{suffix}{port}", arrived.scheme())
+                let branch = self.host_label_suffix.as_deref().unwrap_or("");
+                format!("{}://{host}{branch}.{suffix}{port}", arrived.scheme())
             }
             None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
         }
     }
+}
+
+/// A branch's mark on its fragments' labels: `--` and its name, so
+/// `<label>--<username>--<branch>.<suffix>` stays one DNS label under the
+/// zone's one wildcard certificate (docs/cloudflare-v1.md, decision 20).
+fn valid_label_suffix(s: &str) -> bool {
+    s.strip_prefix("--").is_some_and(|b| {
+        (1..=31).contains(&b.len())
+            && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            && b.as_bytes()[0] != b'-'
+            && !b.contains("--")
+    })
 }
 
 /// The label `host` has under `suffix` (`x` of `x.<suffix>`), if it is one.

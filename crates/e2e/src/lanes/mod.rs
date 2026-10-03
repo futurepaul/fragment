@@ -87,8 +87,6 @@ const LANES: &[Lane] = &[
     sync::folder_sync,
     restart::restart,
     restart::pathmode,
-    // runs last: a node of its own
-    |s, _| limits::node_full(s),
 ];
 
 /// Runs every lane, each with an API of its own. A lane that returns an

@@ -31,16 +31,16 @@ pub const SW_JS: &str = include_str!("../sw.js");
 
 impl FragmentCell {
     /// The fragment's VAPID key, made on first use and sealed like a secret
-    /// (`KEYS` opens it for this cell alone).
+    /// (it opens in this cell alone).
     pub(crate) async fn vapid(&self) -> CellResult<Vapid> {
         if self.meta(MetaKey::Vapid)?.is_none() {
             let key = Vapid::draw(js::random_bytes);
-            let sealed = keys::seal(&self.env, &key.to_bytes()).await?;
+            let sealed = keys::seal(&self.env, &self.scope(), &key.to_bytes())?;
             // two first uses at once: the first stored wins, and both use it
             self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![MetaKey::Vapid.key().into(), sealed.into()])?;
         }
         let sealed = self.must(MetaKey::Vapid)?;
-        let opened = keys::open(&self.env, &sealed, &self.must(MetaKey::Npub)?).await.map_err(|e| CellError::host(format!("the VAPID key: {}", e.message)))?;
+        let opened = keys::open(&self.env, &self.scope(), &sealed).map_err(|e| CellError::host(format!("the VAPID key: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE meta SET value = ? WHERE key = ? AND value = ?", vec![fresh.into(), MetaKey::Vapid.key().into(), sealed.into()])?;
         }

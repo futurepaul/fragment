@@ -387,13 +387,13 @@ impl RegistryCell {
         Ok(Began { state })
     }
 
-    /// WorkOS's code, exchanged by `KEYS` for the Registry, then the sign-in
+    /// WorkOS's code, exchanged with the deployment's API key, then the sign-in
     /// finished. A code is single-use at WorkOS; the state here.
     pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
         if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
             return Err(CellError::invalid("an exchange names its state, code, and client"));
         }
-        let (status, answer) = crate::keys::workos_authenticate(&self.env, &b.client_id, &b.code).await?;
+        let (status, answer) = crate::keys::workos_authenticate(&self.env, &self.cfg.workos()?.api, &b.client_id, &b.code).await?;
         if status != 200 {
             let refusal = serde_json::from_value::<Refusal>(answer).ok();
             let why = refusal.and_then(|r| r.error_description.or(r.message)).unwrap_or_else(|| "no reason given".into());

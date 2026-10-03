@@ -1,4 +1,6 @@
-// Tries what a loaded worker may not do (docs/hardening.md, H3).
+// Tries what an app may not do: code from strings, a blocked thread, and
+// the parts of its Durable Object the platform takes away (platform.mjs,
+// `lock`).
 import { DurableObject } from "cloudflare:workers";
 
 function attempt(f) {
@@ -22,11 +24,25 @@ export class App extends DurableObject {
     return attempt(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10));
   }
 
-  // grows its heap 8 MiB at a time until the node ends it
-  bomb() {
-    const keep = [];
-    for (let i = 0; i < 512; i++) keep.push(new Array(1 << 20).fill(i + 0.5));
-    return { survived: keep.length };
+  try_alarm() {
+    return attempt(() => this.ctx.storage.setAlarm(Date.now() + 1000));
+  }
+
+  // the original, sought on the prototype
+  try_alarm_proto() {
+    return attempt(() => Object.getPrototypeOf(this.ctx.storage).setAlarm.call(this.ctx.storage, Date.now() + 1000));
+  }
+
+  try_transaction() {
+    return attempt(() => this.ctx.storage.transaction(async () => {}));
+  }
+
+  try_put() {
+    return attempt(() => this.ctx.storage.put("k", "v"));
+  }
+
+  try_facets() {
+    return attempt(() => this.ctx.facets.get("mine", () => ({})));
   }
 
   hello() {

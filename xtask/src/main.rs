@@ -1,11 +1,11 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
-//!   celld            build the pinned celld fork into target/celld/bin
-//!   dev [--clean]    build, then run the stack in the foreground: the cell on
-//!                    :8790 (fragments at <label>--<username>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, and agents co-hosted on the
-//!                    cell's node (their turns spend their owner's budget: a
+//!   dev [--clean]    build, then run the stack in the foreground under
+//!                    `wrangler dev`: the cell on :8790 (fragments at
+//!                    <label>--<username>.fragment.localhost:8790), the
+//!                    code.storage fake on :8792, and the agents' Worker beside
+//!                    it (their turns spend their owner's budget: a
 //!                    real OpenRouter key per person, minted with the
 //!                    management key OPENROUTER_MANAGEMENT_KEY_FILE names)
 //!   try <template> [name]
@@ -15,10 +15,16 @@
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
 //!                    or --except <section>[,...])
 //!   check            host tests and clippy, warnings denied
+//!   deploy --config <file> [--branch <name>]
+//!                    build and deploy to Cloudflare from a deployment's config
+//!                    (deploy/example.jsonc): a branch gets a complete copy of
+//!                    its own at <branch>.<zone> (xtask/src/deploy.rs)
+//!   teardown --config <file> --branch <name>
+//!                    remove a branch deployment (irreversible)
 //!
-//! No command deploys: fragment.club runs on celld from the `celld` branch
-//! (the tag celld-final) until the move to Cloudflare (docs/cloudflare-v1.md,
-//! decision 35), and master's deploy arrives with it.
+//! fragment.club runs on celld from the `celld` branch (the tag celld-final)
+//! until the cutover (docs/cloudflare-v1.md, decision 35): `deploy` never
+//! reaches it.
 
 use std::net::TcpStream;
 use std::path::Path;
@@ -26,6 +32,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
+
+mod deploy;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
@@ -38,8 +46,8 @@ const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
 const DEV_ORG: &str = "fragment-dev";
 
 /// A command as errors show it: the program and its arguments only
-/// (`{cmd:?}` would print the environment set on it, and the dev stack
-/// sets the node's secrets there).
+/// (`{cmd:?}` would print the environment set on it, where a deploy may
+/// hand wrangler its token).
 fn shown(cmd: &Command) -> String {
     std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
@@ -58,7 +66,7 @@ fn build() -> Result<()> {
     build_worker(&devstack::agent_dir())
 }
 
-/// One celld project (`cell/` or `agent/`) for wasm32, into its `build/`.
+/// One Worker project (`cell/` or `agent/`) for wasm32, into its `build/`.
 /// One at a time: worker-build fetches its tools into one shared cache,
 /// and two at once race there.
 fn build_worker(dir: &Path) -> Result<()> {
@@ -70,38 +78,6 @@ fn build_worker(dir: &Path) -> Result<()> {
         bail!("worker-build {WORKER_BUILD_VERSION} is required, found {}", version.trim());
     }
     run(Command::new("worker-build").arg("--release").current_dir(dir))
-}
-
-/// Builds the pinned fork. Its seam builds our native services
-/// (crates/native) from a fragment-next checkout beside it named
-/// `fragment/`: here, a link to this repository, so the node's `KEYS` is
-/// always this tree's. `CELLD_FORK_DIR` names a local clone of the fork to
-/// fetch the pinned commit from before it is pushed.
-fn celld() -> Result<()> {
-    let root = devstack::repo_root().join("target/celld");
-    let src = root.join("src");
-    std::fs::create_dir_all(&root)?;
-    let beside = root.join("fragment");
-    if std::fs::symlink_metadata(&beside).is_err() {
-        std::os::unix::fs::symlink("../..", &beside).context("link target/celld/fragment to this repository")?;
-    }
-    if !src.join(".git").is_dir() {
-        run(Command::new("git").args(["clone", "--quiet", devstack::CELLD_FORK_URL]).arg(&src))?;
-    }
-    let head = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&src).output()?;
-    if String::from_utf8_lossy(&head.stdout).trim() != devstack::CELLD_FORK_REV {
-        match std::env::var_os("CELLD_FORK_DIR") {
-            Some(dir) => run(Command::new("git").args(["fetch", "--quiet"]).arg(&dir).arg("+refs/heads/*:refs/remotes/local/*").current_dir(&src))?,
-            None => run(Command::new("git").args(["fetch", "--quiet", "origin"]).current_dir(&src))?,
-        }
-        run(Command::new("git").args(["checkout", "--quiet", "--detach", devstack::CELLD_FORK_REV]).current_dir(&src))?;
-    }
-    // every time: our crates in it may have changed (a no-op build is quick)
-    run(Command::new("cargo").args(["build", "--release", "--locked", "-p", "celld"]).current_dir(&src))?;
-    std::fs::create_dir_all(root.join("bin"))?;
-    std::fs::copy(src.join("target/release/celld"), devstack::fork_celld_path())?;
-    println!("celld fork {} built", &devstack::CELLD_FORK_REV[..7]);
-    Ok(())
 }
 
 fn dev(args: &[String]) -> Result<()> {
@@ -139,7 +115,7 @@ fn dev(args: &[String]) -> Result<()> {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
     };
-    let node_env = devstack::Fleet {
+    devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
@@ -164,7 +140,7 @@ fn dev(args: &[String]) -> Result<()> {
         test_hooks: false,
     }
     .configure(&devstack::cell_dir())?;
-    // the agents' script is co-hosted on the same node, as the fleet runs it
+    // the agents' Worker runs beside it, as a deployment runs it
     devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
@@ -177,23 +153,21 @@ fn dev(args: &[String]) -> Result<()> {
         project: devstack::cell_dir(),
         port: DEV_PORT,
         clean,
-        watch: true,
-        env: node_env,
         with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
-        // the node's own warnings and information, when asked for
+        // wrangler's own debug logs, when asked for
         node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
     };
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
-    println!("  agents:       {}/api/agents (co-hosted; signed)", node.base);
+    println!("  agents:       {}/api/agents (beside it; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = node.wait()?;
-    println!("celld dev exited: {status}");
+    println!("wrangler dev exited: {status}");
     Ok(())
 }
 
@@ -348,12 +322,13 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("build") => build(),
-        Some("celld") => celld(),
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
         Some("check") => check(),
-        _ => bail!("usage: cargo xtask build | celld | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] | check"),
+        Some("deploy") => deploy::deploy(&args[1..]),
+        Some("teardown") => deploy::teardown(&args[1..]),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 
@@ -386,8 +361,8 @@ mod tests {
 
     #[test]
     fn a_failed_command_never_shows_its_environment() {
-        let mut cmd = std::process::Command::new("celld");
+        let mut cmd = std::process::Command::new("wrangler");
         cmd.args(["dev", "--port", "8790"]).env("FRAGMENT_KEYS_HOST_SECRET", "not-a-real-secret");
-        assert_eq!(super::shown(&cmd), "celld dev --port 8790");
+        assert_eq!(super::shown(&cmd), "wrangler dev --port 8790");
     }
 }

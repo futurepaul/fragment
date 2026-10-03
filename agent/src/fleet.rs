@@ -31,20 +31,19 @@ pub struct Fleet {
     pub acting_for: Option<String>,
 }
 
-/// The agent's key, as `KEYS` holds it: sealed in the agent's own storage,
-/// used only through the service.
+/// The agent's key, sealed in the agent's own storage (keys.rs).
 #[derive(Clone)]
 pub struct Signer {
     pub env: Env,
     pub sql: SqlStorage,
+    /// What its sealed key names.
+    pub scope: String,
 }
 
 impl Signer {
-    pub async fn sign(&self, what: Sign<'_>) -> anyhow::Result<String> {
+    pub fn sign(&self, what: Sign<'_>) -> anyhow::Result<String> {
         let sealed = kv_get(&self.sql, "secret")?.context("the agent has no key")?;
-        // what an agent made before KEYS sealed its key with
-        let npub = kv_get(&self.sql, "npub")?.unwrap_or_default();
-        let signed = keys::nostr_sign(&self.env, &sealed, &npub, what).await?;
+        let signed = keys::nostr_sign(&self.env, &self.scope, &sealed, what)?;
         if let Some(fresh) = signed.resealed {
             kv_set(&self.sql, "secret", fresh)?;
         }
@@ -77,7 +76,7 @@ impl Fleet {
         };
         let headers = Headers::new();
         let payload = (!bytes.is_empty()).then(|| hex::encode(Sha256::digest(&bytes)));
-        let auth = self.signer.sign(Sign::Header { method: method.as_ref(), url: &url, payload }).await?;
+        let auth = self.signer.sign(Sign::Header { method: method.as_ref(), url: &url, payload })?;
         headers.set("authorization", &auth).map_err(|e| anyhow!("{e}"))?;
         let mut init = RequestInit::new();
         init.with_method(method);

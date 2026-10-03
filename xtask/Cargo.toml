@@ -7,5 +7,7 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 fragment-devstack = { path = "../crates/devstack" }
 fragment-fakes = { path = "../crates/fakes" }

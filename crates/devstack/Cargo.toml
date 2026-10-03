@@ -3,7 +3,8 @@ name = "fragment-devstack"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Starts and stops the local fragment stack (a celld dev node for cell/) for xtask and the e2e."
+description = "Starts and stops the local fragment stack (`wrangler dev` for cell/ and agent/) for xtask and the e2e."
 
 [dependencies]
 anyhow = "1"
+serde_json = "1"

@@ -124,7 +124,7 @@ impl<'a> Cs<'a> {
         if let Some(t) = TOKENS.with(|t| t.borrow().get(repo, scopes, now, RUNTIME_TOKEN_MARGIN_S).map(str::to_string)) {
             return Ok(t);
         }
-        let (token, expires_ms) = keys::codestorage_token(self.env, repo, RUNTIME_SUB, scopes, RUNTIME_TOKEN_TTL_S).await?;
+        let (token, expires_ms) = keys::codestorage_token(self.env, &self.cfg.org, repo, RUNTIME_SUB, scopes, RUNTIME_TOKEN_TTL_S)?;
         TOKENS.with(|t| t.borrow_mut().insert(repo, scopes, token.clone(), expires_ms / 1000, now));
         Ok(token)
     }
@@ -330,7 +330,7 @@ impl<'a> Cs<'a> {
     pub async fn storage_token(&self, repo: &str, principal: &str) -> CellResult<StorageToken> {
         let scopes = ["git:read", "git:write"];
         let sub = format!("editor:{principal}");
-        let (token, expires_ms) = keys::codestorage_token(self.env, repo, &sub, &scopes, limits::STORAGE_TOKEN_TTL_S).await?;
+        let (token, expires_ms) = keys::codestorage_token(self.env, &self.cfg.org, repo, &sub, &scopes, limits::STORAGE_TOKEN_TTL_S)?;
         let exp = expires_ms / 1000;
         let claims = token.split('.').nth(1).and_then(|p| {
             use base64::Engine;

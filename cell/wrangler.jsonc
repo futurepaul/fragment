@@ -1,14 +1,19 @@
 {
+  // The platform Worker for `wrangler dev` (`cargo xtask dev` and the e2e,
+  // which stage a copy). `cargo xtask deploy` renders a deployment's own
+  // config from this one (names, routes, the bucket and queues), so a
+  // binding is declared here once.
   "name": "fragment",
   // entry.mjs is the JavaScript shim around the Rust build (build/index.js):
-  // workers-rs classes do not extend DurableObject, which celld requires for
-  // RPC, so the shim declares the classes and forwards to Rust.
+  // it declares the Durable Object, WorkerEntrypoint and Workflow classes and
+  // forwards to Rust, which workers-rs does not wrap for these.
   "main": "entry.mjs",
   "compatibility_date": "2026-01-01",
+  "build": { "command": "worker-build --release", "watch_dir": ["src", "../crates"] },
   "worker_loaders": [{ "binding": "LOADER" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
-  // Blobs: the bytes of files of 1 MiB or more (blobs.rs), in the fleet bucket.
+  // Blobs: the bytes of files of 1 MiB or more (blobs.rs).
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
   // Deliveries: web push and notifyUrls, sent outside any request (deliveries.rs).
   "queues": {
@@ -18,33 +23,20 @@
       { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 }
     ]
   },
-  // The node's keys (crates/native, docs/hardening.md H1): sealing, the
-  // code.storage JWT, WorkOS's exchange, OpenRouter's key API. Needs our
-  // celld fork, which routes `native:*` targets to that crate.
-  // AGENTS is the agents' script (agent/), co-hosted in this fleet: it has
-  // no ingress of its own, and the router hands it /api/agents and /api/a/*.
-  "services": [{ "binding": "KEYS", "service": "native:keys" }, { "binding": "AGENTS", "service": "fragment-agent" }],
+  // AGENTS is the agents' Worker (agent/): it has no route of its own, and
+  // the router hands it /api/agents and /api/a/*.
+  "services": [{ "binding": "AGENTS", "service": "fragment-agent" }],
   "durable_objects": {
     "bindings": [
       { "name": "FRAGMENT", "class_name": "Fragment" },
       { "name": "PRINCIPAL", "class_name": "Principal" },
-      // The identity registry: one cell for the fleet (registry.rs).
+      // The identity registry: one object for the deployment (registry.rs).
       { "name": "REGISTRY", "class_name": "Registry" },
-      // A billing org's budget and usage: one cell per org (ledger.rs).
+      // A billing org's budget and usage: one object per org (ledger.rs).
       { "name": "LEDGER", "class_name": "Ledger" }
     ]
   },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Fragment"] },
-    { "tag": "v2", "new_sqlite_classes": ["Principal"] },
-    { "tag": "v3", "new_sqlite_classes": ["Registry"] },
-    { "tag": "v4", "new_sqlite_classes": ["Ledger"] },
-    // Computer and Hermes went at the cut (celld-final): neither is bound
-    // or exported any more. celld takes `new_sqlite_classes` alone and stops
-    // a deployment that deletes a class, so `{"tag": "v7",
-    // "deleted_classes": ["Computer", "Hermes"]}` waits for wrangler
-    // (docs/cloudflare-v1.md, phase 2).
-    { "tag": "v5", "new_sqlite_classes": ["Computer"] },
-    { "tag": "v6", "new_sqlite_classes": ["Hermes"] }
-  ]
+  // Restarted at the move to Cloudflare: nothing on celld migrates
+  // (docs/cloudflare-v1.md, decision 33).
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger"] }]
 }

@@ -868,7 +868,6 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await
         }
-        (Method::Get, ["api", "test", "env"]) if cfg.test_hooks => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
         (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if cfg.test_hooks => {
             /// The fragment a test hook's body names (the rest is the fragment's to read).
             #[derive(Deserialize)]

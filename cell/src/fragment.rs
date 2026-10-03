@@ -311,7 +311,7 @@ pub(crate) enum MetaKey {
     Owner,
     /// The fragment's own key.
     Npub,
-    /// Its secret key, sealed by `KEYS`.
+    /// Its secret key, sealed for this cell.
     FragmentSecret,
     Visibility,
     /// The share link's token.
@@ -762,6 +762,11 @@ impl FragmentCell {
         Ok(caller)
     }
 
+    /// What a value this fragment seals names (keys.rs): it opens only here.
+    pub(crate) fn scope(&self) -> String {
+        crate::keys::scope("Fragment", &self.state)
+    }
+
     /// The signer's identity.
     pub(crate) fn caller_id<'a>(&self, caller: &'a Caller) -> CellResult<&'a str> {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
@@ -770,12 +775,12 @@ impl FragmentCell {
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
         if path == "/test/keys" && self.cfg.test_hooks {
-            // this cell's own use of KEYS: the e2e checks that what one
-            // fragment seals another cannot open (the host attests which)
+            // this cell's own sealing: the e2e checks that what one
+            // fragment seals another cannot open
             let body: Value = body_json(&mut req).await?;
             let answer = match (body["op"].as_str(), body["plaintext"].as_str(), body["sealed"].as_str()) {
-                (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, text.as_bytes()).await? }),
-                (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, sealed, "").await?.plaintext) }),
+                (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, &self.scope(), text.as_bytes())? }),
+                (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, &self.scope(), sealed)?.plaintext) }),
                 _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
             };
             return json_response(&answer);
@@ -975,11 +980,12 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::Name, &body.name)?;
         self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
-        // the fragment's own key is made by KEYS; its secret stays sealed there
+        // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
-            let repo_name = fragment_proto::flat_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
+            let flat = fragment_proto::flat_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
+            let repo_name = format!("{}{flat}", cs_cfg.repo_prefix);
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env).await?;
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope())?;
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
         let (repo, fragment_pub, sealed) = match made.await {

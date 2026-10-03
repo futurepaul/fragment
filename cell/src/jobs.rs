@@ -1211,13 +1211,13 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }
 
-    /// A secret's value, for the egress point only (`KEYS` opens it for
-    /// this cell alone). A value sealed under a previous host secret, or by
-    /// the cell itself before `KEYS`, comes back resealed and is stored so.
+    /// A secret's value, for the egress point only (it opens in this cell
+    /// alone). A value sealed under a previous host secret comes back
+    /// resealed and is stored so.
     pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
         let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let opened = keys::open(&self.env, &sealed, &self.must(MetaKey::Npub)?).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        let opened = keys::open(&self.env, &self.scope(), &sealed).map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));

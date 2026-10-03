@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "description": "The JavaScript the platform needs from npm: wrangler (dev, deploy) and the Sandbox SDK's helpers the cell's shim bundles. Exact pins; npm ci.",
+  "devDependencies": {
+    "wrangler": "4.145.0"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "1.0.0"
+  }
+}

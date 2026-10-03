@@ -306,10 +306,11 @@ async fn fragments_list(env: &Env, cfg: &Config, url: &Url, id: &str) -> String 
 }
 
 /// What follows a label in a fragment's address: `--<username>.<suffix>`
-/// (decision 16), or, on a fleet without a suffix, `.<username>`.
+/// (decision 16; a branch's mark before the dot), or, on a deployment
+/// without a suffix, `.<username>`.
 fn after_label(cfg: &Config, username: &str) -> String {
     match &cfg.host_suffix {
-        Some(suffix) => format!("--{username}.{suffix}"),
+        Some(suffix) => format!("--{username}{}.{suffix}", cfg.host_label_suffix()),
         None => format!(".{username}"),
     }
 }

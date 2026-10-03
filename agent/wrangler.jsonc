@@ -1,13 +1,10 @@
 {
   "name": "fragment-agent",
   // worker-build bundles the Rust worker already: index.js imports only
-  // index_bg.wasm and cloudflare:workers, so celld takes it as it is
+  // index_bg.wasm and cloudflare:workers
   "main": "build/index.js",
   "no_bundle": true,
   "compatibility_date": "2026-01-01",
-  // The node's keys (crates/native): the agent's nostr key stays sealed
-  // there (our celld fork routes `native:*`)
-  "services": [{ "binding": "KEYS", "service": "native:keys" }],
   "durable_objects": { "bindings": [{ "name": "AGENT", "class_name": "Agent" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }]
 }

@@ -1,11 +1,13 @@
-//! The local stack: one `celld dev` node serving `cell/`, with its
-//! variables rendered into `cell/.dev.vars`. `xtask dev` runs it in the
-//! foreground; the e2e starts, crashes, and restarts it.
+//! The local stack: one `wrangler dev` process serving the platform Worker
+//! (`cell/`) and the agents' Worker (`agent/`) together, with each one's
+//! variables and secrets rendered into its `.dev.vars`. `xtask dev` runs it
+//! in the foreground; the e2e starts, crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -17,15 +19,8 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fork of celld (branch `hardening-v0.6.0`): v0.6.0 with public-only
-/// Worker egress
-/// (`CELLD_EGRESS_PUBLIC_ONLY`, docs/phase-3.md slice E), the native-services
-/// seam that serves `KEYS` from crates/native, and the settings
-/// docs/hardening.md turns on: `CELLD_FACET_MAX_BYTES`,
-/// `CELLD_LOADED_WORKERS_MAX`, `CELLD_DYNAMIC_LOCKDOWN`,
-/// `CELLD_INTERNAL_PEER_ONLY`, and a hard heap ceiling.
-pub const CELLD_FORK_URL: &str = "https://github.com/futurepaul/celld.git";
-pub const CELLD_FORK_REV: &str = "4f50c819214d85d604e09f12a10a90ca0b37119e";
+/// The wrangler the repo pins (package.json; `npm ci` installs it).
+pub const WRANGLER_VERSION: &str = "4.145.0";
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -41,21 +36,50 @@ pub fn agent_dir() -> PathBuf {
     repo_root().join("agent")
 }
 
-/// A copy of the built agent project at `dir` (its config and build).
-pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
-    let agent = agent_dir();
-    fs::create_dir_all(dir.join("build"))?;
-    fs::copy(agent.join("wrangler.jsonc"), dir.join("wrangler.jsonc")).context("stage the agent's wrangler.jsonc")?;
-    for f in ["index.js", "index_bg.wasm"] {
-        fs::copy(agent.join("build").join(f), dir.join("build").join(f)).with_context(|| format!("stage agent/build/{f} (run `cargo xtask build`)"))?;
+/// `text` (JSONC: JSON with `//` comments) as JSON.
+pub fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let (mut in_string, mut escaped) = (false, false);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if c == '/' && chars.peek() == Some(&'/') {
+            // to the end of the line, which stays
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
     }
-    Ok(dir.to_path_buf())
+    out
 }
 
-/// A copy of the built cell project at `dir` (its config, shim, and build),
-/// so a node run from it keeps its state and variables
-/// apart from `cell/`, where `xtask dev` runs.
-pub fn stage_project(dir: &Path) -> Result<PathBuf> {
+/// A project's wrangler config, parsed.
+pub fn read_config(project: &Path) -> Result<serde_json::Value> {
+    let path = project.join("wrangler.jsonc");
+    let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
+}
+
+/// A copy of a built project at `dir`: its config (without its `build`
+/// step: a staged copy has no source to build), its `files`, and its
+/// `build/`, so a node run from it keeps its state and variables apart
+/// from the source tree, where `xtask dev` runs.
+fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
@@ -69,66 +93,50 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
         }
         Ok(())
     }
-    let cell = cell_dir();
     fs::create_dir_all(dir)?;
-    for f in ["wrangler.jsonc", "entry.mjs"] {
-        fs::copy(cell.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
+    let mut config = read_config(from)?;
+    config.as_object_mut().context("a wrangler config is an object")?.remove("build");
+    fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
+    for f in files {
+        fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
     }
     let _ = fs::remove_dir_all(dir.join("build"));
-    copy_dir(&cell.join("build"), &dir.join("build")).context("stage cell/build (run `cargo xtask build`)")?;
+    copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
     Ok(dir.to_path_buf())
 }
 
-/// Where `xtask celld` installs the fork's binary.
-pub fn fork_celld_path() -> PathBuf {
-    repo_root().join("target/celld/bin/celld")
+/// A copy of the built agent project at `dir`.
+pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
+    stage(&agent_dir(), dir, &[])
+}
+
+/// A copy of the built cell project at `dir` (its config, shim, and build).
+pub fn stage_project(dir: &Path) -> Result<PathBuf> {
+    stage(&cell_dir(), dir, &["entry.mjs"])
 }
 
 /// The binaries the node needs.
 pub struct Tools {
-    pub celld: PathBuf,
-    pub esbuild: PathBuf,
+    pub wrangler: PathBuf,
 }
 
 impl Tools {
-    /// `CELLD_BIN` or the fork build; `CELLD_ESBUILD` or the esbuild
-    /// worker-build downloads into its cache.
+    /// `WRANGLER_BIN`, or the repo's pinned wrangler (`npm ci`).
     pub fn locate() -> Result<Tools> {
-        let celld = match std::env::var_os("CELLD_BIN") {
+        let wrangler = match std::env::var_os("WRANGLER_BIN") {
             Some(p) => PathBuf::from(p),
-            None => fork_celld_path(),
+            None => repo_root().join("node_modules/.bin/wrangler"),
         };
-        if !celld.is_file() {
-            bail!("no celld at {} (run `cargo xtask celld`, or set CELLD_BIN)", celld.display());
+        if !wrangler.is_file() {
+            bail!("no wrangler at {} (run `npm ci` at the repo root, or set WRANGLER_BIN)", wrangler.display());
         }
-        Ok(Tools { celld, esbuild: esbuild()? })
+        let out = Command::new(&wrangler).arg("--version").env("WRANGLER_SEND_METRICS", "false").output().with_context(|| format!("run {}", wrangler.display()))?;
+        let version = String::from_utf8_lossy(&out.stdout);
+        if !version.contains(WRANGLER_VERSION) {
+            bail!("wrangler {WRANGLER_VERSION} is required (package.json), found {}", version.trim());
+        }
+        Ok(Tools { wrangler })
     }
-}
-
-/// The esbuild the node bundles with: `CELLD_ESBUILD`, or the one
-/// worker-build downloads into its cache.
-pub fn esbuild() -> Result<PathBuf> {
-    match std::env::var_os("CELLD_ESBUILD") {
-        Some(p) => Ok(PathBuf::from(p)),
-        None => worker_build_esbuild(),
-    }
-}
-
-fn worker_build_esbuild() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME").context("HOME is unset")?;
-    let cache = PathBuf::from(home).join("Library/Caches/worker-build");
-    let mut found: Vec<PathBuf> = fs::read_dir(&cache)
-        .with_context(|| format!("no worker-build cache at {} (run `cargo xtask build` first)", cache.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("esbuild-")))
-        .collect();
-    found.sort();
-    let dir = found.pop().context("worker-build has not downloaded esbuild yet (run `cargo xtask build`)")?;
-    let bin = if dir.is_file() { dir } else { dir.join("bin/esbuild") };
-    if !bin.is_file() {
-        bail!("no esbuild binary at {}", bin.display());
-    }
-    Ok(bin)
 }
 
 /// A free local port.
@@ -147,11 +155,11 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-/// What a fleet is configured with (ROADMAP decision 13). The cell reads
-/// the plain settings as Worker variables; the fleet's secrets go to the
-/// node's environment, where only `KEYS` reads them (crates/native,
-/// docs/hardening.md H1). A dev or test fleet points code.storage at the
-/// fake in `crates/fakes`.
+/// What a local deployment is configured with. The cell reads its
+/// settings as Worker variables and its keys as Worker secrets
+/// (cell/src/keys.rs); under `wrangler dev` both come from `.dev.vars`
+/// (mode 600). A dev or test deployment points code.storage at the fake in
+/// `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -201,46 +209,15 @@ pub struct WorkOsVars {
     pub api_url: Option<String>,
 }
 
-/// An app's database: the platform refuses a mutation past
-/// `fragment_proto::limits::APP_DB_MAX_BYTES` (16 MiB); our celld fork stops
-/// every write at this, 4 MiB above, so the runtime's own bookkeeping in
-/// that database always has room.
-pub const FACET_MAX_BYTES: u64 = 20 * 1024 * 1024;
-
-/// The node's settings, as a fleet's (docs/hardening.md): `KEYS`'s secret,
-/// the app database cap, loaded workers without `eval` or `Atomics.wait`,
-/// and an internal listener that serves only fleet-signed peer routes.
-fn node_env(host_secret: &str) -> Vec<(String, String)> {
-    vec![
-        ("FRAGMENT_KEYS_HOST_SECRET".into(), host_secret.into()),
-        ("CELLD_FACET_MAX_BYTES".into(), FACET_MAX_BYTES.to_string()),
-        ("CELLD_DYNAMIC_LOCKDOWN".into(), "1".into()),
-        ("CELLD_INTERNAL_PEER_ONLY".into(), "1".into()),
-    ]
-}
-
 impl Fleet {
-    /// Renders the fleet's plain settings into the project's `.dev.vars`,
-    /// and answers the node's environment: the fleet's secrets, for `KEYS`.
-    pub fn configure(&self, project: &Path) -> Result<Vec<(String, String)>> {
-        let mut env = node_env(&self.host_secret);
-        env.push(("FRAGMENT_KEYS_CODESTORAGE_ORG".into(), self.codestorage_org.clone()));
-        env.push(("FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY".into(), self.codestorage_key_pem.clone()));
-        if let Some(w) = &self.workos {
-            env.push(("FRAGMENT_KEYS_WORKOS_API_KEY".into(), w.api_key.clone()));
-            if let Some(u) = &w.api_url {
-                env.push(("FRAGMENT_KEYS_WORKOS_URL".into(), u.clone()));
-            }
-        }
-        if let Some(k) = &self.openrouter_management {
-            env.push(("FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY".into(), k.clone()));
-            if let Some(u) = &self.openrouter_url {
-                env.push(("FRAGMENT_KEYS_OPENROUTER_URL".into(), u.clone()));
-            }
-        }
+    /// Renders the deployment's settings and secrets into the project's
+    /// `.dev.vars`.
+    pub fn configure(&self, project: &Path) -> Result<()> {
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
+            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
+            ("CODESTORAGE_PRIVATE_KEY", self.codestorage_key_pem.as_str()),
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
@@ -269,12 +246,16 @@ impl Fleet {
         }
         if let Some(w) = &self.workos {
             vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));
+            vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
             if let Some(u) = &w.api_url {
                 vars.push(("WORKOS_API_URL", u.as_str()));
             }
         }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
+        }
+        if let Some(k) = &self.openrouter_management {
+            vars.push(("OPENROUTER_MANAGEMENT_KEY", k.as_str()));
         }
         if let Some(b) = &self.budget_usd {
             vars.push(("FRAGMENT_BUDGET_USD", b.as_str()));
@@ -289,8 +270,7 @@ impl Fleet {
         if self.test_hooks {
             vars.push(("FRAGMENT_TEST_HOOKS", "allow"));
         }
-        write_dev_vars(project, &vars)?;
-        Ok(env)
+        write_dev_vars(project, &vars)
     }
 }
 
@@ -311,10 +291,10 @@ pub struct AgentFleet {
 }
 
 impl AgentFleet {
-    /// Renders the fleet into the project's `.dev.vars`, and answers the
-    /// node's environment (the host secret, for `KEYS`).
-    pub fn configure(&self, project: &Path) -> Result<Vec<(String, String)>> {
+    /// Renders the fleet into the project's `.dev.vars`.
+    pub fn configure(&self, project: &Path) -> Result<()> {
         let mut vars = vec![
+            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
             ("FRAGMENT_API", self.fragment_api.as_str()),
             ("AGENT_URL", self.agent_url.as_str()),
         ];
@@ -324,8 +304,7 @@ impl AgentFleet {
         if self.test_hooks {
             vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
-        write_dev_vars(project, &vars)?;
-        Ok(node_env(&self.host_secret))
+        write_dev_vars(project, &vars)
     }
 }
 
@@ -353,23 +332,18 @@ pub fn dev_secret(name: &str, make: impl FnOnce() -> String) -> Result<String> {
 }
 
 pub struct NodeOptions {
-    /// The celld project the node runs: `cell/` for `xtask dev`, a staged
-    /// copy for the e2e. Its state (`.celld/dev`) and variables live there.
+    /// The platform Worker's project: `cell/` for `xtask dev`, a staged
+    /// copy for the e2e. Its state (`.wrangler/state`) lives there.
     pub project: PathBuf,
     pub port: u16,
     /// Discard the local state first.
     pub clean: bool,
-    /// Rebuild on file changes (for `xtask dev`; the e2e never watches).
-    pub watch: bool,
-    /// Extra environment for the node (celld tuning variables).
-    pub env: Vec<(String, String)>,
-    /// Projects co-hosted beside it for its service bindings (`celld dev
-    /// --with`): the agents' script, as the fleet runs it.
+    /// Projects run beside it for its service bindings (`wrangler dev -c`
+    /// again): the agents' Worker.
     pub with: Vec<PathBuf>,
-    /// Where each boot's log goes (`celld-<port>-<boot>.log`).
+    /// Where each boot's log goes (`node-<port>-<boot>.log`).
     pub log_dir: PathBuf,
-    /// `celld dev --logs`: the node's own warnings and information in the
-    /// log, beside the workers' output (a panic's message among them).
+    /// wrangler's own debug logs in the log, beside the Workers' output.
     pub node_logs: bool,
 }
 
@@ -377,14 +351,14 @@ pub struct NodeOptions {
 /// asks for the directory to be cleared rather than scanning without end.
 pub const BOOT_LOGS_MAX: u32 = 10_000;
 
-/// A new log for a boot on `port`: `celld-<port>-<boot>.log`, the first
+/// A new log for a boot on `port`: `node-<port>-<boot>.log`, the first
 /// boot number `dir` has no log for. A node started again on its port (the
 /// e2e's restarts) never truncates the log of the one before, which a
-/// crash leaves there, and its own `ready` is the only one in its file.
+/// crash leaves there, and its own `Ready on` is the only one in its file.
 fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
     fs::create_dir_all(dir)?;
     for boot in 1..=BOOT_LOGS_MAX {
-        let path = dir.join(format!("celld-{port}-{boot}.log"));
+        let path = dir.join(format!("node-{port}-{boot}.log"));
         match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -394,8 +368,14 @@ fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
     bail!("{} holds {BOOT_LOGS_MAX} logs of nodes on :{port} already; clear it", dir.display())
 }
 
-/// One `celld dev` node. `celld dev` runs the node as a child process, so
-/// a crash must kill that child, not only `celld dev`.
+/// Where a project's local state lives: its Durable Objects' SQLite, R2,
+/// Workflows and queues, as workerd persists them.
+pub fn state_dir(project: &Path) -> PathBuf {
+    project.join(".wrangler/state")
+}
+
+/// One `wrangler dev` process, which runs workerd as its child: it runs in
+/// a process group of its own, so a crash kills both.
 pub struct Node {
     child: Child,
     pub base: String,
@@ -405,51 +385,45 @@ pub struct Node {
     reaped: bool,
 }
 
-/// A dev node's shutdown budget (`CELLD_SHUTDOWN_TOTAL_MS`): room for its
-/// handoff on a slow runner, not a peer's.
-const DEV_SHUTDOWN_TOTAL_MS: &str = "5000";
-
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
-        let mut cmd = Command::new(&tools.celld);
-        cmd.arg("dev").arg(&opts.project).args(["--port", &opts.port.to_string()]);
-        if opts.node_logs {
-            cmd.arg("--logs");
-        }
-        for other in &opts.with {
-            cmd.arg("--with").arg(other);
-        }
         if opts.clean {
-            cmd.arg("--clean");
+            let state = state_dir(&opts.project);
+            if state.exists() {
+                fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+            }
         }
-        if !opts.watch {
-            cmd.arg("--no-watch");
+        let (log, out) = boot_log(&opts.log_dir, opts.port)?;
+        let mut cmd = Command::new(&tools.wrangler);
+        cmd.arg("dev").arg("-c").arg(opts.project.join("wrangler.jsonc"));
+        for other in &opts.with {
+            cmd.arg("-c").arg(other.join("wrangler.jsonc"));
         }
-        cmd.env("CELLD_ESBUILD", &tools.esbuild);
-        // A dev node is the fleet's only one: once its cells are handed off
-        // (durable, well inside a second) no peer takes them, and celld
-        // waits out its whole no-progress window, 25 s of its default 40.
-        if std::env::var_os("CELLD_SHUTDOWN_TOTAL_MS").is_none() {
-            cmd.env("CELLD_SHUTDOWN_TOTAL_MS", DEV_SHUTDOWN_TOTAL_MS);
-        }
-        for (k, v) in &opts.env {
-            cmd.env(k, v);
-        }
+        cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
+        cmd.args(["--inspector-port", &free_port()?.to_string()]);
+        cmd.arg("--persist-to").arg(state_dir(&opts.project));
+        cmd.args(["--show-interactive-dev-session=false", "--log-level", if opts.node_logs { "debug" } else { "log" }]);
+        // its own dev registry: a crashed node's entries (or another
+        // stack's Workers of the same names) never stand in for its own
+        cmd.current_dir(&opts.project)
+            .env("WRANGLER_SEND_METRICS", "false")
+            .env("WRANGLER_LOG_PATH", &opts.log_dir)
+            .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
+        cmd.process_group(0);
         let t0 = Instant::now();
         let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
         let mut node = Node { child, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
-            if text.contains("  ready  ") {
+            if text.contains(&format!("Ready on http://127.0.0.1:{}", opts.port)) {
                 break;
             }
             if let Some(status) = node.child.try_wait()? {
                 node.reaped = true;
-                bail!("celld dev exited ({status}) before it was ready:\n{text}");
+                bail!("wrangler dev exited ({status}) before it was ready:\n{text}");
             }
             if t0.elapsed() > READY_TIMEOUT {
-                bail!("celld dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
+                bail!("wrangler dev on :{} was not ready after {READY_TIMEOUT:?}:\n{text}", opts.port);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -457,50 +431,64 @@ impl Node {
         Ok((node, t0.elapsed()))
     }
 
-    /// SIGTERM: celld's graceful shutdown.
+    fn signal_group(&self, signal: &str) -> Result<()> {
+        let status = Command::new("kill").args([signal, "--", &format!("-{}", self.child.id())]).status()?;
+        anyhow::ensure!(status.success(), "kill {signal} delivered to the node's group");
+        Ok(())
+    }
+
+    /// SIGINT, as Ctrl-C stops it: wrangler shuts workerd down, and every
+    /// write already answered is on disk.
     pub fn stop(mut self) -> Result<()> {
-        let status = Command::new("kill").args(["-TERM", &self.child.id().to_string()]).status()?;
-        assert!(status.success(), "kill -TERM delivered");
+        self.signal_group("-INT")?;
         let t0 = Instant::now();
         while self.child.try_wait()?.is_none() {
             if t0.elapsed() > STOP_TIMEOUT {
                 self.kill();
-                bail!("celld dev did not stop within {STOP_TIMEOUT:?}");
+                bail!("wrangler dev did not stop within {STOP_TIMEOUT:?}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
         self.reaped = true;
+        // workerd may outlive wrangler by a moment; the port must be free for the next node
+        self.kill_group();
         Ok(())
     }
 
-    /// SIGKILL the node: a crash, with no graceful handoff.
+    /// SIGKILL the node and workerd: a crash, with no graceful shutdown.
     pub fn crash(mut self) -> Result<()> {
         self.kill();
         Ok(())
     }
 
-    /// Waits for `celld dev` to exit (the foreground `xtask dev`).
+    /// Waits for `wrangler dev` to exit (the foreground `xtask dev`).
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         let status = self.child.wait()?;
         self.reaped = true;
+        self.kill_group();
         Ok(status)
     }
 
+    fn kill_group(&self) {
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+    }
+
     fn kill(&mut self) {
-        let _ = Command::new("pkill").args(["-KILL", "-P", &self.child.id().to_string()]).status();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        self.reaped = true;
+        if !self.reaped {
+            self.kill_group();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            self.reaped = true;
+        }
     }
 }
 
 impl Drop for Node {
-    /// An early error must not leave a node holding the port. Never signal
-    /// a reaped PID: the system may have reused it.
+    /// An early error must not leave a node holding the port. A reaped
+    /// leader's group id is never signalled but by `stop` and `wait`, right
+    /// after it exits, while workerd may still hold the group.
     fn drop(&mut self) {
-        if !self.reaped {
-            self.kill();
-        }
+        self.kill();
     }
 }
 
@@ -517,10 +505,20 @@ mod tests {
         writeln!(file, "the first boot's last words").expect("write the first log");
         let (second, _) = boot_log(&dir, 4321).expect("a second log");
         let (other, _) = boot_log(&dir, 4322).expect("another port's log");
-        assert_eq!(first, dir.join("celld-4321-1.log"));
-        assert_eq!(second, dir.join("celld-4321-2.log"));
-        assert_eq!(other, dir.join("celld-4322-1.log"));
+        assert_eq!(first, dir.join("node-4321-1.log"));
+        assert_eq!(second, dir.join("node-4321-2.log"));
+        assert_eq!(other, dir.join("node-4322-1.log"));
         assert_eq!(fs::read_to_string(&first).expect("read the first log"), "the first boot's last words\n");
         fs::remove_dir_all(&dir).expect("remove the test's directory");
+    }
+
+    /// Comments go, strings keep what looks like one, and the result is JSON.
+    #[test]
+    fn jsonc_comments_are_stripped_outside_strings() {
+        let text = "{\n  // a comment\n  \"url\": \"http://a//b\", // trailing\n  \"q\": \"say \\\"//\\\"\"\n}";
+        let v: serde_json::Value = serde_json::from_str(&strip_comments(text)).expect("JSON");
+        assert_eq!(v["url"], "http://a//b");
+        assert_eq!(v["q"], "say \"//\"");
+        assert!(read_config(&cell_dir()).expect("cell/wrangler.jsonc parses")["durable_objects"].is_object());
     }
 }

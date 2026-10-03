@@ -21,6 +21,7 @@ pub mod npub;
 pub mod ratelimit;
 pub mod registry;
 pub mod schema;
+pub mod seal;
 pub mod secrets;
 pub mod webpush;
 pub mod site;

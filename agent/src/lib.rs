@@ -401,7 +401,7 @@ impl Agent {
     }
 
     fn fleet(&self) -> Answer<Fleet> {
-        Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql() }, acting_for: None })
+        Ok(Fleet { base: fleet::base(&self.env)?, signer: fleet::Signer { env: self.env.clone(), sql: self.sql(), scope: keys::scope(&self.state) }, acting_for: None })
     }
 
     async fn create(&self, principal: &str, body: CreateBody) -> Answer<Value> {
@@ -423,8 +423,8 @@ impl Agent {
         if instructions.len() > INSTRUCTIONS_MAX {
             return Err(Fail::invalid(format!("instructions are at most {INSTRUCTIONS_MAX} bytes")));
         }
-        // the key is made by KEYS: its secret never reaches this cell
-        let (pubkey, sealed) = keys::nostr_keypair(&self.env).await.map_err(Fail::host)?;
+        // the key's secret is kept only sealed for this cell
+        let (pubkey, sealed) = keys::nostr_keypair(&self.env, &keys::scope(&self.state)).map_err(Fail::host)?;
         if kv_get(&sql, "created_at")?.is_some() {
             return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
         }

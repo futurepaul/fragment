@@ -120,22 +120,25 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &[("site/style.css", Some(b"body{color:green}"))]);
     let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "hold": 3000 })))?;
     s.ok("the registry holds its next answer (a test hook)", r.status == 200 && r.body["hold"] == 3000, &r);
-    let (raced, landed) = std::thread::scope(|scope| {
+    let asked = std::time::Instant::now();
+    let (raced, sent) = std::thread::scope(|scope| {
         let read = scope.spawn(|| {
             let r = api.call(Call { method: "GET", url: api.site_url(&name, "style.css"), keys: Some(&viewer), ..Call::default() });
             (r, std::time::Instant::now())
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
+        // the deploy's webhook is sent now; when its answer comes back is
+        // the cell's business (the fake waits for it), not the race's
+        let sent = std::time::Instant::now();
         s.deploy(&c);
-        let landed = s.eventually(std::time::Duration::from_secs(2), || tag("style.css") != blue).then(std::time::Instant::now);
-        (read.join().expect("the read's thread"), landed)
+        (read.join().expect("the read's thread"), sent)
     });
     let ((r, answered), green) = (raced, tag("style.css"));
     let r = r?;
     s.ok(
-        "the deploy landed while the member's read waited on the registry",
-        r.status == 200 && landed.is_some_and(|at| at < answered),
-        format!("{} landed={landed:?} answered={answered:?}", r.status),
+        "the deploy was sent while the member's read waited on the registry",
+        r.status == 200 && answered - asked >= std::time::Duration::from_millis(2_500) && sent < answered,
+        format!("{}: answered after {:?}, the deploy sent at {:?}", r.status, answered - asked, sent - asked),
     );
     s.ok(
         "and its answer names the bytes it carries: the new commit's tag with the new bytes",

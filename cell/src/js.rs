@@ -101,7 +101,10 @@ fn worker_code(ctx: &JsValue, code: &AppCode) -> CellResult<Object> {
     set(&modules, facet::LIMITS_MODULE, code.limits);
     set(&modules, "app.js", code.source.as_str());
     for (path, source) in &code.modules {
-        set(&modules, path, source.as_str());
+        // typed: the Loader infers a module's type only from `.js` and `.py`
+        let module = Object::new();
+        set(&module, "js", source.as_str());
+        set(&modules, path, module);
     }
     let limits = Object::new();
     set(&limits, "cpuMs", code.cpu_ms);
@@ -387,23 +390,6 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
-/// POSTs `body` (JSON) to a service binding: (status, the answer's text).
-/// workers-rs 0.8.5 refuses celld's service stubs (its constructor is not
-/// named `Fetcher`), so this goes to the binding itself.
-pub async fn service_post(env: &JsValue, binding: &str, url: &str, body: &str) -> CellResult<(u16, String)> {
-    let service = self::binding(env, binding, "services")?;
-    let headers = Object::new();
-    set(&headers, "content-type", "application/json");
-    let init = Object::new();
-    set(&init, "method", "POST");
-    set(&init, "headers", headers);
-    set(&init, "body", body);
-    let resp = await_js(call(&service, "fetch", &[url.into(), init.into()]), binding).await?;
-    let status = get(&resp, "status")?.as_f64().unwrap_or(0.0) as u16;
-    let text = await_js(call(&resp, "text", &[]), binding).await?.as_string().unwrap_or_default();
-    Ok((status, text))
-}
-
 /// Hands a request, as it came (method, URL, headers, body), to a service
 /// binding: the agents' script, co-hosted in this fleet.
 pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -> CellResult<worker::Response> {
@@ -411,19 +397,6 @@ pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -
     let out = await_js(call(&service, "fetch", &[JsValue::from(req.inner())]), binding).await?;
     let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host(format!("{binding} answered no Response")))?;
     Ok(worker::Response::from(resp))
-}
-
-/// The Worker variables in `env` (its string values): the e2e checks that
-/// no fleet secret is one (a test hook).
-pub fn env_vars(env: &JsValue) -> CellResult<serde_json::Map<String, serde_json::Value>> {
-    let mut out = serde_json::Map::new();
-    for key in Reflect::own_keys(env).map_err(|e| CellError::host(js_message(&e)))?.iter() {
-        let Some(name) = key.as_string() else { continue };
-        if let Some(value) = get(env, &name)?.as_string() {
-            out.insert(name, serde_json::Value::String(value));
-        }
-    }
-    Ok(out)
 }
 
 /// Stores bytes at `key`.
