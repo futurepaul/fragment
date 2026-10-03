@@ -1163,7 +1163,7 @@ is docs/computers.md; the routes here are its owner's.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner) |
-| `GET /api/computers` | a person | → `{computers: [ComputerView]}` |
+| `GET /api/computers` | a person | → `{computers: [ComputerView], defaultImage}`: `defaultImage` is the image a new computer is pinned to; one pinned to another may update to it (the shell asks) |
 | `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); anyone else 404 |
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: `/data` saved, the guest signalled, the container gone |

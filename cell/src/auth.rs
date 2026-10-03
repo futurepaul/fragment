@@ -440,24 +440,9 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
     let platform = cfg.platform(url);
     {
         match (method, segments) {
-            (Method::Get, [""]) => {
-                let body = match platform_session(&req, env, url).await? {
-                    // a username first: fragments live under it (decision 16)
-                    Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => {
-                        let email = live.email.unwrap_or_default();
-                        format!(
-                            "<h1>Choose your username</h1><p>Signed in as <b>{}</b>. Your fragments will live at <code>&lt;label&gt;{}</code>; a username is chosen once.</p>\
-                             <form method=\"post\" action=\"/auth/username\"><p><input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" autocomplete=\"username\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"> <button>Take it</button></p></form>\
-                             <p><a href=\"/auth/logout\">Sign out</a></p>",
-                            esc(&email),
-                            esc(&after_label(cfg, "username")),
-                        )
-                    }
-                    Some(_) => return redirect("/settings", &[]),
-                    None => "<p>Small web apps that keep their state, live for everyone who opens them. Invite-only for now.</p><p><a href=\"/auth/login\">Sign in</a></p>".to_string(),
-                };
-                page(200, "fragment", &body)
-            }
+            // the shell: signed out it asks them to sign in, without a username
+            // it asks for one (decision 16), and then it is their home
+            (Method::Get, [""]) => Ok(crate::shell::page(&req, cfg, url)?),
             (Method::Get, ["settings"]) => match platform_session(&req, env, url).await? {
                 None => to_login(&platform, "/settings"),
                 Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => redirect("/", &[]),

@@ -925,7 +925,8 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
-            json_response(&json!({ "computers": list }))
+            // the image a new computer gets: one pinned to another may update to it
+            json_response(&json!({ "computers": list, "defaultImage": Config::from_env(env).computer_image }))
         }
         (Method::Get, [id]) => json_response(&owned(env, who, id).await?),
         (Method::Post, [id, "wake"]) => {

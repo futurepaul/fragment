@@ -28,6 +28,25 @@ pub(super) fn with_session(api: &Api, method: &str, path: &str, session: &str) -
     api.call(Call { method, url: format!("{}{path}", api.base), cookie: Some(format!("fragment_session={session}")), ..Call::default() })
 }
 
+/// Who the platform says a browser's session is, as the shell asks it
+/// (`GET /api/identities/me` with the session: lib.rs `shell_session`):
+/// their identity, or 401's `Null`.
+pub(super) fn who(api: &Api, session: &str) -> Result<Value> {
+    let r = api.call(Call {
+        method: "GET",
+        url: format!("{}/api/identities/me", api.base),
+        cookie: Some(format!("fragment_session={session}")),
+        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
+        ..Call::default()
+    })?;
+    Ok(if r.status == 200 { r.body } else { Value::Null })
+}
+
+/// The shell's page, which `/` is for everyone.
+fn is_shell(r: &Reply) -> bool {
+    r.status == 200 && r.text.contains("/__shell/shell.js")
+}
+
 /// The platform's settings, its other cases: `/settings` sends the
 /// signed-out to sign in, and someone with no username yet to choose one.
 fn settings_cases(s: &mut Suite, api: &Api) -> Result<()> {
@@ -242,8 +261,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
 
     // who a person is: their (issuer, subject), never their email
     let paul = api.sign_in("paul@e2e.test")?;
-    let r = with_session(api, "GET", "/", &paul)?;
-    s.ok("the platform says who is signed in", r.status == 200 && r.text.contains("paul@e2e.test"), &r);
+    let r = who(api, &paul)?;
+    s.ok("the platform says who is signed in", r.to_string().contains("paul@e2e.test"), &r);
     let keys = Keys::generate();
     let claimed = api.approve(&paul, &keys)?;
     let paul_id = claimed.body["id"].as_str().unwrap_or("").to_string();
@@ -266,12 +285,12 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             ..Call::default()
         })
     };
-    let asked = with_session(api, "GET", "/", &chooser)?;
-    s.ok("the page asking for a username says where their fragments will live", asked.text.contains("&lt;label&gt;--username."), &asked);
+    let asked = who(api, &chooser)?;
+    s.ok("a person new to the platform has no username yet (the shell asks for one)", asked["kind"] == "person" && asked["username"].is_null(), &asked);
     let (r, calls) = calls_of(api, || choose(&chooser, &chosen))?;
     s.ok("a person chooses their username on the platform's page, asking the registry once, and goes home", r.status == 302 && calls == 1 && r.header("location") == "/", format!("{calls} calls: {r}"));
     let home = with_session(api, "GET", "/", &chooser)?;
-    s.ok("home, with a username, is their settings", home.status == 302 && home.header("location") == "/settings", &home);
+    s.ok("home, with a username, is the shell", is_shell(&home) && who(api, &chooser)?["username"] == chosen.as_str(), &home);
     let settings = with_session(api, "GET", "/settings", &chooser)?;
     s.ok(
         "their settings say who they are, that they have no fragments yet, and how to pair a CLI and a coding agent",
@@ -301,10 +320,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         extra: vec![("origin", A_FRAGMENTS_PAGE.into())],
         ..Call::default()
     })?;
-    let home = with_session(api, "GET", "/", &newcomer)?;
+    let home = who(api, &newcomer)?;
     s.ok(
         "a username posted from a fragment's page is refused (403): the person still chooses their own",
-        r.status == 403 && home.text.contains("Choose your username"),
+        r.status == 403 && home["username"].is_null(),
         format!("{r} / {home}"),
     );
     let picture = |origin: &str| {
@@ -403,8 +422,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // redirect shows nothing)
     let pages = [
         ("the settings page's forms", "Make it", with_session(api, "GET", "/settings", &paul)?),
-        ("the username form", "Take it", with_session(api, "GET", "/", &newcomer)?),
-        ("the signed-out home", "Sign in", api.unsigned("GET", "/", None)?),
+        ("the shell, for someone with no username yet", "/__shell/shell.js", with_session(api, "GET", "/", &newcomer)?),
+        ("the shell, signed out", "/__shell/shell.js", api.unsigned("GET", "/", None)?),
         ("the sign-out button", "Sign out", with_session(api, "GET", "/auth/logout", &paul)?),
         ("an expired approval link", "fragment login", with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?),
         ("a key added", "Key added", r),
@@ -725,8 +744,8 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;
     s.ok("and every fragment session made from it", r.status == 401, &r);
-    let r = with_session(api, "GET", "/", &member_session)?;
-    s.ok("the platform no longer knows the browser", r.text.contains("Sign in") && !r.text.contains("member@e2e.test"), &r);
+    let r = who(api, &member_session)?;
+    s.ok("the platform no longer knows the browser", r.is_null(), &r);
 
     // invites are accepted on the platform's origin (`/join/<name>`: the share lane)
 
@@ -799,10 +818,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "signins": { "expireSession": again } })))?;
     anyhow::ensure!(r.status == 200, "expiring a platform session: {r}");
-    let (kept, platform) = (reads(&two)?, with_session(api, "GET", "/", &again)?);
+    let (kept, platform) = (reads(&two)?, who(api, &again)?);
     s.ok(
         "a platform session past its time is nobody, and so is every site session made from it",
-        kept == 401 && platform.text.contains("Sign in") && !platform.text.contains("member@e2e.test"),
+        kept == 401 && platform.is_null(),
         kept,
     );
 
@@ -833,12 +852,22 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         api.call(Call { method: "GET", url: format!("{}{path}", api.base), cookie, extra: vec![("x-forwarded-proto", "https".into())], ..Call::default() })
     };
     let session = api.sign_in("host-prefix@e2e.test")?;
-    let planted = https("/", Some(format!("fragment_session={session}")))?;
-    let hosted = https("/", Some(format!("__Host-fragment_session={session}")))?;
+    // the shell's question, who is signed in, over https
+    let me = |cookie: String| {
+        api.call(Call {
+            method: "GET",
+            url: format!("{}/api/identities/me", api.base),
+            cookie: Some(cookie),
+            extra: vec![("x-forwarded-proto", "https".into()), ("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into())],
+            ..Call::default()
+        })
+    };
+    let planted = me(format!("fragment_session={session}"))?;
+    let hosted = me(format!("__Host-fragment_session={session}"))?;
     s.ok(
         "over https the platform reads its session only from a __Host- cookie (a planted plain one is nobody)",
-        planted.status == 200 && !planted.text.contains("Sign out") && hosted.status == 200 && hosted.text.contains("Sign out"),
-        format!("{} / {}", planted.text.chars().take(120).collect::<String>(), hosted.text.chars().take(120).collect::<String>()),
+        planted.status == 401 && hosted.status == 200 && hosted.body["kind"] == "person",
+        format!("{} / {}", planted.status, hosted.status),
     );
     let start = https("/auth/login?return=/", None)?;
     let cookie = start.headers.get_all("set-cookie").iter().filter_map(|v| v.to_str().ok()).find(|c| c.contains("fragment_login=")).unwrap_or("").to_string();

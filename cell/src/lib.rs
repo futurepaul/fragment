@@ -59,6 +59,7 @@ mod routed;
 mod runs_on;
 mod serve;
 mod share;
+mod shell;
 mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
@@ -857,6 +858,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match (req.method(), segments.as_slice()) {
+        (Method::Get | Method::Head, ["__shell", file @ ..]) => match shell::asset(&req, &file.join("/"))? {
+            Some(resp) => Ok(resp),
+            None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
+        },
         (_, [""] | ["settings"] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
