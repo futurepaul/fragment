@@ -606,6 +606,8 @@ impl FragmentCell {
                     "role": run.role,
                     "run": run_id,
                     "attempt": attempt,
+                    "via": run.via.as_str(),
+                    "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
@@ -796,6 +798,20 @@ impl FragmentCell {
             }
             Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,
             Step::AgentPoll { turn } => self.step_agent_poll(&turn).await,
+            // what the fragment's own page reads, read for its code: who is
+            // in it, their names, and who is here
+            Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),
+            Step::People { ids } => {
+                if ids.len() > fragment_core::steps::PEOPLE_MAX {
+                    return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));
+                }
+                match crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await {
+                    Ok(answer) => Ok(json!(answer)),
+                    Err(e) if e.code == ErrorCode::InvalidRequest => Err(permanent(e.message)),
+                    Err(e) => Err(StepFail::Retry(e.message)),
+                }
+            }
+            Step::Presence {} => Ok(json!({ "here": self.present() })),
         }
     }
 
@@ -923,7 +939,9 @@ impl FragmentCell {
     }
 
     /// Starts the runs a record on a channel triggers, one for each
-    /// operation its triggers run. Each is the fragment's own call, its id
+    /// operation its triggers run (a trigger that names its posters' kind,
+    /// only for a member of that kind's record: a record that starts none
+    /// is no run, so it counts toward no breaker). Each is the fragment's own call, its id
     /// the record's (`record:<channel>:<seq>:<op>`), so this again for the
     /// same record answers the runs it started: a try after a failure part
     /// way starts only the rest, never one twice.
@@ -935,12 +953,12 @@ impl FragmentCell {
     /// publish may wait on the ledger here, and a crash while it does is a
     /// failed try, which their retries finish by the record's key.
     pub(crate) async fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        if self.channel_triggers(&record.channel)?.is_empty() {
+        if self.channel_triggers(&record.channel, &record.principal)?.is_empty() {
             return Ok(vec![]);
         }
         let read_only = self.read_only().await?;
         // read after the wait, so the runs start from the code installed now
-        let ops = self.channel_triggers(&record.channel)?;
+        let ops = self.channel_triggers(&record.channel, &record.principal)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];

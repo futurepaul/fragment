@@ -1067,6 +1067,11 @@ pub struct TriggerDecl {
     pub on: TriggerOn,
     /// The operation it runs (a mutation or a job).
     pub run: String,
+    /// A channel trigger's posters: only a record posted by a member of
+    /// this kind starts a run (a chat's agents' replies: `"from":
+    /// "agent"`). None: every record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<IdentityKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

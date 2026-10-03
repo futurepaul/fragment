@@ -38,13 +38,47 @@ fragment.club until cutover (decisions 34–35).
   (subscriptions, VAPID, RFC 8291 encryption decrypted by a fake push
   service, the queue, retries, drops), and the encryption agrees with the
   old runtime's (checked once by hand). `fragment.push.register` and
-  `__sw.js` run only in a real browser with a real push service.
+  `__sw.js` run only in a real browser with a real push service. The
+  chat's push (docs/chat-records.md, Push) is the same: its chat lane
+  subscribes the push fake by `__push-sub`, as the page's bell would.
 - **Risk:** a page's subscribe or the service worker's display breaks
   unnoticed.
 - **First proof:** subscribing from a phone or desktop browser to a
   hosted fragment.
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
+
+## A chat the shell frames is "looked at" while the shell is, and asks for notifications in a tab
+
+- **Observed:** 2026-10-03, the chat's push (docs/chat-records.md, Push).
+  A chat's page says it is `looking` while its document is visible, so a
+  chat open in a tab of the shell that is not shown (its frame is still
+  in a visible page) keeps its person from being pushed. And a browser
+  does not let a cross-origin frame ask for notifications, so the bell of
+  a chat the shell frames opens the chat in a tab of its own, where it may
+  ask.
+- **Risk:** a person with the shell open on another chat misses a
+  reply's push; turning notifications on from the shell takes a detour.
+- **First proof:** a person who keeps the shell open says a reply came
+  without a notification.
+- **Delete when:** the shell tells each frame whether it is shown (a
+  message the chat's page reads, beside its theme), and asks for
+  notifications on the platform's origin for the fragments it frames, or
+  browsers let a frame ask.
+
+## A busy chat's push pauses itself
+
+- **Observed:** 2026-10-03. The chat's push job runs on a channel trigger
+  (`"from": "agent"`), so each agent reply is a triggered run, and an
+  operation's triggers pause themselves after 120 triggered runs in an
+  hour (`limits::TRIGGERED_RUNS_PER_HOUR`). Nothing unpauses a chat's.
+- **Risk:** a chat whose agents reply more than about twice a minute for
+  an hour stops pushing, for good, until someone runs `fragment unpause`.
+- **First proof:** an `op.auto-paused` event for `notify_reply` on a
+  chat.
+- **Delete when:** a trigger's breaker counts runs that fail or loop
+  rather than every run (or an automatic pause expires), or a chat's push
+  fires once a turn, on its last reply.
 
 ## Fragments share one origin when no hostname suffix is configured
 

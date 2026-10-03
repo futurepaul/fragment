@@ -177,6 +177,10 @@ impl Browser {
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
                 "--disable-background-timer-throttling",
+                // a microphone that plays a tone, granted without a prompt:
+                // a chat's voice memo (the chat section) records from it
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
                 "about:blank",
             ])
             .stdin(Stdio::null())

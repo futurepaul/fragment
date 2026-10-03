@@ -64,7 +64,22 @@ pub enum Step {
     /// A started turn's state, by its id (the start's answer).
     #[serde(rename = "agent.poll")]
     AgentPoll { turn: String },
+    /// `job.members()`: the fragment's members, as its page's `__members`
+    /// lists them (the first added first).
+    #[serde(rename = "members")]
+    Members {},
+    /// `job.people(ids)`: names for identities, as its page's `__people`
+    /// answers (at most `PEOPLE_MAX`).
+    #[serde(rename = "people")]
+    People { ids: Vec<String> },
+    /// `job.presence()`: who is here now, as its pages' presence lists
+    /// hold them (`{id, principal, data}`, one a socket that shares any).
+    #[serde(rename = "presence")]
+    Presence {},
 }
+
+/// The identities one `job.people` step names: a page's `__people` limit.
+pub const PEOPLE_MAX: usize = 64;
 
 /// `job.agent({prompt, conversation?, channel?})`: the message, the
 /// conversation it continues (a key the job chooses; none: the run's own),
@@ -197,6 +212,9 @@ impl Step {
             Step::AiVideo {} => "ai.video",
             Step::AgentStart(_) => "agent.start",
             Step::AgentPoll { .. } => "agent.poll",
+            Step::Members {} => "members",
+            Step::People { .. } => "people",
+            Step::Presence {} => "presence",
         }
     }
 }
@@ -254,13 +272,16 @@ mod tests {
             ("ai.video", json!({})),
             ("agent.start", json!({ "prompt": "summarize today", "conversation": "daily", "channel": "ask" })),
             ("agent.poll", json!({ "turn": "0123456789abcdef01234567" })),
+            ("members", json!({})),
+            ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
+            ("presence", json!({})),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 15, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -317,6 +338,9 @@ mod tests {
         refused("agent.start", json!({ "conversation": "daily" }), "missing field `prompt`");
         refused("agent.start", json!({ "prompt": 7 }), "invalid type");
         refused("agent.poll", json!({}), "missing field `turn`");
+        refused("people", json!({}), "missing field `ids`");
+        refused("people", json!({ "ids": "id:x" }), "invalid type");
+        refused("people", json!({ "ids": [7] }), "invalid type");
     }
 
     #[test]

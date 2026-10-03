@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS code (
   modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
@@ -910,6 +910,12 @@ impl FragmentCell {
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
         self.meter_soon().await;
+        // a fragment on a blessed template runs the release this build
+        // serves (decision 40): one installed from an older release (the
+        // platform deployed since) installs again first, its code included
+        if let Err(e) = self.blessed_current().await {
+            self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
+        }
         if let Some(rest) = path.strip_prefix("/serve/") {
             let rest = rest.to_string();
             return self.serve(req, &caller, &routed_name, &rest).await;

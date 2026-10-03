@@ -53,6 +53,7 @@ import {
   POINTER_MAX_BYTES,
   PUSH_WHO_MAX_CHARS,
   PUSH_PAYLOAD_MAX_BYTES,
+  PEOPLE_MAX,
   RESERVED_OP_NAMES,
   utf8Bytes,
   validKind,
@@ -271,6 +272,9 @@ class Job {
     this.role = meta.role;
     this.run = meta.run;
     this.attempt = meta.attempt;
+    // how the run started (call, job, cron, channel, files), and where
+    this.via = meta.via;
+    this.fragment = meta.fragment;
     this.#channels = new Set(meta.channels || []);
     this.#results = results;
     this.#onStep = onStep;
@@ -376,6 +380,26 @@ class Job {
   // A web push to the subscriptions tagged `who` ("*": all).
   push(who, payload) {
     return this.#step("push", { who, payload: JSON.parse(JSON.stringify(checkPush(who, payload))) });
+  }
+
+  // What the fragment's own page reads, as steps: its members as
+  // `__members` lists them ([{ principal, role, kind, … }], the first added
+  // first), names for at most PEOPLE_MAX identities as `__people` answers
+  // ({ [id]: { kind, username, name?, … } }), and who is here now, as the
+  // pages' presence lists hold them ([{ id, principal, data }]).
+  members() {
+    return this.#step("members", {}).then((v) => v.members);
+  }
+
+  people(ids) {
+    if (!Array.isArray(ids) || ids.length > PEOPLE_MAX || !ids.every((id) => typeof id === "string")) {
+      throw new TypeError(`job.people(ids): ids is a list of at most ${PEOPLE_MAX} identities`);
+    }
+    return this.#step("people", { ids: [...ids] }).then((v) => v.profiles);
+  }
+
+  presence() {
+    return this.#step("presence", {}).then((v) => v.here);
   }
 
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.

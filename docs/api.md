@@ -428,7 +428,7 @@ and styles only inline and images only from the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat` and `agent` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -480,6 +480,21 @@ and `app.mjs` (with `applib/**.mjs|js`, at most 64 modules and 4 MiB in
 all) from the live commit. A live commit with an invalid `fragment.json`
 keeps the last good code and says why in `status.code.error`.
 
+A fragment on a blessed template (`chat`, `agent`: docs/cloudflare-v1.md,
+decision 40) names it in `fragment.json` (`template`) and runs the
+platform release's manifest (with its own `meta` over the template's),
+site, and code: the template's `app.mjs` and `applib/`, when it carries
+any (a chat's push: docs/chat-records.md), held to an app's limits and
+run in the same facet, under the release's identity (`blessed:<template>@
+<release>`, a hash of the template's files,
+`fragment_templates::blessed`). A platform deploy that changes the
+template installs again at each such fragment's next request, a fresh
+worker as a new commit is. Its repo holds only its face and data: a live
+commit that declares operations, channels, triggers, `notifyUrls` or an
+agent, or that carries `app.mjs` or `applib/` code of its own, keeps the
+last good code and says to fork it in `status.code.error`. Forking makes
+the code the fragment's own.
+
 ```json
 {
   "operations": {
@@ -519,7 +534,10 @@ keeps the last good code and says why in `status.code.error`.
   defaults to `editor`.
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
   *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
-  <app channel>, "run": op}` (each new record), `{"files": "notes/**",
+  <app channel>, "run": op}` (each new record; with `"from": "person" |
+  "agent"`, each record a member of that kind posted, so a record that
+  starts no run counts toward no breaker: a chat's push, its agents'
+  replies), `{"files": "notes/**",
   "run": op}` (a move of `main` changing a matching path; `*`, `**`, `?`,
   a trailing `/`). The operation must be a mutation or a job an editor
   may call.
@@ -624,7 +642,9 @@ docs/chat-records.md) keeps it while the channel keeps the record; one
 nothing names, by pointer or record, is deleted after the grace period
 like any other (uploads never committed or posted included). It is served as the
 type its upload's `content-type` declared when that is passive media
-(JPEG, PNG, WebP, GIF, MP4, WebM, MP3, WAV, PDF: `blob::served_type`),
+(JPEG, PNG, WebP, GIF, MP4 and WebM video, MP3, WAV, and WebM, Ogg and
+MP4 audio (a chat's voice memo), PDF: `blob::served_type`, its parameters
+dropped),
 else as `application/octet-stream`, so a blob never runs as a page or a
 script there. An editor's page uploads one there too (`PUT
 __blob/<sha256>`, `fragment.blob(file)`): a chat's attachments
@@ -640,12 +660,17 @@ it registers `./__sw.js`, reads the fragment's VAPID key from
 `./__push-key`, and stores the subscription at `./__push-sub` tagged with
 `who`); `fragment.push.unregister()` drops it (`./__push-unsub`, by its
 endpoint). Anyone who can see the fragment may subscribe (at most 10 000
-subscriptions). `call.push(who, payload)` in a mutation (sent once it
-commits) and `job.push(who, payload)` in a job (a step, answering
-`{queued}`) push `payload` (`{title, body, tag, url}`, at most 3800 bytes)
-to the subscriptions tagged `who` (at most 64 characters), or all of them
-with `*`, once per mutation or step. `fragment.notify.{supported,
-permission, ask, show}` wrap the Notification API.
+subscriptions); a `who` that is an identity (`id:…`) is that identity's
+own, and from anyone else is 403, so what is pushed to a person's
+identity reaches their browsers alone (a chat's replies:
+docs/chat-records.md, Push). `call.push(who, payload)` in a mutation
+(sent once it commits) and `job.push(who, payload)` in a job (a step,
+answering `{queued}`) push `payload` (`{title, body, tag, url}`, at most
+3800 bytes) to the subscriptions tagged `who` (at most 64 characters), or
+all of them with `*`, once per mutation or step. A relative `url` is the
+fragment's own (`./` is its page): a click focuses a page of it already
+there, or opens one. `fragment.notify.{supported, permission, ask,
+show}` wrap the Notification API.
 
 `fragment.json`'s `notifyUrls` (at most 3) receive `{type: "changed",
 fragment, sha, paths}` (JSON POST, unsigned, as before) on each move of
@@ -823,7 +848,7 @@ by nothing, so it may be sent again. Test fleets add `POST
 
 A job is a method called `(input, job)` that runs as a Cloudflare Workflow,
 outside any request. Each `await` on a `job.*` step is durable. The
-steps are the five below, the files steps (`job.files.*`), `job.push`,
+steps are the eight below, the files steps (`job.files.*`), `job.push`,
 and the AI steps (`job.ai.*`), all above:
 
 - `job.call(op, input)`: an operation of this fragment as the run's
@@ -852,9 +877,20 @@ and the AI steps (`job.ai.*`), all above:
   starts a second; then `agent.poll`, with sleeps of 2, 4, 8, 16, then
   30 seconds between, at most 40 times. A turn that fails or is stopped
   throws a `StepError`; the model calls are the owner's to pay.
+- What the fragment's own page reads, read for its code:
+  `job.members()` → its members as `__members` lists them (`[{principal,
+  role, kind, addedAt, …}]`, the first added first); `job.people(ids)` →
+  names for at most 64 identities as `__people` answers them (`{[id]:
+  {kind, username, name?, fragment?, picture?}}`, an agent made from an
+  agent fragment named by its label; `picture` a path on the platform's
+  origin); `job.presence()` → who is here now, as the pages' presence
+  lists hold them (`[{id, principal, data}]`, one a socket that shares
+  any). Each is a step, so a run reads what was true when it first took
+  it, again on a retry.
 
 `job.principal`, `job.role`, `job.run`, and `job.attempt` say who and
-which. The method re-runs from the top at every step with the results so
+which; `job.via` how the run started (`call`, `job`, `cron`, `channel`,
+`files`), and `job.fragment` the fragment's name. The method re-runs from the top at every step with the results so
 far, so it must reach its steps in the same order each time and change
 nothing except through steps. The platform keeps each step's answer
 before the job's Workflow hears it, and the method reads the answers back
@@ -1300,9 +1336,9 @@ docs/chat-records.md extends this for computers' agents (phase 4: turns,
 drafts, prompts, attachments, Stop, hand-offs, routines) and wins where
 they differ.
 
-A chat is two channels and no app code (no worker), and an agent
-answering it (one that listens there, or the fragment's own: the `agent`
-block, above):
+A chat is two channels (and, on the blessed template, its push job:
+docs/chat-records.md), and an agent answering it (one that listens
+there, or the fragment's own: the `agent` block, above):
 
 ```json
 "channels": {
