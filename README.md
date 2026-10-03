@@ -97,6 +97,6 @@ crates/fakes   code.storage, OpenRouter, WorkOS, and push-service fakes
 crates/devstack  runs a celld node and the fakes
 crates/e2e     the end-to-end suite
 templates/     blank, calories, inbox, notes, todo
-xtask/         build, celld, dev, try, check, e2e, e2e-kit
+xtask/         build, celld, dev, try, check, e2e
 docs/          model, contract, roadmap, phase records, the debt ledger
 ```
