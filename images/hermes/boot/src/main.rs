@@ -666,6 +666,7 @@ async fn boot_main() {
     let mut restarts = 0u32;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_sync = Instant::now();
     let mut last_agents = Instant::now();
     let mut agents_unread = false;
@@ -674,7 +675,9 @@ async fn boot_main() {
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
+        // SIGTERM first: it means stop now (docs/computers.md)
         tokio::select! {
+            biased;
             _ = term.recv() => break,
             _ = tick.tick() => {}
         }
@@ -694,46 +697,60 @@ async fn boot_main() {
                 bridge = spawn_bridge();
             }
         }
-        // The computer's agents may change while it runs (docs/computers.md).
-        if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
-            last_agents = Instant::now();
-            match api.computer().await {
-                Ok(c) => {
-                    agents_unread = false;
-                    let change = agents::diff(&agents, &c.agents);
-                    if !change.is_empty() {
-                        follow_agents(&api, &change, &c.agents, &home, ids, &model).await;
+        // What waits on the platform (each call up to its 15 s), cut short by
+        // SIGTERM: a slow platform never holds the stop. Cut, it is done
+        // again at the next boot (a profile written whole again, a sync
+        // whose commits are keyed by their content).
+        let slow = async {
+            // The computer's agents may change while it runs (docs/computers.md).
+            if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
+                last_agents = Instant::now();
+                match api.computer().await {
+                    Ok(c) => {
+                        agents_unread = false;
+                        let change = agents::diff(&agents, &c.agents);
+                        if !change.is_empty() {
+                            follow_agents(&api, &change, &c.agents, &home, ids, &model).await;
+                        }
+                        agents = c.agents;
                     }
-                    agents = c.agents;
-                }
-                // once per outage: the next read that answers ends it
-                Err(e) if !agents_unread => {
-                    agents_unread = true;
-                    ev!("agents.unread", { "error": e.to_string() });
-                }
-                Err(_) => {}
-            }
-        }
-        if let Some(storage) = storage.as_deref().filter(|_| t0.elapsed() > Duration::from_secs(10)) {
-            let dbs: Vec<(String, PathBuf)> = hermes::litestream_dbs(&agents, &home).into_iter().filter(|(_, p)| p.exists()).collect();
-            if streamed.as_ref() != Some(&dbs) {
-                if let Some(old) = litestream.take() {
-                    stop_litestream(old).await;
-                }
-                litestream = start_litestream(&dbs, storage);
-                streamed = Some(dbs);
-            }
-        }
-        if last_sync.elapsed() > Duration::from_millis(sync_every) {
-            last_sync = Instant::now();
-            for a in &agents {
-                let dir = hermes::profile_dir(&home, &a.fragment);
-                match sync::round(&api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
-                    Ok(d) if d != sync::Done::default() => ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted }),
-                    Ok(_) => {}
-                    Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
+                    // once per outage: the next read that answers ends it
+                    Err(e) if !agents_unread => {
+                        agents_unread = true;
+                        ev!("agents.unread", { "error": e.to_string() });
+                    }
+                    Err(_) => {}
                 }
             }
+            if let Some(storage) = storage.as_deref().filter(|_| t0.elapsed() > Duration::from_secs(10)) {
+                let dbs: Vec<(String, PathBuf)> = hermes::litestream_dbs(&agents, &home).into_iter().filter(|(_, p)| p.exists()).collect();
+                if streamed.as_ref() != Some(&dbs) {
+                    if let Some(old) = litestream.take() {
+                        stop_litestream(old).await;
+                    }
+                    litestream = start_litestream(&dbs, storage);
+                    streamed = Some(dbs);
+                }
+            }
+            if last_sync.elapsed() > Duration::from_millis(sync_every) {
+                last_sync = Instant::now();
+                for a in &agents {
+                    let dir = hermes::profile_dir(&home, &a.fragment);
+                    match sync::round(&api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+                        Ok(d) if d != sync::Done::default() => ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted }),
+                        Ok(_) => {}
+                        Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
+                    }
+                }
+            }
+        };
+        let stopped = tokio::select! {
+            biased;
+            _ = term.recv() => true,
+            () = slow => false,
+        };
+        if stopped {
+            break;
         }
     }
     ev!("boot.signal");
