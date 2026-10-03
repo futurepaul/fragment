@@ -192,6 +192,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
     let first = b.until(&page, "document.querySelector('#first-run-card textarea[name=job]')", wait);
     s.ok("then: what should your first agent do?", first, "");
+    // setup's computer starts while the job is typed, not after it is sent
+    let warming = s.eventually(wait, || {
+        shell(api, &session, "GET", "/api/computers", None, &[]).is_ok_and(|r| {
+            r.body["computers"].as_array().is_some_and(|c| c.len() == 1 && matches!(c[0]["phase"].as_str(), Some("starting" | "awake")))
+        })
+    });
+    let seen = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    s.ok("and the person's computer is already starting as they type it", warming, &seen);
     let _ = b.screenshot(&page, &shots.join("first-agent.png"));
     b.eval(&page, &fill("#first-run-card textarea[name=job]", "hello there, please help me water the garden"))?;
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;

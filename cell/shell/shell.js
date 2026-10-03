@@ -416,7 +416,7 @@ async function makeAgent(job, chosen) {
   const name = chosen?.trim() || pickName();
   const label = freeLabel(slug(name));
   const agent = await api("POST", "/api/fragments", { name: label, template: "agent", title: name });
-  const computer = await api("POST", "/api/computers", {});
+  const computer = await warmComputer();
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   // its colour is its identity's, as every page that shows it chooses it
@@ -574,6 +574,20 @@ $("workspace-search").addEventListener("keydown", (e) => {
 let woke = 0;
 // asking for a wake as the person arrives, focuses a chat, or starts a new
 // agent hides the computer's start (decision 39's pre-wake, from the shell)
+// Setup's computer: made and woken as the first-agent question shows, so
+// its first start (its image pulled to its machine, half a minute) runs
+// while the person types the job, not after (Paul, 2026-10-03). Making one
+// again is the same one (docs/api.md), so a retry only wakes it.
+let warming = null;
+function warmComputer() {
+  warming ??= api("POST", "/api/computers", {}).then((c) => {
+    state.computer = c;
+    api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+    return c;
+  });
+  warming.catch(() => { warming = null; });
+  return warming;
+}
 function prewake() {
   const c = state.computer;
   if (!c || document.hidden || Date.now() - woke < 60_000 || c.phase === "awake" || c.phase === "starting") return;
@@ -860,8 +874,9 @@ function firstAgent() {
       go.textContent = "Start";
     }
   };
-  firstRun(el("h1", null, "What should your first agent do?"), el("p", "muted", "It takes the job, picks a name, and says hello while its computer starts."), form);
+  firstRun(el("h1", null, "What should your first agent do?"), el("p", "muted", "It takes the job, picks a name, and says hello."), form);
   job.focus();
+  warmComputer().catch(() => {});
 }
 
 // ---- the person's things, read again whenever they may have changed ----
