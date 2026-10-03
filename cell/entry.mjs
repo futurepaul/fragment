@@ -10,10 +10,31 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { DirectoryBackup } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
+import { NodeContainer, nodeEgress, nodeOf, routeNodeEgress } from "./node.mjs";
+
+// The last `arm` of a computer on a node, its isolate's to repeat.
+const NODE_ARM = "node/arm";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
-export default rs.default;
+// The router is Rust's, but for one route: a sandcastle node's intercepts
+// (node.mjs), on the platform's own host, which go to their computer's
+// object as they came.
+function routed(request, env, rust) {
+  const url = new URL(request.url);
+  const platform = env.FRAGMENT_PLATFORM_URL ? new URL(env.FRAGMENT_PLATFORM_URL).host : url.host;
+  if (url.pathname === "/api/nodes/egress" && url.host === platform && nodeOf(env)) return routeNodeEgress(request, env);
+  return rust();
+}
+
+const Rust = rs.default;
+export default typeof Rust === "function"
+  ? class extends Rust {
+      fetch(request) {
+        return routed(request, this.env, () => super.fetch(request));
+      }
+    }
+  : { ...Rust, fetch: (request, env, ctx) => routed(request, env, () => Rust.fetch(request, env, ctx)) };
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {
@@ -134,26 +155,48 @@ export class Job extends WorkflowEntrypoint {
 // runtime call and its plumbing. Every call that touches the container
 // names the start it is for (its generation): a late call for an earlier
 // start (a sleep that finishes after a wake started another) touches
-// nothing.
+// nothing. The container is the runtime's (`ctx.container`), or, when the
+// deployment places computers on a sandcastle node, the node's
+// (`NodeContainer`, node.mjs: the same API).
 class ContainerHost {
   #ctx;
   #env;
   #report;
   #generation = 0;
   #backups;
+  #node;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
+    const node = nodeOf(env);
+    this.#node = node ? new NodeContainer(node, ctx.id.toString()) : null;
+    this.#backups = new DirectoryBackup(this.#c, ctx.exports.DirectoryBackupGateway, {
       binding: "BLOBS",
       prefix: `computers/${ctx.id}/backups/`,
     });
   }
 
   get #c() {
-    return this.#ctx.container;
+    return this.#node || this.#ctx.container;
+  }
+
+  // A new isolate's first look at a node's container (`running` is the
+  // node's to say), before any request.
+  refresh() {
+    return this.#node ? this.#node.refresh() : Promise.resolve();
+  }
+
+  // An intercepted request from the node (node.mjs). An isolate that
+  // started after its container has no bindings: it sets them again from
+  // the last `arm`, kept for this.
+  nodeEgress(request) {
+    const rearm = async () => {
+      const a = await this.#ctx.storage.get(NODE_ARM);
+      if (a && this.adopt(a.generation)) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
+    };
+    return nodeEgress(request, this.#env, this.#node, rearm);
   }
 
   running() {
@@ -234,6 +277,7 @@ class ContainerHost {
     }
     await this.#settled(() => this.#backups.intercept());
     await this.#settled(() => c.setInactivityTimeout(idleMs));
+    if (this.#node) await this.#ctx.storage.put(NODE_ARM, { generation, computer, idleMs, swapHosts });
     return true;
   }
 
@@ -333,10 +377,15 @@ export class Computer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
-    Object.defineProperty(ctx, "computerHost", { value: new ContainerHost(ctx, env, report) });
+    const host = new ContainerHost(ctx, env, report);
+    Object.defineProperty(ctx, "computerHost", { value: host });
     this.rs = new rs.ComputerCell(ctx, env);
+    ctx.blockConcurrencyWhile(() => host.refresh());
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) {
+    if (new URL(request.url).pathname === "/__node/egress") return this.ctx.computerHost.nodeEgress(request);
+    return this.rs.fetch(request);
+  }
   alarm(info) { return this.rs.alarm(info); }
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
