@@ -52,10 +52,10 @@ export class App extends DurableObject {
 "#;
 const WHO_JSON: &str = r#"{ "operations": { "whoami": { "kind": "mutation", "role": "viewer", "input": { "type": "object", "additionalProperties": false } } } }"#;
 
-/// The shell, once it has asked who is signed in and shows them their
-/// page: the sidebar, or, for a person with no chat yet, the first run's
-/// question.
-const SIGNED_IN: &str = "!!document.querySelector('#first-run-card textarea[name=job]') || (!document.getElementById('layout').hidden && !!document.querySelector('#chats > *'))";
+/// The shell at `/settings`, once it has asked who is signed in and shows
+/// them their settings (which a person with no chat yet sees too: `/`
+/// would make their first agent).
+const SIGNED_IN: &str = "!document.getElementById('layout').hidden && !document.getElementById('settings-page').hidden";
 /// The shell signed out: it asks them to sign in.
 const SIGNED_OUT: &str = "!!document.querySelector('#first-run-card a[href^=\"/auth/login\"]')";
 
@@ -211,10 +211,10 @@ pub(super) fn safari_like(s: &Suite) -> Result<Option<Browser>> {
     Browser::launch_with(&s.scratch, &args, Some(&blocking))
 }
 
-/// The shell's page at `/`, loaded (`ready`: `SIGNED_IN` or `SIGNED_OUT`),
+/// The shell's page at `/settings`, loaded (`ready`: `SIGNED_IN` or `SIGNED_OUT`),
 /// listening to its frames.
 fn platform_page(chrome: &mut Browser, api: &Api, ready: &str) -> Result<Page> {
-    let page = chrome.open(&format!("{}/", api.base))?;
+    let page = chrome.open(&format!("{}/settings", api.base))?;
     let loaded = chrome.until(&page, &format!("document.readyState === 'complete' && ({ready})"), Duration::from_secs(20));
     anyhow::ensure!(loaded, "the shell did not open ({ready}): {}", chrome.eval(&page, "document.body.innerText.slice(0, 300)")?);
     chrome.eval(&page, LISTEN)?;
