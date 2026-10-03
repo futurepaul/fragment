@@ -550,8 +550,15 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         api.signed(&owner, "GET", &format!("/api/f/{next_name}/channels"), None).is_ok_and(|r| r.body["channels"].as_array().is_some_and(|c| c.iter().any(|x| x["name"] == "chat")))
     });
     std::thread::sleep(QUEUE_DRAIN);
-    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("asleep, with a new chat deployed", deployed && r.body["phase"] == "asleep", &r);
+    // a real runtime's last turn may still post a record that wakes it
+    // again (a preview's model is slower than the stub): asked until asleep
+    let mut last = Value::Null;
+    let slept = s.eventually(Duration::from_secs(90), || {
+        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
+        last["phase"] == "asleep"
+    });
+    s.ok("asleep, with a new chat deployed", deployed && slept, &last);
     let t0 = std::time::Instant::now();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{next_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("its agent is added to the new chat", r.status == 200, &r);

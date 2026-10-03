@@ -295,7 +295,16 @@ fn read_secret(file: &Path) -> Result<String> {
 
 /// The preview answers, and its levers take the secret: answers its deploy.
 fn preflight(api: &Api) -> Result<String> {
-    let health = api.unsigned("GET", "/healthz", None)?;
+    // a route just deployed answers 52x at Cloudflare's edge for a moment:
+    // bounded, one look every 5 s for a minute
+    let mut health = api.unsigned("GET", "/healthz", None)?;
+    for _ in 0..12 {
+        if health.status == 200 || !(520..=530).contains(&health.status) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        health = api.unsigned("GET", "/healthz", None)?;
+    }
     anyhow::ensure!(health.status == 200, "{}/healthz: {health}", api.base);
     let deploy = health.header("x-fragment-deploy");
     let r = api.unsigned("POST", "/api/test/people", Some(&json!({})))?;
