@@ -115,13 +115,16 @@ that names a PID from before a sleep can name a live process after it.
   them, never above them (decision 36).
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
-    identity, name, owner}]}`: the agents to run. **They may change while
-    the computer runs** (its owner assigns or unassigns one): the guest
-    reads them again while awake and runs the new set, with nothing
-    restarted. The platform never restarts a computer for a change of its
-    agents, so an image must not rely on reading them once, at its start.
-    An agent unassigned signs nothing from that moment (the intercept
-    refuses it), whatever the guest still runs.
+    identity, name, owner, connections, credentials: [{provider, kind,
+    env, placeholder, hosts}]}], credentialEnv}`: the agents to run, and
+    each one's credentials (below, Connections and operator keys). **They
+    may change while the computer runs** (its owner assigns or unassigns
+    an agent, connects an account, narrows an agent): the guest reads them
+    again while awake and runs the new set, with nothing restarted. The
+    platform never restarts a computer for a change of its agents, so an
+    image must not rely on reading them once, at its start. An agent
+    unassigned signs nothing from that moment (the intercept refuses it),
+    and its placeholders are refused, whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy; drop it while waiting on a
     person (decision 42).
@@ -207,46 +210,123 @@ intercept. It is for an image's own disaster recovery (Litestream).
 
 ### Connections and operator keys
 
-- A connection (Google, Notion, GitHub, …) is used by sending its
-  placeholder, `fragment-connection:<provider>`, in a header of a
-  request to one of the provider's own hosts, with `x-fragment-agent`:
-  `Authorization: Bearer fragment-connection:github` to
-  `api.github.com`. The intercept swaps in a short-lived token from
-  WorkOS Pipes for the agent's owner's account at that provider. An
-  agent may use every connection its owner has (decision 44: a person's
-  agents are not fenced from each other); its owner may narrow one agent
-  to a list (`PUT /api/computers/{id}/agents/{fragment}/connections
-  {connections: [provider]}`, and `{connections: null}` for every one
-  again, the default). It refuses (decision 22) with 403 `forbidden`
-  when the owner narrowed the agent to a list without that provider,
-  and 403 `not_connected` when the owner has connected no account
-  there, or must authorize it again. The token is held until a minute
-  before it expires, at most ten minutes.
-- An operator key (a paid API that needs only a key) is
-  `fragment-key:<name>` in whichever header the provider takes it in
-  (`x-api-key: fragment-key:search`). Any agent of the computer may use
-  it; the swap meters the call to the agent's owner (decision 37).
-- Which providers and keys a deployment offers, and each one's hosts,
-  are its configuration (`FRAGMENT_CONNECTIONS`,
-  `FRAGMENT_OPERATOR_KEYS`: `{"github": ["api.github.com"]}`; a key's
-  value is the secret `FRAGMENT_KEY_<NAME>`). Only those hosts are
-  intercepted; the rest of the internet is reached as it is (decision
-  43).
-- A placeholder sent to a host that is not its credential's is refused
-  (403), so a token never reaches a host it was not made for. Only
-  headers are swapped: a URL or a body is sent as it came, and at most
-  4 placeholders a request.
-- The intercept catches those hosts on HTTPS and on plain HTTP alike,
-  and always sends on over HTTPS. It strips `x-fragment-agent`, never
-  follows a redirect (the guest follows it, without the token), and
-  reads a request's body whole (at most 32 MiB). A request to such a
-  host with no placeholder goes on as it came.
+Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
+is a per-agent placeholder in the environment variable its provider's own
+SDK reads, so any SDK or CLI works unmodified, with no header of ours. The
+real credential is added only at the computer's egress, and only toward
+the provider's own hosts.
+
+- **The catalog.** What a deployment offers is one typed list, its
+  configuration's `providers` (`FRAGMENT_PROVIDERS`;
+  `fragment_core::catalog`, at most 64 rows). Each row is a provider:
+  - its `name` and `kind`: a `connection` (WorkOS Pipes: a short-lived
+    token for the person's account, acting as them), an `operator` key (the
+    operator's, lent to every agent, each call metered to the agent's owner
+    at its price and the margin), or an `own` key (the person's own, which
+    they give the platform: never metered);
+  - its `hosts` (1 to 16): the only hosts its credential is sent to;
+  - its `placements` (1 to 4), where the credential goes on a request: a
+    header and its format (`{"header": "authorization", "format": "Bearer
+    {}"}`, `{"header": "xi-api-key"}`), a query parameter (`{"query":
+    "key"}`), or a half of basic auth (`{"basic": "password"}`);
+  - its `env` (1 to 4): the environment variables a guest is given its
+    placeholder in, the vendor SDK's names where it has one;
+  - an operator key's `price` per call at list, or by default the price
+    book's for its name (`fragment_core::price::DEFAULT_KEYS`, each with its
+    source); a row with none is refused before a deploy.
+
+  Adding a provider is a catalog row (and, for a connection, the provider
+  enabled in the WorkOS environment); nothing in code names one. The
+  platform's catalog (`deploy/example.jsonc`, `deploy/e2e.jsonc`):
+
+  | Provider | Kind | Hosts | Placement | Environment variable | Price per call (list) |
+  |---|---|---|---|---|---|
+  | `google` | connection | `gmail`, `www`, `people`, `sheets`, `docs` `.googleapis.com` | `Authorization: Bearer {}` | `GOOGLE_OAUTH_ACCESS_TOKEN` (Terraform's Google provider reads it; Google's client libraries take a token as given) | none |
+  | `perplexity` | operator | `api.perplexity.ai` | `Authorization: Bearer {}` | `PERPLEXITY_API_KEY` (Perplexity's SDKs) | $0.005 |
+  | `google-places` | operator | `places.googleapis.com` | `X-Goog-Api-Key: {}`, or `?key=` | `GOOGLE_PLACES_API_KEY` (no Google SDK reads one; the `goplaces` CLI does) | $0.035 |
+  | `xai` | operator | `api.x.ai` | `Authorization: Bearer {}` | `XAI_API_KEY` (xAI's SDK) | $0.12 |
+  | `elevenlabs` | operator | `api.elevenlabs.io` | `xi-api-key: {}` | `ELEVENLABS_API_KEY` (ElevenLabs' SDKs) | $0.15 |
+
+- **A placeholder** is `fcx_<provider>_<tag>` for a connection and
+  `fck_<provider>_<tag>` for a key. `<tag>` is 32 hex of HMAC-SHA256 over
+  (computer, agent fragment, provider) under a key only the platform holds,
+  derived from its host secret (`swap::TagKey`; docs/secrets.md). So a
+  placeholder names its agent and its computer, no one can make one, and a
+  guest that leaks one leaks nothing usable from anywhere else. It is
+  stable (the same agent, computer and provider make the same tag), so an
+  image may write it once.
+- **The guest learns its credentials** from its own view (`GET
+  /api/computer`, below): each agent's `credentials`, `[{provider, kind,
+  env, placeholder, hosts}]`, those it may use now:
+  - a connection its owner has connected (Pipes says `connected`: the
+    connected account's state, read with no token minted, believed for a
+    minute; the owner's own read of their connections, and a swap Pipes
+    refused, tell the computer at once);
+  - an operator key the deployment holds;
+  - an own key its owner gave (`PUT /api/connections/{provider}/key`,
+    sealed by the computer);
+  - none its owner narrowed it from.
+
+  And `credentialEnv`: every environment variable of the catalog, held now
+  or not, so an image can pass them all through once. A guest reads the view
+  again while awake (our Hermes image every 3 s) and puts each placeholder
+  in its variables.
+- **The intercept** catches the catalog's hosts on HTTPS and on plain HTTP
+  alike, and always sends on over HTTPS. For a request to one of them it
+  finds each placeholder (`swap::Plan`) in a header value, in a half of
+  `Authorization: Basic`, in the query string, or in the path, wherever
+  one begins as a token of its own (one inside a JWT is none), and refuses
+  the request, saying why and reaching no provider, when a placeholder:
+  - is malformed (a prefix, a provider and `_`, then no 32-hex tag): 400;
+  - names a provider the deployment does not offer, or has the other
+    kind's prefix: 400;
+  - is sent to a host that is not its provider's: 403 `forbidden`;
+  - is in a place its provider does not take it (another header, a query
+    parameter it does not name, the path), or is not alone where it must
+    be (a query value, a half of basic auth), or there are more than 4: 400;
+  - has a tag that names no agent on this computer now: forged, another
+    computer's, or an agent removed since (removing an agent revokes its
+    tags): 403 `forbidden`;
+  - names more than one agent in one request: 400;
+  - names an agent its owner narrowed from that provider: 403 `forbidden`;
+  - is a connection its owner has not connected, or must authorize again:
+    403 `not_connected`; an own key its owner has not given: 403
+    `not_connected`;
+  - is an operator key's whose owner's ledger refuses a paid call: 402 or
+    403, the ledger's reason.
+
+  Otherwise each placeholder's place gets its credential: a header is its
+  format around it (`Bearer sk-…`, whatever scheme word the guest wrote), a
+  query parameter the credential (percent-encoded), a half of basic auth
+  the credential (the other half as it came). No `x-fragment-agent` is read
+  or needed (a hard cut), and no `x-fragment-…` header goes to a provider.
+  A connection's token is held until a minute before it expires, at most
+  ten minutes. A request to such a host with no placeholder goes on as it
+  came; a body is sent as it came, read whole (at most 32 MiB); a redirect
+  is never followed (the guest follows it, without the credential).
+- **After the provider answers** (anything under 500), each operator key's
+  call is metered to the agent's owner (`key:<computer>:…`, at the price
+  book's price and the margin), and every call is counted as the agent's
+  in the computer's `uses`: by month, provider and agent, its calls and
+  what they were charged (a connection's and an own key's are counted,
+  never charged). Its owner reads them (`GET /api/computers/{id}/uses`,
+  docs/api.md), and the shell's Connections page shows them.
+- **Who may use what.** An agent may use every provider its owner has
+  (decision 44: a person's agents are not fenced from each other); its
+  owner may narrow one agent to a list (`PUT
+  /api/computers/{id}/agents/{fragment}/connections {connections:
+  [provider]}`, and `{connections: null}` for every one again, the
+  default). One agent's guest could send another's placeholder, and that
+  is by design: the call is that agent's, and a narrowed list is an agent's
+  specialization, never a wall. Walls stand between people (decision 36).
+- **Approvals** are Hermes' own (Paul, 2026-10-04): a person who connected
+  something lets their agents use it, with no approval of the platform's.
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
-- Agents share a computer, so one agent's guest could send another's
-  `x-fragment-agent`, and that is by design: a person's agents are not
-  fenced from each other (decision 44), so a narrowed list is an agent's
-  specialization, never a wall. Walls stand between people (decision 36).
+- What the catalog cannot express is never swapped: a key in a path is
+  refused, and a body goes as it came (a placeholder in it reaches the
+  provider, which refuses it). A vendor that signs its requests with the
+  key needs more than a placement.
 
 ### Ports
 
@@ -372,10 +452,27 @@ and how a runtime finds them, is the image's.
   the CLI's agent mode (cli/GUIDE.md, "As an agent") names the agent in
   `x-fragment-agent`, signs nothing, and reaches the platform at
   `FRAGMENT_API`, acting for the owner on the routes that honor `for`. The
-  egress signs. No key is in the container. The skills' helpers name the
-  agent the same way for the credential swap. `fragment sync` and `deploy`
+  egress signs. No key is in the container. `fragment sync` and `deploy`
   still reach code.storage directly, with the short-lived, repo-scoped
   token the platform mints for the agent.
+- **Its credentials** (Connections and operator keys, above):
+  `hermes-boot` writes each agent's placeholders into its profile's `.env`
+  under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
+  Hermes reads again at every turn, so its own tools (its Perplexity web
+  search, ElevenLabs speech, xAI) use them too; and the profile's config
+  passes every variable of the catalog (`credentialEnv`) to its terminal,
+  named once since Hermes reads the list once per gateway. Hermes never
+  passes a name it keeps for its own providers' keys (its
+  `_HERMES_PROVIDER_ENV_BLOCKLIST`: `PERPLEXITY_API_KEY`, `XAI_API_KEY`,
+  `ELEVENLABS_API_KEY` among them), so the profile's terminal also sources
+  `credentials.sh` (`terminal.shell_init_files`, after Hermes' own three),
+  which exports each one as a terminal session's shell starts. A change
+  (a connection made or lost, a narrowing) rewrites both within 3 s,
+  nothing restarted: a passed-through variable is current at the next
+  command, one from `credentials.sh` at the next terminal session (an
+  operator key's placeholder does not change). So a skill's helper, a
+  stock `curl` or a vendor's SDK in the terminal finds its variable, with
+  no header of ours (`profile.credentials` in the events).
 
 ## Billing
 
@@ -392,8 +489,9 @@ and how a runtime finds them, is the image's.
 - Model calls bill the agent's owner, through the platform's model
   route. Each operator key's call the provider answered is metered to
   the agent's owner at the key's price and the margin (`key:<computer>:…`;
-  decision 37); a key with no price on the deployment is not lent.
-  Connections cost nothing to swap.
+  decision 37); a catalog's operator key always has a price (its own or
+  the price book's list price). A connection's call and an own key's are
+  counted, never charged; every call is in the computer's `uses`.
 - At zero credit, or with agents stopped, no wake starts (decision 27):
   the owner's wake is refused with the ledger's reason (402
   `budget_used_up` at zero credit or a canceled seat; 403 for a guest,

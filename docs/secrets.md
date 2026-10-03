@@ -24,14 +24,45 @@ the cell stores.
 | Secret | Home |
 |---|---|
 | A person's GitHub token, other personal keys | the person's own cell |
+| A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The deployment's host secret, the code.storage org key, the WorkOS API key, the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37), a preview's test secret (`FRAGMENT_TEST_SECRET`, below) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
-| A person's connections (Google, GitHub, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
+| A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
+| The key computers' placeholders are tagged with | derived from the host secret (HKDF-SHA256, its own salt), never stored or provisioned apart: in the platform Worker alone, never in a container. Rotating the host secret rotates every placeholder (guests read theirs again within seconds; tags under `FRAGMENT_HOST_SECRET_PREVIOUS` still verify during a rotation) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
 Never in git, a log, a command line, or a channel record. Rotating a secret means changing it in its home; everything that
 uses it reads it from there.
+
+## Placeholders and the operator's keys (Paul, 2026-10-04)
+
+A computer's guest is given each credential its agent may use as a
+placeholder in a standard environment variable
+(`PERPLEXITY_API_KEY=fck_perplexity_<tag>`; docs/computers.md). The
+placeholder is not a secret: its tag is an HMAC of (computer, agent
+fragment, provider) under the tag key above, so it names its agent and
+works only from that computer's egress, toward its provider's own hosts.
+A guest that prints one, or a provider that echoes one, leaks nothing
+usable. The intercept adds the real credential and logs the provider
+only, never a tag or a value.
+
+The operator's keys are Worker secrets (`FRAGMENT_KEY_<NAME>`), each
+uploaded by `cargo xtask deploy` from the `key_file` its catalog row names
+(`deploy/example.jsonc`, `deploy/e2e.jsonc`). The platform's four are
+Paul's to supply, as text files (mode 600), at:
+
+| Key | File | Worker secret |
+|---|---|---|
+| Perplexity | `~/.config/fragment/secrets/perplexity-api-key` | `FRAGMENT_KEY_PERPLEXITY` |
+| Google Places | `~/.config/fragment/secrets/google-places-api-key` | `FRAGMENT_KEY_GOOGLE_PLACES` |
+| xAI | `~/.config/fragment/secrets/xai-api-key` | `FRAGMENT_KEY_XAI` |
+| ElevenLabs | `~/.config/fragment/secrets/elevenlabs-api-key` | `FRAGMENT_KEY_ELEVENLABS` |
+
+A deploy that cannot read one stops before anything changes. Rotating one:
+change its file and deploy again (the swap reads the secret per call). The
+local e2e and dev use test values of their own, sent only to the upstream
+fake.
 
 ## The test secret (previews and the local e2e)
 

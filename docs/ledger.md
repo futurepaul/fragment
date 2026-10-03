@@ -92,7 +92,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | `dynamic_workers` | unique dynamic workers per UTC day | $0.002 each | Dynamic Workers pricing |
 | `browser` | ms of Browser Rendering | $0.09 an hour | Browser Run pricing (developers.cloudflare.com/browser-run/pricing, updated 2026-04-21): $0.09 per browser hour past the 10 a month Workers Paid includes |
 | `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
-| `key` | the key's own unit | set per key (`micros` per `per` units) | the operator; none by default |
+| `key` | calls the provider answered | per call at list: Perplexity $0.005, Google Places $0.035, xAI $0.12, ElevenLabs $0.15 (`micros` per `per` calls), or the price a catalog row names | each vendor's pricing page (`DEFAULT_KEYS` in `price.rs`, each with its source and what an estimate assumes); the book's `keys` are the deployment's catalog's operator rows |
 
 Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
@@ -266,8 +266,11 @@ mark sends the same batch again, which answers as before.
   theirs.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
-- **Operator keys** (decision 37): the intercept reserves a `key` worst
-  case and settles the units used.
+- **Operator keys** (decision 37): before the call the computer asks the
+  owner's ledger whether they may spend (`may_spend(agent_turn)`); after
+  the provider answered (under 500), the intercept meters one `key` call
+  (`key:<computer>:<12 hex>`), as the agent, to its owner, and the
+  computer counts it with its charge (docs/computers.md).
 - **Compute** (the Computer DO). It meters each awake interval at sleep,
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The

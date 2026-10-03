@@ -658,15 +658,83 @@ fragment.club until cutover (decisions 34–35).
 
 - **Observed:** phase 4 (`cell/src/computer.rs` `egress_swap`). The
   computers lane drives the swap from the stub's scripted agent over
-  plain HTTP; the real-Hermes lane sends Hermes' own `curl https://…`
-  through `interceptOutboundHttps` with Cloudflare's local CA. Both send
-  the swapped request to `FRAGMENT_SWAP_UPSTREAM`, not a real provider,
-  and neither runs on Containers.
+  plain HTTP; the real-Hermes lane sends a stock `curl https://…` from
+  Hermes' terminal, with the placeholder from its environment, through
+  `interceptOutboundHttps` with Cloudflare's local CA. Both send the
+  swapped request to `FRAGMENT_SWAP_UPSTREAM`, not a real provider, and
+  neither runs on Containers. The four operator keys and the Google
+  connection have never reached their real vendors through it.
 - **Risk:** Containers' CA, or a real provider's TLS and auth, differ
   from the local proxy's, so a connection works in dev and not hosted.
 - **First proof:** the first hosted computer using a connection.
 - **Delete when:** the hosted lane makes one swapped call to a real
   provider from a computer on a preview deployment.
+
+## An operator key is metered per call, not per what its vendor counts
+
+- **Observed:** Paul, 2026-10-04 (`fragment_core::price::DEFAULT_KEYS`).
+  The swap meters one `key` unit a call the provider answered. Perplexity's
+  Sonar Pro briefs also bill tokens and a request fee ($0.02 to $0.04 a
+  brief at list), priced as a $0.005 search; xAI's X Search bills posts and
+  profiles fetched, priced as a 20-post call ($0.12); ElevenLabs bills
+  minutes of music (and characters of speech), priced as a minute ($0.15).
+- **Risk:** a brief or a long composition costs the operator more than
+  it charges; a short jingle or a speech call charges the person more than
+  it cost.
+- **First proof:** a month's vendor invoice against the ledger's `key`
+  rows for that key.
+- **Delete when:** the swap reads each answer's usage (a header or the
+  body, as the model route reads tokens) and meters the vendor's own
+  units, each catalog row naming how, proven by a lane whose upstream fake
+  answers usage and is charged by it.
+
+## Hermes keeps its providers' variable names from its terminal
+
+- **Observed:** Paul, 2026-10-04 (`images/hermes/boot`: `hermes.rs`
+  `credentials_sh`). Hermes v0.21.5 never passes a name of its own
+  providers' keys to its terminal (`_HERMES_PROVIDER_ENV_BLOCKLIST`:
+  `PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY` among them),
+  whatever `terminal.env_passthrough` lists. The image also writes them to
+  the profile's `credentials.sh`, which its terminal sources as a session's
+  shell starts (`terminal.shell_init_files`), so they are in its snapshot.
+- **Risk:** a Hermes release that scrubs those names from the snapshot, or
+  ignores `shell_init_files`, takes the operator keys from the agents'
+  terminals (their skills say the key is not offered); and one sourced at
+  a session's start keeps a value removed meanwhile until the session
+  ends (a placeholder then refused at the swap, never a key).
+- **First proof:** the hermes lane's check that a stock curl in Hermes'
+  terminal finds `$PERPLEXITY_API_KEY`, failing on a Hermes upgrade.
+- **Delete when:** Hermes lets a profile pass a name it keeps (an
+  allowlist of its own), or the catalog's names for those providers are
+  ones Hermes does not keep, proven by the same check with no
+  `credentials.sh`.
+
+## Own keys are kept by the person's computer
+
+- **Observed:** Paul, 2026-10-04 (`computer.rs` `own_keys`). A person's
+  own key for an `own` provider is sealed in their computer's Durable
+  Object, since a person has one computer (decision 13) and the swap
+  resolves there.
+- **Risk:** a person with a second computer gives their key again; one
+  whose computer is deleted loses it.
+- **First proof:** a second computer per person.
+- **Delete when:** own keys live in the person's own cell (docs/secrets.md)
+  and every computer of theirs asks it, proven by two computers swapping
+  one key.
+
+## A connection's state comes from Pipes' connected-account API, untried on staging
+
+- **Observed:** Paul, 2026-10-04 (`keys.rs` `pipes_state`). A guest is
+  given a connection once `GET
+  /user_management/users/{user}/connected_accounts/{provider}` says
+  `connected` (workos.com/docs/reference/pipes/connected-account), so no
+  token is minted to tell. Spike S5 proved the token and authorize calls
+  on staging, not this one; the fake answers as the reference does.
+- **Risk:** staging answers it otherwise (another path, a 404 for every
+  account), and no agent is ever given Google.
+- **First proof:** the hosted lane with a connected Google account.
+- **Delete when:** the hosted lane reads a connected account's state on
+  staging, proven by its guest given the connection.
 
 ## The swap reads a request's body whole
 
