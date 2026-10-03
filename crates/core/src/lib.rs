@@ -13,6 +13,7 @@ pub mod effects;
 pub mod egress;
 pub mod facet;
 pub mod form;
+pub mod frames;
 pub mod glob;
 pub mod history;
 pub mod ledger;

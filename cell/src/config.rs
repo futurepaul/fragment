@@ -182,6 +182,17 @@ impl Config {
             host_label_suffix.as_deref().is_none_or(valid_label_suffix),
             "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (^--[a-z0-9][a-z0-9-]{{0,30}}$)"
         );
+        // the platform's origin is named in frames' `frame-ancestors` and
+        // messages' targets (fragment_core::frames), so it is one exactly
+        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
+        assert!(
+            platform_url.as_deref().is_none_or(fragment_core::frames::is_origin),
+            "FRAGMENT_PLATFORM_URL is an origin (scheme://host[:port], lower case, no path)"
+        );
+        assert!(
+            host_suffix.as_deref().is_none_or(|s| fragment_core::frames::is_origin(&format!("https://{s}"))),
+            "FRAGMENT_HOST_SUFFIX is a host name"
+        );
         Config {
             codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
                 let api =
@@ -208,7 +219,7 @@ impl Config {
                 client_id,
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
-            platform_url: var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string()),
+            platform_url,
             default_plan: default_plan(env),
             ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");

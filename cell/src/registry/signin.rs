@@ -13,11 +13,10 @@
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
 //! A frame's session (docs/fragment-boats.md) is a site session bound to
-//! the origin of the page that framed it (`embedder`): redeemed only in a
-//! frame, and looked up only as a frame's. Nothing mints a frame
-//! redemption since the desktop went (it minted from its own page's
-//! session); the shell will, from the platform's (docs/cloudflare-v1.md,
-//! phase 5; docs/technical-debt-ledger.md).
+//! the origin of the page that framed it (`embedder`): minted from the
+//! platform session for a frame of the platform's own page (the shell's
+//! tabs: `/auth/frame`, whose embedder is the platform's origin), redeemed
+//! only in a frame, and looked up only as a frame's.
 //!
 //! A person's yes to a fragment that is not theirs or shared with them
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
@@ -491,8 +490,14 @@ impl RegistryCell {
     }
 
     /// A platform session's redemption for a fragment, when the person may
-    /// be known there: they said yes to it before, or now, or are in it.
+    /// be known there: they said yes to it before, or now, or are in it. A
+    /// frame redemption names the origin of the page that frames it (the
+    /// router's, never a request's: the platform's own).
     pub(super) async fn mint(&self, b: Mint) -> CellResult<Minted> {
+        // it becomes a page's `frame-ancestors`: an origin, and nothing more
+        if b.embedder.as_deref().is_some_and(|e| !fragment_core::frames::is_origin(e)) {
+            return Err(CellError::invalid("a frame redemption's embedder is an origin (scheme://host[:port])"));
+        }
         let Live { hash, session, .. } = self.live_session(&b.token, None, false)?;
         let identity = session.identity;
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
@@ -515,7 +520,7 @@ impl RegistryCell {
                 )?;
             }
         }
-        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, None).await?;
+        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
         Ok(Minted { redeem: Some(redeem), identity })
     }
 

@@ -14,7 +14,7 @@ a vendor's product beyond the credential it holds.
 
 | Surface | Why it is platform | Built on |
 |---|---|---|
-| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`) | Security: it mints the credentials every other surface trusts. | WorkOS AuthKit; the registry |
+| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`) | Security: it mints the credentials every other surface trusts. | WorkOS AuthKit; the registry |
 | The shell (`/chat`): sidebar, tabs, profile, search, first run | Security: it holds your session and frames your fragments and computers. The thin page users can't break. | The public fragment, computer, identity and ledger APIs |
 | Identity and delegation | Security: who an agent acts for, and at what role. | The registry |
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
@@ -34,7 +34,7 @@ Every fragment gets these routes, and none of them knows what a
 fragment is for: `__signin` and `__signout`, `__op`, `__live`,
 `__people`, `__blob`, `__files` (the vault UI), people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the
-shell's tabs will use.
+shell's tabs use (`__signin?token=` in a frame, from `/auth/frame`).
 
 ## Not special cases
 

@@ -485,29 +485,6 @@ fragment.club until cutover (decisions 34–35).
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
 
-## Frame sessions have no minter
-
-- **Observed:** the cut (2026-10-02). The desktop framed its owner's
-  fragments through `__frame`, which minted a frame redemption from the
-  framing page's own site session, behind the `frame` capability and
-  its owner's grant. `__frame`, the capability, the grant, and the share
-  sheet's embed went with the desktop; the redeeming half stays, generic:
-  a frame redemption spent only in a frame, into the partitioned
-  `fragment_frame` cookie, a frame-bound session naming its `embedder`,
-  the router's frame credential, `frame-ancestors` naming the embedder,
-  the `blocked` page, and `check=frame` (cell/src/auth.rs,
-  cell/src/registry/signin.rs). Nothing mints a frame redemption now,
-  so none of it runs, and the e2e's `frames` section (and the listed
-  node shape it ran on) went too; the `isolation` section still checks
-  that a frame signs in nowhere.
-- **Risk:** code no test reaches rots: a change breaks it, and the shell
-  that frames fragments next finds out.
-- **First proof:** the first page that frames a fragment signed in.
-- **Delete when:** a platform-origin mint (a `Mint` naming its embedder,
-  from the shell's own session) frames a fragment signed in, with a
-  frames lane again; or the redeeming half is deleted if the shell does
-  not frame fragments.
-
 ## Channel drafts' refusals have no e2e
 
 - **Observed:** the cut (2026-10-02) took the lane that drove

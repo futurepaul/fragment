@@ -12,7 +12,8 @@
 //!   one-time tickets that sign a browser in to its ports.
 //! - **Its origin** (`<24 hex>--computer.<suffix>`: `serve_host`) serves
 //!   its ports to its owner, cross-site from the platform, so a page the
-//!   guest serves can act as no one.
+//!   guest serves can act as no one; in a tab of its own, or in a frame of
+//!   the platform's page (the shell's), the only page that may frame it.
 //! - **Its guest** reaches the platform only through the intercepts
 //!   (`ComputerEgress`): the API as its agents (each request signed by the
 //!   agent fragment it names, which checks it runs here), its own view,
@@ -59,8 +60,13 @@ const SESSION_HEADER: &str = "x-fragment-computer-session";
 const SIGNER_HEADER: &str = "x-fragment-computer-signer";
 /// The header the guest names the agent it acts as with (docs/computers.md).
 const AGENT_HEADER: &str = "x-fragment-agent";
-/// The cookie that signs a browser in to a computer's origin.
+/// The cookies that sign a browser in to a computer's origin: a top-level
+/// visit's (SameSite=Lax), and a frame's in the platform's page (the
+/// shell's tab onto a port: SameSite=None, partitioned). Each is
+/// `__Host-` over https (`auth::set_cookie`): a fragment's page may set a
+/// cookie for the whole suffix, never one of those.
 const SESSION_COOKIE: &str = "fragment_computer";
+const FRAME_COOKIE: &str = "fragment_computer_frame";
 
 /// `agents.connections` is JSON: `null`, every connection the owner has
 /// (decision 44), or a list that narrows it. An agent's row names it as
@@ -753,7 +759,8 @@ impl ComputerCell {
                 let Some(t) = rows.first().filter(|t| t["expires_at"].as_i64().unwrap_or(0) >= now) else {
                     return Err(CellError::new(ErrorCode::Unauthenticated, "this link was used or is too old: open the computer again"));
                 };
-                let session = js::random_hex::<24>();
+                // 32 bytes, as every session's: its cookie is read as one (`auth::cookie_of`)
+                let session = js::random_hex::<32>();
                 let identity = t["identity"].as_str().unwrap_or_default();
                 self.exec(
                     "INSERT INTO sessions (hash, identity, expires_at) VALUES (?, ?, ?)",
@@ -1047,17 +1054,71 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
 
 /// A request to a computer's own origin: `/__ticket` signs a browser in
 /// (a ticket its owner minted becomes this origin's session cookie), and
-/// `/p/<port>/…` is that port, for its owner.
+/// `/p/<port>/…` is that port, for its owner. Its answers may be framed by
+/// the platform's page alone (the shell's tab onto a port: decisions 11
+/// and 41), never by a fragment's, which is one site with this origin.
 pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
+    let platform = Config::from_env(env).platform(url);
+    let answered = match host_answer(req, env, url, id, signer).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    framed_by(answered, &platform)
+}
+
+/// `resp` with `frame-ancestors <platform>` added (an image's own policy
+/// stays: a second one only narrows it). A socket's upgrade shows nothing,
+/// and keeps the answer it had.
+fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
+    assert!(fragment_core::frames::is_origin(platform), "frame-ancestors names the platform's origin alone");
+    if resp.status_code() == 101 {
+        return Ok(resp);
+    }
+    let h = resp.headers().clone();
+    h.append("content-security-policy", &format!("frame-ancestors {platform}"))?;
+    Ok(resp.with_headers(h))
+}
+
+/// Which of a browser's cookies name its session on a computer's origin,
+/// from the Fetch Metadata it sends, as on a fragment's (`crate::fetched`):
+/// every fragment's page is one site with this origin, so a SameSite=Lax
+/// cookie rides along on its images, fetches and frames, and the frame
+/// cookie, partitioned under the platform's page, on those of any page
+/// framed there. The session counts only on this origin's own page's
+/// requests, a top-level navigation (the site cookie), and a frame's
+/// navigation (the frame cookie, its answer shown only in the platform's
+/// page: `framed_by`); a socket only from this origin's own page.
+fn session_of(req: &Request, url: &Url) -> CellResult<Option<String>> {
+    let fetched = crate::fetched(req)?;
+    let socket = req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    // a socket has no CORS: one from any other page is refused before its cookies are read
+    if socket && req.headers().get("origin")?.is_some_and(|o| o != url.origin().ascii_serialization()) {
+        return Err(CellError::new(ErrorCode::Forbidden, "a computer's socket opens from its own page"));
+    }
+    let secure = url.scheme() == "https";
+    let site = if fetched.site { crate::auth::cookie_of(req, SESSION_COOKIE, secure, "/")? } else { None };
+    let frame = if fetched.frame { crate::auth::cookie_of(req, FRAME_COOKIE, secure, "/")? } else { None };
+    Ok(if fetched.framed { frame.or(site) } else { site.or(frame) })
+}
+
+async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
     let path = url.path().to_string();
+    let secure = url.scheme() == "https";
     if path == "/__ticket" {
         let q = |k: &str| url.query_pairs().find(|(n, _)| n == k).map(|(_, v)| v.into_owned());
         let ticket = q("t").ok_or_else(|| CellError::invalid("this link names no ticket"))?;
         let next = q("next").filter(|n| n.starts_with("/p/") && !n.contains("//")).unwrap_or_else(|| "/p/6080/".into());
         let s = ask(env, id, "computer/redeem", &json!({ "ticket": ticket })).await?;
         let session = s["session"].as_str().ok_or_else(|| CellError::host("the computer made no session"))?;
-        let secure = if url.scheme() == "https" { "; Secure" } else { "" };
-        let cookie = format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", s["maxAgeS"].as_i64().unwrap_or(0));
+        let max_age_s = s["maxAgeS"].as_i64().unwrap_or(0);
+        // In a frame (the platform's tab onto the port), the session is the
+        // frame's: a partitioned cookie for the page around it, which a
+        // browser that blocks third-party cookies keeps (CHIPS). The site
+        // cookie is SameSite=Lax, which a cross-site frame never sends.
+        let cookie = match crate::fetched(&req)?.framed {
+            true => crate::auth::frame_cookie(FRAME_COOKIE, session, "/", max_age_s, secure),
+            false => crate::auth::set_cookie(SESSION_COOKIE, session, "/", max_age_s, secure),
+        };
         let headers = Headers::new();
         headers.set("location", &next)?;
         headers.set("set-cookie", &cookie)?;
@@ -1069,10 +1130,7 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
     };
     let (port, tail) = rest.split_once('/').unwrap_or((rest, ""));
     let port: u16 = port.parse().map_err(|_| CellError::invalid("a port is a number"))?;
-    let session = req
-        .headers()
-        .get("cookie")?
-        .and_then(|c| c.split(';').map(str::trim).find_map(|kv| kv.strip_prefix(&format!("{SESSION_COOKIE}=")).map(str::to_string)));
+    let session = session_of(&req, url)?;
     let headers = Headers::new();
     for k in ["accept", "content-type", "range", "if-none-match", "upgrade", "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"] {
         if let Some(v) = req.headers().get(k)? {

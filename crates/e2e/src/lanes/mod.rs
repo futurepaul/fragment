@@ -11,6 +11,7 @@ mod computers;
 mod control;
 mod delegation;
 mod deliver;
+mod frames;
 pub mod hermes;
 mod identities;
 mod isolation;
@@ -57,6 +58,7 @@ const LANES: &[Lane] = &[
     templates::templates,
     share::share,
     isolation::isolation,
+    frames::frames,
     app::ops,
     app::public,
     app::effects,
