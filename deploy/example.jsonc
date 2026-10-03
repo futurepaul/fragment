@@ -48,8 +48,8 @@
     "default_image": "hermes",
     "images": {
       "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "images" }
-    },
-    "instance_type": "standard-2"
+    }
+    // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },
   // What a computer's swap offers: WorkOS Pipes providers (each enabled in
   // the WorkOS environment above) and the operator's keys, each with the

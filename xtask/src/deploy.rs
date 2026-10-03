@@ -82,17 +82,10 @@ struct Computers {
     /// By name: each image's Dockerfile and build context, relative to the
     /// repo (`images/hermes/Dockerfile`, `images`), and its build variables.
     images: BTreeMap<String, Image>,
-    /// The container's instance type (default: Cloudflare's): a named one
-    /// (`standard-2`) or a size, `{vcpu, memory_mib, disk_mb}` (decision
-    /// 13's 2 vCPU and 6 GiB is one).
-    instance_type: Option<InstanceType>,
-}
-
-#[derive(Deserialize, serde::Serialize)]
-#[serde(untagged, deny_unknown_fields)]
-enum InstanceType {
-    Named(String),
-    Sized { vcpu: f64, memory_mib: u32, disk_mb: u32 },
+    // No size here: a Durable Object's container is sized as it starts, at
+    // the instance its awake time is priced at (fragment_core::price
+    // `instance_size`; decision 13's 2 vCPU and 6 GiB), and wrangler
+    // refuses `instance_type` for one.
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -387,9 +380,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
                 images.insert(name.clone(), i);
             }
             container["images"] = Value::Object(images);
-            if let Some(t) = &computers.instance_type {
-                container["instance_type"] = json!(t);
-            }
         }
         None => {
             c.remove("containers");
@@ -582,7 +572,7 @@ mod tests {
         d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into(), price: KeyPrice { micros: 1, per: 1 } });
         assert!(checked(d).is_err());
         let mut d = deployment(None, None);
-        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), instance_type: None });
+        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new() });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
     }

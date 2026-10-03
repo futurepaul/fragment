@@ -529,7 +529,9 @@ impl ComputerCell {
         let backup = if snapshot.is_none() { self.meta(MetaKey::Backup)? } else { None };
         let env = js::to_js(&self.guest_env(&id, &image, backup.is_some()));
         let snapshot_js = snapshot.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
-        self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, JsValue::NULL]).await?;
+        // the size its awake time is priced at (decision 13's, by default)
+        let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
+        self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")));

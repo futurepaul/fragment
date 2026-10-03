@@ -300,8 +300,12 @@ settings and state):
 
 ## Billing
 
-- Awake time is metered at the instance's rate (`FRAGMENT_COMPUTER_INSTANCE`,
-  the price book's name for it) to the computer's owner (decision 24):
+- A computer's container starts at the size its awake time is priced at:
+  `FRAGMENT_COMPUTER_INSTANCE` names the price book's instance (default
+  `2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
+  as `instance` (`fragment_core::price::instance_size`: a Containers type
+  by name, or `<n>vcpu-<m>gib`, a custom size with 2 GB of disk a GiB).
+- Awake time is metered at the instance's rate to the computer's owner (decision 24):
   an interval every five minutes awake and one at each sleep, kept by the
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
