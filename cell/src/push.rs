@@ -162,6 +162,7 @@ impl FragmentCell {
                 ],
                 body: B64.encode(body),
                 sub: s["id"].as_i64(),
+                card: None,
             });
         }
         deliveries

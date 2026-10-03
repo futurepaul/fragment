@@ -151,6 +151,11 @@ pub(super) fn started(r: &Reply) -> i64 {
     r.body["result"]["run"].as_i64().unwrap_or(0)
 }
 
+/// What the triggers section needs (its cron fragment is deployed sections
+/// before it, when it will run): a local upstream its webhook deliveries
+/// reach, and a fragment's levers.
+pub const TRIGGERS_NEEDS: &[crate::Need] = &[crate::Need::Fakes, crate::Need::Levers];
+
 /// A fragment whose cron trigger fires every minute, for the triggers
 /// section to check.
 pub struct Cron {
@@ -164,7 +169,7 @@ pub struct Cron {
 /// a full run a minute boundary has passed by the time it is checked, on
 /// the real alarm; alone, the section waits for one.
 pub fn cron(s: &Suite, api: &Api) -> Result<Option<Cron>> {
-    if !s.runs("triggers") {
+    if !s.runs("triggers", TRIGGERS_NEEDS) {
         return Ok(None);
     }
     let owner = api.person()?;
@@ -173,7 +178,7 @@ pub fn cron(s: &Suite, api: &Api) -> Result<Option<Cron>> {
 }
 
 pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("jobs") {
+    if !s.section("jobs", &[crate::Need::Fakes, crate::Need::Levers]) {
         return Ok(());
     }
     let upstream = Upstream::start()?;
@@ -397,7 +402,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, String>>) -> Result<()> {
-    if !s.section("triggers") {
+    if !s.section("triggers", TRIGGERS_NEEDS) {
         return Ok(());
     }
     let cron = match cron {

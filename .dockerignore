@@ -1,0 +1,16 @@
+# The Hermes image builds from the repo root (images/hermes/Dockerfile): it
+# carries the fragment CLI, of the root workspace. Its context is only what
+# its build reads; everything else (targets, the cell's builds, node_modules,
+# git) stays out. The stub image builds from images/ (images/.dockerignore).
+*
+!Cargo.toml
+!Cargo.lock
+!cli
+!crates
+!templates
+!xtask
+!images
+**/target
+**/node_modules
+**/.DS_Store
+**/.wrangler

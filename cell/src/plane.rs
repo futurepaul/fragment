@@ -554,7 +554,8 @@ impl FragmentCell {
 
     /// Refreshes pins; a move of main notifies the change feed and starts
     /// the runs its file triggers name, and the agent a new live declares
-    /// joins with its deploy (the alarm retries one that fails).
+    /// joins with its deploy (the alarm retries one that fails). A move of
+    /// live wants its preview card, shot later from the alarm (card.rs).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
         if let Err(e) = self.sync_agent().await {
@@ -566,6 +567,12 @@ impl FragmentCell {
             if which == "main" && moved.changed {
                 if let Err(e) = self.notify_urls(moved.to.as_deref(), &moved.paths).await {
                     self.event("notify.failed", &e.message, json!({ "code": e.code }));
+                }
+            }
+            // a move of live wants its preview card, which the alarm shoots (card.rs)
+            if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
+                if let Err(e) = self.card_wanted(live) {
+                    self.event("card.want-failed", &e.message, json!({ "code": e.code }));
                 }
             }
         }
@@ -759,8 +766,9 @@ impl FragmentCell {
         self.admit(&facts, caller, false, Role::Viewer)?;
         self.ensure_pins(&mut facts).await?;
         let blobs = self.pointer_sizes("main")?;
-        let files: Vec<Value> = self
-            .tree_rows("main")?
+        let rows = self.tree_rows("main")?;
+        let release = self.release_data(&rows.iter().map(|r| r.path.as_str()).collect())?;
+        let mut files: Vec<Value> = rows
             .into_iter()
             .map(|r| {
                 let mut f = json!({ "path": r.path, "size": r.size, "mode": r.mode, "lastCommitSha": r.last_commit, "machinery": site::is_machinery(&r.path) });
@@ -771,7 +779,42 @@ impl FragmentCell {
                 f
             })
             .collect();
+        // a blessed template's data, beneath the fragment's own files (decision 40)
+        files.extend(release.iter().map(|d| json!({ "path": d.path, "size": d.bytes.len(), "mode": "100644", "lastCommitSha": d.version, "machinery": false, "release": true })));
+        files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
         json_response(&json!({ "ref": facts.pin_main, "files": files }))
+    }
+
+    /// The data of the blessed template live runs (blessed.rs `data`), less
+    /// the paths the fragment holds of its own (`own`): a fragment on the
+    /// template lists and reads it from the release, so one deploy of the
+    /// platform updates every one of them, and a file of its own at the same
+    /// path wins over the release's.
+    pub(crate) fn release_data(&self, own: &std::collections::BTreeSet<&str>) -> CellResult<Vec<&'static blessed::DataFile>> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(vec![]) };
+        let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+        Ok(blessed::data(template).iter().filter(|d| !own.contains(d.path)).collect())
+    }
+
+    /// One data file of the blessed template live runs, when the fragment
+    /// holds no file of its own at `path`.
+    pub(crate) fn release_file(&self, path: &str) -> CellResult<Option<&'static blessed::DataFile>> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(None) };
+        let template = installed.split_once('@').map_or(installed.as_str(), |(t, _)| t);
+        Ok(blessed::data_file(template, path))
+    }
+
+    /// A release's data file as a file route answers one.
+    pub(crate) fn release_response(d: &blessed::DataFile, head: bool) -> CellResult<Response> {
+        let headers = Headers::new();
+        headers.set("content-type", site::mime_for_path(d.path))?;
+        headers.set("cache-control", "no-store")?;
+        headers.set("x-fragment-ref", &d.version)?;
+        headers.set("content-length", &d.bytes.len().to_string())?;
+        if head {
+            return Ok(Response::empty()?.with_headers(headers));
+        }
+        Ok(Response::from_bytes(d.bytes.to_vec())?.with_headers(headers))
     }
 
     /// Streams a file from a pin (`main` for the API, `live` for the site);
@@ -808,6 +851,10 @@ impl FragmentCell {
         }
         self.ensure_pins(&mut facts).await?;
         let Some(row) = self.tree_row("main", path)? else {
+            // beneath its own files, its blessed template's data (decision 40)
+            if let Some(d) = self.release_file(path)? {
+                return Self::release_response(d, false);
+            }
             return Err(CellError::new(ErrorCode::NotFound, format!("no file {path} at main")));
         };
         let mut resp = self.stream_file(&facts, "main", &row, None).await?;

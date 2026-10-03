@@ -60,7 +60,12 @@ prebuilt bundle is in the debt ledger).
   for wasm32 (Apple's does not: `brew install llvm`, or Nix, which xtask
   finds; or name one with `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`), Node 22 or later, and `npm ci` at the repo
-  root (the pinned wrangler; `WRANGLER_BIN` names another).
+  root (the pinned wrangler; `WRANGLER_BIN` names another). Preview cards
+  are shot by `wrangler dev`'s local Browser Rendering, which downloads
+  Chrome for Testing 126 (about 145 MB) into wrangler's cache
+  (`$XDG_CACHE_HOME/.wrangler/chrome`, else the system's cache) on its
+  first shot; a Node whose unzip of it hangs (a v26 alpha did) leaves
+  every shot failing, quietly.
 - `cargo xtask build`: the cell and the agents for wasm32.
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
@@ -68,11 +73,11 @@ prebuilt bundle is in the debt ledger).
   builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
-  auth, create, lockdown, keys, members, identities, signin, secrets,
+  auth, create, lockdown, keys, members, identities, signin, levers, secrets,
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
+  brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
   hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
@@ -92,7 +97,26 @@ prebuilt bundle is in the debt ledger).
   xtask dev` can run at once. That scratch holds each node boot's log
   (`node-<port>-<boot>.log`, wrangler's debug logs on) and is removed when
   every check passes, kept when one fails (`FRAGMENT_E2E_KEEP=1` keeps it
-  anyway).
+  anyway). Each section declares what it needs (`crates/e2e/src/needs.rs`:
+  fakes, the node, the whole deployment, levers, local Docker, Chrome,
+  computers, models, two sites), and that alone chooses the hosted set.
+  The node's test levers (`/api/test/*`) take a secret made per run.
+- `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
+  … | --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the hosted
+  lane, the same sections against the branch deployment
+  `https://<b>.<zone>` on its real vendors (crates/e2e/src/hosted.rs). Its
+  people sign in through the preview's levers as `<name>@e2e.test` (the
+  config's `test_secret_file`, read from its file; docs/secrets.md), its
+  fragments are `e2e-…`, and a section that needs what a preview lacks is
+  a skip that says why. Paid calls (models, AI steps) are lent from the
+  run's budget (default 60), each person's capped by their ledger, and the
+  run ends saying what it spent. `--dry-run` prints the plan (base URL,
+  what runs, what is skipped and why) and calls nothing; `--sweep` deletes
+  the e2e people's `e2e-…` fragments there and puts their computers to
+  sleep. `cargo xtask e2e --rehearse` keeps the hosted lane's rules on the
+  local node (shaped as a branch, its fakes hidden from the lanes) and
+  ends with the sweep. Running it against a preview spends test cents:
+  Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds

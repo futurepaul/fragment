@@ -355,7 +355,10 @@ pub fn browser(s: &mut Suite, api: &Api, chrome: &mut Lease) -> Result<()> {
     let url = api.site_url(&name, "");
     let a = chrome.open(&url)?;
     let b = chrome.open(&url)?;
-    let loaded = chrome.until(&a, "document.readyState === 'complete'", wait) && chrome.until(&b, "document.readyState === 'complete'", wait);
+    // the room's page itself: a new tab is `about:blank`, complete at once,
+    // until its navigation lands (slower on a preview than locally)
+    let here = format!("location.href.startsWith({}) && document.readyState === 'complete'", serde_json::to_string(&url)?);
+    let loaded = chrome.until(&a, &here, wait) && chrome.until(&b, &here, wait);
     s.ok("(two pages of a room with no app code open)", loaded, "");
     let lib = "import(new URL('./__fragment.js', location.href).href)";
     chrome.eval(&b, &format!("{lib}.then((f) => {{ window.__heard = []; f.subscribe('chat', (r) => window.__heard.push(r)); return f.me(); }})"))?;

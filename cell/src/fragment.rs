@@ -45,6 +45,8 @@
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
+//!   POST   /card/report                   the delivery consumer, for a card's shot (card.rs); never routed from outside
+//!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
@@ -437,6 +439,11 @@ pub(crate) enum MetaKey {
     MeterClosed,
     /// When storage was last sampled (meter.rs).
     StorageSampledAt,
+    /// The preview card and its schedule (card.rs: `fragment_core::card::Cards`, as JSON).
+    Cards,
+    /// Test fleets only: how many more card shots open a page nothing
+    /// serves, so they fail (`fail-cards`).
+    TestFailCards,
 }
 
 impl MetaKey {
@@ -492,6 +499,8 @@ impl MetaKey {
 
             MetaKey::MeterClosed => "meter_closed",
             MetaKey::StorageSampledAt => "storage_sampled_at",
+            MetaKey::Cards => "cards",
+            MetaKey::TestFailCards => "test_fail_cards",
         }
     }
 
@@ -880,6 +889,14 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
+        if path == "/card/report" {
+            // Only the delivery consumer sets the header; the router never passes it.
+            if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let report = body_json(&mut req).await?;
+            return json_response(&self.card_report(report).await?);
+        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
@@ -1006,6 +1023,7 @@ impl FragmentCell {
                     if bytes.is_empty() { json!({}) } else { serde_json::from_slice(&bytes).map_err(|e| CellError::invalid(format!("body: {e}")))? };
                 self.deploy_api(&caller, body).await
             }
+            (Method::Get, ["api", "card"]) => self.card_api(&caller, &req).await,
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
@@ -1233,7 +1251,7 @@ impl FragmentCell {
             code: self.code_status()?,
             view_token: Some(facts.view_token),
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
-            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
+            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform(&caller.url) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             name: facts.name,
         })
@@ -1287,6 +1305,9 @@ impl FragmentCell {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;
+        if let Err(e) = self.drain_card().await {
+            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
+        }
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
         }
@@ -1341,7 +1362,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
+        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

@@ -5,6 +5,7 @@ mod agents;
 mod app;
 mod appfiles;
 mod blobs;
+mod brain;
 mod chat;
 mod author;
 mod computers;
@@ -17,6 +18,7 @@ mod identities;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
+mod levers;
 mod ledger;
 mod limits;
 mod members;
@@ -51,6 +53,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    levers::levers,
     members::secrets,
     delegation::delegation,
     plane::files,
@@ -87,6 +90,7 @@ const LANES: &[Lane] = &[
     appfiles::appfiles,
     blobs::blobs,
     notes::notes,
+    brain::brain,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,

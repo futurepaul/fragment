@@ -37,7 +37,7 @@ pub(super) fn shell(api: &Api, session: &str, method: &'static str, path: &str, 
 }
 
 pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("shell") {
+    if !s.section("shell", &[crate::Need::Fakes]) {
         return Ok(());
     }
     let email = format!("shell-{}@e2e.test", crate::api::now_s());
@@ -104,6 +104,11 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its job and settings are files of its own, deployed", r.status == 200 && deploy.status == 200, format!("{r} {deploy}"));
     let soul = shell_site(s, api, &session, &agent, "__file?path=SOUL.md")?;
     s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), soul.status);
+    // an agent is no app: its deploys get no preview card (decision 31)
+    let events = || shell(api, &session, "GET", &format!("/api/f/{agent}/events?tail=200"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let skipped = s.eventually(super::site::CARD_WAIT, || events()["events"].as_array().is_some_and(|l| l.iter().any(|e| e["kind"] == "card.skipped" && e["data"]["why"] == "not_an_app")));
+    let card = shell(api, &session, "GET", &format!("/api/f/{agent}/card"), None, &[])?;
+    s.ok("an agent fragment is not shot for a card (it is no app): 404", skipped && card.status == 404, format!("{card} | {}", events()));
 
     // code of its own is a fork's, refused while it names the template
     let r = shell(
@@ -329,7 +334,7 @@ fn fill(selector: &str, value: &str) -> String {
 /// keeps), and the phone's layout. The agents run on the stub image
 /// (Docker), as the computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("shell-ui") {
+    if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker]) {
         return Ok(());
     }
     let Some(mut b) = s.browser()? else {
@@ -428,6 +433,25 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "document.querySelector('.catalog form')?.requestSubmit()")?;
     let window = b.until(&page, "document.querySelectorAll('#apps .row[data-key]').length === 1 && document.querySelector('.viewer iframe')", wait);
     s.ok("an app from the catalog opens in a window beside the chat", window, "");
+    // its row shows its preview card once the platform has shot it: read with
+    // the shell's session, shown as a blob URL (the shell's CSP allows `img-src blob:`)
+    let carded = b.until(
+        &page,
+        "(() => { const i = document.querySelector('#apps .row[data-key] .app-card.shot img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 1280 && i.naturalHeight === 800; })()",
+        super::site::CARD_WAIT,
+    );
+    s.ok(
+        "the app's row in the sidebar shows its preview card, a blob URL of the 1280×800 shot",
+        carded,
+        b.eval(&page, "[...document.querySelectorAll('#apps .row')].map((r) => r.querySelector('.app-card')?.outerHTML.slice(0, 160))")?,
+    );
+    let peeked = b.eval(
+        &page,
+        "(() => { const r = document.querySelector('#apps .row.app-row'); r?.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' })); const p = document.querySelector('.card-peek'); return !!p && !p.hidden && p.querySelector('img').src.startsWith('blob:') && p.getBoundingClientRect().width === 320; })()",
+    )?;
+    s.ok("a pointer over the row shows the card larger, beside the sidebar", peeked == true, &peeked);
+    let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
+    b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
 
     // settings, at /settings: what a person needs of their account
@@ -453,6 +477,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
+    skills_ui(s, api, &mut b, &page, &session)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -488,6 +513,63 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The skills in settings (decision 17): the shell made the person's skills
+/// fragment at setup, and its Skills section lists exactly that fragment's
+/// managed set by category, then each agent's own skills (its fragment's
+/// `skills/`), as the agents' computers read them.
+fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let mine = |kind: &str| list.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["kind"] == kind && f["role"] == "owner")).and_then(|f| f["name"].as_str()).map(str::to_string);
+    let (Some(skills), Some(agent)) = (mine("skills"), mine("agent")) else {
+        s.ok("the shell made the person's skills fragment at setup, beside their agent", false, &list);
+        return Ok(());
+    };
+    s.ok("the shell made the person's skills fragment at setup, beside their agent", true, &skills);
+    // what the fragment's files say: skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md
+    let skills_of = |paths: &[String]| -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = paths
+            .iter()
+            .filter_map(|p| {
+                let parts: Vec<&str> = p.split('/').collect();
+                match parts.as_slice() {
+                    ["skills", c, n, "SKILL.md"] => Some((c.to_string(), n.to_string())),
+                    ["skills", n, "SKILL.md"] => Some(("general".to_string(), n.to_string())),
+                    _ => None,
+                }
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let paths = |name: &str| -> Result<Vec<String>> {
+        let r = shell(api, session, "GET", &format!("/api/f/{name}/files"), None, &[])?;
+        Ok(r.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str().map(str::to_string)).collect()).unwrap_or_default())
+    };
+    let want = skills_of(&paths(&skills)?);
+    let shown = "JSON.stringify([...document.querySelectorAll('#settings-skills [data-category] [data-skill]')].map((e) => [e.closest('[data-category]').dataset.category, e.dataset.skill]).sort())";
+    let listed = b.until(page, &format!("{shown} !== '[]'"), wait);
+    let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
+    s.ok(
+        &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
+        listed && want.len() == 42 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
+    );
+    // an agent's own skill, from its fragment, shows beside it
+    let own = "---\nname: garden-notes\ndescription: What this garden needs.\n---\n";
+    let w = shell(api, session, "POST", &format!("/api/f/{agent}/files"), Some(&json!({ "files": [{ "path": "skills/garden-notes/SKILL.md", "text": own }], "key": "own-skill" })), &[])?;
+    b.reload(page)?;
+    let beside = format!("!!document.querySelector('#settings-skills [data-agent={}] [data-skill=\"garden-notes\"]')", js(&agent));
+    let shows = b.until(page, &beside, wait);
+    let own_files = skills_of(&paths(&agent)?);
+    s.ok(
+        "and an agent's own skill shows beside it, as its fragment's files say",
+        w.status == 200 && shows && own_files.contains(&("general".to_string(), "garden-notes".to_string())),
+        json!({ "write": w.status, "own": own_files }),
+    );
     Ok(())
 }
 

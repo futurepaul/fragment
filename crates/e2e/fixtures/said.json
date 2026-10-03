@@ -1,0 +1,19 @@
+{
+  "operations": {
+    "say": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 100 } }
+      }
+    },
+    "count": { "kind": "query", "role": "viewer" }
+  },
+  "channels": {
+    "chat": { "read": "viewer" }
+  },
+  "meta": { "title": "Said", "description": "A chat from before postable channels: a message is said through an operation." }
+}

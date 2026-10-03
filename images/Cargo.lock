@@ -168,6 +168,7 @@ dependencies = [
  "base64",
  "bytes",
  "fragment-bridge",
+ "futures-util",
  "http-body-util",
  "hyper",
  "libc",

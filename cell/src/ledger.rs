@@ -53,6 +53,9 @@ pub const PAYER_HEADER: &str = "x-fragment-payer";
 const DEFAULT_PLAN_ID: &str = "plan:default";
 /// Test fleets: references a test hook lists at most.
 const TEST_ENTRIES_MAX: i64 = 500;
+/// The meta keys of a capped ledger's paid calls (`TestHook::PaidCalls`).
+const PAID_CALLS_MAX: &str = "test_paid_calls_max";
+const PAID_CALLS_USED: &str = "test_paid_calls_used";
 
 /// The price book the deployment charges with: the core's defaults, and
 /// the operator keys' prices and the book's version from the deployment's
@@ -165,10 +168,13 @@ pub struct FragmentOpen {
 #[serde(deny_unknown_fields)]
 pub struct Status {}
 
-/// Test fleets only (`FRAGMENT_TEST_HOOKS=allow`): move this ledger's
-/// clock (`clock {offsetMs}`), run its sweep now (`sweep`), list the
-/// references under a prefix (`entries {prefix}`), or read what moved its
-/// balance (`totals`).
+/// Fleets with levers only (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs):
+/// move this ledger's clock (`clock {offsetMs}`), run its sweep now
+/// (`sweep`), list the references under a prefix (`entries {prefix}`),
+/// read what moved its balance (`totals`), or cap its paid calls from now
+/// (`paid-calls {max}`: each new reservation, a model call or an AI step,
+/// counts one, and one past `max` is refused as a ledger at zero refuses
+/// it; the hosted e2e's people are capped so).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -177,6 +183,7 @@ pub enum TestHook {
     Sweep,
     Entries { prefix: String },
     Totals,
+    PaidCalls { max: u64 },
 }
 
 impl Route for core::Reserve {
@@ -584,6 +591,9 @@ impl LedgerCell {
         match path.as_str() {
             <core::Reserve as Route>::PATH => {
                 let r: core::Reserve = decode(&body)?;
+                if self.cfg.test_hooks {
+                    self.paid_call(&r.reference)?;
+                }
                 reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
             }
             <core::Settle as Route>::PATH => {
@@ -635,9 +645,33 @@ impl LedgerCell {
         }
     }
 
+    /// Fleets with levers: a ledger whose paid calls are capped
+    /// (`TestHook::PaidCalls`) counts each new reservation, and refuses one
+    /// past the cap before anything is held. A retry of one it holds (the
+    /// same reference) is no new call.
+    fn paid_call(&self, reference: &str) -> Result<(), Failed> {
+        assert!(self.cfg.test_hooks, "only a fleet with levers caps paid calls");
+        let Some(max) = self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()) else { return Ok(()) };
+        let held: Vec<Value> = self.sql().exec("SELECT 1 AS n FROM entries WHERE ref = ? LIMIT 1", vec![reference.into()])?.to_array()?;
+        if !held.is_empty() {
+            return Ok(());
+        }
+        let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        if used >= max {
+            return Err(CellError::new(ErrorCode::BudgetUsedUp, format!("this test person's {max} paid calls are used up (the hosted e2e's cap)")).into());
+        }
+        self.set_meta(PAID_CALLS_USED, &(used + 1).to_string())?;
+        Ok(())
+    }
+
     async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
+            TestHook::PaidCalls { max } => {
+                self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
+                let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+                Ok(json!({ "max": max, "used": used }))
+            }
             TestHook::Clock { offset_ms } => {
                 self.set_meta("clock_offset", &offset_ms.to_string())?;
                 let status = self.mutate(|l, s, now| Ok(l.status(s, now))).await?;

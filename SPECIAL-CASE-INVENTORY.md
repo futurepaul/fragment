@@ -20,6 +20,7 @@ a vendor's product beyond the credential it holds.
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | The share sheet and invites | Security: it acts as the fragment's owner. | The members and invites API |
+| Test levers and the e2e's sign-in (`/api/test/*`; previews and the local e2e only, 404 elsewhere) | Proof: the hosted e2e signs `@e2e.test` people in and pulls levers on a preview's real vendors, with no real account. A secret only a branch deploy takes gates it, and on a preview it reaches the e2e's own fragments and people alone (docs/secrets.md). | The registry, the ledger, and the fragment cells' test controls |
 
 ## Interim, until phase 5
 

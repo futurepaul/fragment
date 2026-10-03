@@ -30,7 +30,7 @@ use crate::Suite;
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
 pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("share") {
+    if !s.section("share", &[crate::Need::Node, crate::Need::Chrome, crate::Need::Levers]) {
         return Ok(());
     }
     s.stop()?;

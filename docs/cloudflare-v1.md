@@ -164,6 +164,22 @@ speaking Cloudflare's APIs) returns once this product works.
     become one apps skill, and git, brain and Google are rewritten too.
     `fal-image-editing` moves to Cloudflare's own inference (Paul,
     2026-10-02: agents can do anything they could do in Finite).
+
+    Status, 2026-10-03 (branch `claude/skills`; templates/skills/README.md):
+    - Built: the blessed `skills` template, its repo the managed set (42
+      skills: finite-skills less shared-skills, apps, fragment git, brain,
+      Google through `fragment-connection:google`, image generation through
+      a fragment AI step, Finite-only paths and keys stripped). A fragment
+      on a blessed template lists and reads that template's data from the
+      release, beneath its own files (decision 40). The shell makes each
+      person's skills fragment at setup and lists it, by category, beside
+      each agent's own, in settings. Our Hermes image installs it into every
+      profile (`skills.external_dirs`, an agent's own winning on a name) and
+      carries the fragment CLI, whose agent mode acts as the agent through
+      the API egress with no key (docs/computers.md).
+    - Missing: image editing (FLUX.1 [schnell] is text to image), other
+      vendors' models in the model council, and operator keys or
+      connections a deployment does not offer (the README's table).
 18. **Backups are a computer feature.** `/data` is saved with
     `DirectoryBackup` every few minutes while written. A sleep is driven
     by the Computer DO, in this order:
@@ -298,6 +314,7 @@ speaking Cloudflare's APIs) returns once this product works.
     brain. There is no encryption.
 31. **Sites are fragment apps.** Every deploy takes a screenshot with
     Browser Rendering for the app's preview card.
+    Status, 2026-10-03 (branch `claude/screenshots`): built, on the delivery queue after live moves, as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
 32. **SimpleX on $200 seats only.** The `simplex-chat` daemon runs on
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram
@@ -747,10 +764,80 @@ exit says.
    fragment skills, screenshots. Exit: from a chat, an agent builds,
    publishes and shares an app, ingests into a brain and searches it;
    the skills list matches the skills fragment.
+
+   Status, 2026-10-03 (futurepaul/fragment#118, stacked on #117):
+   - Built:
+     - **The brain** (decision 30): a blessed `brain` template on the
+       notes vault UI.
+       - Finite Brain's layout and wiki conventions.
+       - FTS5 sections ranked by BM25, kept current by a file trigger,
+         behind a `search` operation.
+       - Assets are blobs. It is offered in the shell's catalog.
+     - **The skills** (decision 17): a blessed `skills` template of the
+       managed set, finite-skills ported.
+       - The Finite-specific skills are rewritten: apps, git, brain,
+         Google through the swap, images on FLUX.
+       - hermes-boot installs the set read-only into every profile, beside
+         each agent's own, its own winning.
+       - The shell's settings list them.
+     - **The `fragment` CLI in the Hermes image**, acting as the agent
+       with no key in it.
+       - `fragment create --template`.
+       - `fragment write`: one file through the platform.
+       - `fragment deploy` without `--dir`: the platform moves live.
+     - **Cards** (decision 31): each move of live is shot with Browser
+       Rendering for the app's card in the shell, metered to the owner.
+     - An app's redirect now reaches the browser (both hops into a
+       fragment had followed it).
+   - Evidence, local on workerd with the vendors faked at their
+     boundaries:
+     - **The exit** (the real-Hermes lane, 40 passed, 0 failed): from its
+       chat, the agent, acting for its owner,
+       - makes a todo app (its owner's), writes a page, and deploys it;
+       - gets its share link, which an anonymous visitor opens;
+       - makes a brain, ingests a source, and finds it by searching.
+     - **The skills list** matches the skills fragment: the shell-ui and
+       templates sections.
+     - **Sections** templates, brain, notes, deploy, site, shell,
+       shell-ui, ledger, computers: 427 passed, 0 failed.
+   - The agent shares by its link: making an app public or adding members
+     is the owner's, since an agent acts at most as an editor (decision
+     36). Whether a person's own agents may share for them is Paul's call.
+   - Not yet: the same on a preview (phase 7's hosted lane).
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
    blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
-   for the in-fragment agent's reply-operation answer path, which has
-   none today (a ledger entry).
+   for the in-fragment agent's reply-operation answer path (the agents
+   section's, since 2026-10-03).
+
+   Status, 2026-10-03 (futurepaul/fragment#118):
+   - Built:
+     - **The in-fragment agent's answer path** has its test, in the agents
+       section: valid, invalid, replay, and a crash after the answer.
+       - It found a bug: any 404 on posting an answer dropped the chat's
+         listen. Now only a refusal or a fragment that is gone does.
+     - **The hosted lane**: `cargo xtask e2e --hosted --config <file>
+       --branch <b>`, with `--dry-run` for its plan, `--rehearse` for it
+       on the local node, and `--sweep`.
+       - It runs on a branch preview, choosing sections by what each
+         declares it needs.
+       - Its people sign in through a branch-only, secret-gated,
+         e2e-scoped lever (docs/secrets.md); a deployment of its own
+         refuses the secret.
+       - Its paid calls are lent from a capped budget.
+   - Evidence:
+     - Local: the full e2e, 1475 passed, 0 failed, 2 skipped (both
+       hosted-only).
+     - Hosted, on **e2e.finite.place**, on real vendors: WorkOS staging,
+       code.storage, Workers AI through `fragment-dev`, Browser Rendering,
+       and our Hermes image on Containers.
+       - First run: 354 passed, 2 failed, 57 skipped, for 11 model calls,
+         $0.16. Both failures were the lane's timing on a real
+         deployment, fixed in it.
+       - The two sections again: 79 passed, 0 failed.
+       - Then a sweep removed the run's 25 fragments.
+   - Not yet hosted: jobs, triggers, push, AI steps, blobs, sync and
+     appfiles still need local fakes or servers, so they are green locally
+     and skipped on a preview (the debt ledger).
 8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.

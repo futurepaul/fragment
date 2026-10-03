@@ -302,7 +302,8 @@ impl Call for SetPicture {
     type Answer = Picture;
 }
 
-/// `POST /test`: dev fleets' controls (`FRAGMENT_TEST_HOOKS=allow`).
+/// `POST /test`: the levers of a fleet with a test secret
+/// (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum TestHook {
@@ -316,7 +317,59 @@ pub(crate) enum TestHook {
     /// requests run while a fragment waits on the Registry.
     Hold(u32),
     Signins(SigninsHook),
+    /// An e2e person (`<name>@e2e.test`, the e2e issuer) signed in: a new
+    /// platform session, and the person made the first time
+    /// (`E2eSignedIn`); on a branch, within the day's caps.
+    E2eSignIn(E2eSignIn),
+    /// The e2e people, by identity, a page at a time (`E2ePeopleAnswer`).
+    E2ePeople(E2ePeople),
+    /// Whether an identity is an e2e person (`{e2e}`): a branch's ledger
+    /// levers reach no one else.
+    E2eIs(String),
 }
+
+/// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
+/// day's count on a branch).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct E2eSignIn {
+    pub email: String,
+    pub paid_calls: u64,
+}
+
+/// `TestHook::E2eSignIn`'s answer.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct E2eSignedIn {
+    pub token: String,
+    pub identity: String,
+    pub created: bool,
+}
+
+/// `TestHook::E2ePeople`: the page after `after` (an identity), or the first.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct E2ePeople {
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+/// One e2e person, as the sweep finds them.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct E2ePerson {
+    pub identity: String,
+    pub email: String,
+}
+
+/// A page of e2e people (at most `E2E_PEOPLE_PAGE`), and the identity to
+/// ask after for the next (`None`: this was the last).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct E2ePeopleAnswer {
+    pub people: Vec<E2ePerson>,
+    pub next: Option<String>,
+}
+
+/// The e2e people one page lists.
+pub(crate) const E2E_PEOPLE_PAGE: u32 = 100;
 
 /// The longest `TestHook::Hold`.
 pub(crate) const TEST_HOLD_MAX_MS: u32 = 10_000;

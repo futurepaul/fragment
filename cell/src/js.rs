@@ -428,6 +428,16 @@ pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -
     Ok(worker::Response::from(resp))
 }
 
+/// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc
+/// `browser`), through its `fetch`: the routes `@cloudflare/puppeteer`
+/// speaks to it, a WebSocket upgrade among them (card.rs).
+pub async fn browser_fetch(env: &JsValue, req: worker::Request) -> CellResult<worker::Response> {
+    let browser = self::binding(env, "BROWSER", "browser")?;
+    let out = await_js(call(&browser, "fetch", &[JsValue::from(req.inner())]), "BROWSER").await?;
+    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("BROWSER answered no Response"))?;
+    Ok(worker::Response::from(resp))
+}
+
 /// Stores bytes at `key`.
 pub async fn blob_put_bytes(env: &JsValue, key: &str, bytes: &[u8]) -> CellResult<()> {
     let data = js_sys::Uint8Array::from(bytes);

@@ -106,7 +106,31 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str) -> String {
     // The guest holds no credential: the intercept strips auth and adds its own.
     y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
     y.push_str(&format!("  default_headers:\n    x-fragment-agent: {}\n", q(&agent.fragment)));
+    // The managed skills (skills.rs), after the profile's own `skills/`:
+    // Hermes takes the first skill of a name, so an agent's own wins.
+    y.push_str(&format!("skills:\n  external_dirs: [{}]\n", q(crate::skills::MANAGED_DIR)));
+    // Its terminal acts as the agent: the fragment CLI and the skills' helpers
+    // read these from the profile's `.env` (`profile_env`), which Hermes passes
+    // only to the commands of this profile's turns.
+    y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", PROFILE_ENV.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     y
+}
+
+/// What a profile's terminal knows of the agent it runs (cli/GUIDE.md, "As
+/// an agent"): the agent fragment its computer signs as, and the person it
+/// acts for, its owner. Hermes passes these from the profile's `.env` to its
+/// terminal's commands (`terminal.env_passthrough`, scoped per profile under
+/// one gateway), so each agent's commands act as that agent alone.
+pub const PROFILE_ENV: [&str; 2] = ["FRAGMENT_AS_AGENT", "FRAGMENT_FOR"];
+
+/// A profile's `.env`: it holds no credential, only who the agent is.
+pub fn profile_env(agent: &Agent) -> String {
+    let line_safe = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\'' && b != b'\\' && b != b'#');
+    assert!(line_safe(&agent.fragment) && line_safe(&agent.owner), "an agent's fragment and owner are names: {agent:?}");
+    format!(
+        "# The profile of {}; the computer holds no credential.\n{}={}\n{}={}\n",
+        agent.fragment, PROFILE_ENV[0], agent.fragment, PROFILE_ENV[1], agent.owner
+    )
 }
 
 /// The default profile (the gateway's own, no agent's): it runs no turns.
@@ -239,6 +263,11 @@ mod tests {
         assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal");
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
+        assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\"]\n"), "the managed skills, after its own: {p}");
+        assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
+        let e = profile_env(&agent());
+        assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper.paul\n") && e.contains("\nFRAGMENT_FOR=id:paul\n"), "{e}");
+        assert!(!e.contains("KEY") && !e.contains("TOKEN"), "no credential in a profile");
         let env = gateway_env("127.0.0.1:8650", "computer", &"s".repeat(32));
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
@@ -273,6 +302,14 @@ mod tests {
     fn litestream_streams_the_gateways_and_each_profiles_database() {
         let dbs = litestream_dbs(&[agent()], Path::new("/data/hermes"));
         assert_eq!(dbs, vec![("default".into(), PathBuf::from("/data/hermes/state.db")), ("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))]);
+    }
+
+    #[test]
+    #[should_panic(expected = "an agent's fragment and owner are names")]
+    fn a_profile_env_of_no_names_is_a_bug() {
+        let mut a = agent();
+        a.owner = "id:paul\nOPENAI_API_KEY=x".into();
+        profile_env(&a);
     }
 
     #[test]

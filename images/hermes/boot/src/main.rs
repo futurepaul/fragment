@@ -20,6 +20,7 @@
 
 mod agents;
 mod hermes;
+mod skills;
 mod sync;
 
 use std::os::unix::fs::PermissionsExt;
@@ -52,6 +53,9 @@ const CA: &str = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The agents' repos sync this often while awake.
 const SYNC_EVERY_MS: u64 = 60_000;
+/// The managed skills (skills.rs) are read again this often while awake: a
+/// platform release changes them, and an install fetches only what changed.
+const SKILLS_EVERY_MS: u64 = 10 * 60_000;
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
 /// The bridge is restarted at most this many times before the boot fails.
@@ -359,10 +363,9 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
     let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
     write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model), ids);
-    let env_file = dir.join(".env");
-    if !env_file.exists() {
-        write_whole(&env_file, &format!("# The profile of {}; the computer holds no credential.\n", a.fragment), ids);
-    }
+    // who the agent is, for its terminal (the fragment CLI, the skills'
+    // helpers): written whole each time, after the config
+    write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
     match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
@@ -511,6 +514,30 @@ async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: 
     ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }
 
+/// The managed skills' directory (skills.rs), made if it is missing: the
+/// boot's, readable by all, writable by none of the agents.
+fn managed_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = skills::managed_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))) {
+        ev!("skills.dir_failed", { "dir": dir.display().to_string(), "error": e.to_string() });
+    }
+}
+
+/// One install of the managed skills, in the background (skills.rs), as the
+/// computer's first agent of its owner: none while it has no such agent.
+fn spawn_skills(api: &Api, agents: &[Agent], owner: &str) -> Option<tokio::task::JoinHandle<()>> {
+    let reader = skills::reader(agents, owner)?.clone();
+    let (api, owner) = (api.clone(), owner.to_string());
+    Some(tokio::spawn(async move {
+        let t = Instant::now();
+        match skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await {
+            Ok(d) => ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "ms": t.elapsed().as_millis() as u64 }),
+            Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
+        }
+    }))
+}
+
 /// The gateway: the preloaded one is told to go; without one, it is
 /// started now.
 fn start_gateway(home: &Path) -> Option<u32> {
@@ -648,6 +675,10 @@ async fn boot_main() {
         let _ = std::fs::write(&default_cfg, hermes::default_config(&model));
         chown(&default_cfg, ids);
     }
+    // The managed skills' directory exists before any profile names it:
+    // Hermes skips an external dir it does not find, until the profile's
+    // config changes. What it holds is installed off the boot's path.
+    managed_dir();
     profiles(&api, &agents, &home, ids, &model).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
@@ -672,6 +703,13 @@ async fn boot_main() {
     let mut agents_unread = false;
     // HERMES_BOOT_SYNC_MS: the operator's (a test's) cadence, at least 1 s.
     let sync_every = env("HERMES_BOOT_SYNC_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SYNC_EVERY_MS, |v| v.max(1_000));
+    // the managed skills: installed now, off the boot's path, then again
+    // every SKILLS_EVERY_MS (HERMES_BOOT_SKILLS_MS: a test's, at least 1 s);
+    // one install at a time, and none until the computer has an agent
+    let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
+    let owner = computer.owner.clone();
+    let mut skills_task = spawn_skills(&api, &agents, &owner);
+    let mut last_skills = Instant::now();
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
@@ -696,6 +734,16 @@ async fn boot_main() {
                 }
                 bridge = spawn_bridge();
             }
+        }
+        // the managed skills again: the first as soon as there is an agent to
+        // read them as, then on their cadence, never two at once
+        let skills_due = match &skills_task {
+            None => !agents.is_empty(),
+            Some(t) => t.is_finished() && last_skills.elapsed() >= Duration::from_millis(skills_every),
+        };
+        if skills_due {
+            skills_task = spawn_skills(&api, &agents, &owner);
+            last_skills = Instant::now();
         }
         // What waits on the platform (each call up to its 15 s), cut short by
         // SIGTERM: a slow platform never holds the stop. Cut, it is done

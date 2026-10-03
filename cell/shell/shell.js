@@ -43,6 +43,8 @@ const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
   { template: "blank", name: "Blank", about: "One page to start from." },
+  // blessed (decision 40): named, not copied, and made with a title, as a chat is
+  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
 ];
 
 // me: the signed-in person; fragments: their list (name, role, kind,
@@ -376,15 +378,82 @@ function paneIcon(name) {
   return i;
 }
 const iconOf = (name) => appIcon(labelOf(name));
+// An app's card: its page as the platform shot it after its last deploy
+// (`GET /api/f/<name>/card`, read with this page's session and shown as a
+// blob URL), or its icon until it has one.
+const cards = new Map();
+function cardOf(name) {
+  const box = el("span", "app-card");
+  const card = cards.get(name);
+  if (card) {
+    const img = el("img");
+    img.src = card.url;
+    img.alt = "";
+    box.classList.add("shot");
+    box.append(img);
+  } else box.append(iconOf(name));
+  return box;
+}
+// "new", "same", or "none" (no card yet)
+async function loadCard(name) {
+  const known = cards.get(name);
+  const headers = { "x-fragment-shell": "1" };
+  if (known) headers["if-none-match"] = known.etag;
+  const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+  if (r.status === 304) return "same";
+  if (r.status === 404 && !known) return "none";
+  if (!r.ok) return "same";
+  const url = URL.createObjectURL(await r.blob());
+  if (known) URL.revokeObjectURL(known.url);
+  cards.set(name, { etag: r.headers.get("etag"), url });
+  return "new";
+}
+// every listed app's, again after a deploy may have made one: an app with
+// none yet is asked again, waiting longer each time (2 s to a minute), and
+// the rest when the page comes back after a minute away
+const cardsLoad = { wait: 0, timer: null, at: 0 };
+async function loadCards() {
+  clearTimeout(cardsLoad.timer);
+  cardsLoad.at = Date.now();
+  const listed = shown(apps()).map((f) => f.name);
+  for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
+  const got = await Promise.all(listed.map((name) => loadCard(name).catch(() => "same")));
+  if (got.includes("new")) renderApps();
+  if (got.includes("none") && cardsLoad.wait < 60_000) {
+    cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
+    cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
+  }
+}
+addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
+// a pointer over an app's row shows its card larger, beside the sidebar
+const peek = el("div", "card-peek");
+peek.hidden = true;
+peek.setAttribute("aria-hidden", "true");
+peek.append(el("img"));
+document.body.append(peek);
+function showPeek(row, name) {
+  const card = cards.get(name);
+  if (!card) return;
+  peek.firstChild.src = card.url;
+  peek.hidden = false;
+  const r = row.getBoundingClientRect();
+  const edge = Math.max(r.right, $("sidebar").getBoundingClientRect().right);
+  peek.style.left = `${Math.max(8, Math.min(edge + 12, innerWidth - peek.offsetWidth - 8))}px`;
+  peek.style.top = `${Math.max(8, Math.min(r.top + r.height / 2 - peek.offsetHeight / 2, innerHeight - peek.offsetHeight - 8))}px`;
+}
+const hidePeek = () => { peek.hidden = true; };
 function renderApps() {
+  hidePeek();
   const list = shown(apps());
   $("apps").replaceChildren(...(list.length ? list.map((f) => {
-    const row = el("button", `row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
+    const row = el("button", `row app-row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
     row.type = "button";
     row.dataset.key = `app:${f.name}`;
-    row.append(iconOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
+    row.append(cardOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
     if (!own(f)) row.append(el("span", "meta", f.role));
-    row.onclick = () => { openApp(f.name); leaveSidebar(); };
+    row.onclick = () => { hidePeek(); openApp(f.name); leaveSidebar(); };
+    row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
+    row.onpointerleave = hidePeek;
     return row;
   }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]));
 }
@@ -631,7 +700,8 @@ function showCatalog() {
       add.disabled = true;
       error.textContent = "";
       try {
-        const made = await api("POST", "/api/fragments", { name: input.value.trim() || freeLabel(t.template), template: t.template });
+        const label = input.value.trim();
+        const made = await api("POST", "/api/fragments", { name: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
         await load();
         viewer.close("catalog");
         openApp(made.name);
@@ -942,6 +1012,7 @@ async function openSettings(push = true) {
     }
     return row;
   }) : [el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read.")]));
+  const skills = await skillsSection();
   // pairing the CLI: `fragment login` opens this platform to approve its key
   const cli = section(
     "The command line",
@@ -950,7 +1021,84 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- skills (decision 17): the managed set, the person's skills fragment's
+// (the platform's release, which their computers install for every agent),
+// by category, and each agent's own (its fragment's skills/, which win on a
+// name). Both read as the agents' computers read them: the fragments' files.
+// A skill is skills/<category>/<name>/SKILL.md, or skills/<name>/SKILL.md.
+function skillsIn(paths) {
+  const out = [];
+  for (const path of paths) {
+    const parts = path.split("/");
+    if (parts[0] !== "skills" || parts[parts.length - 1] !== "SKILL.md") continue;
+    if (parts.length === 4) out.push({ category: parts[1], name: parts[2] });
+    else if (parts.length === 3) out.push({ category: "", name: parts[1] });
+  }
+  return out.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+}
+const skillsFragmentOf = () => state.fragments.find((f) => f.kind === "skills" && own(f));
+// The person's skills fragment, made from the blessed template when they
+// have none (at setup, as their default agent is).
+async function skillsFragment() {
+  const have = skillsFragmentOf();
+  if (have) return have.name;
+  const made = await api("POST", "/api/fragments", { name: freeLabel("skills"), template: "skills" });
+  await load();
+  return made.name;
+}
+function skillNames(list) {
+  const value = el("span", "settings-value");
+  list.forEach((s, i) => {
+    if (i) value.append(", ");
+    const name = el("span", "skill", s.name);
+    name.dataset.skill = s.name;
+    value.append(name);
+  });
+  return value;
+}
+async function skillsSection() {
+  const s = section("Skills");
+  s.id = "settings-skills";
+  const filesOf = (name) => api("GET", `/api/f/${name}/files`).then((v) => (v.files ?? []).map((f) => f.path)).catch(() => null);
+  const mine = skillsFragmentOf();
+  if (!mine) {
+    const add = el("button", "quiet", "Add the managed skills");
+    add.type = "button";
+    add.onclick = () => skillsFragment().then(() => openSettings(false)).catch((e) => { add.textContent = e.message; });
+    s.append(el("p", "muted", "Your agents have no managed skills yet."), add);
+  } else {
+    const paths = await filesOf(mine.name);
+    if (!paths) s.append(el("p", "muted", "Your skills could not be read."));
+    else {
+      const groups = new Map();
+      for (const k of skillsIn(paths)) groups.set(k.category, [...(groups.get(k.category) ?? []), k]);
+      s.dataset.fragment = mine.name;
+      s.append(...[...groups].map(([category, list]) => {
+        const row = el("p", "settings-line");
+        row.dataset.category = category || "general";
+        row.append(el("span", "settings-key", (category || "general").replace(/-/g, " ")), skillNames(list));
+        return row;
+      }));
+      const open = el("button", "quiet", "Open your skills");
+      open.type = "button";
+      open.onclick = () => openApp(mine.name);
+      s.append(open);
+    }
+  }
+  // each agent's own skills, from its fragment
+  const agents = state.fragments.filter((f) => f.kind === "agent" && own(f));
+  const owns = await Promise.all(agents.map((a) => filesOf(a.name)));
+  agents.forEach((a, i) => {
+    const row = el("p", "settings-line");
+    row.dataset.agent = a.name;
+    const list = skillsIn(owns[i] ?? []);
+    row.append(el("span", "settings-key", `${titleOf(a.name)}'s own`), list.length ? skillNames(list) : el("span", "settings-value muted", owns[i] ? "None yet" : "Not read"));
+    s.append(row);
+  });
+  return s;
 }
 // The wallpaper's photographer, credited. A photo of the person's own
 // (later) is credited to no one: `credited(null)` is no section.
@@ -1019,6 +1167,8 @@ async function defaultAgent(step) {
   await load();
   const username = state.me.username;
   step("agent");
+  // the managed skills its computer installs at its first start (decision 17)
+  await skillsFragment();
   const computer = await computerOf();
   let agent = state.fragments.find((f) => f.kind === "agent" && f.role === "owner");
   if (!agent) {
@@ -1119,6 +1269,8 @@ async function load() {
   renderUpdate();
   previews().catch(() => {});
   chatMembers().catch(() => {});
+  cardsLoad.wait = 0;
+  loadCards().catch(() => {});
 }
 // each chat's agents, from its member list (the first added first): a
 // group is a chat with two or more; one that does not answer keeps what

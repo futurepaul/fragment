@@ -219,7 +219,7 @@ fn both(api: &Api, name: &str, method: &str, path: &str, body: Option<&Value>, c
 }
 
 pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("signin") {
+    if !s.section("signin", &[crate::Need::Fakes, crate::Need::Deployment, crate::Need::Levers]) {
         return Ok(());
     }
 

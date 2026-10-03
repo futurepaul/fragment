@@ -81,7 +81,7 @@ fn token_of(location: &str) -> String {
 }
 
 pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("frames") {
+    if !s.section("frames", &[crate::Need::Chrome, crate::Need::TwoSites]) {
         return Ok(());
     }
     let (owner, owner_session) = person(api)?;

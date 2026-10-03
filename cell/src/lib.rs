@@ -33,6 +33,7 @@ mod agents;
 mod ai;
 mod auth;
 mod blobs;
+mod card;
 mod config;
 mod connections;
 mod channels;
@@ -46,6 +47,7 @@ mod jobs;
 mod js;
 mod keys;
 mod ledger;
+mod levers;
 mod live;
 mod members;
 mod meter;
@@ -768,7 +770,9 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
         headers.set(k, v)?;
     }
     let mut init = RequestInit::new();
-    init.with_method(req.method()).with_headers(headers);
+    // a fragment's redirect (an app's) is the browser's to follow: followed
+    // here, it came back to the fragment at its Location, outside its routes
+    init.with_method(req.method()).with_headers(headers).with_redirect(RequestRedirect::Manual);
     if body.is_some() {
         init.with_body(body);
     }
@@ -931,6 +935,17 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if let ["api", "test", lever @ ..] = segments.as_slice() {
+        // The levers exist only on a fleet with a test secret, for a
+        // request that carries it: to anyone else they are the 404 any
+        // missing route is, so a scan cannot tell a preview's from production.
+        let carried = req.headers().get(fragment_core::levers::SECRET_HEADER)?;
+        if !cfg.test_secret.as_ref().is_some_and(|secret| secret.admits(carried.as_deref())) {
+            return Err(levers::no_route(&path));
+        }
+        let lever = lever.to_vec();
+        return levers::route(req, env, cfg, &lever).await;
+    }
     match (req.method(), segments.as_slice()) {
         (Method::Get | Method::Head, ["__shell", file @ ..]) => match shell::asset(&req, &file.join("/"))? {
             Some(resp) => Ok(resp),
@@ -1006,22 +1021,6 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             ledger_route(req, env, cfg, &url, &rest).await
         }
         (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
-        (Method::Post, ["api", "test", "ledger"]) if cfg.test_hooks => {
-            /// `POST /api/test/ledger {identity, …}`: a lever on that person's ledger (ledger.rs `TestHook`).
-            #[derive(Deserialize)]
-            struct TestLedger {
-                identity: String,
-                #[serde(flatten)]
-                hook: ledger::TestHook,
-            }
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let t: TestLedger = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            if !npub::is_identity(&t.identity) {
-                return Err(CellError::invalid("name an identity"));
-            }
-            json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
-        }
-
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await
@@ -1047,24 +1046,6 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await
-        }
-        (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if cfg.test_hooks => {
-            /// The fragment a test hook's body names (the rest is the fragment's to read).
-            #[derive(Deserialize)]
-            struct TestTarget {
-                fragment: String,
-            }
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let target: TestTarget = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            check_name(&target.fragment)?;
-            let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
-            let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
-            Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
-        }
-        (Method::Post, ["api", "test", "registry"]) if cfg.test_hooks => {
-            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let hook: calls::TestHook = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            json_answer(&ask_registry(env, &hook).await?)
         }
         // A blob's bytes stream through: the router never holds them. The
         // signature covers the URL, which names the bytes' hash; the

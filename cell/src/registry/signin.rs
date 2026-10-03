@@ -32,13 +32,14 @@
 //! an anonymous `/auth/login` must not scan the tables every signed
 //! request waits on.
 
+use fragment_core::levers;
 use fragment_proto::Subject;
 use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
-    ApproveKey, Began, Begin, Consent, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem,
-    Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer,
+    ApproveKey, Began, Begin, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint,
+    Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -81,6 +82,8 @@ CREATE INDEX IF NOT EXISTS redemptions_expires ON redemptions (expires_at);
 CREATE TABLE IF NOT EXISTS consents (
   identity TEXT NOT NULL, fragment TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (identity, fragment));
 CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
+CREATE TABLE IF NOT EXISTS e2e_days (
+  day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL);
 ";
 
 /// Sign-in tables from before frames gain their `embedder` (every row
@@ -423,11 +426,22 @@ impl RegistryCell {
                 vec![sha(state).into(), SqlStorageValue::Integer(js::now_ms() - LOGIN_TTL_MS)],
             )?
             .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
+        let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref())?;
+        let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
+        Ok(Exchanged { token, return_to: login.return_to })
+    }
+
+    /// The person a verified `(issuer, subject)` signs in as: the one it is
+    /// already linked to, the signed-in person it is being linked to
+    /// (`link_to`), or a new person. Answers whether they are new.
+    fn person_for(&self, issuer: &str, subject: &str, email: &str, link_to: Option<&str>) -> CellResult<(String, bool)> {
+        assert!(!issuer.is_empty() && !subject.is_empty(), "a sign-in names its issuer and subject");
         let now = SqlStorageValue::Integer(js::now_ms());
         let known = self
             .row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![issuer.into(), subject.into()])?
             .map(|r| r.identity);
-        let id = match (login.link_to.as_deref(), known) {
+        let made = link_to.is_none() && known.is_none();
+        let id = match (link_to, known) {
             // linking: explicit, from a signed-in session, never by email
             (Some(to), Some(owner)) if owner == to => owner,
             (Some(_), Some(_)) => return Err(conflict("that sign-in already belongs to someone else")),
@@ -453,8 +467,72 @@ impl RegistryCell {
              ON CONFLICT (issuer, subject) DO UPDATE SET email = excluded.email",
             vec![issuer.into(), subject.into(), id.as_str().into(), now, email.into()],
         )?;
-        let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
-        Ok(Exchanged { token, return_to: login.return_to })
+        Ok((id, made))
+    }
+
+    /// An e2e person signed in (the levers' `TestHook::E2eSignIn`): their
+    /// email is their subject under the e2e issuer, which no real sign-in
+    /// has, so they are never a person WorkOS signs in; the first sign-in
+    /// makes them. A platform session like any other.
+    pub(super) fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> CellResult<E2eSignedIn> {
+        assert!(self.cfg.test_hooks, "e2e people sign in only on a fleet with levers");
+        if !levers::valid_e2e_email(email) {
+            return Err(CellError::invalid(format!("an e2e person's email is <name>@{}", levers::E2E_EMAIL_DOMAIN)));
+        }
+        if paid_calls > levers::E2E_PAID_CALLS_MAX {
+            return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
+        }
+        // a branch's day is capped (people made, paid calls lent): counted
+        // in the same turn as the sign-in, before anyone is made
+        if self.cfg.levers_scoped {
+            let known = self.row::<HolderRow>("SELECT identity FROM subjects WHERE issuer = ? AND subject = ?", vec![levers::E2E_ISSUER.into(), email.into()])?.is_some();
+            self.count_e2e_day(!known, paid_calls)?;
+        }
+        let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None)?;
+        let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
+        Ok(E2eSignedIn { token, identity, created })
+    }
+
+    /// Counts a branch's e2e sign-in in today's caps (`levers::admit`), or
+    /// refuses it (429), counting nothing. Days past a week are forgotten.
+    fn count_e2e_day(&self, new: bool, paid_calls: u64) -> CellResult<()> {
+        #[derive(Deserialize)]
+        struct DayRow {
+            people: i64,
+            paid_calls: i64,
+        }
+        let day = js::now_ms() / (24 * 3600 * 1000);
+        let today = self
+            .row::<DayRow>("SELECT people, paid_calls FROM e2e_days WHERE day = ?", vec![SqlStorageValue::Integer(day)])?
+            .map(|r| levers::Day { people: r.people.max(0) as u64, paid_calls: r.paid_calls.max(0) as u64 })
+            .unwrap_or_default();
+        let next = levers::admit(today, new, paid_calls).map_err(|full| CellError::new(ErrorCode::RateLimited, full.message()))?;
+        let as_int = |n: u64| SqlStorageValue::Integer(i64::try_from(n).expect("a day's caps fit an i64"));
+        self.exec(
+            "INSERT INTO e2e_days (day, people, paid_calls) VALUES (?, ?, ?) ON CONFLICT (day) DO UPDATE SET people = excluded.people, paid_calls = excluded.paid_calls",
+            vec![SqlStorageValue::Integer(day), as_int(next.people), as_int(next.paid_calls)],
+        )?;
+        self.exec("DELETE FROM e2e_days WHERE day < ?", vec![SqlStorageValue::Integer(day - 7)])?;
+        Ok(())
+    }
+
+    /// Whether `identity` is an e2e person (signed in under the e2e issuer).
+    pub(super) fn is_e2e(&self, identity: &str) -> CellResult<bool> {
+        assert!(self.cfg.test_hooks, "only a fleet with levers asks who is an e2e person");
+        Ok(self.count("SELECT COUNT(*) AS n FROM subjects WHERE issuer = ? AND identity = ?", vec![levers::E2E_ISSUER.into(), identity.into()])? > 0)
+    }
+
+    /// The e2e people after `after`, by identity, a page at a time.
+    pub(super) fn e2e_people(&self, after: Option<&str>) -> CellResult<E2ePeopleAnswer> {
+        assert!(self.cfg.test_hooks, "e2e people are listed only on a fleet with levers");
+        let after = after.unwrap_or("");
+        let people: Vec<E2ePerson> = self.rows(
+            "SELECT identity, email FROM subjects WHERE issuer = ? AND identity > ? ORDER BY identity LIMIT ?",
+            vec![levers::E2E_ISSUER.into(), after.into(), SqlStorageValue::Integer(E2E_PEOPLE_PAGE.into())],
+        )?;
+        assert!(people.len() <= E2E_PEOPLE_PAGE as usize, "a page is bounded");
+        let next = (people.len() == E2E_PEOPLE_PAGE as usize).then(|| people.last().map(|p| p.identity.clone())).flatten();
+        Ok(E2ePeopleAnswer { people, next })
     }
 
     pub(super) fn session(&self, b: Session) -> CellResult<LiveSession> {

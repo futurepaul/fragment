@@ -14,22 +14,35 @@
 //! log, the lanes' directories and screenshots) is
 //! removed when every check passes, and kept when one fails (or when
 //! `FRAGMENT_E2E_KEEP` is set).
+//!
+//! The hosted lane (`--hosted`, hosted.rs) runs the same sections against
+//! a branch deployment on real vendors: each section says what it needs
+//! (needs.rs), and one that needs what a preview lacks (a fake, the node,
+//! the whole deployment, local Docker) is a skip that says why.
 
 mod api;
 mod browser;
+mod hosted;
 mod lanes;
+mod needs;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine;
 use fragment_devstack as devstack;
 use fragment_fakes::codestorage::{self as fake, CodeStorage};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use api::Api;
+pub use needs::Need;
 
 pub const SUFFIX: &str = "fragment.localhost";
 /// The fragments' suffix on a node shaped as fragment.club is since the
@@ -62,6 +75,8 @@ pub const DEFAULT_PLAN: &str = "seat";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The branch a rehearsal of the hosted lane shapes the local node as.
+pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): one
 /// connection and one operator key, each with a host of its own, and the
 /// key's (test) value.
@@ -73,10 +88,73 @@ pub const SWAP_KEY_VALUE: &str = "sk-e2e-search-7f3a9c";
 /// What one call of the key costs at list price: half a cent.
 pub const SWAP_KEY_MICROS: i64 = 5_000;
 
+/// A vendor fake, the lanes' on a local run only: a section that touches
+/// one declares `Need::Fakes`, and the hosted lane skips it before it
+/// could. A rehearsal's node still runs on the fakes (`node`), hidden from
+/// the lanes as a preview's vendors are.
+pub struct Fake<T> {
+    what: &'static str,
+    fake: Option<T>,
+    /// The lanes may use it (a local run's).
+    lanes: bool,
+}
+
+impl<T> Fake<T> {
+    /// A local run's fake, or (`hidden`) a rehearsal's: the node's vendor,
+    /// which no lane reaches.
+    fn of(hidden: bool, what: &'static str, fake: T) -> Fake<T> {
+        Fake { what, fake: Some(fake), lanes: !hidden }
+    }
+
+    fn absent(what: &'static str) -> Fake<T> {
+        Fake { what, fake: None, lanes: false }
+    }
+
+    /// The fake as the node is configured with it.
+    fn node(&self) -> &T {
+        self.fake.as_ref().unwrap_or_else(|| panic!("a hosted run starts no node on the {} fake", self.what))
+    }
+}
+
+impl<T> Deref for Fake<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        match (&self.fake, self.lanes) {
+            (Some(fake), true) => fake,
+            _ => panic!("the {} fake on the hosted lane: a section that uses it declares Need::Fakes", self.what),
+        }
+    }
+}
+
+/// One section as a dry run plans it: what it needs, and why it would be
+/// skipped (`None`: it would run).
+pub struct Planned {
+    pub section: String,
+    pub needs: Vec<Need>,
+    pub skip: Option<String>,
+}
+
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
     only: Option<Vec<String>>,
     except: Vec<String>,
+    /// Where the run is: under `wrangler dev` with the fakes, or a preview.
+    rung: needs::Rung,
+    /// The hosted lane's rules: on a preview, or its rehearsal on the local
+    /// node (shaped as a branch deployment, its fakes hidden from the lanes).
+    hosted_rules: bool,
+    /// The preview a hosted run targets (`None`: the local node).
+    preview: Option<api::Preview>,
+    /// A dry run's plan (`Some`: nothing runs, each section is planned).
+    plan: Option<Vec<Planned>>,
+    /// What the run's APIs share: the levers' secret, and (hosted) its
+    /// people and the paid calls it may lend.
+    shared: Arc<api::Run>,
+    /// Who made each fragment `create` made (hosted: commits and deploys
+    /// go through the API as its owner, where locally a writer pushes to
+    /// the code.storage fake).
+    owners: RefCell<BTreeMap<String, Keys>>,
     /// Every section a lane asked for, run or not: a name given to
     /// `--only` or `--except` that is none of them fails the run.
     asked: Vec<String>,
@@ -96,22 +174,25 @@ pub struct Suite {
     cron: Option<Result<Option<lanes::jobs::Cron>, String>>,
     /// Chrome, started when a lane first asks for it and shared after.
     chrome: browser::Shared,
-    tools: devstack::Tools,
+    /// The local node's tools (`None`: a hosted run, which starts no node).
+    tools: Option<devstack::Tools>,
     node: Option<devstack::Node>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
-    pub fake: CodeStorage,
+    pub fake: Fake<CodeStorage>,
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
-    pub ai: fragment_fakes::workers_ai::WorkersAi,
-    pub push: fragment_fakes::push::PushService,
+    pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
+    pub push: Fake<fragment_fakes::push::PushService>,
     org_key: String,
     host_secret: String,
+    /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
+    test_secret: String,
     /// Sign-in's stand-in: people sign in through it (`Api::person`), and
     /// Pipes', which hands out connections' tokens.
-    pub workos: fragment_fakes::workos::WorkOs,
+    pub workos: Fake<fragment_fakes::workos::WorkOs>,
     /// The provider APIs a computer's swap sends to.
-    pub upstream: fragment_fakes::upstream::Upstream,
+    pub upstream: Fake<fragment_fakes::upstream::Upstream>,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
@@ -127,39 +208,74 @@ pub struct Suite {
 
 impl Suite {
     /// The deployment's secrets (label, value): the platform Worker holds
-    /// them, never an app.
+    /// them, never an app. A local run's alone: a section that reads them
+    /// declares `Need::Deployment`.
     pub fn deployment_secrets(&self) -> Vec<(&'static str, String)> {
+        assert!(!self.hosted_rules, "the hosted lane holds none of the deployment's secrets: a section that reads them declares Need::Deployment");
         vec![
             ("host secret", self.host_secret.clone()),
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("test secret", self.test_secret.clone()),
         ]
+    }
+
+    /// Whether the run keeps the hosted lane's rules (on a preview, or its
+    /// rehearsal): a section adapts a check, or skips it, where a real
+    /// vendor or the deployment's own image answers.
+    pub fn hosted(&self) -> bool {
+        self.hosted_rules
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
     /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
-    pub fn section_by_name(&mut self, name: &str, why: &str) -> bool {
+    pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {
         if self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name)) {
-            return self.section(name);
+            return self.section(name, needs);
         }
         self.asked.push(name.to_string());
-        if self.runs(name) {
-            self.skip(&format!("the {name} section"), &format!("{why}: run it by name, cargo xtask e2e --only {name}"));
+        if self.selected(name) {
+            // what it needs first: by name it would be skipped all the same
+            let why = match needs::unmet(needs, self.rung) {
+                Some((need, missing)) => format!("{missing} ({})", need.name()),
+                None => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
+            };
+            match &mut self.plan {
+                Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip: Some(why) }),
+                None => self.skip(&format!("the {name} section"), &why),
+            }
         }
         false
     }
 
-    /// Whether the section `name` runs in this suite (`--only` names it,
-    /// `--except` does not).
-    pub fn runs(&self, name: &str) -> bool {
+    /// Whether `--only` and `--except` select the section `name`.
+    fn selected(&self, name: &str) -> bool {
         self.only.as_ref().is_none_or(|only| only.iter().any(|o| o == name)) && !self.except.iter().any(|e| e == name)
     }
 
+    /// Whether the section `name`, needing `needs`, runs in this suite:
+    /// selected, on a rung that has what it needs, and not a dry run.
+    pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
+        self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
+    }
+
     /// Whether the section `name` runs (it prints its header when it does).
-    pub fn section(&mut self, name: &str) -> bool {
+    /// It needs `needs`: on a rung without one of them it is a skip that
+    /// says which, and a dry run plans it instead.
+    pub fn section(&mut self, name: &str, needs: &[Need]) -> bool {
         self.asked.push(name.to_string());
-        if !self.runs(name) {
+        if !self.selected(name) {
+            return false;
+        }
+        let unmet = needs::unmet(needs, self.rung);
+        if let Some(plan) = &mut self.plan {
+            let skip = unmet.map(|(need, why)| format!("{why} ({})", need.name()));
+            plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip });
+            return false;
+        }
+        if let Some((need, why)) = unmet {
+            self.skip(&format!("the {name} section"), &format!("{why} ({})", need.name()));
             return false;
         }
         println!("\n# {name}");
@@ -214,6 +330,11 @@ impl Suite {
     /// platform on 127.0.0.1, no extra settings, and no model answers left
     /// scripted.
     fn recover(&mut self) -> Result<()> {
+        if self.hosted() {
+            // the deployment is not the run's to restart; a hosted lane pulls
+            // levers on its own fragments and people alone
+            return Ok(());
+        }
         self.ai.clear_script();
         self.shape = Shape::Plain;
         if let Some(node) = self.node.take() {
@@ -226,9 +347,15 @@ impl Suite {
         Ok(())
     }
 
-    /// The node's API as the lanes use it: fragments on their own hosts.
+    /// The node's API as the lanes use it: fragments on their own hosts
+    /// (hosted: the preview's).
     pub fn api(&self) -> Api {
-        Api::new(self.port, Some(SUFFIX))
+        match (&self.preview, self.hosted_rules) {
+            (Some(preview), _) => Api::hosted(preview, &self.shared),
+            // a rehearsal's node is shaped as a branch deployment
+            (None, true) => Api::new(self.port, Some(SUFFIX), &self.shared).branch(REHEARSAL_BRANCH),
+            (None, false) => Api::new(self.port, Some(SUFFIX), &self.shared),
+        }
     }
 
     /// The shared Chrome, in a context of the lane's own (`None`: no Chrome
@@ -237,9 +364,13 @@ impl Suite {
         self.chrome.lease()
     }
 
-    /// A label for this run (a fragment's full name adds its owner's username).
+    /// A label for this run (a fragment's full name adds its owner's
+    /// username). Hosted, it starts `e2e-`, so a sweep finds it.
     pub fn name(&self, base: &str) -> String {
-        format!("{base}-{}", self.run)
+        match self.hosted_rules {
+            true => format!("{}{base}-{}", fragment_core::levers::E2E_LABEL_PREFIX, self.run),
+            false => format!("{base}-{}", self.run),
+        }
     }
 
     /// `base`'s full name for this run, under `owner`'s username.
@@ -264,27 +395,32 @@ impl Suite {
 
     /// Starts the node; `suffix` serves fragments from their own hosts.
     pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
+        anyhow::ensure!(self.preview.is_none(), "a hosted run starts no node: a section that does declares Need::Node");
         assert!(self.node.is_none(), "one node at a time");
+        let tools = self.tools.as_ref().context("a local run locates its tools")?;
         devstack::Fleet {
             host_secret: self.host_secret.clone(),
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
-            codestorage_url: self.fake.url.clone(),
+            codestorage_url: self.fake.node().url.clone(),
             host_suffix: suffix.then(|| self.suffix().to_string()),
             legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
+            // a rehearsal's node is shaped as a branch deployment, whose
+            // levers are scoped as a preview's are
+            host_label_suffix: self.hosted_rules.then(|| format!("--{REHEARSAL_BRANCH}")),
             poll_interval_s: POLL_S,
             egress_local: true,
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
             // the lower rung: the model route's calls go to the Workers AI fake
-            ai_url: Some(self.ai.url.clone()),
+            ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
-                client_id: self.workos.client_id.clone(),
+                client_id: self.workos.node().client_id.clone(),
                 api_key: WORKOS_KEY.into(),
-                api_url: Some(self.workos.url.clone()),
+                api_url: Some(self.workos.node().url.clone()),
             }),
             platform_url: Some(match (self.shape, suffix) {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
@@ -292,14 +428,15 @@ impl Suite {
             }),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
-            test_hooks: true,
+            // the levers, as a preview has them: each request carries the secret
+            test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
             computer_snapshots: false,
             connections: Some(json!({ SWAP_CONNECTION: [SWAP_CONNECTION_HOST] }).to_string()),
             operator_keys: Some(json!({ SWAP_KEY: [SWAP_KEY_HOST] }).to_string()),
             operator_key_values: vec![(SWAP_KEY.into(), SWAP_KEY_VALUE.into())],
             key_prices: Some(json!([{ "key": SWAP_KEY, "micros": SWAP_KEY_MICROS, "per": 1 }]).to_string()),
-            swap_upstream: Some(self.upstream.url.clone()),
+            swap_upstream: Some(self.upstream.node().url.clone()),
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
@@ -321,9 +458,9 @@ impl Suite {
             log_dir: self.scratch.clone(),
             node_logs: true,
         };
-        let (node, _) = devstack::Node::start(&self.tools, &opts)?;
+        let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
-        Ok(Api::new(self.port, suffix.then_some(self.suffix())))
+        Ok(Api::new(self.port, suffix.then_some(self.suffix()), &self.shared))
     }
 
     /// The fragments' suffix in the next node's shape.
@@ -337,23 +474,34 @@ impl Suite {
     /// The agents' API: the node's own (the agents' script is co-hosted),
     /// started again after `crash`. Its state is the node's.
     pub fn agents(&mut self) -> Result<Api> {
+        if let Some(preview) = &self.preview {
+            // the platform's own: the router hands the agents' Worker /api/a/*
+            return Ok(Api::hosted(preview, &self.shared));
+        }
         if self.node.is_none() {
             self.start(false, true)?;
         }
-        Ok(Api::new(self.port, None))
+        Ok(Api::new(self.port, None, &self.shared))
     }
 
     pub fn stop(&mut self) -> Result<()> {
+        anyhow::ensure!(self.preview.is_none(), "a hosted run stops no node: a section that does declares Need::Node");
         self.node.take().expect("a running node").stop()
     }
 
     pub fn crash(&mut self) -> Result<()> {
+        anyhow::ensure!(!self.hosted_rules, "the hosted lane crashes no node: a section that does declares Need::Node");
         self.node.take().expect("a running node").crash()
     }
 
     /// Registers the fragment's push webhook with the fake (the dashboard
     /// registration the real service has), so git moves reach the cell.
+    /// Hosted, nothing: the run's commits and deploys go through the API
+    /// (`commit`, `deploy`), which moves the pins itself.
     pub fn hook(&self, api: &Api, created: &Value) {
+        if self.hosted() {
+            return;
+        }
         let name = created["name"].as_str().expect("created.name");
         let repo = created["repo"].as_str().expect("created.repo");
         let secret = created["webhookSecret"].as_str().expect("created.webhookSecret");
@@ -367,20 +515,52 @@ impl Suite {
             bail!("create {name}: {r}");
         }
         self.hook(api, &r.body);
+        let full = r.body["name"].as_str().context("a create answers the fragment's name")?;
+        self.owners.borrow_mut().insert(full.to_string(), keys.clone());
         Ok(r.body)
     }
 
-    /// A commit on main by another writer, announced by webhook.
+    /// A commit on main by another writer, announced by webhook. Hosted,
+    /// its owner's commit through the files route (`POST /api/f/{name}/files`:
+    /// one commit, main moved at once), since a preview's git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
-        self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit")
+        if !self.hosted() {
+            return self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+        }
+        let files: Vec<Value> = changes
+            .iter()
+            .map(|(path, bytes)| match bytes.map(std::str::from_utf8) {
+                None => json!({ "path": path, "delete": true }),
+                Some(Ok(text)) => json!({ "path": path, "text": text }),
+                Some(Err(_)) => json!({ "path": path, "base64": base64::engine::general_purpose::STANDARD.encode(bytes.unwrap_or_default()) }),
+            })
+            .collect();
+        let r = self.as_owner(created, "files", &json!({ "files": files, "message": "e2e commit" }));
+        r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
     /// Moves live to main's tip (what `fragment deploy` does), announced.
+    /// Hosted, its owner's deploy (`POST /api/f/{name}/deploy`), which
+    /// installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
-        let repo = created["repo"].as_str().expect("created.repo");
-        let tip = self.fake.branch(repo, "main").expect("main has a commit");
-        self.fake.set_branch(repo, "live", &tip);
-        tip
+        if !self.hosted() {
+            let repo = created["repo"].as_str().expect("created.repo");
+            let tip = self.fake.branch(repo, "main").expect("main has a commit");
+            self.fake.set_branch(repo, "live", &tip);
+            return tip;
+        }
+        let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
+        r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
+    }
+
+    /// A hosted run's `POST /api/f/{name}/{route}`, signed by the owner
+    /// `create` recorded: a git move as a local run makes it through the fake.
+    fn as_owner(&self, created: &Value, route: &str, body: &Value) -> Value {
+        let name = created["name"].as_str().expect("created.name");
+        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name} was made by Suite::create, which records its owner"));
+        let r = self.api().signed(&owner, "POST", &format!("/api/f/{name}/{route}"), Some(body)).unwrap_or_else(|e| panic!("{route} {name}: {e:#}"));
+        assert!(r.status == 200, "{route} {name}: {r}");
+        r.body
     }
 
     /// Polls `f` until it holds or `timeout` passes.
@@ -514,22 +694,40 @@ fn approve_login(api: &Api, pending: &Value) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let list = |names: &str| names.split(',').map(str::to_string).collect::<Vec<_>>();
-    let (only, except) = match args.as_slice() {
-        [] => (None, vec![]),
-        [flag, sections] if flag == "--only" => (Some(list(sections)), vec![]),
-        [flag, sections] if flag == "--except" => (None, list(sections)),
-        _ => bail!("usage: fragment-e2e [--only <section>[,<section>...] | --except <section>[,<section>...]]"),
-    };
-    let root = devstack::repo_root();
-    let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| root.join("target/release/fragment"));
+    let args = hosted::parse(&args)?;
+    match args.hosted {
+        None => local(args.only, args.except, args.rehearse),
+        Some(hosted) => hosted::run(args.only, args.except, hosted),
+    }
+}
+
+/// The CLI the lanes drive (`FRAGMENT_BIN`, else the release build).
+fn cli_binary() -> Result<PathBuf> {
+    let cli = std::env::var_os("FRAGMENT_BIN").map(PathBuf::from).unwrap_or_else(|| devstack::repo_root().join("target/release/fragment"));
     if !cli.is_file() {
         bail!("no CLI at {} (cargo build --release -p fragment-cli, or set FRAGMENT_BIN)", cli.display());
     }
+    Ok(cli)
+}
+
+/// A run's name: distinguishes its fragments from any earlier state.
+fn run_name() -> String {
+    format!("{:x}", api::now_s() % 0xffffff)
+}
+
+/// The local run: a fresh `wrangler dev` node and the fakes. A rehearsal
+/// (`rehearse`: the paid calls it may lend) keeps the hosted lane's rules
+/// on it: the node shaped as a branch deployment (its levers scoped as a
+/// preview's), people signed in through the levers, git moved through the
+/// API, the fakes hidden from the lanes, and each section run or skipped by
+/// what it needs, as on a preview; it ends with the sweep.
+fn local(only: Option<Vec<String>>, except: Vec<String>, rehearse: Option<u64>) -> Result<()> {
+    let root = devstack::repo_root();
+    let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
     let org_key = fake::generate_org_key_pem();
     let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
-    let run = format!("{:x}", api::now_s() % 0xffffff);
+    let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
@@ -537,9 +735,26 @@ fn main() -> Result<()> {
         lanes::hermes::stage_images(&project)?;
     }
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
+    let test_secret = devstack::random_hex(32);
+    // a local run's people sign in through the WorkOS fake, and pay the fake
+    // model; a rehearsal's, through the levers, lent paid calls as on a preview
+    let (rung, shared) = match rehearse {
+        None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
+        Some(paid_calls) => {
+            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some() };
+            (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
+        }
+    };
+    let hidden = rehearse.is_some();
     let mut s = Suite {
         only,
         except,
+        rung,
+        hosted_rules: rehearse.is_some(),
+        preview: None,
+        plan: None,
+        shared,
+        owners: RefCell::new(BTreeMap::new()),
         asked: vec![],
         passed: 0,
         failed: vec![],
@@ -549,18 +764,18 @@ fn main() -> Result<()> {
         lost: None,
         cron: None,
         chrome: browser::Shared::new(&scratch),
-        tools,
+        tools: Some(tools),
         node: None,
         port: devstack::free_port()?,
         run,
-        fake,
-        ai: fragment_fakes::workers_ai::WorkersAi::start(0)?,
-
-        push: fragment_fakes::push::PushService::start()?,
+        fake: Fake::of(hidden, "code.storage", fake),
+        ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
+        push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
         org_key,
         host_secret: devstack::random_hex(32),
-        workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
-        upstream: fragment_fakes::upstream::Upstream::start()?,
+        test_secret,
+        workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
         operator: Keys::generate(),
         cli,
         scratch,
@@ -570,10 +785,24 @@ fn main() -> Result<()> {
     };
     s.start(true, true)?;
     lanes::run(&mut s);
+    if rehearse.is_some() {
+        hosted::rehearse_sweep(&mut s);
+    }
+    finish(&mut s)
+}
+
+/// A run's end: a name `--only` or `--except` gave that no section has
+/// fails it; the node stops; the counts, each FAIL, and (hosted) what the
+/// run spent are printed. Non-zero when any check failed, the scratch kept.
+fn finish(s: &mut Suite) -> Result<()> {
     for (flag, name) in s.only.clone().unwrap_or_default().into_iter().map(|n| ("--only", n)).chain(s.except.clone().into_iter().map(|n| ("--except", n))) {
         if !s.asked.contains(&name) {
             s.fail(&format!("{flag} {name}"), "no section has that name");
         }
+    }
+    // what the run's people spent, from their ledgers, while they answer
+    if s.hosted() {
+        hosted::spent(s);
     }
     if s.node.is_some() {
         let t0 = Instant::now();
@@ -585,12 +814,19 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    println!("\n{} passed, {} failed, {} skipped (the hosted lane's)", s.passed, s.failed.len(), s.skipped.len());
+    let skipped = match s.hosted() {
+        true => "skipped (each says why)",
+        false => "skipped (the hosted lane's)",
+    };
+    println!("\n{} passed, {} failed, {} {skipped}", s.passed, s.failed.len(), s.skipped.len());
     if !s.failed.is_empty() {
         for f in &s.failed {
             println!("  FAIL {f}");
         }
-        println!("kept for a look: {} (each node boot's log is node-<port>-<boot>.log there)", s.scratch.display());
+        match s.hosted() {
+            true => println!("kept for a look: {}", s.scratch.display()),
+            false => println!("kept for a look: {} (each node boot's log is node-<port>-<boot>.log there)", s.scratch.display()),
+        }
         std::process::exit(1);
     }
     if std::env::var_os("FRAGMENT_E2E_KEEP").is_some() {

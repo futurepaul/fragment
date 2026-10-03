@@ -13,7 +13,12 @@
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
-//!                    or --except <section>[,...])
+//!                    or --except <section>[,...]; --rehearse keeps the hosted lane's
+//!                    rules on the local node)
+//!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
+//!       [--dry-run | --sweep] [--max-paid-calls <n>]
+//!                    the suite against that branch deployment on its real vendors
+//!                    (crates/e2e/src/hosted.rs); --dry-run prints its plan
 //!   check            host tests and clippy, warnings denied
 //!   deploy --config <file> [--branch <name>]
 //!                    build and deploy to Cloudflare from a deployment's config
@@ -127,6 +132,7 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_url: fake.url.clone(),
         host_suffix: Some("fragment.localhost".into()),
         legacy_host_suffix: None,
+        host_label_suffix: None,
         // No webhooks reach dev fragments (the CLI's refresh and this poll do).
         poll_interval_s: 10,
         egress_local: true,
@@ -143,7 +149,7 @@ fn dev(args: &[String]) -> Result<()> {
         platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
         operators: None,
         signins_pending_max: None,
-        test_hooks: false,
+        test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
         connections: None,
@@ -235,8 +241,24 @@ fn try_template(args: &[String]) -> Result<()> {
 }
 
 fn e2e(args: &[String]) -> Result<()> {
+    // the hosted lane: a branch deployment, read from its config; it needs
+    // the CLI and the suite, and no Worker built here (a dry run, the suite alone)
+    if args.iter().any(|a| a == "--hosted") {
+        let suite_args = deploy::hosted_e2e_args(args)?;
+        match suite_args.iter().any(|a| a == "--dry-run") {
+            true => build_suite()?,
+            false => build_native()?,
+        }
+        return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
+    }
     build_e2e()?;
     run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
+}
+
+/// The suite alone, for this machine.
+fn build_suite() -> Result<()> {
+    let manifest = devstack::repo_root().join("Cargo.toml");
+    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
 }
 
 /// The suite, as `build_e2e` leaves it.
@@ -257,7 +279,7 @@ fn build_e2e() -> Result<()> {
 fn build_native() -> Result<()> {
     let manifest = devstack::repo_root().join("Cargo.toml");
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
-    run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-e2e"]))
+    build_suite()
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a
@@ -342,7 +364,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 

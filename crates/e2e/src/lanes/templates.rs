@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::shell::shell;
 use super::signin::site_cookie;
-use crate::api::{Api, Reply};
+use crate::api::{Api, Call, Reply};
 use crate::Suite;
 
 /// A person with a CLI key and a platform session.
@@ -22,7 +22,7 @@ pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
 }
 
 pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("templates") {
+    if !s.section("templates", &[]) {
         return Ok(());
     }
     let (owner, owner_session) = person(api)?;
@@ -135,5 +135,87 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a label already taken says so", r.status == 409 && r.code() == Some(ErrorCode::AlreadyExists), &r);
     let st = api.status(&owner, &name)?;
     s.ok("(a todo made there opens to anyone with its link, as before)", st.body["visibility"] == "link", &st);
+    skills(s, api, &owner)
+}
+
+/// The managed skills (decision 17): a fragment on the blessed `skills`
+/// template lists and reads the release's managed set as its files
+/// (decision 40: no copy to drift), beneath files of its own at the same
+/// path; its repo holds only its manifest.
+fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    use fragment_templates::blessed;
+    let label = s.name("tskills");
+    let r = api.create_with(owner, json!({ "name": label, "template": "skills" }))?;
+    let name = r.body["name"].as_str().unwrap_or("").to_string();
+    s.ok("a skills fragment is made from the blessed skills template", r.status == 200 && !name.is_empty(), &r);
+    let view = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
+    let m = api.signed(owner, "GET", &format!("/api/f/{name}/manifest"), None)?;
+    s.ok("its repo names the template, nothing else", m.body == json!({ "template": "skills" }), &m);
+    let listed = api.signed(owner, "GET", "/api/fragments", None)?;
+    let kind = listed.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name.as_str())).map(|f| f["kind"].clone());
+    s.ok("its owner's list says it is their skills", kind == Some(json!("skills")), &listed);
+
+    let files = |k: &Keys| api.signed(k, "GET", &format!("/api/f/{name}/files"), None);
+    let r = files(owner)?;
+    let rows: Vec<Value> = r.body["files"].as_array().cloned().unwrap_or_default();
+    let release: Vec<(String, String)> = rows.iter().filter(|f| f["release"] == true).map(|f| (f["path"].as_str().unwrap_or("").to_string(), f["lastCommitSha"].as_str().unwrap_or("").to_string())).collect();
+    let want: Vec<(String, String)> = blessed::data("skills").iter().map(|d| (d.path.to_string(), d.version.clone())).collect();
+    s.ok(
+        &format!("its files are the release's managed set ({} files), each at its version, beside its own manifest", want.len()),
+        r.status == 200 && !want.is_empty() && release == want && rows.iter().any(|f| f["path"] == "fragment.json" && f["release"].is_null()),
+        format!("{} release rows, {} wanted; {}", release.len(), want.len(), &r.text[..r.text.len().min(300)]),
+    );
+    let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
+    s.ok(
+        "the managed set is decision 17's: the rewritten skills there, shared-skills and what they replace gone",
+        skill_names.len() == 42
+            && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"].iter().all(|n| skill_names.contains(n))
+            && !skill_names.iter().any(|n| ["shared-skills-finite", "finite-sites-publishing-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite"].contains(n)),
+        format!("{skill_names:?}"),
+    );
+    let apps = "skills/software-development/apps-finite/SKILL.md";
+    let read = |k: &Keys, path: &str| api.signed(k, "GET", &format!("/api/f/{name}/file?path={}", crate::api::url_enc(path)), None);
+    let r = read(owner, apps)?;
+    s.ok("a managed skill reads as the release's bytes", r.status == 200 && Some(r.bytes.as_slice()) == blessed::data_file("skills", apps).map(|d| d.bytes), r.status);
+    let r = read(owner, "skills/nope/SKILL.md")?;
+    s.ok("a skill the set has not is no file (404)", r.status == 404, &r);
+
+    // a file of its own at a managed path wins; removed, the release's is back
+    let own = "---\nname: apps-finite\ndescription: my own apps skill\n---\n";
+    let w = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "files": [{ "path": apps, "text": own }], "key": "own-apps" })))?;
+    let r = read(owner, apps)?;
+    let at: Vec<Value> = files(owner)?.body["files"].as_array().map(|l| l.iter().filter(|f| f["path"] == apps).cloned().collect()).unwrap_or_default();
+    let row = at.first().cloned().unwrap_or_default();
+    s.ok(
+        "a file of its own at a managed path wins over the release's, listed once",
+        w.status == 200 && r.text == own && at.len() == 1 && row["release"].is_null() && !row["lastCommitSha"].as_str().unwrap_or("").starts_with("release:"),
+        json!({ "rows": at, "read": r.status }),
+    );
+    let w = api.signed(owner, "POST", &format!("/api/f/{name}/files"), Some(&json!({ "files": [{ "path": apps, "delete": true }], "key": "own-apps-gone" })))?;
+    let r = read(owner, apps)?;
+    s.ok("and removed, the release's is back", w.status == 200 && Some(r.bytes.as_slice()) == blessed::data_file("skills", apps).map(|d| d.bytes), r.status);
+
+    // its page, and its site's file routes, read the same
+    let page = api.page(&name, "", Some(&view))?;
+    s.ok("its page is the release's", page.status == 200 && page.text.contains("<title>Skills"), page.status);
+    let site = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), cookie: Some(view.clone()), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    let site_paths: Vec<&str> = site.body["files"].as_array().map(|l| l.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
+    s.ok("its site lists the managed set too", want.iter().all(|(p, _)| site_paths.contains(&p.as_str())), site.status);
+    let file = api.page(&name, &format!("__file?path={}", crate::api::url_enc(apps)), Some(&view))?;
+    s.ok("and reads a managed skill", file.status == 200 && file.text.contains("name: apps-finite"), file.status);
+
+    // a stranger reads none of it on a members fragment
+    let stranger = api.person()?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    let r = files(&stranger)?;
+    s.ok("a stranger lists none of a members skills fragment (403)", r.status == 403, &r);
+    let r = read(&stranger, apps)?;
+    s.ok("nor reads one of its skills", r.status == 403, &r);
+    // a fragment on a template without data lists only its own
+    let chat = s.named(api, owner, "tskillschat")?;
+    let r = api.create_with(owner, json!({ "name": chat, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making a chat: {r}");
+    let r = api.signed(owner, "GET", &format!("/api/f/{}/files", r.body["name"].as_str().unwrap_or("")), None)?;
+    s.ok("a chat's files are its own alone (its template carries no data)", r.body["files"].as_array().is_some_and(|l| l.iter().all(|f| f["release"].is_null())), &r);
     Ok(())
 }

@@ -68,17 +68,18 @@ fn said_count(text: &str) -> Option<u32> {
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    let images_dir = fragment_devstack::repo_root().join("images");
-    let dockerfile = images_dir.join("hermes/Dockerfile");
+    // the Hermes image builds from the repo's root: it carries the fragment CLI
+    let root = fragment_devstack::repo_root();
+    let dockerfile = root.join("images/hermes/Dockerfile");
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": images_dir }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": images_dir, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
+    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
 
 pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section_by_name(SECTION, "it builds and runs the Hermes image") {
+    if !s.section_by_name(SECTION, &[crate::Need::Fakes, crate::Need::LocalDocker], "it builds and runs the Hermes image") {
         return Ok(());
     }
     s.ai.clear_script();
@@ -96,14 +97,26 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "hermes" })))?;
     s.ok("a person's computer, pinned to the Hermes image", r.status == 200 && r.body["image"] == "hermes", &r);
 
-    // an agent fragment with a soul and a tier, and a chat it is in
+    // an agent fragment with a soul, a tier and skills of its own (one a
+    // managed skill also names), and a chat it is in
     let agent_name = s.named(api, &owner, "juniper")?;
     let agent = s.create(api, &owner, &agent_name)?;
     s.commit(
         &agent,
-        &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Juniper, a careful gardener.\n")), ("agent.json", Some(br#"{"tier":"cheap"}"#))],
+        &[
+            ("fragment.json", Some(AGENT_JSON)),
+            ("SOUL.md", Some(b"You are Juniper, a careful gardener.\n")),
+            ("agent.json", Some(br#"{"tier":"cheap"}"#)),
+            ("skills/garden-notes/SKILL.md", Some(b"---\nname: garden-notes\ndescription: Juniper's notes on the garden.\n---\n")),
+            ("skills/grill-me/SKILL.md", Some(b"---\nname: grill-me\ndescription: Juniper's own grill, which wins.\n---\n")),
+        ],
     );
     s.deploy(&agent);
+    // the owner's skills fragment (decision 17): its computer installs its managed set
+    let skills_label = s.name("skills");
+    let r = api.create_with(&owner, json!({ "name": skills_label, "template": "skills" }))?;
+    let skills_name = r.body["name"].as_str().unwrap_or("").to_string();
+    s.ok("its owner has a skills fragment on the blessed template", r.status == 200 && !skills_name.is_empty(), &r);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent to it", r.status == 200 && identity.starts_with("id:"), &r);
@@ -233,6 +246,90 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "Hermes' HTTPS call to a connection's host reaches it with the owner's token in the placeholder's place",
         seen["host"] == SWAP_CONNECTION_HOST && tokens.last().is_some_and(|t| seen["auth"]["authorization"] == format!("Bearer {t}")),
         json!({ "reply": reply_of(&swapped), "seen": seen }),
+    );
+
+    // The managed skills and its own, where its profile looks: its own
+    // `skills/` (its fragment's) and the managed set its config names (the
+    // images' Docker lane checks Hermes' own view of the two, its own
+    // winning on a name); and its terminal runs the fragment CLI as itself,
+    // acting for its owner, with no key: it lists its owner's fragments
+    // (their skills fragment, which it is no member of, among them).
+    let managed = "/data/hermes/managed-skills/software-development/apps-finite/SKILL.md";
+    let found = format!("cd \"$HERMES_HOME\" && grep -c managed-skills config.yaml && ls skills/garden-notes/SKILL.md {managed}");
+    let has_both = |t: &str| t.contains("skills/garden-notes/SKILL.md") && t.contains(managed) && !t.contains("No such file");
+    let mut skills_seen = None;
+    // the managed set is installed off the boot's path: asked again until it is
+    for n in 0..6u32 {
+        let r = say(40 + n, &format!("run: {found}"))?;
+        let asked = turn_for(&r);
+        s.eventually(TURN, || ended(&asked).is_some());
+        skills_seen = reply_of(&asked);
+        if skills_seen.as_deref().is_some_and(has_both) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    s.ok(
+        "its profile has the managed skills (its config naming them) and its own",
+        skills_seen.as_deref().is_some_and(has_both),
+        json!(skills_seen),
+    );
+    let r = say(50, &format!("run: fragment list | grep -c '^{skills_name} ' | sed 's/^/listed-/'"))?;
+    let listed = turn_for(&r);
+    s.eventually(TURN, || ended(&listed).is_some());
+    let r = say(51, &format!("run: fragment whoami | grep -c '^agent: {agent_name} ' | sed 's/^/whoami-/'"))?;
+    let whoami = turn_for(&r);
+    s.eventually(TURN, || ended(&whoami).is_some());
+    s.ok(
+        "its terminal runs `fragment` as itself, with no key, acting for its owner: it lists its owner's fragments",
+        reply_of(&listed).is_some_and(|t| t.contains("listed-1")) && reply_of(&whoami).is_some_and(|t| t.contains("whoami-1")),
+        json!({ "list": reply_of(&listed), "whoami": reply_of(&whoami) }),
+    );
+
+    // phase 6's exit: from its chat, the agent builds an app, publishes it and
+    // shares its link, then ingests a source into a brain and searches it,
+    // all with the `fragment` CLI in its terminal, acting for its owner
+    let run = |s: &Suite, n: u32, cmd: &str| -> Result<Option<String>> {
+        let r = say(n, &format!("run: {cmd}"))?;
+        let turn = turn_for(&r);
+        s.eventually(TURN, || ended(&turn).is_some());
+        Ok(reply_of(&turn))
+    };
+    let said = |reply: &Option<String>, mark: &str| reply.as_deref().is_some_and(|t| t.contains(mark));
+    let username = agent_name.split_once('.').map(|(_, u)| u.to_string()).unwrap_or_default();
+    let owner_name = |label: &str| format!("{label}.{username}");
+    let made = run(s, 60, "fragment create groceries --template todo --json | grep -c '\"ok\":true' | sed 's/^/made-/'")?;
+    let wrote = run(s, 61, "fragment write groceries site/hello.html --text '<h1>Picked by the agent</h1>' --json | grep -c '\"ok\":true' | sed 's/^/wrote-/'")?;
+    let live = run(s, 62, "fragment deploy groceries | grep -o 'view=[0-9a-f]*' | head -1 | sed 's/^/link-/'")?;
+    let app = owner_name("groceries");
+    let status = api.signed(&owner, "GET", &format!("/api/f/{app}/status"), None)?;
+    let owned = status.body["owner"] == api.identity(&owner)?.as_str();
+    let token = status.body["viewToken"].as_str().unwrap_or("").to_string();
+    let page = api.call(Call { method: "GET", url: format!("{}?view={token}", api.site_url(&app, "hello.html")), ..Call::default() })?;
+    s.ok(
+        "from its chat, the agent makes an app (its owner's), writes a page, and publishes it",
+        said(&made, "made-1") && said(&wrote, "wrote-1") && owned && page.text.contains("Picked by the agent"),
+        json!({ "made": made, "wrote": wrote, "owner": status.body["owner"], "page": page.status }),
+    );
+    s.ok(
+        "and shares it: its share link, which an anonymous visitor opens",
+        said(&live, &format!("link-view={token}")) && !token.is_empty(),
+        json!({ "reply": live, "token": !token.is_empty() }),
+    );
+    let brain = run(s, 63, "fragment create garden --template brain --title 'Garden notes' --json | grep -c '\"ok\":true' | sed 's/^/brain-/'")?;
+    let ingested = run(s, 64, "printf '# Tomatoes\\n\\nWater the tomatoes at dawn, before the heat.\\n' | fragment write garden garden/raw/tomatoes.md --from - --json | grep -c '\"ok\":true' | sed 's/^/ingested-/'")?;
+    let found = run(s, 65, "fragment call garden search --input '{\"q\":\"tomatoes dawn\"}' --json | grep -o 'garden/raw/tomatoes.md' | head -1 | sed 's/^/found-/'")?;
+    let brain_name = owner_name("garden");
+    let searched = api.signed(&owner, "POST", &format!("/api/f/{brain_name}/ops/search"), Some(&json!({ "id": "e2e-brain-search", "input": { "q": "tomatoes" } })))?;
+    s.ok(
+        "then makes a brain, ingests a source into it, and finds it by searching",
+        said(&brain, "brain-1") && said(&ingested, "ingested-1") && said(&found, "found-garden/raw/tomatoes.md"),
+        json!({ "brain": brain, "ingested": ingested, "found": found }),
+    );
+    s.ok(
+        "the brain is its owner's, and its search finds the source for its owner too",
+        searched.status == 200 && searched.text.contains("garden/raw/tomatoes.md"),
+        &searched,
     );
 
     // delegation (decision 36): Skyler shares a fragment with the owner as an

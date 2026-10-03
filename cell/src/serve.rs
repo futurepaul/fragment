@@ -297,7 +297,10 @@ impl FragmentCell {
         headers.set("x-fragment-principal", &who)?;
         headers.set("x-fragment-role", role.as_str())?;
         let mut init = RequestInit::new();
-        init.with_method(req.method()).with_headers(headers);
+        // the app's redirect is the browser's to follow: followed here, it
+        // came back into the app at its Location (an app sending a blob's
+        // bytes to `__file`) and the app answered that path instead
+        init.with_method(req.method()).with_headers(headers).with_redirect(RequestRedirect::Manual);
         if !matches!(req.method(), Method::Get | Method::Head) {
             let body = req.bytes().await?;
             if !body.is_empty() {
@@ -385,6 +388,12 @@ impl FragmentCell {
                         sizes.insert(r.path, size);
                     }
                 }
+                // beneath them, its blessed template's data (decision 40)
+                let release: Vec<(String, u64)> = {
+                    let own: std::collections::BTreeSet<&str> = sizes.keys().map(String::as_str).collect();
+                    self.release_data(&own)?.into_iter().map(|d| (d.path.to_string(), d.bytes.len() as u64)).collect()
+                };
+                sizes.extend(release);
                 let files: Vec<Value> = sizes.into_iter().map(|(path, size)| json!({ "path": path, "size": size })).collect();
                 return json_response(&json!({ "type": "files", "count": files.len(), "files": files }));
             }
@@ -398,7 +407,11 @@ impl FragmentCell {
                     Some(row) => ("live", row),
                     None => match self.tree_row("main", &p)? {
                         Some(row) => ("main", row),
-                        None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
+                        // beneath both, its blessed template's data (decision 40)
+                        None => match self.release_file(&p)? {
+                            Some(d) => return Self::release_response(d, head),
+                            None => return Err(CellError::new(ErrorCode::NotFound, format!("no file {p}"))),
+                        },
                     },
                 };
                 if head {

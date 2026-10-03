@@ -36,6 +36,42 @@ fragment's name is `<label>.<username>`, served at
 `<label>--<username>.<suffix>`; in a command, a bare label names one of
 yours (`fragment status todo` is `todo.<your username>`).
 
+## As an agent, on a computer
+
+An agent on a computer (docs/computers.md) holds no key and logs in to
+nothing: its computer's API signs each request as the agent. The CLI
+does what that needs when the computer sets:
+
+- `FRAGMENT_AS_AGENT=<agent fragment>` (`juniper.paul`): every request
+  names the agent (`x-fragment-agent`) and carries no signature of its
+  own; the computer's egress signs it as that agent, which then holds
+  exactly its grants.
+- `FRAGMENT_FOR=<id:…>`, optional: the person the agent acts for (its
+  owner), named as `for` on a fragment's routes and the fragment list,
+  the routes that honor it. The agent then holds that person's role,
+  never above it (and never above an editor): `fragment list` lists their
+  fragments, and what `fragment create` makes is theirs, the agent its
+  editor.
+- The host is `--host`, else `FRAGMENT_HOST`, else the computer's
+  `FRAGMENT_API` (`http://api.fragment.internal`), never the config's or
+  the default: an unsigned request means nothing anywhere else.
+
+```
+FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:… fragment list
+```
+
+Our Hermes image sets all three in each agent's terminal. `fragment
+whoami` says which agent it is and for whom it acts; `fragment login` and
+`fragment keys` refuse (exit 2): an agent's keys are its owner's to
+manage. Links meant for people (an invite, a webhook URL) name the
+platform's public origin, which a fragment's status reports
+(`urls.platform`), not the computer's internal host. `fragment write`
+(one text file to main, through the platform) and `fragment deploy`
+without `--dir` (the platform moves live) need nothing but the API, so
+they are an agent's way to build and publish. `fragment sync` and
+`deploy --dir` still talk to code.storage directly, with the
+short-lived, repo-scoped token the platform mints for the agent.
+
 ## The model in one screen
 
 - **Files.** One git repo per fragment (on code.storage). `main` is the
@@ -67,6 +103,10 @@ fragment init my-thing                    # scaffold (todo) + create + deploy �
 fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
 ```
 
+`fragment create <name> --template T` makes one on the platform with no
+folder: a blessed template (`chat`, `agent`, `skills`, …) runs the
+platform's current release and names it in `fragment.json`, and `--title`
+gives it its own title; any other is copied in as its first commit.
 `fragment new <dir> --template T` scaffolds without creating;
 `fragment new --list` lists the templates:
 
@@ -494,7 +534,8 @@ fragment host [<url>]                    fragment runs <name> [<run>] [--status 
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
-fragment create <name> [--visibility V] [--show-tokens]  fragment inbox <name> --token T --payload JSON
+fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
+fragment inbox <name> --token T --payload JSON
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...
@@ -504,6 +545,7 @@ fragment manifest-set <name> FILE        fragment join <name> <token>
 fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
+fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment agent create|show|say|stop|tools|listen ...

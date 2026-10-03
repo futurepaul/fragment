@@ -314,7 +314,15 @@ pub const DEFAULT_STORAGE: StoragePrices = StoragePrices { r2: 15_000, sqlite: 2
 pub const DEFAULT_REQUESTS: i64 = 450_000;
 /// Dynamic Workers: $0.002 per unique dynamic worker per day.
 pub const DEFAULT_DYNAMIC_WORKERS: i64 = 2_000;
-/// Browser Rendering: $0.09 per browser hour.
+/// Browser Rendering (now "Browser Run"): $0.09 per browser hour on
+/// Workers Paid, past the 10 hours a month the plan includes. Source:
+/// developers.cloudflare.com/browser-run/pricing (last updated 2026-04-21,
+/// read 2026-10-03); its time is totalled per day in seconds, and the
+/// month's total rounded to the nearest hour. A card's shot is a Browser
+/// Session (CDP over the binding: crate::card), which also bills
+/// concurrent browsers, $2.00 each a month past 10 (the month's average of
+/// each day's peak): a deployment-wide charge that no one shot causes, so
+/// it is not metered per person (docs/ledger.md, Assumptions).
 pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;

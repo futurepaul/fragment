@@ -451,6 +451,9 @@ pub enum FragmentKind {
     Chat,
     Agent,
     Brain,
+    /// A person's managed skills (decision 17: the blessed `skills`
+    /// template), which their agents' computers install.
+    Skills,
 }
 
 impl FragmentKind {
@@ -460,6 +463,7 @@ impl FragmentKind {
             FragmentKind::Chat => "chat",
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
+            FragmentKind::Skills => "skills",
         }
     }
 
@@ -469,6 +473,7 @@ impl FragmentKind {
             "chat" => Some(FragmentKind::Chat),
             "agent" => Some(FragmentKind::Agent),
             "brain" => Some(FragmentKind::Brain),
+            "skills" => Some(FragmentKind::Skills),
             _ => None,
         }
     }
@@ -570,6 +575,11 @@ pub struct CodeStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Urls {
     pub canonical: String,
+    /// The platform's own origin, where people open its join links and
+    /// send its inbox's webhooks: a client inside a computer reaches the
+    /// API at an internal host, so a link for a person names this one.
+    #[serde(default)]
+    pub platform: String,
 }
 
 /// `GET /api/f/<name>/status` (viewer and up).
