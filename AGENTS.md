@@ -72,9 +72,10 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  push, ai, ledger, agents, addon, computers, hermes, sync, restart,
-  pathmode; `crates/e2e/src/lanes/mod.rs`). `computers` runs the stub
-  image (`images/stub`) in Docker; `hermes`, the real-Hermes lane, builds
+  push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
+  hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
+  in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
   (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
