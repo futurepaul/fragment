@@ -691,6 +691,56 @@ exit says.
    through a platform-origin frame-session mint, with a frames lane; the
    shell replaces `/` and `/settings`. Exit: the browser lane at desktop
    and phone sizes, on a preview.
+
+   Status, 2026-10-03 (futurepaul/fragment#117; Skyler's design handoff
+   of 2026-10-02 for every part it draws):
+   - Built:
+     - **The shell** at `/` and `/settings` (cell/shell/; the server's
+       pages went):
+       - First run: a username, then "Creating your agent…". The person's
+         default agent, in charge, is made with its computer and its chat,
+         and the chat opens once the agent follows it (Paul, 2026-10-03:
+         no job asked, and no wait in the chat).
+       - A sidebar of agents, group chats and apps; per-person archive.
+       - Search over titles and messages (FTS5 in the Principal).
+       - Settings: the account, credit, computer, agents, connections,
+         the CLI, and the wallpaper's credit.
+       - An update prompt when the computer's image is behind.
+       - It calls the API with the platform session (docs/api.md, The
+         shell).
+     - **The frame mint** (`/auth/frame`). The shell's tabs, and a
+       computer's ports, sign in on their own origins with partitioned
+       cookies.
+     - **The blessed `agent` and `chat` templates** (decision 40),
+       served from the release, their app code included.
+       - The chat, on Skyler's design: drafts, steps as cards, approvals,
+         Stop, @mentions, and attachments both ways.
+       - Voice memos: an audio attachment the agent transcribes (decision
+         9, as Paul changed it).
+       - Push on an agent's final reply.
+     - **Paul's 2026-10-03 rules:**
+       - guests make no fragments;
+       - past the overdraft, triggers start no runs;
+       - the platform posts `joined` and wakes the computer;
+       - decision 44.
+     - A chat's files are kept while their records are.
+     - Computers start at the size their price names, decision 13's
+       2 vCPU and 6 GiB.
+     - `cargo xtask deploy` makes the proxied DNS record its routes need.
+   - Evidence:
+     - local, on workerd: `cargo xtask check` and the e2e (shell, shell-ui
+       in the browser at desktop and phone sizes, chat, frames, computers,
+       push, signin);
+     - the preview **p5.finite.place**: real WorkOS staging, code.storage,
+       Workers AI through the `fragment-dev` gateway, and a Hermes computer
+       on Containers. Paul signed in, made agents, and chatted; messages
+       queued, one turn at a time.
+   - Found on the preview:
+     - a computer's first start pulls the 3.8 GB image (about 29 s), now
+       hidden behind setup;
+     - an agent added to an awake Hermes computer had no profile (a 401):
+       hermes-boot adds it live, in progress.
+   - Not yet: the hosted e2e lane on the preview; files in search.
 6. **Brains, skills, sites.** The brain and skills templates, Hermes'
    fragment skills, screenshots. Exit: from a chat, an agent builds,
    publishes and shares an app, ingests into a brain and searches it;
