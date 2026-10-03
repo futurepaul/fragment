@@ -80,7 +80,8 @@ struct Computers {
     /// The image a new computer is pinned to (one of `images`).
     default_image: String,
     /// By name: each image's Dockerfile and build context, relative to the
-    /// repo (`images/hermes/Dockerfile`, `images`), and its build variables.
+    /// repo (`images/hermes/Dockerfile`, `.`: the Hermes image carries the CLI,
+    /// so it builds from the repo root), and its build variables.
     images: BTreeMap<String, Image>,
     // No size here: a Durable Object's container is sized as it starts, at
     // the instance its awake time is priced at (fragment_core::price
