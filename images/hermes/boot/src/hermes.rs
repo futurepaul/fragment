@@ -92,8 +92,16 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
 
 /// An agent's profile config: its model, through the model intercept, as
 /// that agent (`x-fragment-agent` on every call, the main model's and the
-/// auxiliary ones').
-pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str) -> String {
+/// auxiliary ones'); and what its terminal is given: who it is
+/// (`PROFILE_ENV`) and every credential's environment variable the
+/// deployment may give it (`credential_env`, the guest view's: Hermes reads
+/// the list once per gateway, so it names them all, held now or not, and
+/// each value is the profile's `.env`'s, read again at every turn). Hermes
+/// never passes a name it keeps for its own providers' keys
+/// (`PERPLEXITY_API_KEY`, `XAI_API_KEY`, `ELEVENLABS_API_KEY`, …: its
+/// `_HERMES_PROVIDER_ENV_BLOCKLIST`), so the terminal also sources the
+/// profile's credentials file (`credentials_sh`) as its shell starts.
+pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_env: &[String], credentials_file: &Path) -> String {
     let base = model_base.trim_end_matches('/');
     let (provider, url) = match tier {
         // The high tier is Anthropic's Messages shape, passed through.
@@ -111,8 +119,17 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str) -> String {
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", q(crate::skills::MANAGED_DIR)));
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
-    // only to the commands of this profile's turns.
-    y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", PROFILE_ENV.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
+    // only to the commands of this profile's turns. Its shell's start files are
+    // Hermes' own three, then the agent's credentials.
+    let mut passed: Vec<String> = PROFILE_ENV.iter().map(|s| s.to_string()).collect();
+    for e in credential_env.iter().filter(|e| env_name_ok(e)) {
+        if !passed.contains(e) {
+            passed.push(e.clone());
+        }
+    }
+    y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", passed.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
+    let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
+    y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
     y
 }
 
@@ -123,14 +140,67 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str) -> String {
 /// one gateway), so each agent's commands act as that agent alone.
 pub const PROFILE_ENV: [&str; 2] = ["FRAGMENT_AS_AGENT", "FRAGMENT_FOR"];
 
-/// A profile's `.env`: it holds no credential, only who the agent is.
+/// The profile's credentials file, which its terminal's shell sources.
+pub const CREDENTIALS_FILE: &str = "credentials.sh";
+
+/// An environment variable's name a credential may be given in: upper
+/// case, and not one of the profile's own.
+fn env_name_ok(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && !name.as_bytes()[0].is_ascii_digit()
+        && !name.starts_with("FRAGMENT_")
+        && !name.starts_with("HERMES_")
+}
+
+/// A placeholder, as the platform makes one: `fcx_`/`fck_`, a provider and
+/// a tag, nothing a line or a shell would read as more.
+fn placeholder_ok(p: &str) -> bool {
+    (p.starts_with("fcx_") || p.starts_with("fck_")) && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// The agent's credentials as `(name, placeholder)`, each in every
+/// environment variable it names, in the platform's order; one the
+/// platform sent out of shape is left out (and the name first given wins).
+pub fn credential_vars(agent: &Agent) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    for c in &agent.credentials {
+        if !placeholder_ok(&c.placeholder) {
+            continue;
+        }
+        for e in c.env.iter().filter(|e| env_name_ok(e)) {
+            if !out.iter().any(|(n, _)| n == e) {
+                out.push((e.clone(), c.placeholder.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// A profile's `.env`: who the agent is, and its credentials, each a
+/// placeholder (the computer holds no credential: the swap fills them on
+/// the way to their providers).
 pub fn profile_env(agent: &Agent) -> String {
     let line_safe = |v: &str| !v.is_empty() && v.bytes().all(|b| b.is_ascii_graphic() && b != b'"' && b != b'\'' && b != b'\\' && b != b'#');
     assert!(line_safe(&agent.fragment) && line_safe(&agent.owner), "an agent's fragment and owner are names: {agent:?}");
-    format!(
-        "# The profile of {}; the computer holds no credential.\n{}={}\n{}={}\n",
+    let mut e = format!(
+        "# The profile of {}; the computer holds no credential, only placeholders.\n{}={}\n{}={}\n",
         agent.fragment, PROFILE_ENV[0], agent.fragment, PROFILE_ENV[1], agent.owner
-    )
+    );
+    for (name, placeholder) in credential_vars(agent) {
+        e.push_str(&format!("{name}={placeholder}\n"));
+    }
+    e
+}
+
+/// The profile's credentials for its terminal's shell (`CREDENTIALS_FILE`,
+/// sourced as a session's shell starts): each exported under its name.
+pub fn credentials_sh(agent: &Agent) -> String {
+    let mut s = format!("# Written by hermes-boot: {}'s credentials, placeholders the computer's swap fills.\n", agent.fragment);
+    for (name, placeholder) in credential_vars(agent) {
+        s.push_str(&format!("export {name}='{placeholder}'\n"));
+    }
+    s
 }
 
 /// The default profile (the gateway's own, no agent's): it runs no turns.
@@ -238,7 +308,7 @@ mod tests {
     use super::*;
 
     fn agent() -> Agent {
-        Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into() }
+        Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] }
     }
 
     #[test]
@@ -257,17 +327,22 @@ mod tests {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
-        let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/");
+        let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
+        let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
         assert!(p.contains("default: \"medium\""));
         assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
-        let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal");
+        let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\"]\n"), "the managed skills, after its own: {p}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
+        assert!(
+            p.contains("  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\", \"/data/hermes/profiles/juniper-paul/credentials.sh\"]\n"),
+            "its shell starts as Hermes' does, then reads its credentials: {p}"
+        );
         let e = profile_env(&agent());
         assert!(e.contains("\nFRAGMENT_AS_AGENT=juniper.paul\n") && e.contains("\nFRAGMENT_FOR=id:paul\n"), "{e}");
-        assert!(!e.contains("KEY") && !e.contains("TOKEN"), "no credential in a profile");
+        assert!(!e.contains("KEY") && !e.contains("TOKEN"), "no credential, and none held: {e}");
         let env = gateway_env("127.0.0.1:8650", "computer", &"s".repeat(32));
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
@@ -275,6 +350,56 @@ mod tests {
         let l = litestream_config(&[("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))], "http://storage.fragment.internal");
         assert!(l.contains("path: \"litestream/juniper-paul\"") && l.contains("endpoint: \"http://storage.fragment.internal\""), "{l}");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
+    }
+
+    fn credential(provider: &str, env: &[&str], placeholder: &str) -> fragment_bridge::runtime::Credential {
+        fragment_bridge::runtime::Credential {
+            provider: provider.into(),
+            kind: "operator".into(),
+            env: env.iter().map(|e| e.to_string()).collect(),
+            placeholder: placeholder.into(),
+            hosts: vec!["api.perplexity.ai".into()],
+        }
+    }
+
+    /// Valid: each credential's placeholder is in its environment
+    /// variables, in the profile's `.env` (for Hermes and its tools) and in
+    /// the terminal's credentials file; the terminal is passed every name
+    /// the deployment may give, held now or not.
+    #[test]
+    fn a_profile_holds_its_credentials_placeholders() {
+        let mut a = agent();
+        let tag = "0123456789abcdef0123456789abcdef";
+        a.credentials = vec![
+            credential("perplexity", &["PERPLEXITY_API_KEY"], &format!("fck_perplexity_{tag}")),
+            credential("google", &["GOOGLE_OAUTH_ACCESS_TOKEN"], &format!("fcx_google_{tag}")),
+        ];
+        let e = profile_env(&a);
+        assert!(e.contains(&format!("\nPERPLEXITY_API_KEY=fck_perplexity_{tag}\n")) && e.contains(&format!("\nGOOGLE_OAUTH_ACCESS_TOKEN=fcx_google_{tag}\n")), "{e}");
+        let s = credentials_sh(&a);
+        assert!(s.contains(&format!("\nexport PERPLEXITY_API_KEY='fck_perplexity_{tag}'\n")), "{s}");
+        let env = ["GOOGLE_OAUTH_ACCESS_TOKEN".to_string(), "PERPLEXITY_API_KEY".to_string(), "XAI_API_KEY".to_string()];
+        let p = profile_config(&a, Tier::Medium, "http://model.fragment.internal", &env, Path::new("/c.sh"));
+        assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"GOOGLE_OAUTH_ACCESS_TOKEN\", \"PERPLEXITY_API_KEY\", \"XAI_API_KEY\"]"), "{p}");
+    }
+
+    /// Invalid: a credential the platform sent out of shape (a name an image
+    /// relies on, a value a line or a shell would read as more) is left out;
+    /// a name given twice keeps the first.
+    #[test]
+    fn a_credential_out_of_shape_is_left_out() {
+        let mut a = agent();
+        let tag = "0123456789abcdef0123456789abcdef";
+        a.credentials = vec![
+            credential("a", &["FRAGMENT_AS_AGENT", "A_KEY"], &format!("fck_a_{tag}")),
+            credential("b", &["B_KEY"], "fck_b_x'\nrm -rf /"),
+            credential("c", &["lower"], &format!("fck_c_{tag}")),
+            credential("d", &["A_KEY"], &format!("fck_d_{tag}")),
+        ];
+        assert_eq!(credential_vars(&a), vec![("A_KEY".to_string(), format!("fck_a_{tag}"))]);
+        let p = profile_config(&a, Tier::Medium, "http://m", &["FRAGMENT_FOR".into(), "HERMES_HOME".into(), "A_KEY".into()], Path::new("/c.sh"));
+        assert!(p.contains("env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\", \"A_KEY\"]"), "{p}");
+        assert!(!credentials_sh(&a).contains("rm -rf"));
     }
 
     /// The gateway's control wire as `gateway/control_socket.py` speaks it:

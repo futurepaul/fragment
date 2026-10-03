@@ -38,7 +38,32 @@ pub struct Agent {
     pub name: String,
     /// Its owner: the only one who answers its prompts (decision 42).
     pub owner: String,
+    /// The credentials it may use now (docs/computers.md, "Connections and
+    /// operator keys"): each a placeholder that names the agent, which an
+    /// image puts in the environment variables named, for the computer's
+    /// swap to fill on the way to the provider's hosts. The bridge sends
+    /// none itself.
+    #[serde(default)]
+    pub credentials: Vec<Credential>,
 }
+
+/// One credential of an agent's (`GET /api/computer`'s `agents[].credentials`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Credential {
+    pub provider: String,
+    /// `connection`, `operator` or `own`.
+    pub kind: String,
+    /// The environment variables it goes in (the vendor's SDK's names).
+    pub env: Vec<String>,
+    /// `fcx_<provider>_<tag>` or `fck_<provider>_<tag>`.
+    pub placeholder: String,
+    /// The only hosts it is swapped for.
+    pub hosts: Vec<String>,
+}
+
+/// The most credentials one agent is given (the platform's catalog holds
+/// at most 64 providers).
+pub const CREDENTIALS_MAX: usize = 64;
 
 /// A file on the bridge's disk: an attachment, downloaded for the runtime
 /// or written by it.
@@ -77,7 +102,7 @@ pub struct TurnStart {
 /// What the bridge asks of a runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    Start(TurnStart),
+    Start(Box<TurnStart>),
     /// The turn's asker pressed Stop.
     Stop { turn: String },
     /// A prompt's answer (`option`), or its expiry (`None`): only ever once

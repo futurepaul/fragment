@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into() }
+        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into(), credentials: vec![] }
     }
 
     /// Valid: the file names the agents ready; the gate keeps the

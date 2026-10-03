@@ -357,7 +357,7 @@ impl Loop {
 
     async fn command(&mut self, c: Command) {
         match c {
-            Command::Start(ts) => self.start(ts),
+            Command::Start(ts) => self.start(*ts),
             Command::Stop { turn } => {
                 let Some(f) = self.inflight.get_mut(&turn) else { return };
                 if f.acked || f.sent {
