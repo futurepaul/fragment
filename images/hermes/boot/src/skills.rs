@@ -199,7 +199,9 @@ impl From<ApiError> for InstallError {
 /// acting for `owner`. An answer the platform did not give (a transport
 /// error, a refusal) changes nothing installed: the last install stays.
 pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifest: &Path) -> Result<Done, InstallError> {
-    let mut installed = load_manifest(manifest);
+    // what the manifest says is installed and is still on disk (a file gone
+    // from under it is fetched again)
+    let mut installed: Installed = load_manifest(manifest).into_iter().filter(|(rel, _)| valid_rel(rel) && dir.join(rel).is_file()).collect();
     let fragments = api.fragments_for(&reader.fragment, owner).await?;
     let fragment = pick(&fragments, &reader.fragment);
     let listing = match &fragment {
@@ -356,6 +358,11 @@ mod tests {
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists() && !dir.join("fragment.json").exists());
         let replay = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
         assert_eq!((replay.fetched, replay.removed), (0, 0), "settled");
+        // a file gone from under the manifest is fetched again
+        std::fs::remove_file(dir.join("grill-me/SKILL.md")).unwrap();
+        let repaired = install(&api, &agent, "id:paul", &dir, &manifest).await.unwrap();
+        assert_eq!(repaired.fetched, 1);
+        assert!(dir.join("grill-me/SKILL.md").exists());
 
         // the release changes one skill and drops the other
         files.lock().unwrap().insert("skills/research/arxiv-finite/SKILL.md".into(), ("release:a2".into(), b"---\nname: arxiv-finite\n---\nnew\n".to_vec()));

@@ -1265,7 +1265,11 @@ The platform's one page is `/`, and `/settings` (cell/shell/, its files at
 the address, so a reload stays put. Its settings hold the person's
 account (username, sign-ins, identity id, picture, `/auth/link` to add
 another sign-in, a POST to `/auth/logout`), their credit and what their
-standing stops, their computer and agents, connections, and pairing the
+standing stops, their computer and agents, their skills (decision 17: the
+managed set, read from their skills fragment's files by category, and
+each agent's own, from its fragment's `skills/`; the shell makes the
+skills fragment, kind `skills`, at setup beside their default agent),
+connections, and pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent); its sidebar lists their fragments, each one's share sheet
 (`/share/<name>`) in a dialog, and the catalog makes an app from a
