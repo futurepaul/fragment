@@ -276,7 +276,8 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     say(&mut chrome, "draw me something")?;
     let chip = "[...document.querySelectorAll('.msg.agent a.attachment-chip')].find((a) => a.textContent.includes('drawing.txt'))";
     s.ok("a reply's file shows as a chip", shows(&mut chrome, &page, chip), "");
-    let drawing = chrome.eval(&page, &format!("fetch({chip}.getAttribute('href')).then((r) => r.text())"))?;
+    // no chip is no text: a FAIL below, the checks after it still made
+    let drawing = chrome.eval(&page, &format!("(() => {{ const a = {chip}; return a ? fetch(a.getAttribute('href')).then((r) => r.text()) : null; }})()"))?;
     s.ok("which reads as the chat's blob", drawing.as_str().is_some_and(|t| t.contains("a drawing for")), &drawing);
 
     // what it looks like: desktop light and dark, and a phone's width with nothing sideways
@@ -285,7 +286,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     chrome.color_scheme(&page, "dark")?;
     chrome.screenshot(&page, &shots.join("desktop-dark.png"))?;
     // the cards, further up
-    chrome.eval(&page, "(() => { const p = document.querySelector('.prompt'); p.scrollIntoView({ block: 'center' }); return true; })()")?;
+    chrome.eval(&page, "(() => { document.querySelector('.prompt')?.scrollIntoView({ block: 'center' }); return true; })()")?;
     chrome.screenshot(&page, &shots.join("desktop-dark-cards.png"))?;
     chrome.color_scheme(&page, "light")?;
     chrome.screenshot(&page, &shots.join("desktop-light-cards.png"))?;
