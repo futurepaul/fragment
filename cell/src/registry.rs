@@ -410,7 +410,7 @@ impl RegistryCell {
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
             // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment });
+            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment, title: None });
         }
         Ok(ProfilesAnswer { profiles })
     }

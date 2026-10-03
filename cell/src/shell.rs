@@ -14,7 +14,7 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 16] = [
+const FILES: [(&str, &str, &[u8]); 17] = [
     ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
     ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
     ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
@@ -32,6 +32,8 @@ const FILES: [(&str, &str, &[u8]); 16] = [
     ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
     // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
     ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
+    // every agent's image, tinted to its colour (agent-identity.css; CREDITS.md)
+    ("agent.png", "image/png", include_bytes!("../shell/agent.png")),
 ];
 const PAGE: &str = include_str!("../shell/index.html");
 

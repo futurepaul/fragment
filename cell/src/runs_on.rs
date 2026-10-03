@@ -136,6 +136,9 @@ impl FragmentCell {
                 }
                 Ok(json!({ "ok": true }))
             }
+            // its face (kind, title), for a page that names it: `__people`
+            // shows an agent by its fragment's title
+            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
             "identity" => {
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;

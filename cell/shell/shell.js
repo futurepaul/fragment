@@ -34,7 +34,9 @@ const ICON = {
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // Skyler's agent palette: a plain colored circle, no eyes
 const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];
-const NAMES = ["Juniper", "Maple", "Willow", "Rowan", "Hazel", "Sage", "Aspen", "Linden", "Alder", "Cedar", "Briar", "Fern"];
+// A new agent's name, when its maker names none (Paul, 2026-10-03): the
+// beige boxes of an alternate 1990s, never a real one's.
+const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
 const CURRENT = "shell.chat.v1";
 // the templates an app starts from (the platform's catalog: publish.rs)
 const CATALOG = [
@@ -457,7 +459,8 @@ function freeLabel(base) {
 }
 function pickName() {
   const taken = new Set(state.fragments.map((f) => titleOf(f.name)));
-  return NAMES.find((n) => !taken.has(n)) ?? `Agent ${state.fragments.length + 1}`;
+  const free = NAMES.filter((n) => !taken.has(n));
+  return free.length ? free[Math.floor(Math.random() * free.length)] : `Unit ${state.fragments.length + 1}`;
 }
 // Through public APIs only: the agent fragment (the agent template, its job
 // in SOUL.md), assigned to the person's computer; a chat with it (the chat

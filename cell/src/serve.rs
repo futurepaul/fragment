@@ -210,8 +210,13 @@ impl FragmentCell {
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
             let platform = self.cfg.platform(&caller.url);
+            // bounded: the registry answers at most 64 profiles
             for p in answer.profiles.values_mut() {
                 p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
+                if let Some(fragment) = p.fragment.clone() {
+                    let face = crate::fragment::ask(&self.env, &fragment, "computer/face", &json!({})).await.unwrap_or(Value::Null);
+                    p.title = face["title"].as_str().map(str::to_string);
+                }
             }
             json_response(&answer)?
         } else if path == "__members" {

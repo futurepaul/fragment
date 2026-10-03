@@ -238,7 +238,7 @@ export function mount(root) {
     want(principal);
     const p = profiles.get(principal);
     if (isAgent(principal)) {
-      const name = p?.name ? capital(p.name) : p?.username ? `${p.username}'s agent` : "Agent";
+      const name = p?.title ?? (p?.name ? capital(p.name) : p?.username ? `${p.username}'s agent` : "Agent");
       return { agent: true, name, color: colorOf(principal) };
     }
     const name = p?.username ?? (p ? `id:…${principal.slice(-6)}` : "…");

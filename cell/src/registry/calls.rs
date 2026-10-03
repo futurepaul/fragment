@@ -272,6 +272,10 @@ pub(crate) struct Profile {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
+    /// An agent's fragment's title (`XBT-2000`), filled by the fragment a
+    /// page asks (serve.rs `__people`), never by the registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

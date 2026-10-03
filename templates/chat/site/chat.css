@@ -80,7 +80,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--accent-blue); o
   background: #363636; color: #f5f5f5; box-shadow: 0 2px 8px rgba(0,0,0,.2); pointer-events: none; font: 500 11px/1.4 var(--font-sans); white-space: nowrap; }
 
 /* agents: plain colored circles */
-.agent-avatar { --agent-color: #a88bea; display: inline-block; width: 40px; height: 40px; flex: none; background: var(--agent-color); border-radius: 50%; }
+/* An agent's image (Paul, 2026-10-03): a CRT monitor, whole (no circle),
+   tinted to the agent's colour: its silhouette filled with the colour and
+   the photograph's light over it (luminosity), so any colour takes. */
+.agent-avatar { --agent-color: #a88bea; position: relative; isolation: isolate; display: inline-block; width: 40px; height: 40px; flex: none; background: var(--agent-color); -webkit-mask: url("agent.png") center / contain no-repeat; mask: url("agent.png") center / contain no-repeat; }
+.agent-avatar::after { content: ""; position: absolute; inset: 0; background: url("agent.png") center / contain no-repeat; mix-blend-mode: luminosity; }
 .agent-avatar.large { width: 70px; height: 70px; margin-bottom: 22px; }
 .agent-avatar.small { width: 26px; height: 26px; }
 .agent-avatar.tiny { width: 20px; height: 20px; }

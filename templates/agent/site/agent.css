@@ -14,7 +14,12 @@
 html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text-primary); }
 body { font: 15px/1.5 var(--font-sans); -webkit-font-smoothing: antialiased; }
 .agent { max-width: 640px; margin: 0 auto; padding: 40px 20px 64px; }
-.agent-avatar { --agent-color: #a88bea; display: inline-block; width: 70px; height: 70px; border-radius: 50%; background: var(--agent-color); margin-bottom: 18px; }
+/* An agent's image (Paul, 2026-10-03): a CRT monitor, whole (no circle),
+   tinted to the agent's colour: its silhouette filled with the colour and
+   the photograph's light over it (luminosity), so any colour takes. */
+.agent-avatar { --agent-color: #a88bea; position: relative; isolation: isolate; display: inline-block; width: 40px; height: 40px; flex: none; background: var(--agent-color); -webkit-mask: url("agent.png") center / contain no-repeat; mask: url("agent.png") center / contain no-repeat; }
+.agent-avatar::after { content: ""; position: absolute; inset: 0; background: url("agent.png") center / contain no-repeat; mix-blend-mode: luminosity; }
+.agent-avatar { width: 70px; height: 70px; margin-bottom: 18px; }
 h1 { font-size: 24px; line-height: 1.25; font-weight: 600; margin: 0 0 4px; }
 h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); margin: 32px 0 8px; }
 .tier { margin: 0; color: var(--text-secondary); font-size: 13px; }
