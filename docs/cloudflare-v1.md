@@ -426,8 +426,9 @@ exit says.
      Containers (S3).
    - Folded into phase 2's first step: the cell on real Workers, and a
      per-branch deployment on `finite.place`.
-   - Still open: AI Gateway (Unified Billing and ZDR need credits on the
-     account), and WorkOS Pipes (staging's shared credentials).
+   - Done: WorkOS Pipes (S5).
+   - Half done: AI Gateway (S4). Its second half (Unified Billing, Opus,
+     ZDR, spend limits) is running with an AI Gateway token.
 1. **Freeze and cut. Done 2026-10-02.**
    - `celld-final` was tagged and the `celld` branch pushed.
    - The product half of decision 33 went: about 64k lines.
@@ -629,6 +630,37 @@ Intercept facts:
   gateway's logs are a separate setting.
 - Gateway spend limits are eventually consistent, so they are only a
   backstop. Our ledger stays authoritative.
+
+**S5, WorkOS Pipes for Google (2026-10-02, staging, with Paul).** It
+works end to end.
+
+The setup:
+- Staging's Pipes offers **no shared credentials** for Google or Gmail;
+  both need a client ID and secret. We reuse Finite's Google OAuth
+  client (project `714116971392`), with WorkOS' redirect URI added.
+- The provider is WorkOS' general `google`, user-owned, with Finite's 11
+  scopes: `drive`, `documents`, `spreadsheets`, `gmail.readonly`,
+  `gmail.send`, `gmail.modify`, `calendar`, `contacts.readonly`,
+  `openid`, `userinfo.email`, `userinfo.profile`.
+
+The calls:
+- `POST /data-integrations/google/authorize {user_id}` returns
+  `{url, state}`, a plain redirect with no secret in it. Google's
+  consent asks for offline access.
+- `POST /data-integrations/google/token {user_id}` returns
+  `{active, access_token: {access_token, expires_at, scopes,
+  missing_scopes}}`. The token lasts about an hour, and WorkOS refreshes
+  it on the next call.
+
+With that token, read-only calls to Gmail, Calendar, Drive, Docs and
+Sheets all answered.
+
+Contacts was refused because the People API was disabled in that
+project. finite.computer's own `contacts.readonly` never worked there
+either; enabling the API fixes both.
+
+The placeholder swap at the computer's intercept is tested in phase 4,
+against Google's own client libraries.
 
 ## Bugs the port must fix
 
