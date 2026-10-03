@@ -93,5 +93,10 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     FRAGMENT_API=http://api.fragment.internal \
     FRAGMENT_MODEL=http://model.fragment.internal
 WORKDIR /opt/hermes
+# which build this is, served beside the screen (the platform's upgrade and
+# rollback lane reads it through the computer's port): a layer of its own,
+# so another build shares the one above
+ARG IMAGE_VERSION=1
+RUN echo "$IMAGE_VERSION" > /opt/fragment/screen/version.txt
 EXPOSE 6080
 ENTRYPOINT ["/opt/fragment/bin/hermes-boot", "pre-init"]

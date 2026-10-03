@@ -143,6 +143,19 @@ impl Suite {
         ]
     }
 
+    /// A heavy section runs only when `--only` names it (the real-Hermes
+    /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
+    pub fn section_by_name(&mut self, name: &str, why: &str) -> bool {
+        if self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name)) {
+            return self.section(name);
+        }
+        self.asked.push(name.to_string());
+        if self.runs(name) {
+            self.skip(&format!("the {name} section"), &format!("{why}: run it by name, cargo xtask e2e --only {name}"));
+        }
+        false
+    }
+
     /// Whether the section `name` runs in this suite (`--only` names it,
     /// `--except` does not).
     pub fn runs(&self, name: &str) -> bool {
@@ -528,6 +541,9 @@ fn main() -> Result<()> {
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
+    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+        lanes::hermes::stage_images(&project)?;
+    }
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let mut s = Suite {
         only,

@@ -15,7 +15,10 @@
 //! each): one longer is cut there and ends `length`.
 //!
 //! Replies are scripted (text, tool calls, nothing, or reasoning alone) and
-//! answered in order before falling back to an echo of the last message.
+//! answered in order before falling back to an echo of the last message,
+//! or, for a real agent runtime (`transcripts`), to `transcript_reply`: a
+//! pure function of the transcript (lesson 13), which an agent's own
+//! auxiliary calls (titles, its approval guardian) cannot put out of order.
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
 //! report (`set_usage`), and a stream cut before its usage (`break_next`).
@@ -79,6 +82,58 @@ struct State {
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
+    /// Unscripted calls answer `transcript_reply`, in pieces.
+    transcripts: bool,
+}
+
+fn text_of(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    }
+}
+
+/// The answer for a transcript, as an agent runtime's lane needs it:
+///
+/// - after a tool's result (since the last user message):
+///   `scripted: the tool ran: <its first line>`;
+/// - Hermes' smart-approval guardian, asking for one word: `ESCALATE`, so a
+///   person decides;
+/// - a user message whose newest line is `run: <command>`, when the call
+///   offers a `terminal` tool: that tool, called with the rest of the line.
+///   The newest line is the last a person said (Hermes puts `[name] ` before
+///   each, and merges two user messages a restart left side by side into
+///   one), else the first (a runtime appends its own notes after it, which
+///   may quote an earlier command);
+/// - a user message with an image: `scripted: I see an image`;
+/// - otherwise `scripted: <the message's first line> [<user messages in
+///   the transcript>]`, so a restored conversation shows in its count.
+pub fn transcript_reply(body: &Value) -> Reply {
+    let messages = body["messages"].as_array().cloned().unwrap_or_default();
+    let users: Vec<&Value> = messages.iter().filter(|m| m["role"] == "user").collect();
+    let last = users.last().map(|m| &m["content"]).cloned().unwrap_or(Value::Null);
+    let said = text_of(&last);
+    let result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
+    if let Some(result) = result {
+        let first = result.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").chars().take(200).collect::<String>();
+        return Reply::Text(format!("scripted: the tool ran: {first}"));
+    }
+    if said.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
+        return Reply::Text("ESCALATE".into());
+    }
+    let has_terminal = body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "terminal"));
+    // a person's line: `[name] text`, the name one word
+    let named = |l: &str| l.strip_prefix('[').and_then(|r| r.split_once("] ")).filter(|(n, _)| !n.is_empty() && !n.contains(' ')).map(|(_, t)| t.to_string());
+    let lines: Vec<&str> = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let newest = lines.iter().rev().find_map(|l| named(l)).or_else(|| lines.first().map(|l| l.to_string())).unwrap_or_default();
+    if let (Some(command), true) = (newest.strip_prefix("run: ").map(str::trim), has_terminal) {
+        return Reply::Tools(vec![("terminal".into(), json!({ "command": command }))]);
+    }
+    if last.as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url")) {
+        return Reply::Text("scripted: I see an image".into());
+    }
+    Reply::Text(format!("scripted: {newest} [{}]", users.len()))
 }
 
 /// The usage of an answer: a test's, or the request's bytes in and the
@@ -121,7 +176,7 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
 
 /// A reply streamed as Workers AI streams it (S4's shapes); `broken` ends
 /// it before the usage and `[DONE]`, as a dropped stream does.
-fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool) -> String {
+fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
     *ids += 1;
     let id = format!("fake{ids:08x}");
     let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
@@ -131,7 +186,14 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
         Reply::Text(text) => {
             let (text, was_cut) = within(text, &mut budget);
             cut = was_cut;
-            parts.push((json!({ "content": text }), 0));
+            // in pieces, so a client's draft grows
+            let chars: Vec<char> = text.chars().collect();
+            for piece in chars.chunks(chars.len().div_ceil(pieces.max(1)).max(1)) {
+                parts.push((json!({ "content": piece.iter().collect::<String>() }), 0));
+            }
+            if chars.is_empty() {
+                parts.push((json!({ "content": "" }), 0));
+            }
             "stop"
         }
         Reply::Empty => "stop",
@@ -202,25 +264,43 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
     let broken = s.breaks.pop_front().unwrap_or(false);
+    let unscripted = |s: &State| if s.transcripts { transcript_reply(&body) } else { Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))) };
     if body["stream"] == true {
-        let reply = scripted.unwrap_or_else(|| Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))));
+        let reply = scripted.unwrap_or_else(|| unscripted(s));
         let written = match &reply {
             Reply::Text(t) | Reply::Thinking(t) => t.chars().count(),
             Reply::Tools(calls) => calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum(),
             Reply::Empty => 0,
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
-        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken);
+        let pieces = if s.transcripts { 3 } else { 1 };
+        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
         return Response::bytes(200, "text/event-stream", events.into_bytes()).with_header("cf-aig-log-id", &log_id);
     }
-    let content = match scripted {
-        Some(Reply::Text(text)) => text,
-        _ => format!("echo: {}", last.as_str().unwrap_or("")),
+    let reply = match scripted {
+        Some(r @ Reply::Text(_)) => r,
+        _ if s.transcripts => transcript_reply(&body),
+        _ => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
     };
-    let used = usage_of(used, &body, content.chars().count());
+    let (message, finish, written) = match reply {
+        Reply::Tools(calls) => {
+            let calls: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } }))
+                .collect();
+            (json!({ "role": "assistant", "content": null, "tool_calls": calls }), "tool_calls", 16)
+        }
+        Reply::Text(text) => {
+            let n = text.chars().count();
+            (json!({ "role": "assistant", "content": text }), "stop", n)
+        }
+        Reply::Empty | Reply::Thinking(_) => (json!({ "role": "assistant", "content": "" }), "stop", 0),
+    };
+    let used = usage_of(used, &body, written);
     let answer = json!({
         "id": format!("fake{:08x}", s.answers), "object": "chat.completion", "created": 0, "model": model,
-        "choices": [{ "index": 0, "finish_reason": "stop", "logprobs": null, "message": { "role": "assistant", "content": content } }],
+        "choices": [{ "index": 0, "finish_reason": finish, "logprobs": null, "message": message }],
         "usage": usage_json(used),
     });
     Response::json(200, &answer).with_header("cf-aig-log-id", &log_id)
@@ -299,6 +379,12 @@ impl WorkersAi {
     }
 
 
+    /// Unscripted calls answer from their transcript (`transcript_reply`),
+    /// in pieces (`true`), or echo their last message.
+    pub fn transcripts(&self, on: bool) {
+        self.state().transcripts = on;
+    }
+
     pub fn calls(&self) -> Vec<AiCall> {
         self.state().calls.clone()
     }
@@ -319,14 +405,38 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false);
+        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
         let last = lines.last().unwrap();
         assert_eq!((last["response"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!(""), json!(23), json!(15)));
         assert!(text.ends_with("data: [DONE]\n\n"));
-        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true);
+        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
+    }
+
+    /// Goal: a runtime's transcript decides its answer, whatever else it
+    /// asked meanwhile. Method: each rule, from its transcript alone.
+    #[test]
+    fn a_transcript_decides_its_answer() {
+        let say = |text: &str| json!({ "messages": [{ "role": "user", "content": text }] });
+        assert!(matches!(transcript_reply(&say("[paul] hi there\nnotes")), Reply::Text(t) if t == "scripted: hi there [1]"));
+        let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
+        let run = json!({ "messages": [{ "role": "user", "content": "[paul] run: echo tool-ran" }], "tools": tools });
+        assert!(matches!(transcript_reply(&run), Reply::Tools(c) if c == vec![("terminal".to_string(), json!({ "command": "echo tool-ran" }))]));
+        let ran = json!({ "messages": [{ "role": "user", "content": "run: echo x" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools });
+        assert!(matches!(transcript_reply(&ran), Reply::Text(t) if t == "scripted: the tool ran: tool-ran"));
+        assert!(matches!(transcript_reply(&say("Respond with exactly one word: APPROVE, DENY, or ESCALATE.")), Reply::Text(t) if t == "ESCALATE"));
+        let image = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "look" }, { "type": "image_url", "image_url": { "url": "data:" } }] }] });
+        assert!(matches!(transcript_reply(&image), Reply::Text(t) if t == "scripted: I see an image"));
+        // without a terminal tool, `run:` is only words
+        assert!(matches!(transcript_reply(&say("run: ls")), Reply::Text(t) if t == "scripted: run: ls [1]"));
+        // a command quoted after the first line is a note, not a request
+        let quoted = json!({ "messages": [{ "role": "user", "content": "[paul] do you remember\n> run: rm -rf x" }], "tools": tools });
+        assert!(matches!(transcript_reply(&quoted), Reply::Text(t) if t == "scripted: do you remember [1]"));
+        // two of a person's messages merged into one: the newest is the request
+        let merged = json!({ "messages": [{ "role": "user", "content": "[paul] run: rm -rf x\n\n[paul] do you remember" }], "tools": tools });
+        assert!(matches!(transcript_reply(&merged), Reply::Text(t) if t == "scripted: do you remember [1]"));
     }
 }

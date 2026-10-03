@@ -10,6 +10,7 @@ mod computers;
 mod control;
 mod delegation;
 mod deliver;
+pub mod hermes;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
@@ -88,6 +89,7 @@ const LANES: &[Lane] = &[
     agents::agents,
     addon::addon,
     computers::computers,
+    hermes::hermes,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,

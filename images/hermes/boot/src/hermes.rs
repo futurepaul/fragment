@@ -126,7 +126,11 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // outright, because left to its default Hermes stays standalone in an s6
     // container with no per-profile gateway slots, which this image has none
     // of by design.
-    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\n")
+    // HERMES_AUTO_CONTINUE_FRESHNESS: one second, so no message after a
+    // restart is wrapped in Hermes' recovery notes (the boot's clean-exit
+    // receipt already discards the turns a restart cut short, which the
+    // bridge ends: docs/chat-records.md).
+    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
 }
 
 /// Litestream for each profile's `state.db`, to the computer's storage
@@ -194,6 +198,7 @@ mod tests {
         let env = gateway_env("127.0.0.1:8650", "computer", &"s".repeat(32));
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
+        assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         let l = litestream_config(&[("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))], "http://storage.fragment.internal");
         assert!(l.contains("path: \"litestream/juniper-paul\"") && l.contains("endpoint: \"http://storage.fragment.internal\""), "{l}");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));

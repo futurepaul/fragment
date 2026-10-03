@@ -69,11 +69,14 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, secrets,
-  files, deploy, templates, share, isolation, ops, public, effects,
-  facet-cap, app-lockdown, site, watch, schemas, channels, live, routes,
-  cli, browser, jobs, triggers, appfiles, blobs, notes, push, ai,
-  ledger, agents, addon, sync, restart, pathmode;
-  `crates/e2e/src/lanes/mod.rs`). A check local workerd cannot make (its
+  delegation, files, deploy, templates, share, isolation, ops, public,
+  effects, facet-cap, app-lockdown, site, watch, schemas, channels,
+  live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
+  push, ai, ledger, agents, addon, computers, hermes, sync, restart,
+  pathmode; `crates/e2e/src/lanes/mod.rs`). `computers` runs the stub
+  image (`images/stub`) in Docker; `hermes`, the real-Hermes lane, builds
+  and runs our Hermes image (3.8 GB), so it runs only by name
+  (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one

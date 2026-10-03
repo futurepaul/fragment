@@ -520,19 +520,19 @@ fragment.club until cutover (decisions 34–35).
   frames lane again; or the redeeming half is deleted if the shell does
   not frame fragments.
 
-## Channel drafts have no e2e
+## Channel drafts' refusals have no e2e
 
-- **Observed:** the cut (2026-10-02). `PUT /api/f/<name>/channels/<channel>/draft`
-  (cell/src/channels.rs `draft_api`: a record its poster is writing,
-  sent to the channel's readers as `draft` frames, never stored) was
-  driven only by the Hermes lane, through Hermes' Relay; that lane went
-  with Hermes. The route stays: decision 21's bridge streams through it.
-- **Risk:** a change breaks drafts (who may draft, the pace, the frame's
-  shape) and nothing says so until the bridge is built on it.
-- **First proof:** the bridge's first streamed reply.
-- **Delete when:** a lane drafts on a declared channel and checks that a
-  reader's socket hears the frame, that a stranger is refused, and that
-  a draft past the pace is refused (429).
+- **Observed:** the cut (2026-10-02) took the lane that drove
+  `PUT /api/f/<name>/channels/<channel>/draft` (cell/src/channels.rs
+  `draft_api`: a record its poster is writing, sent to the channel's
+  readers as `draft` frames, never stored). Phase 4's computers and
+  real-Hermes lanes drive it again through the bridge, and a page's
+  socket hears the frames; nothing drafts as a stranger or past the pace.
+- **Risk:** a change lets a stranger draft on a channel, or drops the
+  pace, and nothing says so.
+- **First proof:** a draft from someone who may not post.
+- **Delete when:** a lane checks that a stranger's draft is refused and
+  that a draft past the pace is refused (429).
 
 ## The hosted lane is not built
 

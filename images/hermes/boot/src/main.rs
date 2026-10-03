@@ -392,6 +392,52 @@ fn start_gateway(home: &Path) -> Option<u32> {
     }
 }
 
+/// What the previous start left behind, ended before the gateway takes a
+/// turn. A container start is a fresh process tree, and the bridge has
+/// already ended every turn a restart cut short (docs/chat-records.md), so:
+///
+/// - Hermes' clean-exit receipt (`.clean_shutdown`) is written: `/data` is
+///   saved before the guest is signalled, so a restored one always reads
+///   as an unclean exit, and Hermes would resume its in-flight turns under
+///   their old message ids, folding the person's next message into them.
+///   With the receipt it discards their markers instead.
+/// - The cross-process leases Hermes keeps in its databases (a session's
+///   turn, a compression) are cleared: their holder's PID names a live
+///   process of this start (PIDs repeat in a fresh namespace: the gateway
+///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
+///
+/// As the `hermes` user, so the files keep their owner.
+fn end_previous_life(agents: &[Agent], home: &Path) {
+    let receipt = home.join(".clean_shutdown");
+    if let Err(e) = std::fs::write(&receipt, "") {
+        ev!("boot.receipt_failed", { "error": e.to_string() });
+    }
+    chown(&receipt, hermes_ids());
+    let mut dbs: Vec<PathBuf> = vec![home.join("state.db")];
+    dbs.extend(agents.iter().map(|a| hermes::profile_dir(home, &a.fragment).join("state.db")));
+    dbs.retain(|p| p.exists());
+    if dbs.is_empty() {
+        return;
+    }
+    let t = Instant::now();
+    let script = r#"import sqlite3, sys
+for p in sys.argv[1:]:
+    c = sqlite3.connect(p, timeout=5)
+    names = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for t in ('session_turn_leases', 'compression_locks'):
+        if t in names:
+            c.execute('DELETE FROM ' + t)
+    c.commit()
+    c.close()
+"#;
+    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", script]).args(&dbs).output();
+    match out {
+        Ok(o) if o.status.success() => ev!("boot.leases_cleared", { "dbs": dbs.len(), "ms": t.elapsed().as_millis() as u64 }),
+        Ok(o) => ev!("boot.leases_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>() }),
+        Err(e) => ev!("boot.leases_failed", { "error": e.to_string() }),
+    }
+}
+
 /// Litestream, once the profiles' databases exist (Hermes makes them as its
 /// gateway starts), off the wake path.
 fn start_litestream(agents: &[Agent], home: &Path) -> Option<Child> {
@@ -450,6 +496,7 @@ async fn boot_main() {
     profiles(&api, &agents, &home, ids, &model).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
+    end_previous_life(&agents, &home);
     let mut bridge = spawn_bridge(&agents, &home);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });

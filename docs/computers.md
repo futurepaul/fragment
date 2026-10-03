@@ -256,7 +256,17 @@ settings and state):
   bridge as Hermes' Relay connector, Litestream, the screen. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
-  committed back. An agent fragment's optional `agent.json`
+  committed back. Each start clears Hermes' cross-process leases (a
+  session's turn, a compression) before the gateway takes a turn: a
+  lease restored with `/data` names a PID that is live again in the new
+  start, and Hermes would wait out its five-minute TTL. And it writes
+  Hermes' clean-exit receipt, so Hermes discards the turns a restart cut
+  short rather than resuming them: `/data` is saved before the guest is
+  signalled, so a restored one always reads as an unclean exit, and a
+  resumed turn would carry the old turn's message id and fold the
+  person's next message into it, while the bridge has already ended it
+  (docs/chat-records.md). An agent fragment's optional
+  `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
