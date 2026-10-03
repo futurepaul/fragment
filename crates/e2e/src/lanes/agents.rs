@@ -178,11 +178,9 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&hand, "GET", &format!("/api/fragments?{}", acting(&owner_id)), None)?;
     s.ok("listed for its owner: the owner's fragments, each as an editor at most", listed(&r, &todo) == Some(json!("editor")) && listed(&r, &other) == Some(json!("editor")), &r);
     let r = api.signed(&hand, "GET", &format!("/api/fragments?{}", acting(&stranger_id)), None)?;
-    s.ok(
-        "and for someone else, only what they are in too, at their own role",
-        r.status == 200 && r.body["fragments"] == json!([{ "name": room, "role": "viewer" }]),
-        &r,
-    );
+    // each row's name and role (its face, kind and title, rides along)
+    let roles: Vec<Value> = r.body["fragments"].as_array().into_iter().flatten().map(|f| json!({ "name": f["name"], "role": f["role"] })).collect();
+    s.ok("and for someone else, only what they are in too, at their own role", r.status == 200 && roles == vec![json!({ "name": room, "role": "viewer" })], &r);
 
     // a turn: the model calls the operation, then answers
     s.ai.clear_script();
