@@ -187,9 +187,14 @@ impl FragmentCell {
 
     pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {
         self.require(caller, false, Role::Viewer)?;
+        json_response(&self.member_list()?)
+    }
+
+    /// Every member, the first added first (a chat's lead is its first
+    /// agent): the API's list, and a page's (`__members`, serve.rs).
+    pub(crate) fn member_list(&self) -> CellResult<MemberList> {
         let rows = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members ORDER BY added_at, principal"), vec![])?;
-        let members = rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()?;
-        json_response(&MemberList { members })
+        Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
     }
 
     /// A new member needs room under `MEMBERS_MAX`; a role change does not.

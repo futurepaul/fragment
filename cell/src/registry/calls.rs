@@ -85,6 +85,11 @@ impl Call for Lookup {
 pub(crate) struct RegisterAgent {
     pub owner: By,
     pub key: String,
+    /// The agent fragment it is made from (a computer's agent, whose key is
+    /// its fragment's own), which names it: `None` for an agent of a CLI's
+    /// or of a fragment's `agent` block.
+    #[serde(default)]
+    pub fragment: Option<String>,
 }
 
 impl Call for RegisterAgent {
@@ -255,13 +260,18 @@ pub(crate) struct Profiles {
     pub ids: Vec<String>,
 }
 
-/// A person's username and picture, or an agent's owner's username.
+/// A person's username and picture, or an agent's owner's username, and
+/// an agent made from an agent fragment's name (its label) and fragment.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,
     pub username: Option<String>,
     /// Where the picture is served, on the platform's origin.
     pub picture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

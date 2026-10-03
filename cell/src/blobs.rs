@@ -10,7 +10,8 @@
 //! latest versions' bytes are kept.
 //!
 //! A page reads one of its fragment's blobs by hash at `__blob/<sha>` (a
-//! step's screenshot), typed as its upload declared.
+//! step's screenshot, a chat's attachment), typed as its upload declared,
+//! and an editor's page uploads one there (`PUT`, as the API's).
 
 use fragment_core::{blob, site};
 use fragment_proto::{ErrorCode, Role};
@@ -56,11 +57,19 @@ impl FragmentCell {
         )
     }
 
-    /// `PUT /api/f/<name>/blobs/<sha256>` (editor): the body, streamed in
-    /// and hashed on the way; bytes that are not what they claim are
-    /// deleted. Its `content-type` is what `__blob` serves it as, when that
-    /// is passive media.
+    /// `PUT /api/f/<name>/blobs/<sha256>`, or `PUT __blob/<sha256>` from
+    /// the fragment's own page (editor): the body, streamed in and hashed
+    /// on the way; bytes that are not what they claim are deleted. Its
+    /// `content-type` is what `__blob` serves it as, when that is passive
+    /// media.
     pub(crate) async fn put_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
+        let answer = self.store_blob(caller, sha, req).await;
+        // bytes this answer did not need are read all the same (js::drain)
+        js::drain(req).await?;
+        answer
+    }
+
+    async fn store_blob(&self, caller: &Caller, sha: &str, req: &Request) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
 

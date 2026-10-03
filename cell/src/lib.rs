@@ -216,10 +216,11 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
 /// Who is asking a site request, unresolved: a signature names its key
 /// (verified here, which needs no registry: a bad one is still 401); a
 /// browser, its session on this origin, as far as its cookies count
-/// (`Fetched`), a frame's navigation by its frame cookie first.
-fn site_credential(req: &Request, url: &Url, body: &[u8], name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
+/// (`Fetched`), a frame's navigation by its frame cookie first. `payload`
+/// is the body a signature covers (a blob upload's, streamed: its hash).
+fn site_credential(req: &Request, url: &Url, payload: Payload<'_>, name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
     if req.headers().get("authorization")?.is_some() {
-        return Ok(Some(Credential::Key(authenticate(req, url, Payload::Read(body))?)));
+        return Ok(Some(Credential::Key(authenticate(req, url, payload)?)));
     }
     let path_mode = mode == Mode::Path;
     let site = if fetched.site { auth::site_token(req, name, url, path_mode)?.map(Credential::Session) } else { None };
@@ -543,7 +544,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
                 let owner_key = authenticate(&req, url, Payload::Read(&body))?;
                 let proof = reg.proof.ok_or_else(|| CellError::invalid("registering an agent needs a proof by its key"))?;
                 let key = proven_key(&proof, &req, url, &owner_key)?;
-                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key }).await?)
+                json_answer(&ask_registry(env, &calls::RegisterAgent { owner: calls::By::Key(owner_key), key, fragment: None }).await?)
             }
         };
     }
@@ -638,6 +639,18 @@ struct Forward {
     extra: Vec<(&'static str, String)>,
 }
 
+/// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
+/// past that it is refused unread (the API's upload, and a page's at
+/// `__blob/<sha256>`).
+fn blob_length(req: &Request) -> CellResult<()> {
+    let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
+    match declared {
+        None => Err(CellError::invalid("a blob upload declares its content-length")),
+        Some(n) if n > limits::BLOB_MAX_BYTES => Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Bytes the router read, as a body to forward.
 fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
@@ -709,12 +722,26 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
     }
     own_page_socket(&req, cfg, url, name)?;
+    // a page's blob upload streams through, as the API's does: the router
+    // never holds its bytes (the fragment checks who uploads, and the hash)
+    let upload = match (req.method(), rest.strip_prefix("__blob/")) {
+        (Method::Put, Some(sha)) => {
+            blob_length(&req)?;
+            Some(sha)
+        }
+        _ => None,
+    };
     // a GET or HEAD has no body to wait for
     let body = match req.method() {
         Method::Get | Method::Head => Vec::new(),
+        _ if upload.is_some() => Vec::new(),
         _ => read_body(&mut req, limits::BODY_MAX_BYTES).await?,
     };
-    let mut credential = site_credential(&req, url, &body, name, mode, fetched)?;
+    let payload = match upload {
+        Some(sha) => Payload::Streamed { sha256_hex: sha },
+        None => Payload::Read(&body),
+    };
+    let mut credential = site_credential(&req, url, payload, name, mode, fetched)?;
     // a frame's page shows only in the page its session was made for: that
     // session is asked for here, for the page's origin (`bound`)
     let (mut signed, mut embedder) = (None, None);
@@ -724,8 +751,16 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         }
         credential = None;
     }
+    // an upload from no one is refused here, its bytes never forwarded
+    if upload.is_some() && signed.is_none() && credential.is_none() {
+        return Err(CellError::new(ErrorCode::Unauthenticated, "sign in on this fragment's page to upload a blob"));
+    }
     let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
-    let mut resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
+    let body = match upload {
+        Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
+        None => bytes_body(body),
+    };
+    let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
     // the fragment's own refusal, never its app's answer
     if resp.headers().has(serve::REFUSAL)? {
         resp = match page {
@@ -901,12 +936,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         // fragment checks the hash as they arrive. A payload tag may name
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
-            let declared: Option<u64> = req.headers().get("content-length")?.and_then(|l| l.parse().ok());
-            match declared {
-                None => return Err(CellError::invalid("a blob upload declares its content-length")),
-                Some(n) if n > limits::BLOB_MAX_BYTES => return Err(CellError::too_large("a blob", n as usize, limits::BLOB_MAX_BYTES as usize)),
-                Some(_) => {}
-            }
+            blob_length(&req)?;
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);

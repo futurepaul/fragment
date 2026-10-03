@@ -1,7 +1,8 @@
 //! Serving a fragment: its site from the `live` pin, the machine-read
-//! plane (`__tree`, `__file`), a blob by its hash (`__blob`), browser
-//! calls (`__op`), and the change feed (`__watch`). Who may see what
-//! follows the fragment's visibility:
+//! plane (`__tree`, `__file`), a blob by its hash (`__blob`, and an
+//! editor's page uploading one there), browser calls (`__op`), who is in
+//! it (`__people`, `__members`), and the change feed (`__watch`). Who may
+//! see what follows the fragment's visibility:
 //! members always; on a `link` or `public` fragment, whoever holds the
 //! share link counts as a viewer (a `?view=` token sets a cookie on the
 //! fragment's origin); on a `public` fragment, everyone else holds the
@@ -212,13 +213,30 @@ impl FragmentCell {
                 p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
             }
             json_response(&answer)?
-        } else if let Some(sha) = path.strip_prefix("__blob/") {
-            // one of this fragment's blobs by its hash (blobs.rs): viewers and up
-            if !matches!(req.method(), Method::Get | Method::Head) {
-                return Err(CellError::invalid("read a blob with GET or HEAD"));
-            }
+        } else if path == "__members" {
+            // who is in it, for a page (a chat's agents, its lead the first
+            // added): viewers and up, as the API's list
             self.reader(&mut facts, caller, link, Role::Viewer).await?;
-            self.serve_blob(&req, sha).await?
+            json_response(&self.member_list()?)?
+        } else if let Some(sha) = path.strip_prefix("__blob/") {
+            match req.method() {
+                // one of this fragment's blobs by its hash (blobs.rs): viewers and up
+                Method::Get | Method::Head => {
+                    self.reader(&mut facts, caller, link, Role::Viewer).await?;
+                    self.serve_blob(&req, sha).await?
+                }
+                // a page's upload (a chat's attachment), its bytes streamed
+                // through the router: editors, as the API's (`put_blob`)
+                Method::Put => match self.identified(caller, name).await {
+                    Ok(caller) => self.put_blob(&caller, sha, &req).await?,
+                    Err(e) => {
+                        // its bytes are read all the same (js::drain)
+                        js::drain(&req).await?;
+                        return Err(e);
+                    }
+                },
+                _ => return Err(CellError::invalid("read a blob with GET or HEAD, or upload one with PUT")),
+            }
         } else if path == "__sw.js" {
             script(&req, crate::push::SW_JS, SW_JS_HASH)?
         } else if path == "__watch" {
