@@ -119,7 +119,7 @@ pub mod limits {
     pub const HOP_DEPTH_MAX: u32 = 16;
     /// Inbox records whose runs have not succeeded; past this a post is 429.
     pub const INBOX_PENDING_MAX: u64 = 1000;
-    /// Steps one job run may take (a video waits in polls and sleeps).
+    /// Steps one job run may take (an agent's turn waits in polls and sleeps).
     pub const JOB_STEPS_MAX: usize = 256;
     /// Every step result of one run together (the job re-reads them at each step).
     pub const JOB_RESULTS_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -169,7 +169,37 @@ pub mod limits {
     pub const AGENT_STATE_WAIT_MS_MAX: u64 = 25_000;
     /// An agent's instructions.
     pub const AGENT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
+    /// Search (docs/api.md, Search): the text of one record a fragment
+    /// sends its people's lists. A longer message is searched by its
+    /// first 4 KiB (its record keeps all of it).
+    pub const SEARCH_TEXT_MAX_BYTES: usize = 4 * 1024;
+    /// Entries a person's list keeps for one fragment, its newest, and the
+    /// fragment's own log of what it sends: as many as a channel people
+    /// post to keeps records, so search finds every message a chat still
+    /// shows.
+    pub const SEARCH_ENTRIES_PER_FRAGMENT_MAX: i64 = POSTED_KEPT;
+    /// Entries a person's list keeps in all (ten full chats); past this
+    /// the oldest go first, whichever fragment they came from.
+    pub const SEARCH_ENTRIES_MAX: i64 = 100_000;
+    /// Entries one delivery from a fragment to a person's list carries
+    /// (at most 400 KiB of text).
+    pub const SEARCH_BATCH_MAX: usize = 100;
+    /// A query: its bytes, and its words.
+    pub const SEARCH_QUERY_MAX_BYTES: usize = 256;
+    pub const SEARCH_QUERY_WORDS_MAX: usize = 8;
+    /// What one search answers: fragments whose title or name match, and
+    /// message hits, newest first.
+    pub const SEARCH_FRAGMENTS_MAX: usize = 20;
+    pub const SEARCH_MESSAGES_MAX: usize = 50;
+    /// A hit's snippet of its message.
+    pub const SEARCH_SNIPPET_MAX_BYTES: usize = 300;
 }
+
+// A person's list keeps every entry one fragment sends it, and room for
+// more than one fragment; one delivery is a small part of a fragment's.
+const _: () = assert!(limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX < limits::SEARCH_ENTRIES_MAX);
+const _: () = assert!((limits::SEARCH_BATCH_MAX as i64) < limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX);
+const _: () = assert!(limits::SEARCH_BATCH_MAX * limits::SEARCH_TEXT_MAX_BYTES < limits::BODY_MAX_BYTES);
 
 /// A secret's name: `^[A-Z][A-Z0-9_]{0,63}$`.
 pub fn valid_secret_name(name: &str) -> bool {
@@ -410,6 +440,45 @@ impl Role {
     }
 }
 
+/// What a fragment is to the people who use it (`fragment.json`'s `kind`,
+/// decision 6): the shell lists each kind in its own place. An app unless
+/// it says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentKind {
+    #[default]
+    App,
+    Chat,
+    Agent,
+    Brain,
+}
+
+impl FragmentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FragmentKind::App => "app",
+            FragmentKind::Chat => "chat",
+            FragmentKind::Agent => "agent",
+            FragmentKind::Brain => "brain",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FragmentKind> {
+        match s {
+            "app" => Some(FragmentKind::App),
+            "chat" => Some(FragmentKind::Chat),
+            "agent" => Some(FragmentKind::Agent),
+            "brain" => Some(FragmentKind::Brain),
+            _ => None,
+        }
+    }
+}
+
+/// A blessed template's name (`fragment.json`'s `template`, decision 40).
+pub fn valid_template_name(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Who can see a fragment: everyone, holders of its share link, or members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -447,9 +516,15 @@ pub struct CreateFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     /// Starts the fragment from one of the platform's templates (`todo`,
-    /// `blank`, …): its files are the first commit, and live.
+    /// `blank`, …): its files are the first commit, and live. A blessed
+    /// template (`chat`, `agent`: decision 40) is named, not copied: the
+    /// first commit is a `fragment.json` that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// A blessed template's fragment's title (its `meta.title`; at most
+    /// 120 characters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// The answer to a create: the only time the webhook secret is shown
@@ -527,10 +602,55 @@ pub struct FragmentStatus {
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
+    /// What it is, and its title, as its live `fragment.json` last said
+    /// (an app with no title until it has).
+    #[serde(default)]
+    pub kind: FragmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has: a fragment from before sends it once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
+    /// The signer archived it: their own view, not the fragment's (the
+    /// shell's sidebar leaves it out; search still finds it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+}
+
+/// `PUT /api/fragments/{name}/archived`: the signer's own view of a
+/// fragment they hold a role on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetArchived {
+    pub archived: bool,
+}
+
+/// Its answer: the fragment, and whether it is archived now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Archived {
+    pub name: String,
+    pub archived: bool,
+}
+
+/// `GET /api/search?q=` (any signer): the signer's fragments whose title
+/// or name match every word of the query, then the messages that do,
+/// newest first, from the fragments they hold a role on now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchAnswer {
+    pub fragments: Vec<ListedFragment>,
+    pub messages: Vec<MessageHit>,
+}
+
+/// One record whose text matched: where it is, when it was written, and
+/// a snippet of its text around the match (plain text, at most
+/// `limits::SEARCH_SNIPPET_MAX_BYTES`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageHit {
+    pub fragment: String,
+    pub channel: String,
+    pub seq: i64,
+    pub at: i64,
+    pub snippet: String,
 }
 
 /// A fragment's sharing, in its owner's list (the platform's page): who
@@ -1016,6 +1136,11 @@ pub struct TriggerDecl {
     pub on: TriggerOn,
     /// The operation it runs (a mutation or a job).
     pub run: String,
+    /// A channel trigger's posters: only a record posted by a member of
+    /// this kind starts a run (a chat's agents' replies: `"from":
+    /// "agent"`). None: every record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<IdentityKind>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1446,13 +1571,26 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None }] };
-        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, sharing: None, archived: false }] };
+        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, sharing: Some(sharing) }] };
+        let listed = FragmentList {
+            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), sharing: Some(sharing), archived: true }],
+        };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
+            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+        );
+        // a list from before archiving reads as nothing archived
+        let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
+        assert!(!read.archived);
+        let found = SearchAnswer {
+            fragments: vec![],
+            messages: vec![MessageHit { fragment: "talk.ann".into(), channel: "chat".into(), seq: 4, at: 1, snippet: "water the tomatoes".into() }],
+        };
+        assert_eq!(
+            value(&found),
+            serde_json::json!({ "fragments": [], "messages": [{ "fragment": "talk.ann", "channel": "chat", "seq": 4, "at": 1, "snippet": "water the tomatoes" }] })
         );
         let members = MemberList { members: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));

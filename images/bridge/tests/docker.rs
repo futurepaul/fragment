@@ -239,6 +239,43 @@ async fn the_hermes_image() {
     fake.until(120_000, "the approved turn's answer", |w| answered(w, &t4).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran"))).await;
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").into_iter().find(|p| p["turn"] == t4).unwrap()["outcome"], "answered"));
 
+    // An agent assigned while it runs (docs/computers.md: a computer's
+    // agents may change while it runs): hermes-boot writes its profile,
+    // the gateway serves it, and it answers in its own chat as itself,
+    // within seconds, while the other agent's slow turn runs on, whole.
+    let fifth = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal slowly" }));
+    let t5 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", fifth["seq"].as_u64().unwrap());
+    fake.until(60_000, "juniper's slow turn running", |w| w.keepalive_open == 1 && w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t5)).await;
+    let calls_before = model.calls.lock().unwrap().len();
+    let assigned = Instant::now();
+    fake.add_agent("maple");
+    fake.with(|w| {
+        w.fragments.get_mut("maple.paul").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Maple, who tends the trees.\n"));
+    });
+    let grove = fake.chat("grove", &["maple"]);
+    let hello = fake.say(&grove, &person("paul"), json!({ "text": "hello maple" }));
+    let tm = fragment_bridge::records::turn_id("maple.paul", &grove, "chat", hello["seq"].as_u64().unwrap());
+    let maple_replied = |w: &support::fake::World| w.bodies(&grove, "chat", "reply").into_iter().find(|r| r["turn"] == tm);
+    if tokio::time::timeout(Duration::from_secs(60), fake.until(60_000, "maple's reply", |w| maple_replied(w).is_some())).await.is_err() {
+        panic!("maple never answered; the container said:\n{}", c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    eprintln!("hermes: an agent assigned while it runs to its first reply: {} ms", assigned.elapsed().as_millis());
+    fake.until(60_000, "juniper's slow turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t5)).await;
+    fake.with(|w| {
+        let reply = maple_replied(w).unwrap();
+        assert!(reply["text"].as_str().unwrap_or("").contains("hello maple"), "the scripted model's answer, as Maple's profile: {reply}");
+        assert_eq!(w.records(&grove, "chat").into_iter().find(|r| r["body"]["turn"] == tm).unwrap()["principal"], "id:maple");
+        assert_eq!(w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == t5).unwrap()["outcome"], "idle", "juniper's turn ran on through the change");
+        assert!(answered(w, &t5).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t5));
+    });
+    {
+        let calls: Vec<_> = model.calls.lock().unwrap()[calls_before..].iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect();
+        assert!(calls.iter().any(|c| c.agent.as_deref() == Some("maple.paul")), "Maple's calls name Maple: {calls:?}");
+        assert!(calls.iter().all(|c| c.agent.is_some()), "no call without its agent (the 401 of a profile that does not exist): {calls:?}");
+    }
+    assert!(c.exec(&["grep", "-q", "Maple", "/data/hermes/profiles/maple-paul/SOUL.md"]), "its repo in its own profile");
+    assert!(c.exec(&["grep", "-q", "maple.paul", "/var/lib/fragment-run/agents.json"]), "the bridge's ready file names it");
+
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());
     if took >= Duration::from_secs(5) {

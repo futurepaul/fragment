@@ -38,13 +38,47 @@ fragment.club until cutover (decisions 34–35).
   (subscriptions, VAPID, RFC 8291 encryption decrypted by a fake push
   service, the queue, retries, drops), and the encryption agrees with the
   old runtime's (checked once by hand). `fragment.push.register` and
-  `__sw.js` run only in a real browser with a real push service.
+  `__sw.js` run only in a real browser with a real push service. The
+  chat's push (docs/chat-records.md, Push) is the same: its chat lane
+  subscribes the push fake by `__push-sub`, as the page's bell would.
 - **Risk:** a page's subscribe or the service worker's display breaks
   unnoticed.
 - **First proof:** subscribing from a phone or desktop browser to a
   hosted fragment.
 - **Delete when:** a manual check on a hosted fleet (phase 3) is recorded,
   or a browser test can run with a local push service.
+
+## A chat the shell frames is "looked at" while the shell is, and asks for notifications in a tab
+
+- **Observed:** 2026-10-03, the chat's push (docs/chat-records.md, Push).
+  A chat's page says it is `looking` while its document is visible, so a
+  chat open in a tab of the shell that is not shown (its frame is still
+  in a visible page) keeps its person from being pushed. And a browser
+  does not let a cross-origin frame ask for notifications, so the bell of
+  a chat the shell frames opens the chat in a tab of its own, where it may
+  ask.
+- **Risk:** a person with the shell open on another chat misses a
+  reply's push; turning notifications on from the shell takes a detour.
+- **First proof:** a person who keeps the shell open says a reply came
+  without a notification.
+- **Delete when:** the shell tells each frame whether it is shown (a
+  message the chat's page reads, beside its theme), and asks for
+  notifications on the platform's origin for the fragments it frames, or
+  browsers let a frame ask.
+
+## A busy chat's push pauses itself
+
+- **Observed:** 2026-10-03. The chat's push job runs on a channel trigger
+  (`"from": "agent"`), so each agent reply is a triggered run, and an
+  operation's triggers pause themselves after 120 triggered runs in an
+  hour (`limits::TRIGGERED_RUNS_PER_HOUR`). Nothing unpauses a chat's.
+- **Risk:** a chat whose agents reply more than about twice a minute for
+  an hour stops pushing, for good, until someone runs `fragment unpause`.
+- **First proof:** an `op.auto-paused` event for `notify_reply` on a
+  chat.
+- **Delete when:** a trigger's breaker counts runs that fail or loop
+  rather than every run (or an automatic pause expires), or a chat's push
+  fires once a turn, on its last reply.
 
 ## Fragments share one origin when no hostname suffix is configured
 
@@ -329,45 +363,24 @@ fragment.club until cutover (decisions 34–35).
   already lists them), with an e2e check; or every socket re-resolves
   its key on a timer, not only at a frame it sends.
 
-## Images and videos stay on OpenRouter, with the deployment's key
+## Video steps are off
 
-- **Observed:** phase 3 of docs/cloudflare-v1.md moved text onto Workers
-  AI through the model route, and left `job.ai.image` and `job.ai.video`
-  on OpenRouter (cell/src/ai.rs), paid by the deployment's own key (the
-  Worker secret `OPENROUTER_API_KEY`), each call reserved at a fixed
-  worst case (an image $0.10, a video $0.10 a second: `fragment_core::media`)
-  and metered on the payer's ledger as OpenRouter's reported cost
-  (`Usage::Billed`, the margin on top, no fee).
-- **Risk:** a second vendor and a second key for the deployment to hold;
-  a reported cost the platform cannot check against a price of its own;
-  an image or video dearer than its fixed worst case reserves less than
-  it costs (the settle charges it in full, so only the hold is short).
-  OpenRouter's account balance is the deployment's, not the person's: a
-  person cannot pass their ledger, but the deployment can run its
-  OpenRouter credit out for everyone.
-- **First proof:** a settle whose `usage` charge is above its
-  reservation, or an OpenRouter 402 on a step.
-- **Delete when:** phase 7 moves image (and video) generation onto
-  Cloudflare's own inference (decision 17's `fal-image-editing` move),
-  metered from its usage like text, and `OPENROUTER_API_KEY`, the
-  OpenRouter fake, `Usage::Billed`'s OpenRouter vendor and
-  `fragment_core::media` go with it.
-
-## A held run's video that finishes anyway is not charged
-
-- **Observed:** the reliability pass (audit R13), kept through phase 3. A
-  run held while its video still waits for its cost gives the reservation
-  back, since nothing polls the video any more. OpenRouter may still
-  finish it and charge the deployment's key; the ledger never learns that
-  cost.
-- **Risk:** the deployment pays OpenRouter for a video no ledger was
-  charged for, at most one per held run.
-- **First proof:** the deployment key's usage (`GET /api/v1/key`) above
-  the ledgers' `Billed` charges for OpenRouter.
-- **Delete when:** a released video is polled once more on the alarm
-  until OpenRouter says it ended, and settled at what it reports, with a
-  check that holds a run mid-video and sees the cost arrive; or videos
-  leave OpenRouter (the entry above).
+- **Observed:** 2026-10-03, when OpenRouter was cut (Paul: "I thought we
+  didn't need openrouter now that we're using ai gateway?"). Images moved
+  onto Workers AI (FLUX.1 [schnell] through the AI binding,
+  cell/src/ai.rs); Workers AI's catalog has no video model (2026-10-03), so
+  `job.ai.video` is a step the platform refuses ("video steps are off
+  until they run on Cloudflare": `fragment_core::media::Refusal::VideoOff`),
+  and OpenRouter's key, its fake and `Usage::Billed` went with it.
+- **Risk:** a fragment that made videos (meatproxy's `fragment:ai`,
+  docs/published-fragments.md) cannot, and an agent asked for one can
+  only say so.
+- **First proof:** a held run whose error is that refusal.
+- **Delete when:** a video model runs on Cloudflare (Workers AI's
+  catalog, or a provider through AI Gateway's Unified Billing), metered
+  from its usage as images are, with `job.ai.video` back as steps and an
+  e2e check that a video is drawn, stored as a blob and charged; or Paul
+  drops videos, and `job.ai.video` goes with this entry.
 
 ## The price book is the core's defaults
 
@@ -398,18 +411,27 @@ fragment.club until cutover (decisions 34–35).
   git), sampled as `Storage { class: git }`, and samples run hourly from
   a cron the plan named (docs/ledger.md).
 
-## Triggers and the platform's own writes go on past the overdraft
+## A run in flight and the platform's own writes go on past the overdraft
 
 - **Observed:** phase 3. Past its owner's overdraft a fragment refuses
   the writes a principal asks for (mutations and jobs, posts, file
-  writes, deploys, storage tokens, blobs, its inbox: `writable` in
-  cell/src/meter.rs), but its cron and file triggers still start runs,
-  and a run in flight still writes.
-- **Risk:** a read-only fragment's own schedule keeps writing (its AI
-  steps are refused by the ledger all the same).
-- **First proof:** a read-only fragment whose events show a cron run.
-- **Delete when:** a trigger's run asks `writable` before it starts (held
-  with the ledger's reason), with an e2e check.
+  writes, deploys, storage tokens, blobs, its inbox, replays: `writable`
+  in cell/src/meter.rs), and since 2026-10-03 its cron, channel and file
+  triggers start no runs (each recorded `blocked` with the ledger's
+  reason: `start_run` in cell/src/jobs.rs, the ledger section's e2e). But
+  a run already in flight still writes (its mutations, publishes, file
+  writes) and starts the jobs it calls, and the platform's own records
+  (an agent's `joined` on its `tasks`: cell/src/runs_on.rs) still append.
+- **Risk:** a run that started before the overdraft writes a read-only
+  fragment for as long as it runs (its AI steps are refused by the
+  ledger all the same); the platform's own records are a few bytes each.
+- **First proof:** a read-only fragment whose events show a run's
+  writes landing after its owner went past the overdraft.
+- **Delete when:** each step of a run asks the owner's standing before
+  it writes (a step past the overdraft fails for good, saying why, so
+  the run is held and replays after a top-up), with an e2e check; the
+  platform's own records stay (they cost nothing, and an agent must hear
+  where it joined).
 
 ## An app's database size is read from its own realm
 
@@ -496,29 +518,6 @@ fragment.club until cutover (decisions 34–35).
   on durable storage (git on disk or in the bucket), with the fake's
   rules as its conformance suite, and the e2e passes against it as well
   as against the fake.
-
-## Frame sessions have no minter
-
-- **Observed:** the cut (2026-10-02). The desktop framed its owner's
-  fragments through `__frame`, which minted a frame redemption from the
-  framing page's own site session, behind the `frame` capability and
-  its owner's grant. `__frame`, the capability, the grant, and the share
-  sheet's embed went with the desktop; the redeeming half stays, generic:
-  a frame redemption spent only in a frame, into the partitioned
-  `fragment_frame` cookie, a frame-bound session naming its `embedder`,
-  the router's frame credential, `frame-ancestors` naming the embedder,
-  the `blocked` page, and `check=frame` (cell/src/auth.rs,
-  cell/src/registry/signin.rs). Nothing mints a frame redemption now,
-  so none of it runs, and the e2e's `frames` section (and the listed
-  node shape it ran on) went too; the `isolation` section still checks
-  that a frame signs in nowhere.
-- **Risk:** code no test reaches rots: a change breaks it, and the shell
-  that frames fragments next finds out.
-- **First proof:** the first page that frames a fragment signed in.
-- **Delete when:** a platform-origin mint (a `Mint` naming its embedder,
-  from the shell's own session) frames a fragment signed in, with a
-  frames lane again; or the redeeming half is deleted if the shell does
-  not frame fragments.
 
 ## Channel drafts' refusals have no e2e
 

@@ -4,6 +4,7 @@
 //   import * as fragment from "./__fragment.js";
 //   await fragment.call("add_todo", { text: "milk" });        // an operation
 //   await fragment.post("chat", { text: "hi" });               // a record, no app code
+//   const file = await fragment.blob(picked);                  // a blob: {sha256, size, type, name}
 //   fragment.live("list", {}, (r) => render(r.todos));         // a query, re-run on changes
 //   fragment.subscribe("activity", (rec) => log(rec.body));    // a channel, from a cursor
 //   fragment.subscribe("chat", show, { last: 100 });           // or from near its end
@@ -79,6 +80,35 @@ export function call(op, input = {}, { id = crypto.randomUUID() } = {}) {
 /// role, as a call does.
 export function post(channel, body, { id = crypto.randomUUID() } = {}) {
   return request(`__op/channels/${encodeURIComponent(channel)}`, id, body);
+}
+
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+/// Uploads `file` (a File or a Blob, at most 256 MiB) as one of this
+/// fragment's blobs, as this page's person, who must be an editor (a
+/// chat's attachment). Its bytes are hashed here, so the same file again
+/// stores nothing new. Returns what a record names it by, `{sha256, size,
+/// type, name}`; a page reads it at `./__blob/<sha256>`, as the type given
+/// here when that is passive media (an image, a video, audio, a PDF).
+export async function blob(file, { name = file.name ?? "", type = file.type || "application/octet-stream" } = {}) {
+  const bytes = await file.arrayBuffer();
+  const sha256 = hex(await crypto.subtle.digest("SHA-256", bytes));
+  // the same bytes under the same hash again: a retry stores nothing twice
+  for (let attempt = 0; ; attempt++) {
+    let resp;
+    try {
+      resp = await fetch(new URL(`__blob/${sha256}`, base), { method: "PUT", headers: { "content-type": type }, body: bytes, credentials: "same-origin" });
+    } catch (e) {
+      if (attempt < 3) {
+        await sleep(300 * (attempt + 1));
+        continue;
+      }
+      throw e;
+    }
+    const answer = await resp.json().catch(() => null);
+    if (!resp.ok) throw new FragmentError(resp.status, answer);
+    return { sha256, size: bytes.byteLength, type, name };
+  }
 }
 
 let socket = null;

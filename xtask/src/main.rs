@@ -34,6 +34,7 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod deploy;
+mod dns;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
@@ -131,9 +132,7 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        openrouter_url: None,
-        // images and videos only with a key of the deployment's own (real OpenRouter: real money)
-        openrouter_key: read("OPENROUTER_API_KEY_FILE")?,
+        // text and images: the Workers AI fake (dev never calls a real model)
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
         // a dev person is a seat, with the month's included credit
@@ -288,7 +287,7 @@ fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
-    let copies = ["cli/GUIDE.md", "README.md", "cell/src/auth.rs"].map(|path| read(path).map(|text| (path, text)));
+    let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
@@ -311,7 +310,7 @@ const RELEASE_ASSETS: [(&str, &str); 3] =
     [("aarch64-apple-darwin", "Darwin-arm64"), ("x86_64-apple-darwin", "Darwin-x86_64"), ("x86_64-unknown-linux-musl", "Linux-x86_64")];
 
 /// cli/SKILL.md (`fragment skill`) is a skill, and its one-line install,
-/// which the platform's home page, GUIDE.md, and the README copy, fetches
+/// which the shell's settings, GUIDE.md, and the README copy, fetches
 /// the latest release's `fragment-$(uname -s)-$(uname -m).tar.gz`: the
 /// release workflow (`.github/workflows/release.yml`) must build exactly
 /// those assets, each a tarball of `fragment` alone. Otherwise a renamed

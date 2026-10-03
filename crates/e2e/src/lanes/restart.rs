@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs;
-use super::signin::{site_cookie, with_session};
+use super::signin::{site_cookie, who};
 use crate::api::{Api, Call};
 use crate::Suite;
 
@@ -86,6 +86,19 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200 && seq_before == 2, "channel setup: {r} (feed at {seq_before})");
     let code_before = api.status(&owner, &stored)?.body["code"].clone();
     anyhow::ensure!(code_before["operations"]["save"]["kind"] == "mutation", "code setup: {code_before}");
+    // a person's search and archiving (principal.rs), and a chat's search outbox (search.rs)
+    let talk = s.named(&api, &owner, "restart-talk")?;
+    let r = api.create_with(&owner, json!({ "name": talk, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "chat setup: {r}");
+    let say = |api: &Api, id: &str, text: &str| api.signed(&owner, "POST", &format!("/api/f/{talk}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })));
+    let found = |api: &Api, q: &str| {
+        let r = api.signed(&owner, "GET", &format!("/api/search?q={q}"), None);
+        r.ok().and_then(|r| r.body["messages"].as_array().map(|l| l.iter().filter(|m| m["fragment"] == talk.as_str()).count())).unwrap_or(0)
+    };
+    let said = s.eventually(Duration::from_secs(30), || say(&api, "k1", "kale outlives restarts").is_ok_and(|r| r.status == 200));
+    let r = api.signed(&owner, "PUT", &format!("/api/fragments/{talk}/archived"), Some(&json!({ "archived": true })))?;
+    let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
+    anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
 
     s.stop()?;
     let api = s.start(false, true)?;
@@ -151,11 +164,18 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let got = seen.lock().expect("upstream log").clone();
     s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
     // a browser's sessions, and the key its push subscriptions were made with
-    let r = with_session(&api, "GET", "/settings", &member_session)?;
-    s.ok("after a restart a browser's platform session still signs it in", r.status == 200 && r.text.contains(MEMBER_EMAIL), &r);
+    let r = who(&api, &member_session)?;
+    s.ok("after a restart a browser's platform session still signs it in", r.to_string().contains(MEMBER_EMAIL), &r);
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);
     s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));
+    s.ok("after a restart a person's search finds what it found", found(&api, "kale") == 1, "");
+    let r = api.signed(&owner, "GET", "/api/fragments", None)?;
+    let held = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == talk.as_str() && f["archived"] == true));
+    s.ok("and their archiving holds", held, &r);
+    let r = say(&api, "k2", "kale and chard")?;
+    let next = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 2);
+    s.ok("and a chat's new message reaches it: its search outbox goes on", r.status == 200 && next, &r);
 
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("a mutation before the crash", r.status == 200, &r);
@@ -172,6 +192,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("after a crash pins and code survive", r.body["pins"]["live"] == live.as_str() && r.body["code"]["sha"] == live.as_str(), &r);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("after a crash the member's list survives", r.text.contains(&name), &r);
+    s.ok("and a person's search, both messages in it", found(&api, "kale") == 2, "");
     s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
     s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
@@ -194,6 +215,15 @@ pub fn pathmode(s: &mut Suite, _: &Api) -> Result<()> {
     s.deploy(&c);
     let r = api.page(&name, "", None)?;
     s.ok("a page is served by path", r.status == 200 && r.text.contains("by path"), &r);
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let frame = vec![("sec-fetch-dest", "iframe".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-site", "same-origin".to_string())];
+    let url = format!("{}/auth/frame?name={name}&return=/", api.base);
+    let r = api.call(Call { method: "GET", url, cookie: Some(format!("fragment_session={session}")), extra: frame, ..Call::default() })?;
+    s.ok(
+        "the frame mint refuses (403): every fragment shares the platform's origin here, so a fragment's page is the platform's own",
+        r.status == 403 && !r.header("location").contains("__signin"),
+        &r,
+    );
     let r = api.browser_op(&name, "sign", "p1", json!({ "text": "hi" }), None)?;
     s.ok("a browser call works by path", r.status == 200, &r);
     s.ok("its cookie is scoped to the fragment's path", r.header("set-cookie").contains(&format!("Path=/f/{name}/;")), r.header("set-cookie"));

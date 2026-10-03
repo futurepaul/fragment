@@ -5,13 +5,17 @@ template reads** (docs/cloudflare-v1.md, decisions 8, 9, 38, 42). It
 extends docs/api.md's "A chat's records"; where they differ, this file
 wins. The bridge's code for it is `images/bridge/src/records.rs`.
 
-A chat is a fragment with two channels and no app code:
+A chat is a fragment with two channels, and one job of the template's
+own code, which runs from the platform's release as its page does
+(decision 40: "Push", below):
 
 ```json
 "channels": {
   "chat": { "read": "public", "post": "viewer" },
   "work": { "read": "viewer", "post": "editor" }
-}
+},
+"operations": { "notify_reply": { "kind": "job" } },
+"triggers": [{ "channel": "chat", "from": "agent", "run": "notify_reply" }]
 ```
 
 - `chat` holds what is said: people's messages, agents' replies, Stop,
@@ -106,6 +110,12 @@ the same record (or 409, for another option).
 
 Any other `kind` on `chat` is the page's own and is never a message.
 
+**Search.** A person's message and an agent's reply are what the
+shell's search finds (docs/api.md, The shell, Search): a body whose
+`kind` is absent or `"message"`, by its `text` alone (its first 4 KiB).
+No other record here is searched, Stop, prompt answers and everything on
+`work` included.
+
 ## `work`
 
 Posted by the agent, each with the id `wk:<turn>:<part>`, so a replayed
@@ -166,9 +176,95 @@ was lost in a restart, or it was refused (too many waiting).
 ```
 
 A file is one of the chat fragment's blobs: its poster uploads it first
-(`PUT /api/f/{chat}/blobs/{sha256}`, which takes editors), then posts
-the record naming it; a page reads it at `__blob/<sha256>`. At most 8 a
-record, 25 MiB each.
+(`PUT /api/f/{chat}/blobs/{sha256}`, which takes editors; a page, `PUT
+__blob/<sha256>` through `fragment.blob(file)`), then posts the record
+naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
+MiB each. The record keeps the file while the channel keeps the record
+(docs/api.md, Blobs); an upload no record names goes after the grace
+period.
+
+**A voice memo** is an attachment whose `type` is audio. The page records
+one (MediaRecorder) and sends it as the recorder made it: `audio/webm`
+(Chrome and Firefox, Opus), `audio/ogg` (Opus), or `audio/mp4` (Safari,
+AAC), named `voice-memo.webm`, `.ogg` or `.m4a`, at most 5 minutes and 25
+MiB, with the message's text beside it or none. A page shows an
+attachment of type `audio/webm`, `audio/ogg`, `audio/mp4`, `audio/mpeg`
+or `audio/wav` as a player, in a person's message and in an agent's reply
+alike (`__blob` serves those types as themselves). The platform does
+nothing with the audio: an agent's runtime hears it, and transcribes it
+on its own side if it does.
+
+## The page (`templates/chat`)
+
+The chat template's page reads and writes only these records. It
+follows `chat` from its last 400 records and, for a viewer, `work` from
+its last 1000, and lays them out in time: a person's message; an
+agent's consecutive steps as one card; a prompt as a card whose buttons
+only `asks` may press (enabled for them alone), then how it closed; a
+reply; and a turn's end when it was not `idle` (Stopped, or the error,
+quietly). A turn's draft shows after the turn's last record, and while
+a turn runs with no draft nor open card, a working line does. It posts:
+
+- a message with a fresh id of its own (`crypto.randomUUID()`), the same
+  id again only for the same body sent again after a failure; its `to`
+  the chat's agents its `@mentions` name, when they name any; its files
+  uploaded first, at most 8 of at most 25 MiB each, and its text cut to
+  32 KiB;
+- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
+  asker while it runs (the send circle is Stop then);
+- a prompt's answer with the id `pr:<prompt>`;
+- a voice memo (Attachments, above): the composer's mic records until it
+  is pressed again, or Send, or 5 minutes pass, then sends the clip as
+  the message's audio file with whatever was typed (the x lets it go).
+  The mic is enabled for editors alone, as uploads are; while it records,
+  a quiet clock shows beside it, and a microphone the browser refused, or
+  a recorder that failed, says so in the page's banner.
+
+Its person's presence on the fragment is `{typing, looking}`: `typing`
+while they write, and `looking` while the chat is on screen
+(`document.visibilityState`), which keeps their agents' replies from
+being pushed to them ("Push", below). For a person signed in who may
+post, a bell beside Send is "Notify me": from a click only it subscribes
+this browser for them (`fragment.push.register(<their identity>)`), and
+says whether it is on (a click again turns it off), blocked in the
+browser's settings, or failed. A chat framed by the shell is a
+cross-origin frame, which a browser does not let ask for notifications:
+there the bell says to open the chat in a tab of its own, and does.
+
+Who is who comes from the fragment: `__members` lists the chat's agents
+(the lead first), and `__people` names them (an agent's `name` is its
+agent fragment's label, which `@mentions` it). An agent's color is one
+of six, chosen by its identity until agents carry one; the chat takes
+its lead's. The shell that frames it may send `postMessage({fragment:
+"theme", mode: "light"|"dark"})`; otherwise it follows
+`prefers-color-scheme`.
+
+## Push
+
+The template's code (`templates/chat/app.mjs`) pushes an agent's reply to
+the chat's people who are away. Its trigger starts a run for each record
+an agent of the chat posts on `chat` (`"from": "agent"`: its replies; a
+draft is never a record, and a person's message starts nothing). The run,
+a job acting as the chat itself:
+
+1. reads the chat's members (`job.members()`): the poster must be an
+   agent still, and the chat's people are its members of kind `person`;
+2. leaves out each person a page of the chat shares `{looking: true}`
+   for (`job.presence()`);
+3. names the agent (`job.people`: its fragment's label, capitalized);
+4. pushes `{title: <the agent's name>, body: <the reply's first 120
+   characters, on one line; one without words says what it carries>, tag:
+   <the chat's name>, url: "./"}` to each of the rest, at most 32, by
+   their identity (`job.push(<identity>, …)`). A subscription's `who` that
+   is an identity is that identity's own (docs/api.md, Deliveries), so a
+   reply reaches its people's browsers, never an agent's.
+
+A member who calls `notify_reply` itself pushes nothing (`job.via` is not
+`channel`). A turn that replies more than once pushes each reply under
+the chat's tag, so a browser shows the latest. `looking` is the page's
+own visibility, so a chat open in a tab of the shell that is not shown
+counts as looked at, and a chat whose agents reply more than 120 times
+in an hour pauses its push (the debt ledger has both).
 
 ## `tasks` (an agent fragment's)
 
@@ -185,6 +281,10 @@ skipped, as cron skips a missed run.
 { "kind": "joined", "fragment": "<fragment>" }
 ```
 
-Posted after adding the agent to a fragment: it wakes the computer,
-which lists its agent's fragments again and follows the new chat at
-once (the listing is otherwise read every 5 minutes while awake).
+Posted by the platform, as the agent fragment itself (its own key),
+when the agent is added as a member of `fragment` (docs/computers.md,
+"An agent added to a fragment wakes its computer"): once for that
+membership, and the platform wakes the computer too. The guest lists its
+agent's fragments again and follows the new chat at once (the listing is
+otherwise read every 5 minutes while awake). No template, page or shell
+posts it: whatever adds an agent to a fragment needs to do nothing more.

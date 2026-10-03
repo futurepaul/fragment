@@ -271,6 +271,7 @@ impl FragmentCell {
                 depth: inv.depth,
                 call: Some((&inv.id, &input_sha)),
                 input: inv.input,
+                owner_read_only: None,
             })?;
             let result = serde_json::value::to_raw_value(&json!({ "run": started.id, "status": started.status })).expect("a run's id and status serialize");
             return Ok(Answered { result, replayed: started.replayed });
@@ -513,8 +514,22 @@ impl FragmentCell {
                 *self.standing.borrow_mut() = None;
                 json!({ "ok": true })
             }
+            Some("cron-now") => {
+                // every schedule due now, so a test need not wait for its minute
+                let due = self.rows("UPDATE schedules SET next_at = ? RETURNING idx", vec![SqlStorageValue::Integer(js::now_ms())])?.len();
+                self.schedule().await?;
+                json!({ "due": due })
+            }
+            Some("poll-now") => {
+                // the next alarm is a poll pass (the blob collection's), so a
+                // test need not wait a quiet fragment's day for one
+                let now = js::now_ms();
+                self.set_meta(MetaKey::PollAt, &now.to_string())?;
+                self.schedule().await?;
+                json!({ "pollAt": now })
+            }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, or forget-standing")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, or poll-now")),
         })
     }
 }

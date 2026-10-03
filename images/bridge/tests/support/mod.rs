@@ -43,7 +43,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &std::path::Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), settings }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), settings, agents_file: None }
 }
 
 pub fn start(cfg: Config, runtime: Box<dyn Runtime>) -> Running {

@@ -1,9 +1,9 @@
 //! Sharing, on the platform's origin (phase 7, decision 4): the share sheet
 //! and accepting an invite. Both are the platform's pages, signed in by its
 //! session cookie, and each acts through the fragment's own handlers
-//! (members.rs) as the signed-in person, as `/auth/new` makes a fragment
-//! for them: the fragment decides who may do what (only its owner changes
-//! anything; a member may see who is in; anyone else gets a 403 page).
+//! (members.rs) as the signed-in person: the fragment decides who may do
+//! what (only its owner changes anything; a member may see who is in;
+//! anyone else gets a 403 page).
 //!
 //!   GET  /share/<name>         the sheet: who is in (usernames and pictures) and their roles;
 //!                              for the owner, inviting by username, pending invites, roles,
@@ -60,7 +60,7 @@ const INVITE_TOKEN_LEN: usize = 48;
 const INVITE_ID_LEN: usize = 16;
 const DAY_MS: i64 = 24 * 3600 * 1000;
 
-/// A card, as a document's share dialog is: the page's, or, in the home's
+/// A card, as a document's share dialog is: the page's, or, in the shell's
 /// dialog (`framed`), the dialog's whole.
 const SHEET_STYLE: &str = ":root{color-scheme:light dark}body{margin:0 auto;padding:16px;max-width:30rem}
 main{background:#fff;border-radius:14px;padding:20px 24px;box-shadow:0 1px 2px #0000001a,0 8px 28px #0000001a}
@@ -111,7 +111,7 @@ fn script() -> String {
   for (const s of document.querySelectorAll("select[data-send]")) s.onchange = () => s.form.submit();
   // in the platform's dialog (only its pages may frame this one), Done or
   // Escape closes the dialog; in a window of its own, Done closes the
-  // window, or it goes home
+  // window, or it goes to the shell's settings
   const framed = parent !== window;
   const tell = (share) => parent.postMessage({{ share, height: document.body.offsetHeight }}, location.origin);
   if (framed) {{
@@ -163,8 +163,9 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
 }
 
 /// The share sheet itself: a sharing page only the platform's own pages
-/// may frame (the home shows it in a dialog: `DIALOG`). `'self'` is the
-/// platform's origin alone; every fragment is on another (docs/platform.md).
+/// may frame (the shell shows it in a dialog: cell/shell/shell.js
+/// `share`). `'self'` is the platform's origin alone; every fragment is on
+/// another (docs/platform.md).
 fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let mut resp = sheet_page(status, title, body, true)?;
     let h = resp.headers_mut();
@@ -172,29 +173,6 @@ fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> 
     h.set("x-frame-options", "SAMEORIGIN")?;
     Ok(resp)
 }
-
-/// The home's share dialog: its Share links open the sheet in a frame
-/// (`sheet_framable`), whose Done closes it; the home reloads to show what
-/// changed. A message counts only from that frame, on the platform's origin.
-pub(crate) const DIALOG: &str = r#"<dialog id="share"><iframe title="Share"></iframe></dialog>
-<style>#share{padding:0;border:0;border-radius:14px;width:min(30rem,calc(100vw - 32px));background:#fff;box-shadow:0 12px 48px #0000004d;overflow:hidden}
-#share::backdrop{background:#0000008c}#share iframe{display:block;width:100%;height:26rem;max-height:calc(100vh - 48px);border:0}
-@media (prefers-color-scheme:dark){#share{background:#1f2327}}</style>
-<script>(() => {
-  const dialog = document.getElementById("share"), frame = dialog.querySelector("iframe");
-  for (const a of document.querySelectorAll("a[data-share]")) a.onclick = (e) => {
-    e.preventDefault();
-    frame.src = a.getAttribute("href");
-    dialog.showModal();
-  };
-  addEventListener("message", (e) => {
-    if (e.origin !== location.origin || e.source !== frame.contentWindow) return;
-    frame.style.height = e.data.height + "px";
-    if (e.data.share === "done") dialog.close();
-  });
-  dialog.onclick = (e) => { if (e.target === dialog) dialog.close(); };
-  dialog.onclose = () => location.reload();
-})();</script>"#;
 
 /// A page that only says something (a refusal, a stale link): `html`,
 /// escaped by the caller.

@@ -9,11 +9,9 @@
 //! and rounded up once, never per part. The fee is AI Gateway's 5% on the
 //! credits that pay for AI through Unified Billing (spike S4), so it
 //! applies to tokens and neurons only; the margin is the operator's, 50%
-//! unless the book sets another. A vendor's own bill (`Billed`: OpenRouter's
-//! for an image or a video, until phase 7 moves them onto Cloudflare) is
-//! its list price, with that vendor's fee from the book. The book is data
-//! the operator sets (the deploy's configuration) and versions; a ledger
-//! keeps the version it charges with (crate::ledger).
+//! unless the book sets another. The book is data the operator sets (the
+//! deploy's configuration) and versions; a ledger keeps the version it
+//! charges with (crate::ledger).
 
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +80,8 @@ pub enum Usage {
     /// usage is metered (spike S4).
     Tokens { model: String, input: u64, cached_input: u64, cache_write: u64, output: u64 },
     /// Workers AI neurons through the gateway, in thousandths of a neuron
-    /// (the fraction Workers AI reports, × 1000, rounded up).
+    /// (the fraction Workers AI reports, × 1000, rounded up; an image's,
+    /// from its tiles and steps: crate::media).
     Neurons { milli: u64 },
     /// A computer awake, in milliseconds, on its instance type (the
     /// book's name for it).
@@ -102,11 +101,6 @@ pub enum Usage {
     /// An operator key's use (decision 37), in the key's own unit: a call,
     /// unless its price counts something else.
     Key { key: String, units: u64 },
-    /// What a vendor billed for a call, as it reported it, in micro-dollars
-    /// (rounded up from its dollars): the list price, to which the book adds
-    /// that vendor's fee and the margin. OpenRouter's images and videos are
-    /// metered this way until phase 7.
-    Billed { vendor: String, micros: u64 },
 }
 
 /// Where sampled bytes are held.
@@ -125,8 +119,8 @@ pub enum StorageClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageFault {
-    /// A model, instance, key or vendor name that is empty, too long, or
-    /// not printable ASCII.
+    /// A model, instance or key name that is empty, too long, or not
+    /// printable ASCII.
     Name,
     /// A quantity over `QUANTITY_MAX`.
     Quantity,
@@ -146,7 +140,6 @@ impl Usage {
             Usage::Tokens { model, .. } => Some(model),
             Usage::Awake { instance, .. } => Some(instance),
             Usage::Key { key, .. } => Some(key),
-            Usage::Billed { vendor, .. } => Some(vendor),
             _ => None,
         };
         if let Some(n) = name {
@@ -161,7 +154,6 @@ impl Usage {
             Usage::Storage { byte_hours, .. } => *byte_hours,
             Usage::Requests { count } | Usage::DynamicWorkers { count } | Usage::Images { count } => *count,
             Usage::Key { units, .. } => *units,
-            Usage::Billed { micros, .. } => *micros,
         };
         if largest <= QUANTITY_MAX {
             Ok(())
@@ -226,16 +218,6 @@ pub struct KeyPrice {
     pub per: u64,
 }
 
-/// A vendor that bills for calls itself (`Usage::Billed`), and its fee on
-/// what it reports, in basis points: none for OpenRouter, whose reported
-/// cost includes its own fee.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VendorPrice {
-    pub vendor: String,
-    pub fee_bp: u32,
-}
-
 /// Every price, the fee and the margin, at one version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,8 +242,6 @@ pub struct PriceBook {
     /// Micro-dollars per thousand unique image transformations.
     pub images: i64,
     pub keys: Vec<KeyPrice>,
-    /// The vendors whose own bills are metered (`Usage::Billed`).
-    pub vendors: Vec<VendorPrice>,
 }
 
 // The default book, at list price on 2026-10-02, each with its source.
@@ -281,7 +261,8 @@ pub const DEFAULT_MODELS: [(&str, TokenPrices); 3] = [
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
 ];
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
-/// matched tokens × the catalog price on every call).
+/// matched tokens × the catalog price on every call). Images are priced
+/// in neurons too (crate::media).
 pub const DEFAULT_NEURONS: i64 = 11_000;
 /// The default computer (decision 13: 2 vCPU, 6 GiB; a 12 GB disk
 /// assumed), from Containers' pricing (Workers Paid, 2026-08-28):
@@ -292,6 +273,38 @@ pub const DEFAULT_NEURONS: i64 = 11_000;
 ///
 /// $0.064224 an awake hour, about $46 for an always-on month.
 pub const DEFAULT_INSTANCES: [(&str, i64); 1] = [("2vcpu-6gib", 64_224)];
+
+/// The size a computer's container starts at (`ctx.container.start`'s
+/// `instance`): one of Containers' named types, or a size of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum InstanceSize {
+    Named(String),
+    #[serde(rename_all = "camelCase")]
+    Custom { vcpu: u32, memory_mib: u32, disk_mb: u32 },
+}
+
+/// Containers' named instance types (developers.cloudflare.com/containers/platform/limits).
+const NAMED_INSTANCES: [&str; 6] = ["lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"];
+
+/// The size an instance of the price book names: a named type as it is,
+/// or `<n>vcpu-<m>gib` (the book's own names, decision 13's `2vcpu-6gib`)
+/// as a custom size with a disk of 2 GB a GiB, as the price assumes, within
+/// Containers' bounds for one: 1 to 4 vCPU, at most 12 GiB, at least 3 GiB
+/// a vCPU, at most 20 GB of disk.
+pub fn instance_size(name: &str) -> Result<InstanceSize, String> {
+    if NAMED_INSTANCES.contains(&name) {
+        return Ok(InstanceSize::Named(name.to_string()));
+    }
+    let custom = name.strip_suffix("gib").and_then(|n| n.split_once("vcpu-")).and_then(|(v, m)| Some((v.parse::<u32>().ok()?, m.parse::<u32>().ok()?)));
+    let Some((vcpu, gib)) = custom else {
+        return Err(format!("an instance is one of {} or <n>vcpu-<m>gib, not {name:?}", NAMED_INSTANCES.join(", ")));
+    };
+    if !(1..=4).contains(&vcpu) || gib > 12 || gib < 3 * vcpu {
+        return Err(format!("{name}: a custom instance has 1 to 4 vCPU and at least 3 GiB a vCPU, at most 12 GiB"));
+    }
+    Ok(InstanceSize::Custom { vcpu, memory_mib: gib * 1024, disk_mb: (gib * 2_000).min(20_000) })
+}
 /// R2 Standard $0.015, Durable Objects' SQL storage $0.20 per GB-month.
 /// code.storage publishes no price to us: git is at R2's until the
 /// operator sets its own.
@@ -305,17 +318,12 @@ pub const DEFAULT_DYNAMIC_WORKERS: i64 = 2_000;
 pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;
-/// OpenRouter bills images and videos itself (until phase 7); the `cost` it
-/// reports is what its credits pay, its own fee included, so the book adds
-/// none.
-pub const DEFAULT_VENDORS: [(&str, u32); 1] = [("openrouter", 0)];
 
 /// Why a book is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BookFault {
-    /// A margin over `MARGIN_BP_MAX`, or a fee (the credits' or a
-    /// vendor's) over `FEE_BP_MAX`.
+    /// A margin over `MARGIN_BP_MAX`, or the credits' fee over `FEE_BP_MAX`.
     Rate,
     /// A price below zero or over `PRICE_MAX`, or a key's `per` outside 1
     /// to `QUANTITY_MAX`.
@@ -331,7 +339,7 @@ pub enum BookFault {
 #[serde(rename_all = "snake_case")]
 pub enum PriceError {
     Invalid(UsageFault),
-    /// The book prices no such model, instance type, key or vendor.
+    /// The book prices no such model, instance type or key.
     NoPrice,
     /// The charge is over `CHARGE_MAX`.
     TooLarge,
@@ -366,16 +374,15 @@ impl PriceBook {
             browser: DEFAULT_BROWSER,
             images: DEFAULT_IMAGES,
             keys: Vec::new(),
-            vendors: DEFAULT_VENDORS.iter().map(|(vendor, fee_bp)| VendorPrice { vendor: vendor.to_string(), fee_bp: *fee_bp }).collect(),
         }
     }
 
     /// Whether the book is one a ledger may charge with.
     pub fn validate(&self) -> Result<(), BookFault> {
-        if self.margin_bp > MARGIN_BP_MAX || self.credits_fee_bp > FEE_BP_MAX || self.vendors.iter().any(|v| v.fee_bp > FEE_BP_MAX) {
+        if self.margin_bp > MARGIN_BP_MAX || self.credits_fee_bp > FEE_BP_MAX {
             return Err(BookFault::Rate);
         }
-        if self.models.len() > PRICES_MAX || self.instances.len() > PRICES_MAX || self.keys.len() > PRICES_MAX || self.vendors.len() > PRICES_MAX {
+        if self.models.len() > PRICES_MAX || self.instances.len() > PRICES_MAX || self.keys.len() > PRICES_MAX {
             return Err(BookFault::TooMany);
         }
         let fixed = [self.neurons, self.storage.r2, self.storage.sqlite, self.storage.git, self.requests, self.dynamic_workers, self.browser, self.images];
@@ -396,8 +403,7 @@ impl PriceBook {
         let models = self.models.iter().map(|m| m.model.as_str()).collect();
         let instances = self.instances.iter().map(|i| i.instance.as_str()).collect();
         let keys = self.keys.iter().map(|k| k.key.as_str()).collect();
-        let vendors = self.vendors.iter().map(|v| v.vendor.as_str()).collect();
-        if names_ok(models) && names_ok(instances) && names_ok(keys) && names_ok(vendors) {
+        if names_ok(models) && names_ok(instances) && names_ok(keys) {
             Ok(())
         } else {
             Err(BookFault::Name)
@@ -427,11 +433,6 @@ impl PriceBook {
             Usage::Key { key, units } => {
                 let k = self.keys.iter().find(|k| k.key == *key).ok_or(PriceError::NoPrice)?;
                 (term(*units, k.micros), k.per, 0)
-            }
-            // the vendor's own list price, a micro-dollar per micro-dollar
-            Usage::Billed { vendor, micros } => {
-                let v = self.vendors.iter().find(|v| v.vendor == *vendor).ok_or(PriceError::NoPrice)?;
-                (term(*micros, 1), 1, v.fee_bp)
             }
         };
         priced(numerator, per, fee_bp, self.margin_bp)
@@ -489,6 +490,20 @@ pub fn dollars(m: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The book's names start the size they price; named types pass as
+    /// they are; a size Containers refuses is refused here first.
+    #[test]
+    fn instance_sizes() {
+        assert_eq!(instance_size(DEFAULT_INSTANCES[0].0), Ok(InstanceSize::Custom { vcpu: 2, memory_mib: 6144, disk_mb: 12_000 }));
+        assert_eq!(serde_json::to_value(instance_size("2vcpu-6gib").unwrap()).unwrap(), serde_json::json!({ "vcpu": 2, "memoryMib": 6144, "diskMb": 12000 }));
+        assert_eq!(instance_size("standard-3"), Ok(InstanceSize::Named("standard-3".into())));
+        assert_eq!(serde_json::to_value(instance_size("standard-3").unwrap()).unwrap(), serde_json::json!("standard-3"));
+        assert_eq!(instance_size("4vcpu-12gib"), Ok(InstanceSize::Custom { vcpu: 4, memory_mib: 12_288, disk_mb: 20_000 }));
+        for bad in ["", "huge", "2vcpu-4gib", "5vcpu-15gib", "0vcpu-3gib", "1vcpu-13gib", "2vcpu-6", "vcpu-6gib", "-1vcpu-6gib"] {
+            assert!(instance_size(bad).is_err(), "{bad:?}");
+        }
+    }
 
     fn tokens(model: &str, input: u64, cached_input: u64, cache_write: u64, output: u64) -> Usage {
         Usage::Tokens { model: model.into(), input, cached_input, cache_write, output }
@@ -670,50 +685,6 @@ mod tests {
         assert_eq!(fault(|b| b.keys.push(KeyPrice { key: "k".into(), micros: 1, per: 1 })), Ok(()));
     }
 
-    /// Goal: a vendor's own bill is its list price, with that vendor's fee
-    /// and the margin; OpenRouter's fee is none, since its cost includes
-    /// its own. Method: OpenRouter's $0.04 image, and a vendor at 10%.
-    #[test]
-    fn a_vendors_bill_is_its_list_price_with_its_fee_and_the_margin() {
-        let book = PriceBook::defaults();
-        let billed = |vendor: &str, micros: u64| Usage::Billed { vendor: vendor.into(), micros };
-        assert_eq!(book.price(&billed("openrouter", 40_000)).unwrap(), Priced { list: 40_000, cost: 40_000, charge: 60_000 });
-        assert_eq!(book.price(&billed("openrouter", 0)).unwrap(), Priced { list: 0, cost: 0, charge: 0 }, "nothing billed costs nothing");
-        // 1 µ$ × 1.5 rounds up once, to 2
-        assert_eq!(book.price(&billed("openrouter", 1)).unwrap(), Priced { list: 1, cost: 1, charge: 2 });
-        let mut fees = book.clone();
-        fees.vendors.push(VendorPrice { vendor: "fal".into(), fee_bp: 1_000 });
-        assert_eq!(fees.price(&billed("fal", 40_000)).unwrap(), Priced { list: 40_000, cost: 44_000, charge: 66_000 });
-        assert_eq!(book.price(&billed("fal", 1)), Err(PriceError::NoPrice), "a vendor the book does not name");
-        assert_eq!(book.price(&billed("open router", 1)), Err(PriceError::Invalid(UsageFault::Name)));
-        assert_eq!(book.price(&billed("openrouter", QUANTITY_MAX + 1)), Err(PriceError::Invalid(UsageFault::Quantity)));
-        // $100,000 billed is over what a row may charge once the margin is on
-        assert_eq!(book.price(&billed("openrouter", CHARGE_MAX as u64)), Err(PriceError::TooLarge));
-        assert_eq!(
-            serde_json::to_value(billed("openrouter", 7)).unwrap(),
-            serde_json::json!({ "kind": "billed", "vendor": "openrouter", "micros": 7 })
-        );
-    }
-
-    /// Goal: a book's vendors break its rules as its other lists do.
-    /// Method: a fee over the limit, a vendor named twice or badly, too many.
-    #[test]
-    fn a_bad_vendor_is_refused() {
-        let fault = |f: fn(&mut PriceBook)| {
-            let mut b = PriceBook::defaults();
-            f(&mut b);
-            b.validate()
-        };
-        assert_eq!(fault(|b| b.vendors[0].fee_bp = FEE_BP_MAX + 1), Err(BookFault::Rate));
-        assert_eq!(fault(|b| b.vendors.push(VendorPrice { vendor: "openrouter".into(), fee_bp: 0 })), Err(BookFault::Name), "a vendor priced twice");
-        assert_eq!(fault(|b| b.vendors[0].vendor = String::new()), Err(BookFault::Name));
-        assert_eq!(
-            fault(|b| b.vendors = (0..=PRICES_MAX).map(|i| VendorPrice { vendor: format!("v{i}"), fee_bp: 0 }).collect()),
-            Err(BookFault::TooMany)
-        );
-        assert_eq!(fault(|b| b.vendors[0].fee_bp = FEE_BP_MAX), Ok(()));
-    }
-
     #[test]
     fn money_for_people() {
         assert_eq!(dollars(20 * USD), "$20.00");
@@ -735,5 +706,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!({ "kind": "storage", "class": "sqlite", "byte_hours": 9 }));
         assert!(serde_json::from_value::<Usage>(serde_json::json!({ "kind": "requests", "count": 1, "extra": 2 })).is_err());
         assert!(serde_json::from_value::<Usage>(serde_json::json!({ "kind": "requests", "count": -1 })).is_err(), "quantities are unsigned");
+        let billed = serde_json::json!({ "kind": "billed", "vendor": "openrouter", "micros": 1 });
+        assert!(serde_json::from_value::<Usage>(billed).is_err(), "a vendor's own bill went with OpenRouter: every meter is Cloudflare's");
     }
 }

@@ -51,9 +51,6 @@ enum Shape {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// The deployment's OpenRouter key (its `OPENROUTER_API_KEY` Worker
-/// secret), which the OpenRouter fake takes: it pays for image and video steps.
-pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
@@ -105,9 +102,7 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: CodeStorage,
-    /// Images and videos (until phase 7).
-    pub openrouter: fragment_fakes::openrouter::OpenRouter,
-    /// The model route's vendor boundary: Workers AI, scripted.
+    /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: fragment_fakes::workers_ai::WorkersAi,
     pub push: fragment_fakes::push::PushService,
     org_key: String,
@@ -139,7 +134,6 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
-            ("OpenRouter key", OPENROUTER_KEY.into()),
         ]
     }
 
@@ -282,8 +276,6 @@ impl Suite {
             egress_local: true,
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
-            openrouter_url: Some(self.openrouter.url.clone()),
-            openrouter_key: Some(OPENROUTER_KEY.into()),
             // the lower rung: the model route's calls go to the Workers AI fake
             ai_url: Some(self.ai.url.clone()),
             ai_gateway: None,
@@ -562,7 +554,6 @@ fn main() -> Result<()> {
         port: devstack::free_port()?,
         run,
         fake,
-        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY)?,
         ai: fragment_fakes::workers_ai::WorkersAi::start(0)?,
 
         push: fragment_fakes::push::PushService::start()?,

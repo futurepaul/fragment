@@ -11,13 +11,14 @@
 //!   `{type: "give"}` from the page, answered to every viewer with
 //!   `{type: "control", holder: <viewer>|null}`.
 //!
-//! The display starts lazily: the first viewer runs `start` once when the
-//! RFB socket does not answer (S3b: the dashboard and screen lazy).
+//! The display starts lazily: a viewer runs `start` when the RFB socket
+//! does not answer, at most once a minute while it stays down (S3b: the
+//! dashboard and screen lazy).
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -62,18 +63,30 @@ pub struct ScreenConfig {
     pub start: Option<Vec<String>>,
 }
 
-/// Who holds control, shared by every viewer.
+/// While the display stays down, its start is run again at most this often:
+/// what it starts may change (the image's first agent, while it runs), and
+/// a start that came to nothing is not the screen's last word.
+pub const START_AGAIN_MS: u64 = 60_000;
+
+/// Whether a viewer that finds the display down runs its start, given the
+/// last start's time.
+fn may_start(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(START_AGAIN_MS))
+}
+
+/// Who holds control, shared by every viewer; and when the display was
+/// last started.
 struct Control {
     holder: Mutex<Option<String>>,
     changes: broadcast::Sender<Option<String>>,
-    started: Mutex<bool>,
+    started: Mutex<Option<Instant>>,
 }
 
 pub async fn serve(cfg: ScreenConfig, stop: watch::Receiver<bool>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| format!("screen listen {}: {e}", cfg.listen))?;
     crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "rfb": cfg.target.is_some() });
     let (changes, _) = broadcast::channel(16);
-    let control = Arc::new(Control { holder: Mutex::new(None), changes, started: Mutex::new(false) });
+    let control = Arc::new(Control { holder: Mutex::new(None), changes, started: Mutex::new(None) });
     let cfg = Arc::new(cfg);
     let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
         let (cfg, control) = (cfg.clone(), control.clone());
@@ -194,16 +207,20 @@ async fn dial(target: &Target) -> std::io::Result<Box<dyn Stream>> {
     }
 }
 
-/// The display, started once if it is down; then its socket.
+/// The display, started if it is down (at most once a `START_AGAIN_MS`);
+/// then its socket.
 async fn open(target: &Target, cfg: &ScreenConfig, control: &Control) -> Option<Box<dyn Stream>> {
     if let Ok(s) = dial(target).await {
         return Some(s);
     }
     let start = {
         let mut started = control.started.lock().expect("started");
-        let first = !*started;
-        *started = true;
-        first
+        let now = Instant::now();
+        let start = may_start(*started, now);
+        if start {
+            *started = Some(now);
+        }
+        start
     };
     if start {
         if let Some(cmd) = cfg.start.as_ref().filter(|c| !c.is_empty()) {
@@ -393,6 +410,20 @@ mod tests {
         assert!(g.push(&cut[..9], false).unwrap().is_empty());
         assert!(g.push(&cut[9..], false).unwrap().is_empty(), "clipboard is input");
         assert_eq!(g.push(&[9], false), Err(Unknown(9)), "an unknown message closes the viewer");
+    }
+
+    /// A display that stays down is started again, at most once a minute:
+    /// a viewer before the image had an agent, or after its first agent
+    /// changed, is not the screen's last word; a burst of viewers is one
+    /// start.
+    #[test]
+    fn a_display_down_is_started_again_once_a_minute() {
+        let t = Instant::now();
+        assert!(may_start(None, t), "never started: start it");
+        assert!(!may_start(Some(t), t), "just started: wait for it");
+        assert!(!may_start(Some(t), t + Duration::from_millis(START_AGAIN_MS - 1)));
+        assert!(may_start(Some(t), t + Duration::from_millis(START_AGAIN_MS)), "still down a minute on: start it again");
+        assert!(!may_start(Some(t + Duration::from_secs(5)), t), "a clock read before the last start never starts twice");
     }
 
     #[test]

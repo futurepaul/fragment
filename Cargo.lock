@@ -584,6 +584,12 @@ dependencies = [
 [[package]]
 name = "fragment-templates"
 version = "0.1.0"
+dependencies = [
+ "fragment-core",
+ "fragment-proto",
+ "hex",
+ "sha2",
+]
 
 [[package]]
 name = "fs2"
@@ -2439,6 +2445,7 @@ dependencies = [
  "fragment-core",
  "fragment-devstack",
  "fragment-fakes",
+ "reqwest",
  "serde",
  "serde_json",
 ]

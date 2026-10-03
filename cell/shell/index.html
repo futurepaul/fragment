@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#181818">
+  <title>Finite.Computer</title>
+  <link rel="manifest" href="/__shell/manifest.webmanifest">
+  <link rel="icon" href="/__shell/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/__shell/shell.css">
+  <link rel="stylesheet" href="/__shell/agent-identity.css">
+</head>
+<body>
+  <!-- the shell: the platform's one page (docs/cloudflare-v1.md, decisions 6–12).
+       sidebar | gutter | chat | gutter | viewer, one grid (layout.js). Design:
+       Skyler's handoff, 2026-10-02. -->
+  <div class="layout" id="layout" hidden>
+    <div class="sidebar-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="brand" id="brand">Finite.Computer</div>
+        <div class="sidebar-top-actions">
+        <button class="icon-button" id="search-agents" type="button" title="Search chats, apps and messages" aria-label="Search chats, apps and messages" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+        </button>
+        </div>
+      </div>
+      <div class="section-label agents-label">Agents<span class="section-actions"><button class="icon-button small" id="new-group" type="button" title="New group chat" aria-label="New group chat" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/></svg>
+        </button><button class="icon-button small" id="new-agent" type="button" title="New agent" aria-label="New agent">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button></span></div>
+      <nav class="rows" id="chats"></nav>
+      <div class="section-label">Apps<button class="icon-button small" id="add-app" type="button" title="Add an app" aria-label="Add an app"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+      <nav class="rows" id="apps"></nav>
+      <div class="spacer"></div>
+      <div class="update" id="update" hidden>
+        <div class="update-confirm" id="update-confirm" hidden>
+          <p id="update-text">A new version of your computer is out. Update it now? It restarts; your agents, chats and files are kept.</p>
+          <div class="update-actions"><button type="button" id="update-go">Update</button><button type="button" id="update-cancel">Not now</button></div>
+        </div>
+        <button class="update-pill" id="update-pill" type="button">Update available</button>
+      </div>
+      <button class="row settings" id="settings" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="label">Settings</span></button>
+    </aside>
+    </div>
+    <div class="gutter gutter-col" id="gutter-left" role="separator" aria-orientation="vertical" aria-label="Collapse or resize sidebar" title="Click to collapse · drag to resize"></div>
+
+    <main class="chat">
+      <header class="topbar">
+        <div class="topbar-left">
+        <button class="icon-button when-left-closed" id="toggle-left" type="button" title="Show sidebar (⌘B)" aria-label="Show sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+        <button class="icon-button when-left-closed" id="new-agent-top" type="button" title="New agent" aria-label="New agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
+        <button class="agent-heading" id="agent-heading" type="button" title="Agent menu" aria-label="Agent menu" aria-haspopup="menu" aria-expanded="false" aria-controls="menu" hidden>
+          <span id="agent-mark"></span><strong class="title" id="chat-title"></strong>
+          <svg class="lucide lucide-chevron-down" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <strong class="page-title" id="page-title" hidden></strong>
+        <div class="topbar-right">
+        <button class="icon-button toggle-right" id="toggle-right" type="button" title="Toggle viewer (⌥⌘B)" aria-label="Toggle viewer"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M15 4v16"/></svg><span class="badge" id="viewer-count" hidden></span></button>
+        </div>
+      </header>
+      <div class="frames" id="frames">
+        <div class="notice" id="notice"><strong>Loading…</strong></div>
+      </div>
+      <section class="page" id="settings-page" hidden></section>
+    </main>
+
+    <div class="gutter gutter-col" id="gutter-right" role="separator" aria-orientation="vertical" aria-label="Resize viewer" title="Drag to resize · double-click to reset"></div>
+    <section class="viewer is-empty" id="viewer" aria-label="Viewer">
+      <div class="stack" id="stack"></div>
+    </section>
+  </div>
+
+  <!-- first run: sign in, a username, then the first agent (decision 10) -->
+  <main class="first-run" id="first-run" hidden>
+    <div class="first-run-card" id="first-run-card"></div>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+  <div class="menu" id="menu" role="menu" hidden></div>
+  <!-- the platform's share sheet (/share/<name>), framed here: it is this origin's -->
+  <dialog class="sheet" id="sheet"></dialog>
+  <dialog class="rename-agent" id="new-agent-dialog" aria-labelledby="new-agent-title">
+    <form id="new-agent-form">
+      <h2 id="new-agent-title">A new agent</h2>
+      <p>What should it do? It takes the job, and you can talk it over in its chat.</p>
+      <label for="new-agent-job">Its job</label>
+      <textarea id="new-agent-job" name="job" rows="4" maxlength="4000" required placeholder="Keep an eye on my garden: what to plant, when to water."></textarea>
+      <label for="new-agent-name">A name (optional)</label>
+      <input id="new-agent-name" name="name" maxlength="48" autocomplete="off" placeholder="It picks one if you don't">
+      <p id="new-agent-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="new-agent-cancel" type="button">Cancel</button><button type="submit" id="new-agent-go">Make it</button></div>
+    </form>
+  </dialog>
+  <!-- a group chat: two or more of the person's agents, the first picked its lead (decision 8) -->
+  <dialog class="rename-agent" id="new-group-dialog" aria-labelledby="new-group-title">
+    <form id="new-group-form">
+      <h2 id="new-group-title">A new group chat</h2>
+      <p>Pick two agents or more. The first you pick leads: it answers unless you @mention another.</p>
+      <div class="pick-agents" id="new-group-agents" role="group" aria-label="Its agents"></div>
+      <label for="new-group-name">A name (optional)</label>
+      <input id="new-group-name" name="name" maxlength="48" autocomplete="off" placeholder="Its agents' names if you don't">
+      <p id="new-group-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="new-group-cancel" type="button">Cancel</button><button type="submit" id="new-group-go" disabled>Make it</button></div>
+    </form>
+  </dialog>
+  <dialog class="rename-agent" id="rename-agent" aria-labelledby="rename-title">
+    <form id="rename-form">
+      <h2 id="rename-title">Name your agent</h2>
+      <p>A name for what you’re working on together.</p>
+      <label for="agent-name" id="rename-label">Agent name</label>
+      <input id="agent-name" name="name" maxlength="48" required autocomplete="off">
+      <p id="rename-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="rename-cancel" type="button">Cancel</button><button type="submit">Save name</button></div>
+    </form>
+  </dialog>
+  <dialog class="search-dialog" id="search-dialog" aria-labelledby="search-title">
+    <div class="search-heading">
+      <h2 id="search-title">Search chats, apps and messages</h2>
+      <button class="icon-button" id="search-close" type="button" aria-label="Close search" title="Close search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+    <input id="workspace-search" type="search" aria-label="Search chats, apps and messages" placeholder="Search chats, apps and messages…" autocomplete="off" maxlength="256" autofocus>
+    <div class="search-results" id="search-results"></div>
+    <p class="search-status" id="search-status" role="status"></p>
+  </dialog>
+  <script type="module" src="/__shell/shell.js"></script>
+</body>
+</html>

@@ -214,11 +214,44 @@ fn a_new_ledger_is_a_guest_who_pays_for_nothing() {
     for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Wake, Spend::Write] {
         assert_eq!(w.ledger.gate(spend, T0), Err(Refused::GuestPayer), "{spend:?}");
     }
+    assert_eq!(w.ledger.gate(Spend::Create, T0), Err(Refused::GuestCreates), "nor makes a fragment");
     w.refused(reserve("r1"), Refused::GuestPayer);
     w.refused(meter("b1", vec![row("row:1", Usage::Requests { count: 1 }, None, T0)]), Refused::GuestPayer);
     let s = w.status();
     assert_eq!((s.plan, s.seat, s.month.as_str(), s.balance_micros, s.included_micros), (Plan::Guest, SeatState::Active, "2026-10", 0, 0));
     assert_eq!((s.overdraft_micros, s.price_book, s.reserved_micros), (OVERDRAFT_DEFAULT, 1, 0));
+}
+
+/// Goal: a guest makes no fragment (Paul, 2026-10-03), and a seat does,
+/// whatever its credit, until its fragments are read-only. Method: the
+/// question is a read, so it is asked twice (a replay answers the same and
+/// changes nothing), then again after an operator's plan change.
+#[test]
+fn a_guest_makes_no_fragments_and_a_seat_does() {
+    let mut w = World::guest();
+    let may = |w: &World| w.ledger.may_spend(&w.store, Spend::Create, None, true, w.now);
+    let (ledger, store) = (w.ledger.clone(), w.store.clone());
+    assert_eq!(may(&w), Err(Refused::GuestCreates));
+    assert_eq!(may(&w), Err(Refused::GuestCreates), "asked again, the same");
+    assert_eq!((&w.ledger, &w.store), (&ledger, &store), "a question changes nothing");
+    let refused = Refused::GuestCreates;
+    assert_eq!(refused.code(), ErrorCode::Forbidden, "a plan's refusal, as a role's: no credit is short");
+    assert!(refused.message().starts_with("guests can't create fragments"), "{}", refused.message());
+    w.ok(plan("plan:seat", Plan::Seat));
+    assert_eq!(may(&w), Ok(()), "a seat makes fragments");
+    w.spend("b1", 50 * USD);
+    assert_eq!((w.ledger.standing(T0), may(&w)), (Standing::AgentsStopped { why: Why::NoCredit }, Ok(())), "at zero too, as it writes");
+    w.ok(seat("s1", SeatState::Canceled, 1));
+    assert_eq!(may(&w), Ok(()), "a canceled seat too, on what is left");
+    w.spend("b2", 2 * USD);
+    assert_eq!(may(&w), Err(Refused::ReadOnly { why: Why::Overdrawn }), "past the overdraft its fragments are read-only, a new one too");
+    w.ok(plan("plan:guest", Plan::Guest));
+    assert_eq!(may(&w), Err(Refused::GuestCreates), "made a guest again: the plan first");
+    w.ok(seat("s2", SeatState::Active, 2));
+    w.ok(plan("plan:seat-again", Plan::Seat));
+    w.ok(grant("g1", 5 * USD));
+    assert_eq!(may(&w), Ok(()));
+    assert_eq!(may(&w.restarted()), Ok(()), "restarted, the same answer");
 }
 
 // Grants
@@ -553,7 +586,7 @@ fn every_refusal_of_a_reservation() {
     w.refused(Op::Reserve(Reserve { fragment: Some("a b".into()), ..reservation("r1", turn()) }), bad_id);
     w.refused(Op::Reserve(Reserve { agent: Some(String::new()), ..reservation("r1", turn()) }), bad_id);
     w.refused(Op::Reserve(reservation("r1", flash(price::QUANTITY_MAX + 1, 0))), Refused::Invalid { what: Invalid::Usage(UsageFault::Quantity) });
-    for spend in [Spend::Wake, Spend::Write] {
+    for spend in [Spend::Wake, Spend::Write, Spend::Create] {
         w.refused(Op::Reserve(Reserve { spend, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Spend });
     }
     w.refused(Op::Reserve(Reserve { capped: true, ..reservation("r1", turn()) }), Refused::Invalid { what: Invalid::Capped });
@@ -912,6 +945,8 @@ fn money_refusals_are_402_with_a_reason_people_can_read() {
     assert_eq!(Refused::ConflictingBody.code(), ErrorCode::ConflictingBody);
     assert_eq!(Refused::UnknownRef.code(), ErrorCode::NotFound);
     assert_eq!(Refused::GuestPayer.code(), ErrorCode::Forbidden);
+    assert_eq!(Refused::GuestCreates.code(), ErrorCode::Forbidden);
+    assert_eq!(serde_json::to_value(Refused::GuestCreates).unwrap(), serde_json::json!({ "refused": "guest_creates" }));
     assert_eq!(Refused::TooManyHolds.code(), ErrorCode::RateLimited);
     assert_eq!(Refused::TooLarge.code(), ErrorCode::TooLarge);
     assert_eq!(Refused::Invalid { what: Invalid::Rows }.code(), ErrorCode::InvalidRequest);

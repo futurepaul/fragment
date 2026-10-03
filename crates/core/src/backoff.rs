@@ -1,7 +1,8 @@
 //! How long a row of an outbox waits after a failed try: the index outbox
-//! (members.rs, a membership change to a person's `Principal` cell) and
-//! the delivery outbox (deliveries.rs, a delivery to the queue) back off
-//! alike.
+//! (members.rs, a membership change to a person's `Principal` cell), the
+//! joined outbox (runs_on.rs, an agent member's notice to its computer)
+//! and the delivery outbox (deliveries.rs, a delivery to the queue) back
+//! off alike.
 
 /// The wait after try number `attempts` failed: 2^attempts seconds, at
 /// most ten minutes. `attempts` counts the failed tries, from 1 (a count

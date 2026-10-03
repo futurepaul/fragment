@@ -77,8 +77,10 @@ pub enum Task {
     /// A routine fired (the agent fragment's cron posted it): a turn in
     /// `chat`, as the agent's owner asked it.
     Routine { text: String, chat: String },
-    /// The agent was added to a fragment: list them again now.
-    Joined,
+    /// The agent was added to a fragment: list them again now. That
+    /// fragment's members changed, so every view of it read before is stale
+    /// (another agent of this computer in it would miss the new one).
+    Joined { fragment: Option<String> },
     Other,
 }
 
@@ -191,7 +193,7 @@ pub fn task(body: &Value) -> Task {
             (Some(text), Some(chat)) if !chat.is_empty() && chat.len() <= 128 => Task::Routine { text, chat },
             _ => Task::Other,
         },
-        Some("joined") => Task::Joined,
+        Some("joined") => Task::Joined { fragment: text_field(o, "fragment").filter(|f| !f.is_empty() && f.len() <= 128) },
         _ => Task::Other,
     }
 }
@@ -471,7 +473,9 @@ mod tests {
     #[test]
     fn tasks_read() {
         assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c.paul" })), Task::Routine { text: "water".into(), chat: "c.paul".into() });
-        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c.paul" })), Task::Joined);
+        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c.paul" })), Task::Joined { fragment: Some("c.paul".into()) });
+        assert_eq!(task(&json!({ "kind": "joined" })), Task::Joined { fragment: None }, "a join naming no fragment still lists them again");
+        assert_eq!(task(&json!({ "kind": "joined", "fragment": "" })), Task::Joined { fragment: None });
         assert_eq!(task(&json!({ "kind": "routine", "text": "water" })), Task::Other);
         assert_eq!(task(&json!("routine")), Task::Other);
     }

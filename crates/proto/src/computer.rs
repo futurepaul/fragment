@@ -49,18 +49,23 @@ pub struct ComputerAgent {
     pub name: String,
     /// Its owner, a person.
     pub owner: String,
-    /// The connections (WorkOS Pipes providers) its owner lets it use
-    /// through the computer's swap (decision 22); none by default.
+    /// The connections (WorkOS Pipes providers) it may have swapped in
+    /// through the computer's swap (decision 22): `None` (`null`), every
+    /// connection its owner has, by default, since a person's agents are
+    /// not fenced from each other (decision 44); a list narrows it to
+    /// those, a role's specialization rather than a wall.
     #[serde(default)]
-    pub connections: Vec<String>,
+    pub connections: Option<Vec<String>>,
 }
 
 /// `PUT /api/computers/{id}/agents/{fragment}/connections`: the
-/// connections an agent may use, all of them named at once.
+/// connections an agent may use, all of them named at once, or `null`
+/// for every connection its owner has (the default again). The field is
+/// named even when it is `null`: the route refuses a body without it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnections {
-    pub connections: Vec<String>,
+    pub connections: Option<Vec<String>>,
 }
 
 /// `GET /api/computers/{id}` (its owner), `POST /api/computers` (made, or
@@ -106,5 +111,19 @@ mod tests {
         assert_eq!(computer_of_label("todo--paul"), None);
         // a computer's label is never a fragment's host: `computer` is reserved
         assert_eq!(crate::from_flat_name("0123456789abcdef01234567--computer"), None);
+    }
+
+    /// Goal: an agent's connections are every one its owner has unless a
+    /// list narrows them (decision 44), and `null` says so on the wire.
+    #[test]
+    fn an_agents_connections_are_all_unless_narrowed() {
+        let all: AgentConnections = serde_json::from_str(r#"{"connections":null}"#).unwrap();
+        assert_eq!(all.connections, None);
+        let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
+        assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None };
+        assert_eq!(serde_json::to_value(&agent).unwrap()["connections"], serde_json::Value::Null, "the default is named, as null");
+        let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
+        assert_eq!(older.connections, None);
     }
 }

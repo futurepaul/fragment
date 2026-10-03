@@ -120,8 +120,14 @@ pub const CATCHUP_PAGES_MAX: u32 = 20;
 pub const CATCHUP_PAGE_RECORDS: u32 = 1000;
 
 /// How long a chat's members (the lead, the agents in it) and its writers'
-/// names are reused before they are read again.
+/// names are reused before they are read again (sooner when one of the
+/// computer's agents joins it).
 pub const VIEW_TTL_MS: u64 = 30_000;
+
+/// Joins of the computer's agents to fragments remembered at once, each for
+/// a view's life (`VIEW_TTL_MS`): past it they are forgotten, and a view
+/// may be stale until its life ends.
+pub const JOINS_HELD_MAX: usize = 1024;
 
 /// A `tasks` record (a routine firing) older than this when first read is
 /// history: a routine missed while the computer could not wake is skipped,

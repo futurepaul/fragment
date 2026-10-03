@@ -10,19 +10,62 @@
 //!   is `computer:<id>`: each new record on the channel wakes it, and the
 //!   guest reads the channel itself. A page opening the fragment, which a
 //!   computer may be about to hear from, wakes it early (a pre-wake).
+//! - **An agent added as a member** (Paul, 2026-10-03: agents are woken
+//!   eagerly, and no template must remember a convention): the platform
+//!   tells its computer. The membership's write keeps a row in this
+//!   fragment's `joined_outbox` in the same turn; delivering it asks the
+//!   agent's owner's computer (one per person: decision 13), which has
+//!   the agent's own fragment post `{kind: "joined", fragment}` on its
+//!   `tasks` (keyed by this membership, so a retry posts nothing twice),
+//!   and then this fragment wakes that computer (`Wake::Joined`) on its
+//!   own. A row that fails for a passing reason is tried again from the
+//!   alarm; an agent that runs on no computer is told nothing.
 
 use fragment_core::npub;
-use fragment_proto::{split_fragment_name, valid_channel_name, ErrorCode, IdentityKind, Role};
+use fragment_proto::{split_fragment_name, valid_channel_name, valid_fragment_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
+use crate::js;
 use crate::registry::calls::{self, By};
 
 /// At most one pre-wake a computer from one fragment this often.
 const PREWAKE_EVERY_MS: i64 = 30_000;
+/// The agent fragment's channel its computer follows for its routines and
+/// its new fragments (docs/chat-records.md, `tasks`).
+pub(crate) const TASKS: &str = "tasks";
+/// Notices one flush sends: a member's change makes one, so a flush has
+/// few; the rest wait for the next.
+const JOINED_FLUSH_MAX: i64 = 16;
+/// Tries at one notice before it is dropped, with an event: with the wait
+/// doubling to ten minutes, about two and a half hours of a computer that
+/// does not answer.
+const JOINED_ATTEMPTS_MAX: i64 = 20;
+
+/// A `joined_outbox` row, as `agent_added` wrote it.
+#[derive(Deserialize)]
+struct Notice {
+    principal: String,
+    owner: String,
+    added_at: i64,
+    attempts: i64,
+}
+
+#[derive(Deserialize)]
+struct Joined {
+    computer: String,
+    fragment: String,
+    at: i64,
+}
+
+/// A failure that trying again may change: the computer, or the agent's
+/// fragment, did not answer.
+fn passing(code: ErrorCode) -> bool {
+    matches!(code, ErrorCode::HostFailed | ErrorCode::UpstreamFailed | ErrorCode::NodeFull | ErrorCode::RateLimited | ErrorCode::RegistryUnavailable)
+}
 
 #[derive(Deserialize)]
 struct Assign {
@@ -65,7 +108,9 @@ impl FragmentCell {
                     None => {
                         let npub = self.must(MetaKey::Npub)?;
                         let key = npub::parse(&npub).ok_or_else(|| CellError::host("the fragment's npub does not decode"))?;
-                        let agent = crate::ask_registry(&self.env, &calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key }).await?;
+                        // the agent is named for its fragment (a page shows it so: `__people`)
+                        let register = calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key, fragment: Some(self.name()?) };
+                        let agent = crate::ask_registry(&self.env, &register).await?;
                         self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
                         agent.id
                     }
@@ -91,6 +136,9 @@ impl FragmentCell {
                 }
                 Ok(json!({ "ok": true }))
             }
+            // its face (kind, title), for a page that names it: `__people`
+            // shows an agent by its fragment's title
+            "face" => Ok(self.meta(MetaKey::Face)?.and_then(|f| serde_json::from_str::<Value>(&f).ok()).unwrap_or(Value::Null)),
             "identity" => {
                 let computer = body["computer"].as_str().unwrap_or("");
                 self.assigned_to(computer)?;
@@ -123,7 +171,119 @@ impl FragmentCell {
                 let id = self.add_subscription(&b.identity, &b.channel, &wake_url(&b.computer))?;
                 Ok(json!({ "id": id, "channel": b.channel, "wake": true }))
             }
+            "joined" => {
+                // this agent was added to `fragment`: its guest hears so on
+                // `tasks`, when it declares one it can post to
+                let b: Joined = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+                self.assigned_to(&b.computer)?;
+                if !valid_fragment_name(&b.fragment) || b.at <= 0 {
+                    return Err(CellError::invalid("a join names a fragment and when it joined"));
+                }
+                if self.declared_channel(TASKS)?.is_none_or(|d| d.post.is_none()) {
+                    return Ok(json!({ "posted": false, "why": "its fragment declares no postable tasks channel" }));
+                }
+                let notice = json!({ "kind": "joined", "fragment": b.fragment });
+                let (record, appended) = self.append_own(TASKS, &notice, &format!("joined:{}:{}", b.fragment, b.at)).await?;
+                assert_eq!(record.channel, TASKS, "the notice is on tasks");
+                Ok(json!({ "posted": true, "seq": record.seq, "replayed": !appended }))
+            }
             r => Err(CellError::new(ErrorCode::NotFound, format!("no route computer/{r}"))),
+        }
+    }
+
+    /// An agent became a member here (`set_member`, `join`): its computer
+    /// is to hear so, in the turn of the membership's write (the row is
+    /// sent by `flush_joined`). A deployment without computers tells no one.
+    pub(crate) fn agent_added(&self, identity: &str, owner: Option<&str>, added_at: i64) -> CellResult<()> {
+        if self.cfg.computer_image.is_none() {
+            return Ok(());
+        }
+        let owner = owner.ok_or_else(|| CellError::host(format!("agent {identity} has no owner")))?;
+        assert!(npub::is_identity(identity), "a notice names an agent's identity, not {identity:?}");
+        assert!(added_at > 0, "a notice names when its agent joined");
+        self.exec(
+            "INSERT INTO joined_outbox (principal, owner, added_at, attempts, next_at) VALUES (?, ?, ?, 0, ?)
+             ON CONFLICT (principal) DO UPDATE SET owner = excluded.owner, added_at = excluded.added_at, attempts = 0, next_at = excluded.next_at",
+            vec![identity.into(), owner.into(), SqlStorageValue::Integer(added_at), SqlStorageValue::Integer(js::now_ms())],
+        )
+    }
+
+    /// A member that left takes its notice with it.
+    pub(crate) fn agent_removed(&self, identity: &str) -> CellResult<()> {
+        self.exec("DELETE FROM joined_outbox WHERE principal = ?", vec![identity.into()])
+    }
+
+    /// When the joined outbox next has a row due (for the alarm).
+    pub(crate) fn joined_due_at(&self) -> CellResult<Option<i64>> {
+        Ok(self.rows("SELECT MIN(next_at) AS at FROM joined_outbox", vec![])?.first().and_then(|r| r["at"].as_i64()))
+    }
+
+    /// Sends the due notices, oldest first: each agent's owner's computer
+    /// has the agent's fragment post `joined`, then is woken on its own,
+    /// so the member's change never waits for a start (as a pre-wake does
+    /// not). A row goes once its computer answered, or for good when
+    /// trying again cannot help (the agent runs nowhere, or moved); a
+    /// passing failure waits, doubling, and after its last try goes with
+    /// an event (never silently).
+    pub(crate) async fn flush_joined(&self) {
+        let Ok(name) = self.name() else { return };
+        let Ok(due) = self.typed::<Notice>(
+            "SELECT principal, owner, added_at, attempts FROM joined_outbox WHERE next_at <= ? ORDER BY next_at LIMIT ?",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(JOINED_FLUSH_MAX)],
+        ) else {
+            return;
+        };
+        let mut waiting = false;
+        for n in due {
+            // the agent's owner's one computer (decision 13): an agent runs only on its owner's
+            let computer = fragment_core::computer::default_computer_of(&n.owner);
+            let asked = json!({ "identity": n.principal, "fragment": name, "at": n.added_at });
+            let told = crate::computer::ask(&self.env, &computer, "computer/joined", &asked).await;
+            // only this membership's row: a newer one (left and added again) stays
+            let done = |cell: &FragmentCell| {
+                let _ = cell.exec("DELETE FROM joined_outbox WHERE principal = ? AND added_at = ?", vec![n.principal.as_str().into(), SqlStorageValue::Integer(n.added_at)]);
+            };
+            match told {
+                Ok(v) if v["runs"] == true => {
+                    done(self);
+                    let heard = if v["posted"] == true { "its tasks say so" } else { "its fragment has no tasks to say so on" };
+                    self.event(
+                        "agent.told",
+                        &format!("{}'s computer is told it joined, and woken ({heard})", npub::display(&n.principal)),
+                        json!({ "principal": npub::display(&n.principal), "computer": computer, "agent": v["agent"], "posted": v["posted"] }),
+                    );
+                    let env = self.env.clone();
+                    worker::wasm_bindgen_futures::spawn_local(async move {
+                        if let Err(e) = crate::computer::ask(&env, &computer, "computer/wake", &json!({ "why": "joined" })).await {
+                            console_log!("{}", json!({ "fragment": "joined-wake", "computer": computer, "error": e.message }));
+                        }
+                    });
+                }
+                Ok(_) => done(self),
+                Err(e) if !passing(e.code) => {
+                    done(self);
+                    if e.code != ErrorCode::NotFound {
+                        self.event("agent.untold", &format!("{}'s computer was not told it joined: {}", npub::display(&n.principal), e.message), json!({ "code": e.code }));
+                    }
+                }
+                Err(e) => {
+                    let attempts = n.attempts + 1;
+                    if attempts >= JOINED_ATTEMPTS_MAX {
+                        done(self);
+                        self.event("agent.untold", &format!("{}'s computer did not answer in {attempts} tries: {}", npub::display(&n.principal), e.message), json!({ "code": e.code }));
+                        continue;
+                    }
+                    waiting = true;
+                    let next_at = js::now_ms() + fragment_core::backoff::outbox_retry_ms(attempts);
+                    let _ = self.exec(
+                        "UPDATE joined_outbox SET attempts = ?, next_at = ? WHERE principal = ? AND added_at = ?",
+                        vec![SqlStorageValue::Integer(attempts), SqlStorageValue::Integer(next_at), n.principal.as_str().into(), SqlStorageValue::Integer(n.added_at)],
+                    );
+                }
+            }
+        }
+        if waiting {
+            let _ = self.schedule().await;
         }
     }
 

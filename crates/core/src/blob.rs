@@ -51,7 +51,7 @@ pub const IS_POINTER_JS: &str = r#"export function isBlobPointer(data) {
 /// a page or a script there (anything else is `application/octet-stream`).
 pub fn served_type(declared: &str) -> Option<&'static str> {
     let essence = declared.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/mpeg", "audio/wav", "application/pdf"]
+    ["image/jpeg", "image/png", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/mpeg", "audio/wav", "audio/webm", "audio/ogg", "audio/mp4", "application/pdf"]
         .into_iter()
         .find(|t| *t == essence)
 }
@@ -103,6 +103,10 @@ mod tests {
     fn served_types_are_passive_media() {
         assert_eq!(served_type("image/jpeg"), Some("image/jpeg"));
         assert_eq!(served_type(" Image/PNG ; q=1"), Some("image/png"));
+        // a voice memo as a browser records it (a chat's: docs/chat-records.md)
+        assert_eq!(served_type("audio/webm;codecs=opus"), Some("audio/webm"));
+        assert_eq!(served_type("audio/ogg; codecs=opus"), Some("audio/ogg"));
+        assert_eq!(served_type("audio/mp4"), Some("audio/mp4"));
         for active in ["text/html", "image/svg+xml", "text/javascript", "application/xml", "text/css", ""] {
             assert_eq!(served_type(active), None, "{active}");
         }

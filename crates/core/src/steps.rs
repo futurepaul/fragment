@@ -52,19 +52,10 @@ pub enum Step {
     AiText(AiText),
     #[serde(rename = "ai.image")]
     AiImage(AiImage),
-    #[serde(rename = "ai.video.start")]
-    AiVideoStart(AiVideo),
-    /// A started video's status, by its OpenRouter id.
-    #[serde(rename = "ai.video.poll")]
-    AiVideoPoll { id: String },
-    /// A finished video, saved to `path` (from `url`, when its poll named one).
-    #[serde(rename = "ai.video.save")]
-    AiVideoSave {
-        id: String,
-        path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        url: Option<String>,
-    },
+    /// `job.ai.video`: refused, whatever it asks, until videos run on
+    /// Cloudflare (crate::media).
+    #[serde(rename = "ai.video")]
+    AiVideo {},
     /// `job.agent`'s first step: a turn of the fragment's own agent for
     /// the run's principal, named by the run and this step, so a retried or
     /// replayed step reattaches to it rather than start another.
@@ -73,7 +64,22 @@ pub enum Step {
     /// A started turn's state, by its id (the start's answer).
     #[serde(rename = "agent.poll")]
     AgentPoll { turn: String },
+    /// `job.members()`: the fragment's members, as its page's `__members`
+    /// lists them (the first added first).
+    #[serde(rename = "members")]
+    Members {},
+    /// `job.people(ids)`: names for identities, as its page's `__people`
+    /// answers (at most `PEOPLE_MAX`).
+    #[serde(rename = "people")]
+    People { ids: Vec<String> },
+    /// `job.presence()`: who is here now, as its pages' presence lists
+    /// hold them (`{id, principal, data}`, one a socket that shares any).
+    #[serde(rename = "presence")]
+    Presence {},
 }
+
+/// The identities one `job.people` step names: a page's `__people` limit.
+pub const PEOPLE_MAX: usize = 64;
 
 /// `job.agent({prompt, conversation?, channel?})`: the message, the
 /// conversation it continues (a key the job chooses; none: the run's own),
@@ -165,24 +171,17 @@ pub struct AiText {
     pub max_tokens: Option<u64>,
 }
 
-/// `job.ai.image`: an image written to `main` at `path`.
+/// `job.ai.image`: a JPEG drawn by the one image model (crate::media),
+/// written to `main` at `path`. A key it does not take (a model, an
+/// aspect ratio) is refused, not ignored: there is no other model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiImage {
     pub prompt: String,
     pub path: String,
-    pub model: Option<String>,
-    pub aspect_ratio: Option<String>,
-}
-
-/// `job.ai.video`'s first step: a video generation started.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AiVideo {
-    pub prompt: String,
-    pub model: Option<String>,
-    /// Seconds, passed as given (its worst case is clamped: media.rs).
-    pub duration: Option<i64>,
-    pub resolution: Option<String>,
-    pub aspect_ratio: Option<String>,
+    /// Diffusion steps (crate::media: 4 unless named, at most 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
 }
 
 impl Step {
@@ -210,11 +209,12 @@ impl Step {
             Step::FilesRemove { .. } => "files.remove",
             Step::AiText(_) => "ai.text",
             Step::AiImage(_) => "ai.image",
-            Step::AiVideoStart(_) => "ai.video.start",
-            Step::AiVideoPoll { .. } => "ai.video.poll",
-            Step::AiVideoSave { .. } => "ai.video.save",
+            Step::AiVideo {} => "ai.video",
             Step::AgentStart(_) => "agent.start",
             Step::AgentPoll { .. } => "agent.poll",
+            Step::Members {} => "members",
+            Step::People { .. } => "people",
+            Step::Presence {} => "presence",
         }
     }
 }
@@ -268,19 +268,20 @@ mod tests {
             ("files.write", json!({ "path": "log.txt", "text": "a\n", "expect": null })),
             ("files.remove", json!({ "path": "log.txt" })),
             ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
-            ("ai.image", json!({ "prompt": "a cat", "path": "cat.png" })),
-            ("ai.video.start", json!({ "prompt": "a cat", "duration": 6, "resolution": "768p" })),
-            ("ai.video.poll", json!({ "id": "v1" })),
-            ("ai.video.save", json!({ "id": "v1", "path": "cat.mp4", "url": "https://openrouter.ai/v1" })),
+            ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
+            ("ai.video", json!({})),
             ("agent.start", json!({ "prompt": "summarize today", "conversation": "daily", "channel": "ask" })),
             ("agent.poll", json!({ "turn": "0123456789abcdef01234567" })),
+            ("members", json!({})),
+            ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
+            ("presence", json!({})),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 17, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -299,8 +300,13 @@ mod tests {
         );
         let Ok(Step::Fetch(f)) = step("fetch", json!({ "url": "https://x/", "method": "post", "headers": {}, "body": "{}" })) else { panic!() };
         assert_eq!((f.method.as_str(), f.body.as_deref()), ("post", Some("{}")));
-        let Ok(Step::AiVideoStart(v)) = step("ai.video.start", json!({ "prompt": "p" })) else { panic!() };
-        assert_eq!((v.duration, v.model), (None, None));
+        let Ok(Step::AiImage(i)) = step("ai.image", json!({ "prompt": "p", "path": "a.jpg" })) else { panic!() };
+        assert_eq!(i.steps, None, "the model's own default unless named");
+        assert_eq!(
+            step("ai.video", json!({ "prompt": "waves", "path": "v.mp4", "duration": 6 })),
+            Ok(Step::AiVideo {}),
+            "a video's args are not read: it is refused whatever it asks"
+        );
         let Ok(Step::AgentStart(a)) = step("agent.start", json!({ "prompt": "p" })) else { panic!() };
         assert_eq!((a.conversation, a.channel), (None, None), "the run's own conversation, posted nowhere");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
@@ -322,14 +328,19 @@ mod tests {
         refused("ai.text", json!({ "model": 7 }), "invalid type");
         refused("ai.text", json!({ "model": "cheap", "reasoning_effort": true }), "invalid type");
         refused("ai.image", json!({ "prompt": "p" }), "missing field `path`");
+        refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "model": "google/gemini-3.1-flash-lite-image" }), "unknown field `model`");
+        refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "steps": -1 }), "invalid value");
+        refused("ai.video.start", json!({ "prompt": "p" }), "unknown variant `ai.video.start`");
         refused("fetch", json!({ "url": "https://x/", "method": "GET", "headers": { "n": 1 } }), "invalid type");
         refused("publish", json!({ "channel": "feed", "body": {} }), "missing field `kind`");
         refused("push", json!({ "payload": {} }), "missing field `who`");
-        refused("ai.video.save", json!({ "path": "v.mp4" }), "missing field `id`");
         refused("files.read", json!("log.txt"), "invalid type");
         refused("agent.start", json!({ "conversation": "daily" }), "missing field `prompt`");
         refused("agent.start", json!({ "prompt": 7 }), "invalid type");
         refused("agent.poll", json!({}), "missing field `turn`");
+        refused("people", json!({}), "missing field `ids`");
+        refused("people", json!({ "ids": "id:x" }), "invalid type");
+        refused("people", json!({ "ids": [7] }), "invalid type");
     }
 
     #[test]

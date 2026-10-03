@@ -1,9 +1,10 @@
 //! The usage ledger (phase 3 of docs/cloudflare-v1.md; docs/ledger.md),
-//! end to end on workerd: plans and guests, a seat's included credit,
-//! operators' commands, AI steps' reserve, settle and release (bugs 2 and
-//! 3), zero credit and the overdraft, a fragment's cap, the meters that
-//! reach the ledger through the queue, and the model route, streamed and
-//! not. The model is the Workers AI fake behind the model route (a lower
+//! end to end on workerd: plans and guests (who make no fragments, and
+//! still edit a seat's), a seat's included credit, operators' commands, AI
+//! steps' reserve, settle and release (bugs 2 and 3), zero credit and the
+//! overdraft (past it, no new fragments, and cron and triggers start no
+//! runs until a top-up), a fragment's cap, the meters that reach the
+//! ledger through the queue, and the model route, streamed and not. The model is the Workers AI fake behind the model route (a lower
 //! rung at the vendor boundary, labeled so); a test sets the usage each
 //! answer reports, so every charge is checked against the price book.
 
@@ -11,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::Used;
+use fragment_fakes::workers_ai::{image_bytes, Used, IMAGE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -24,6 +25,19 @@ use crate::Suite;
 
 const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
+/// A fragment whose cron (due next new year, unless a test makes it due)
+/// and file trigger each run a mutation, and a read `landed` asks.
+const TRIGGERS_APP: &[u8] = br#"import { DurableObject } from "cloudflare:workers";
+export class App extends DurableObject {
+  tick() { return { ok: true }; }
+  filed({ paths }) { return { paths }; }
+  notes() { return { notes: [] }; }
+}
+"#;
+const TRIGGERS_JSON: &[u8] = br#"{
+  "operations": { "tick": { "kind": "mutation" }, "filed": { "kind": "mutation" }, "notes": { "kind": "query", "role": "viewer" } },
+  "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
+}"#;
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
 const GLM: &str = "@cf/zai-org/glm-5.3";
 const USD: i64 = 1_000_000;
@@ -181,9 +195,15 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         &sv,
     );
 
-    // ---- a guest: no agents, no AI steps (decision 25)
+    // ---- a guest: no agents, no AI steps, no fragments of their own
+    // (decision 25; Paul, 2026-10-03). Their fragment was made while they
+    // were a seat (the default here), so it is one a guest owns.
     let guest = api.person()?;
     let guest_id = api.identity(&guest)?;
+    let guest_app = s.named(api, &guest, "ledger-guest")?;
+    let c = s.create(api, &guest, &guest_app)?;
+    ship(s, &c, LEDGER_APP, LEDGER_JSON);
+    landed(s, api, &guest, &guest_app, wait);
     let r = command(&guest_id, "plan", json!({ "id": "to-guest", "plan": "guest" }))?;
     let gv = ledger(api, &guest);
     s.ok(
@@ -191,10 +211,21 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && gv["plan"] == "guest" && gv["standing"] == json!({ "standing": "agents_stopped", "why": "guest" }),
         &gv,
     );
-    let guest_app = s.named(api, &guest, "ledger-guest")?;
-    let c = s.create(api, &guest, &guest_app)?;
-    ship(s, &c, LEDGER_APP, LEDGER_JSON);
-    landed(s, api, &guest, &guest_app, wait);
+    let refused = |r: &Reply| r.status == 403 && r.error() == "forbidden" && r.message().starts_with("guests can't create fragments");
+    let made = s.named(api, &guest, "ledger-guest-new")?;
+    let r = api.create(&guest, &made)?;
+    s.ok("a guest's create is refused, 403, saying why", refused(&r), &r);
+    let again = api.create(&guest, &made)?;
+    let none = api.status(&guest, &made)?;
+    s.ok("asked again it is refused again (a refusal is not remembered), and nothing was made", refused(&again) && none.status == 404, format!("{again} | {none}"));
+    let r = api.signed(&guest, "POST", "/api/fragments", Some(&json!({ "name": s.name("ledger-guest-todo"), "template": "todo" })))?;
+    s.ok("nor does a guest make one from a template", refused(&r), &r);
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&guest, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &guest) })))?;
+    anyhow::ensure!(r.status == 200, "a guest's agent key: {r}");
+    let r = api.signed(&hand, "POST", "/api/fragments", Some(&json!({ "name": s.name("ledger-guest-agent") })))?;
+    s.ok("nor does an agent make one for a guest", refused(&r), &r);
     let calls = s.ai.calls().len();
     let r = api.op(&guest, &guest_app, "summarize", "g-1", json!({ "text": "a guest's step" }))?;
     let run = settle(api, &guest, &guest_app, started(&r), &["succeeded", "held"], wait);
@@ -221,6 +252,15 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
+
+    // a guest editor of a seat's fragment still writes there: its owner pays (decision 26)
+    api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{guest_id}"), Some(&json!({ "role": "editor" })))?;
+    let w = api.op(&guest, &name, "note", "gn-seat", json!({ "text": "a guest edits a seat's fragment" }))?;
+    let post = api.signed(&guest, "POST", &format!("/api/f/{name}/channels/talk"), Some(&json!({ "id": "g-talk", "body": { "text": "a guest posts" } })))?;
+    s.ok("a guest editor still writes to a seat's fragment, and posts there", w.status == 200 && post.status == 200, format!("{w} | {post}"));
+    let r = command(&guest_id, "plan", json!({ "id": "to-seat", "plan": "seat" }))?;
+    let made_now = api.create(&guest, &made)?;
+    s.ok("an operator moves the guest to a seat, and the same create makes the fragment", r.status == 200 && made_now.status == 200 && made_now.body["name"] == made.as_str(), &made_now);
     let before = ledger(api, &owner);
     s.ai.set_usage(&[Used { prompt: 1000, cached: 200, completion: 500 }]);
     let r = api.op(&owner, &name, "summarize", "t-1", json!({ "text": "the notes", "tier": "cheap" }))?;
@@ -286,18 +326,31 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": run, "calls": s.ai.calls().len() - calls }),
     );
     lever(api, &name, "fail-after-paid", json!({ "times": 1 }))?;
-    let images = || s.openrouter.calls().iter().filter(|c| c.1 == "/api/v1/images").count();
+    let images = || s.ai.calls().iter().filter(|c| c.model == IMAGE_MODEL).count();
     let drawn = images();
-    let r = api.op(&owner, &name, "draw", "d-1", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.png" }))?;
+    let r = api.op(&owner, &name, "draw", "d-1", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let image = charge(&Usage::Billed { vendor: "openrouter".into(), micros: 2_000 });
+    // Workers AI's price: 4.80 neurons a 512×512 tile, 9.60 a step (fragment_core::media)
+    let image = |tiles: u64, steps: u64| charge(&Usage::Neurons { milli: tiles * 4_800 + steps * 9_600 });
     s.ok(
-        "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2)",
+        "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2), charged its 4 tiles and 4 steps in neurons",
         run["status"] == "succeeded"
-            && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.png") == Some(fragment_fakes::openrouter::image_bytes("a lighthouse"))
+            && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
             && images() == drawn + 1
-            && run_charged(api, &owner_id, &name, &run) == image,
+            && run_charged(api, &owner_id, &name, &run) == image(4, 4),
         json!({ "run": run, "images": images() - drawn }),
+    );
+    let r = api.op(&owner, &name, "draw", "d-wide", json!({ "prompt": "a wide shore", "path": "art/shore.jpg", "steps": 8 }))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let step = run_steps(api, &owner_id, &name, &run);
+    s.ok(
+        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, past its 1024×1024 reservation, from its usage",
+        run["status"] == "succeeded"
+            && step.len() == 1
+            && step[0]["entry"]["end"]["basis"] == "usage"
+            && run_charged(api, &owner_id, &name, &run) == image(6, 8)
+            && m(&ledger(api, &owner), "reservedMicros") == 0,
+        json!({ "run": run, "step": step }),
     );
     // a replay pays only for the step it had not paid for: the first call
     // answers, the second is refused for good
@@ -348,6 +401,21 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("while its fragments keep taking writes and serving reads", w.status == 200 && q.status == 200, json!([w.status, q.status]));
 
     // ---- past the overdraft: read-only until a top-up brings it above zero
+    // A fragment of the owner's whose cron and file triggers run mutations,
+    // made at zero credit (a person makes fragments there, as they write).
+    // Its cron is due next new year; the `cron-now` lever makes it due at once.
+    let trig = s.named(api, &owner, "ledger-triggers")?;
+    let tc = s.create(api, &owner, &trig)?;
+    ship(s, &tc, TRIGGERS_APP, TRIGGERS_JSON);
+    landed(s, api, &owner, &trig, wait);
+    let runs = |op: &str| -> Vec<Value> {
+        api.signed(&owner, "GET", &format!("/api/f/{trig}/runs?op={op}"), None).ok().and_then(|r| r.body["runs"].as_array().cloned()).unwrap_or_default()
+    };
+    let blocked = |op: &str, via: &str| runs(op).into_iter().find(|r| r["via"] == via && r["status"] == "blocked" && r["error"].as_str().is_some_and(|e| e.contains("read-only")));
+    let succeeded = |op: &str, via: &str| runs(op).iter().filter(|r| r["via"] == via && r["status"] == "succeeded").count();
+    lever(api, &trig, "cron-now", json!({}))?;
+    let ran = s.eventually(wait, || succeeded("tick", "cron") == 1);
+    s.ok("before, its cron runs (a mutation, as the fragment)", ran, json!(runs("tick")));
     let back = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
     command(&owner_id, "grant", json!({ "id": "g-back", "micros": back, "by": op_id, "why": "back above zero" }))?;
     let v = ledger(api, &owner);
@@ -371,13 +439,43 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("then its mutations, posts, file writes and deploys are refused, 402, saying why", refused, format!("{w} | {post} | {files} | {deploy}"));
     let q = api.op(&owner, &name, "notes", "q", json!({}))?;
     let st = api.status(&owner, &name)?;
-    s.ok("while its reads still serve", q.status == 200 && q.body["result"]["notes"].as_array().is_some_and(|n| n.len() == 1) && st.status == 200, format!("{q} | {st}"));
+    s.ok(
+        "while its reads still serve",
+        q.status == 200 && q.body["result"]["notes"].as_array().is_some_and(|n| n.iter().any(|t| t == "at zero")) && st.status == 200,
+        format!("{q} | {st}"),
+    );
+    let over = api.create(&owner, &s.named(api, &owner, "ledger-over")?)?;
+    s.ok("nor do they make a new fragment, 402, saying why", over.status == 402 && over.error() == "budget_used_up" && over.message().contains("read-only"), &over);
+
+    // its cron and its triggers start no runs: each is a blocked run, saying why (Paul, 2026-10-03)
+    lever(api, &trig, "forget-standing", json!({}))?;
+    lever(api, &trig, "cron-now", json!({}))?;
+    let cron = s.eventually(wait, || blocked("tick", "cron").is_some());
+    s.ok("past the overdraft its cron starts no run: the tick is a blocked run, saying why", cron && succeeded("tick", "cron") == 1, json!(runs("tick")));
+    s.commit(&tc, &[("notes/past.md", Some(b"past the overdraft"))]);
+    let filed = s.eventually(wait, || blocked("filed", "files").is_some());
+    s.ok("nor does a file trigger, for a commit to main from outside", filed && succeeded("filed", "files") == 0, json!(runs("filed")));
+    let held = blocked("tick", "cron").map(|r| r["id"].clone()).unwrap_or_default();
+    let r = api.signed(&owner, "POST", &format!("/api/f/{trig}/replay"), Some(&json!({ "run": held })))?;
+    s.ok("and a replay of the blocked run is refused, 402, saying why", r.status == 402 && r.error() == "budget_used_up" && r.message().contains("read-only"), &r);
+
     let top = m(&ledger(api, &owner), "balanceMicros").unsigned_abs() as i64 + USD;
     command(&owner_id, "grant", json!({ "id": "g-top", "micros": top, "by": op_id, "why": "a top-up" }))?;
     lever(api, &name, "forget-standing", json!({}))?;
     let w = api.op(&owner, &name, "note", "n-top", json!({ "text": "after the top-up" }))?;
     let v = ledger(api, &owner);
     s.ok("a top-up above zero restores writes", w.status == 200 && v["standing"]["standing"] == "ok", format!("{w} | {v}"));
+    lever(api, &trig, "forget-standing", json!({}))?;
+    lever(api, &trig, "cron-now", json!({}))?;
+    let cron = s.eventually(wait, || succeeded("tick", "cron") == 2);
+    s.commit(&tc, &[("notes/after.md", Some(b"after the top-up"))]);
+    let filed = s.eventually(wait, || succeeded("filed", "files") == 1);
+    s.ok("and its cron and file triggers start runs again", cron && filed, json!({ "tick": runs("tick"), "filed": runs("filed") }));
+    let r = api.signed(&owner, "POST", &format!("/api/f/{trig}/replay"), Some(&json!({ "run": held })))?;
+    let replayed = s.eventually(wait, || {
+        api.signed(&owner, "GET", &format!("/api/f/{trig}/runs/{held}"), None).is_ok_and(|r| r.body["status"] == "succeeded" && r.body["attempt"] == 2)
+    });
+    s.ok("and the run blocked past the overdraft replays", r.status == 200 && replayed, &r);
 
     // ---- a fragment's cap stops everyone but its owner (decision 26)
     let visitor = api.person()?;

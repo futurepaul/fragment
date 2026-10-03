@@ -38,6 +38,9 @@
 //! operation's triggers pause themselves after repeated held runs or too
 //! many runs in an hour, and a chain of triggered runs deeper than the hop
 //! budget is blocked as a loop. Calls are never paused or rate-ceilinged.
+//! Past its owner's overdraft (decision 27) a trigger's run is blocked,
+//! saying why, until a top-up: the fragment is read-only, and its own
+//! schedule writes no more than its members may (Paul, 2026-10-03).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -45,6 +48,7 @@ use std::time::Duration;
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
+use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
@@ -89,6 +93,11 @@ pub(crate) struct NewRun<'a> {
     /// again with that id answers the same run.
     pub call: Option<(&'a str, &'a str)>,
     pub input: Value,
+    /// Why the owner's fragments are read-only, when they are (meter.rs
+    /// `read_only`, asked before the trigger fired): a triggered run is
+    /// then blocked. A call's is `None`: its caller's write was refused
+    /// already.
+    pub owner_read_only: Option<Why>,
 }
 
 pub(crate) struct Started {
@@ -272,7 +281,7 @@ struct FinishCall {
 
 impl FragmentCell {
     /// The fragment's own key: who triggered runs act as.
-    fn own_key(&self) -> CellResult<String> {
+    pub(crate) fn own_key(&self) -> CellResult<String> {
         npub::parse(&self.must(MetaKey::Npub)?).ok_or_else(|| CellError::host("the stored npub does not parse"))
     }
 
@@ -345,6 +354,8 @@ impl FragmentCell {
             Some(why)
         } else if triggered && self.is_paused(r.op)? {
             Some(format!("{} is paused (`fragment unpause`)", r.op))
+        } else if let Some(why) = r.owner_read_only.filter(|_| triggered) {
+            Some(format!("{}: its triggers start no runs until then", crate::meter::read_only_refusal(why).message))
         } else if triggered
             && self.count_of(
                 "SELECT COUNT(*) AS n FROM runs WHERE op = ? AND via NOT IN ('call', 'job') AND status != 'blocked' AND created_at > ?",
@@ -517,7 +528,7 @@ impl FragmentCell {
             "advance" => {
                 let answer = self.advance(decode(body)?).await?;
                 if answer.get("failed").is_some() || answer.get("done").is_some() {
-                    // the run ended: nothing settles its holds now (a video still waiting on its cost)
+                    // the run ended: nothing settles its holds now
                     self.release_ended_holds().await;
                 }
                 Ok(answer)
@@ -595,6 +606,8 @@ impl FragmentCell {
                     "role": run.role,
                     "run": run_id,
                     "attempt": attempt,
+                    "via": run.via.as_str(),
+                    "fragment": self.name()?,
                     "channels": self.declared_channels()?.keys().collect::<Vec<_>>(),
                 });
                 let results: Vec<Value> = results.iter().map(|r| serde_json::to_value(r).expect("a step result serializes")).collect();
@@ -780,11 +793,25 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideoStart(_) | Step::AiVideoPoll { .. } | Step::AiVideoSave { .. }) => {
+            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
                 self.step_ai(run, index, &ai).await
             }
             Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,
             Step::AgentPoll { turn } => self.step_agent_poll(&turn).await,
+            // what the fragment's own page reads, read for its code: who is
+            // in it, their names, and who is here
+            Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),
+            Step::People { ids } => {
+                if ids.len() > fragment_core::steps::PEOPLE_MAX {
+                    return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));
+                }
+                match crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await {
+                    Ok(answer) => Ok(json!(answer)),
+                    Err(e) if e.code == ErrorCode::InvalidRequest => Err(permanent(e.message)),
+                    Err(e) => Err(StepFail::Retry(e.message)),
+                }
+            }
+            Step::Presence {} => Ok(json!({ "here": self.present() })),
         }
     }
 
@@ -912,12 +939,26 @@ impl FragmentCell {
     }
 
     /// Starts the runs a record on a channel triggers, one for each
-    /// operation its triggers run. Each is the fragment's own call, its id
+    /// operation its triggers run (a trigger that names its posters' kind,
+    /// only for a member of that kind's record: a record that starts none
+    /// is no run, so it counts toward no breaker). Each is the fragment's own call, its id
     /// the record's (`record:<channel>:<seq>:<op>`), so this again for the
     /// same record answers the runs it started: a try after a failure part
     /// way starts only the rest, never one twice.
-    pub(crate) fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        let ops = self.channel_triggers(&record.channel)?;
+    ///
+    /// The owner's standing is read first, and only when the channel has
+    /// triggers. A post and an inbox delivery asked it a moment before
+    /// (their write's check), so it waits on nothing and their record and
+    /// its runs are written in one turn; a mutation's record or a job's
+    /// publish may wait on the ledger here, and a crash while it does is a
+    /// failed try, which their retries finish by the record's key.
+    pub(crate) async fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
+        if self.channel_triggers(&record.channel, &record.principal)?.is_empty() {
+            return Ok(vec![]);
+        }
+        let read_only = self.read_only().await?;
+        // read after the wait, so the runs start from the code installed now
+        let ops = self.channel_triggers(&record.channel, &record.principal)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];
@@ -937,14 +978,16 @@ impl FragmentCell {
                 depth,
                 call: Some((&call_id, &sha)),
                 input: input.clone(),
+                owner_read_only: read_only,
             })?;
             started.push(s.id);
         }
         Ok(started)
     }
 
-    /// Starts the runs a move of `main` triggers.
-    pub(crate) fn fire_files(&self, commit: Option<&str>, paths: &[String], depth: u32) -> CellResult<()> {
+    /// Starts the runs a move of `main` triggers, blocked when `read_only`
+    /// (the owner's standing, read before the move was: plane.rs).
+    pub(crate) fn fire_files(&self, commit: Option<&str>, paths: &[String], depth: u32, read_only: Option<Why>) -> CellResult<()> {
         for t in self.triggers()? {
             let TriggerOn::Files(pattern) = &t.on else { continue };
             let matched: Vec<&String> = paths.iter().filter(|p| glob::matches_path(pattern, p)).collect();
@@ -965,6 +1008,7 @@ impl FragmentCell {
                     "paths": matched.iter().take(FILES_INPUT_MAX).collect::<Vec<_>>(),
                     "more": matched.len().saturating_sub(FILES_INPUT_MAX),
                 }),
+                owner_read_only: read_only,
             })?;
         }
         Ok(())
@@ -1013,10 +1057,20 @@ impl FragmentCell {
     }
 
     /// From the alarm: starts the runs whose schedules are due. A schedule
-    /// whose previous run is still going skips this tick.
-    pub(crate) fn fire_cron(&self) -> CellResult<()> {
+    /// whose previous run is still going skips this tick; past the owner's
+    /// overdraft, each due tick is a blocked run that says why. The
+    /// standing is read first, and only when a schedule is due; the due
+    /// schedules are read after it, so what fires and what moves them on
+    /// is one turn (a deploy that replaced them meanwhile is seen).
+    pub(crate) async fn fire_cron(&self) -> CellResult<()> {
+        if self.count_of("SELECT COUNT(*) AS n FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(js::now_ms())])? == 0 {
+            return Ok(());
+        }
+        let read_only = self.read_only().await?;
         let now = js::now_ms();
-        for row in self.rows("SELECT idx, op, cron, next_at FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(now)])? {
+        let due = self.rows("SELECT idx, op, cron, next_at FROM schedules WHERE next_at <= ?", vec![SqlStorageValue::Integer(now)])?;
+        // bounded: one row per declared cron trigger
+        for row in due {
             let (op, expr) = (row["op"].as_str().expect("schedules.op is TEXT NOT NULL"), row["cron"].as_str().expect("schedules.cron is TEXT NOT NULL"));
             let (idx, at) = (row["idx"].as_i64().expect("schedules.idx is INTEGER"), row["next_at"].as_i64().expect("schedules.next_at is INTEGER NOT NULL"));
             let busy = self.count_of(
@@ -1035,6 +1089,7 @@ impl FragmentCell {
                     depth: 0,
                     call: None,
                     input: json!({ "cron": expr, "at": at }),
+                    owner_read_only: read_only,
                 })?;
             }
             match Cron::parse(expr).ok().and_then(|c| c.next_after(now.max(at))) {
@@ -1128,9 +1183,11 @@ impl FragmentCell {
 
     /// `POST /api/f/<name>/replay` (editor): a held or blocked run again, as
     /// a new attempt with its original input. Steps that already applied a
-    /// mutation replay it rather than apply it twice.
+    /// mutation replay it rather than apply it twice. A replay writes as
+    /// the call it repeats does: past the owner's overdraft it is refused.
     pub(crate) async fn replay(&self, caller: &Caller, body: Replay) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
+        self.writable().await?;
         let rows = self.rows(
             "UPDATE runs SET status = 'queued', attempt = attempt + 1, error = NULL, output = NULL, finished_at = NULL, launched_at = NULL
              WHERE id = ? AND status IN ('held', 'blocked') RETURNING op, attempt",

@@ -40,7 +40,7 @@ primitive gets a row and a check in the same commit.
 | Event ledger: `ctx.events.append`, `fragment events` | meatproxy, events-rfc, sycamore | The `events` channel (e2e `channels`, `members`); app-side appends are channel publishes |
 | Per-workflow state: `ctx.state` | meatproxy | The app's SQL, read and written through a job's call steps (e2e `jobs`) |
 | Secrets: declared by name, wrapped at rest, injected into runs | meatproxy, events-rfc, sycamore | e2e `secrets` (set, list by name, never returned, limits), `crates/core` sealing tests, and e2e `jobs` (`{{NAME}}` in a fetch header reaches the upstream and appears in no run, record, or event) |
-| Platform AI: `fragment:ai` text, image, video | meatproxy | e2e `ai` (OpenRouter text, image, and video with the fake: the fragment's key, the plan's models, images and videos stored as files and blobs, retries, out of credits) |
+| Platform AI: `fragment:ai` text, image, video | meatproxy | e2e `ai` (text and images on Workers AI with the fake: the model route's tiers, FLUX.1 [schnell] JPEGs stored as files and blobs, retries, refusals); video is off until it runs on Cloudflare (the debt ledger) |
 | Visibility: `public`, `link` (view token → per-fragment cookie), `viewers` (now `members`) | all | e2e `site`, `public`, `members`, `lockdown` |
 | Deploy, preview, rollback, drafts (git `main`/`live`) | all | e2e `deploy` (the CLI against the cell), `ops` (code installs from live) |
 | Folder sync: conflict copies, mass-delete guard, journals bound to repo identity | all (authoring) | e2e `sync` (conflict, modes, verify, mirror, guard, large files as pointers, continuous with the change feed) and `blobs`; the CLI unit tests run on `crates/fakes` |

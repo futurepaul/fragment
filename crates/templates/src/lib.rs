@@ -6,6 +6,8 @@ pub type Template = &'static [(&'static str, &'static [u8])];
 
 include!(concat!(env!("OUT_DIR"), "/templates.rs"));
 
+pub mod blessed;
+
 #[cfg(test)]
 mod tests {
     #[test]

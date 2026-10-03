@@ -43,6 +43,10 @@ struct Deployment {
     /// deployment's come from the zone.
     platform_host: Option<String>,
     fragment_suffix: Option<String>,
+    /// A Cloudflare API token with DNS Edit on the zones, by path: with it,
+    /// a deploy makes the proxied record its routes need when it is
+    /// missing (xtask/src/dns.rs). Without it, they are made by hand.
+    dns_token_file: Option<PathBuf>,
     /// Files holding the secrets.
     host_secret_file: PathBuf,
     codestorage: CodeStorage,
@@ -55,9 +59,6 @@ struct Deployment {
     ai_gateway: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
-    /// The deployment's OpenRouter key, which pays for image and video
-    /// steps until phase 7. Without it, they are off.
-    openrouter_api_key_file: Option<PathBuf>,
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
@@ -81,8 +82,10 @@ struct Computers {
     /// By name: each image's Dockerfile and build context, relative to the
     /// repo (`images/hermes/Dockerfile`, `images`), and its build variables.
     images: BTreeMap<String, Image>,
-    /// The container's instance type (default: Cloudflare's).
-    instance_type: Option<String>,
+    // No size here: a Durable Object's container is sized as it starts, at
+    // the instance its awake time is priced at (fragment_core::price
+    // `instance_size`; decision 13's 2 vCPU and 6 GiB), and wrangler
+    // refuses `instance_type` for one.
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -170,6 +173,8 @@ struct Names {
     /// `--<branch>`, for a branch.
     label_suffix: Option<String>,
     routes: Vec<String>,
+    /// The hosts those routes answer on, which must be proxied.
+    dns: Vec<crate::dns::Wanted>,
     /// Repos this deployment makes are named with this before them.
     repo_prefix: Option<String>,
 }
@@ -190,6 +195,8 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 suffix: d.zone.clone(),
                 label_suffix: Some(format!("--{b}")),
                 routes: vec![format!("{b}.{}/*", d.zone), format!("*--{b}.{}/*", d.zone)],
+                // one wildcard covers every branch's platform and fragments
+                dns: vec![crate::dns::Wanted { zone: d.zone.clone(), name: format!("*.{}", d.zone) }],
                 repo_prefix: Some(format!("{b}--")),
             })
         }
@@ -205,6 +212,11 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             suffix: suffix.clone(),
             label_suffix: None,
             routes: vec![format!("{platform}/*"), format!("*.{suffix}/*")],
+            // each its own zone on the account (the config's comment says so)
+            dns: vec![
+                crate::dns::Wanted { zone: platform.clone(), name: platform.clone() },
+                crate::dns::Wanted { zone: suffix.clone(), name: format!("*.{suffix}") },
+            ],
             repo_prefix: None,
         }),
         (Some(_), _, _) => bail!("a config with platform_host and fragment_suffix deploys one deployment of its own: no --branch"),
@@ -301,7 +313,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let org_key = read_secret(&d.codestorage.private_key_file)?;
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
-    let openrouter = d.openrouter_api_key_file.as_deref().map(read_secret).transpose()?;
+    let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     if let Some(p) = &d.default_plan {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
@@ -368,9 +380,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
                 images.insert(name.clone(), i);
             }
             container["images"] = Value::Object(images);
-            if let Some(t) = &computers.instance_type {
-                container["instance_type"] = json!(t);
-            }
         }
         None => {
             c.remove("containers");
@@ -422,6 +431,10 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
 
     println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
+    match &dns_token {
+        Some(token) => crate::dns::ensure(token, &d.account_id, &n.dns)?,
+        None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
+    }
     ensure(wrangler(&tools, &d.account_id).args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id).args(["queues", "create", q]), "a queue")?;
@@ -434,9 +447,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         "CODESTORAGE_PRIVATE_KEY": org_key,
         "WORKOS_API_KEY": workos_key,
     });
-    if let Some(k) = openrouter {
-        secrets["OPENROUTER_API_KEY"] = json!(k);
-    }
     for (name, key) in operator_keys {
         secrets[name] = json!(key);
     }
@@ -481,13 +491,13 @@ mod tests {
             zone: "finite.place".into(),
             platform_host: platform.map(str::to_string),
             fragment_suffix: suffix.map(str::to_string),
+            dns_token_file: None,
             host_secret_file: "h".into(),
             codestorage: CodeStorage { org: "o".into(), private_key_file: "k".into(), api: None },
             workos: WorkOs { client_id_file: "c".into(), api_key_file: "a".into() },
             operators: vec![],
             ai_gateway: None,
             default_plan: None,
-            openrouter_api_key_file: None,
             computers: None,
             connections: BTreeMap::new(),
             operator_keys: BTreeMap::new(),
@@ -505,6 +515,8 @@ mod tests {
 
         assert_eq!(n.platform_host, "dev.finite.place");
         assert_eq!(n.routes, ["dev.finite.place/*", "*--dev.finite.place/*"]);
+        // one wildcard in the zone covers the platform and every fragment
+        assert_eq!(n.dns, [crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() }]);
         assert_eq!((n.label_suffix.as_deref(), n.repo_prefix.as_deref()), (Some("--dev"), Some("dev--")));
         for bad in ["", "Dev", "a--b", "-a", "a-", "a.b", "seventeen-letters"] {
             assert!(names(&deployment(None, None), Some(bad)).is_err(), "{bad:?}");
@@ -516,6 +528,13 @@ mod tests {
         let d = deployment(Some("fragment.club"), Some("fragment.boats"));
         let n = names(&d, None).unwrap();
         assert_eq!(n.routes, ["fragment.club/*", "*.fragment.boats/*"]);
+        assert_eq!(
+            n.dns,
+            [
+                crate::dns::Wanted { zone: "fragment.club".into(), name: "fragment.club".into() },
+                crate::dns::Wanted { zone: "fragment.boats".into(), name: "*.fragment.boats".into() },
+            ]
+        );
         assert_eq!((n.label_suffix, n.repo_prefix), (None, None));
         assert!(names(&d, Some("b")).is_err());
         assert!(names(&deployment(None, None), None).is_err());
@@ -531,6 +550,17 @@ mod tests {
         assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"));
     }
 
+    /// OpenRouter went (a hard cut): a config that still names its key is
+    /// refused, not deployed without it.
+    #[test]
+    fn a_config_naming_openrouter_is_refused() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["openrouter_api_key_file"] = json!("~/.config/fragment/secrets/openrouter-api-key");
+        let refused = serde_json::from_value::<Deployment>(v).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
+    }
+
     /// A swap's names and hosts, and a default image, are checked before
     /// anything deploys.
     #[test]
@@ -542,7 +572,7 @@ mod tests {
         d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into(), price: KeyPrice { micros: 1, per: 1 } });
         assert!(checked(d).is_err());
         let mut d = deployment(None, None);
-        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), instance_type: None });
+        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new() });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
     }

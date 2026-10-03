@@ -128,7 +128,7 @@ pub(crate) async fn create(env: &Env, who: &Signed, label: &str, options: &Value
     let body = json!({ "name": name, "model": options["model"], "instructions": options["instructions"], "scope": scope });
     let mut made = ask_json(env, Method::Post, "/api/agents", &who.id, &body).await?;
     let hex = made["npub"].as_str().and_then(npub::parse).ok_or_else(|| CellError::host("the agents' script answered no key"))?;
-    let registered = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Identity(who.id.clone()), key: hex }).await?;
+    let registered = ask_registry(env, &calls::RegisterAgent { owner: calls::By::Identity(who.id.clone()), key: hex, fragment: None }).await?;
     made["id"] = json!(registered.id);
     Ok(made)
 }
@@ -154,7 +154,7 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .filter_map(|f| {
             // a people-only share is the fragment's to know: a call decides again
             let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
-            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None })
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, kind: f.kind, title: f.title, sharing: None, archived: false })
         })
         .collect();
     Ok(FragmentList { fragments })

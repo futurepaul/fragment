@@ -214,23 +214,28 @@ impl FragmentCell {
             Some((id, i)) => (SqlStorageValue::from(id), SqlStorageValue::Integer(i)),
             None => (SqlStorageValue::Null, SqlStorageValue::Null),
         };
-        let body = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
+        let raw = serde_json::value::to_raw_value(body).expect("a JSON value serializes");
         let rows = self.rows(
             "INSERT INTO records (channel, seq, at, principal, kind, body, op, idx, outboxed)
              VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM records WHERE channel = ?), ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
-            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), body.get().into(), op_id, idx],
+            vec![channel.into(), channel.into(), SqlStorageValue::Integer(now), principal.into(), kind.into(), raw.get().into(), op_id, idx],
         )?;
         let Some(row) = rows.first() else { return Ok(None) };
         let seq = row["seq"].as_i64().expect("records.seq is INTEGER");
         assert!(seq > 0, "a channel's records number from 1");
         // retention: the built-in channels, and those people may post to,
         // keep their newest records (a post's key goes with its record)
-        let kept = if BUILTIN_CHANNELS.contains(&channel) {
-            Some(limits::AUDIT_KEPT)
-        } else {
-            self.declared_channel(channel)?.and_then(|d| d.post).map(|_| limits::POSTED_KEPT)
+        let declared = if BUILTIN_CHANNELS.contains(&channel) { None } else { self.declared_channel(channel)? };
+        let kept = match &declared {
+            None if BUILTIN_CHANNELS.contains(&channel) => Some(limits::AUDIT_KEPT),
+            None => None,
+            Some(d) => d.post.map(|_| limits::POSTED_KEPT),
         };
+        // a message on an app channel goes to its people's search, in this turn
+        if let Some(d) = &declared {
+            self.log_search(d.read, channel, seq, now, body)?;
+        }
         if let Some(kept) = kept {
             assert!(kept >= 1, "a channel keeps the record just appended");
             self.exec(
@@ -238,7 +243,7 @@ impl FragmentCell {
                 vec![channel.into(), channel.into(), SqlStorageValue::Integer(kept)],
             )?;
         }
-        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body };
+        let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), kind: kind.to_string(), body: raw };
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -274,7 +279,15 @@ impl FragmentCell {
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
         let queued = if appended || !self.outboxed(record)? { self.outbox_record(record)? } else { false };
-        let fired = self.fire_channel(record, depth);
+        // a message logged for search is sent from the alarm, so a post
+        // waits on no person's list; an alarm not armed now is armed by the
+        // next thing that arms it (the cursor stays due), never failing the post
+        if self.search_woke.replace(false) {
+            if let Err(e) = self.schedule().await {
+                console_error!("record {}#{}: the alarm was not armed for search ({:?}): {}", record.channel, record.seq, e.code, e.message);
+            }
+        }
+        let fired = self.fire_channel(record, depth).await;
         if queued {
             self.drain_deliveries().await;
         }
@@ -358,6 +371,25 @@ impl FragmentCell {
             self.launch_queued().await;
         }
         Ok((record, !appended))
+    }
+
+    /// A record the platform appends for the fragment itself (as its own
+    /// key, as a trigger's run acts), once by `key` while the record is
+    /// kept: it reaches sockets, subscriptions and triggers as a post's
+    /// does. It is the platform's own write, so it waits on no standing
+    /// (the debt ledger: the platform's own writes go on past the
+    /// overdraft). Answers the record, and whether this call appended it.
+    pub(crate) async fn append_own(&self, channel: &str, body: &Value, key: &str) -> CellResult<(ChannelRecord, bool)> {
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        // a postable channel keeps its newest records (`append`): the
+        // platform's own never grow one without bound
+        if decl.post.is_none() {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts, nor the platform's own records")));
+        }
+        let own = self.own_key()?;
+        let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;
+        self.published(&record, appended, POST_TRIGGERS_DEPTH).await?;
+        Ok((record, appended))
     }
 
     /// The record an earlier post under `key` appended, when it is this

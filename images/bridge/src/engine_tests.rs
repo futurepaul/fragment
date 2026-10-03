@@ -395,7 +395,7 @@ fn tasks_start_routines() {
     assert_eq!((t.fragment.as_str(), t.asker.as_str()), ("talk.paul", "id:paul"));
     assert_eq!(t.turn, records::turn_id(&a.fragment, &a.fragment, "tasks", 1));
     let j = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(2, json!({ "kind": "joined", "fragment": "new.paul" })), view: None, since: 0 }, T0);
-    assert!(j.effects.contains(&Effect::Discover { agent: a.fragment.clone() }));
+    assert!(j.effects.contains(&Effect::Discover { agent: a.fragment.clone(), joined: Some("new.paul".into()) }));
     // a `tasks` record on another fragment is no task
     let other = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: task(3, json!({ "kind": "joined" })), view: None, since: 0 }, T0);
     assert!(other.effects.is_empty());

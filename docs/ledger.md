@@ -20,7 +20,11 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   - a fragment's hosting (requests, storage, dynamic workers,
     screenshots) and its AI steps bill the fragment's owner.
 - **Guests pay for nothing.** A guest's ledger refuses reservations and
-  meter batches (`guest_payer`). A guest owns nothing billable.
+  meter batches (`guest_payer`). A guest owns nothing billable, so a
+  guest makes no fragment either (`guest_creates`, 403: "guests can't
+  create fragments"; Paul, 2026-10-03): every create asks its maker's
+  ledger first (`may_spend(create)`). A guest still edits the fragments
+  shared with them, whose writes bill those fragments' owners.
 - **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
   included, a computer that sleeps); `seat_always_on` ($200 a month,
   $100 included, an always-on computer whose awake time is not metered).
@@ -57,7 +61,9 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
 - **Overdraft and read-only.** At a balance of minus the overdraft ($2
   unless an operator sets another) the person's fragments go read-only.
   They stay read-only until the balance is above zero again. An operator
-  who changes the overdraft decides it afresh.
+  who changes the overdraft decides it afresh. Read-only, the person
+  makes no new fragment, and their fragments' cron and triggers start no
+  runs: each is recorded `blocked`, saying why (Paul, 2026-10-03).
 - **Meters always record.** Usage that happened is charged, past zero
   and past the overdraft. A reservation must fit the balance less what is
   held (`credit_short`); a settle larger than its reservation is charged
@@ -79,7 +85,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
 | `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`); the AI model catalog page for Opus (S4) |
-| `neurons` | thousandths of a neuron | $0.011 per thousand neurons | Workers AI pricing; S4 matched it to tokens on every call |
+| `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`) | Workers AI pricing (its image rows for FLUX.1 [schnell]); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
 | `requests` | requests | $0.45 per million | Workers Standard $0.30 plus the Durable Object request $0.15 |
@@ -87,7 +93,6 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | `browser` | ms of Browser Rendering | $0.09 an hour | Browser Rendering pricing |
 | `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
 | `key` | the key's own unit | set per key (`micros` per `per` units) | the operator; none by default |
-| `billed` | a vendor's reported cost, micro-dollars | the vendor's own, plus its fee from the book (`openrouter`: none, its cost includes it) | the vendor's answer (OpenRouter's `usage.cost`, images and videos until phase 7) |
 
 Checked against S4's real numbers: a $0.004 Flash turn is charged
 $0.0063; the gateway's own `cost` equals our list price on every call;
@@ -148,7 +153,10 @@ mutation first brings the ledger to its time's month.
   refused as `stale`, so a forgotten reference is never charged again.
   Commands are never forgotten.
 - **Reads** (`standing`, `gate`, `fragment_open`, `may_spend`, `status`)
-  roll a copy of the head to their own month and change nothing.
+  roll a copy of the head to their own month and change nothing. A
+  spend is an agent's turn, an AI step, a wake, a write, or a create (a
+  fragment made, a write to one of the maker's own: refused for a guest
+  as `guest_creates`, otherwise as a write is).
   `may_spend(spend, fragment, by_owner)` is the whole question when the
   payer owns the fragment (or there is none). When another person owns
   it, that owner's ledger also answers `fragment_open`.
@@ -251,8 +259,11 @@ mark sends the same batch again, which answers as before.
   reservation answers `settled` with nothing kept (the node died between
   the two) fails rather than buy again. A final failure releases (bug 3),
   as does a step whose retries ran out and any hold of a run that ended.
-  The payer is the fragment's owner, `capped` when the run's principal is
-  neither the owner nor an agent of theirs.
+  A text step settles its tokens; an image settles `neurons` from the
+  JPEG it got (its tiles, read from its header) and its steps, having
+  reserved a 1024×1024 image's. The payer is the fragment's owner,
+  `capped` when the run's principal is neither the owner nor an agent of
+  theirs.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
 - **Operator keys** (decision 37): the intercept reserves a `key` worst

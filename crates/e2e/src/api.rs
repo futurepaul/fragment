@@ -430,6 +430,15 @@ impl Socket {
     }
 
     /// Frames until one of `kind` arrives (at most `limit` frames).
+    /// How long one frame may take to come (5 s unless set): a real
+    /// runtime's first reply after a wake may take longer.
+    pub fn patience(&mut self, wait: Duration) -> Result<()> {
+        if let tungstenite::stream::MaybeTlsStream::Plain(s) = self.0.get_ref() {
+            s.set_read_timeout(Some(wait))?;
+        }
+        Ok(())
+    }
+
     pub fn until(&mut self, kind: &str, limit: usize) -> Result<Value> {
         for _ in 0..limit {
             let v = self.next()?;

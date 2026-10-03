@@ -12,7 +12,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use fragment_core::webpush::{self, Subscription, Tokens, Vapid};
-use fragment_core::egress;
+use fragment_core::{egress, npub};
 use fragment_proto::{limits, ErrorCode};
 use serde_json::{json, Value};
 use worker::*;
@@ -54,12 +54,18 @@ impl FragmentCell {
     }
 
     /// `POST __push-sub` `{who, endpoint, p256dh, auth}`: anyone who can see
-    /// the fragment (the old runtime's body).
+    /// the fragment (the old runtime's body); a `who` that is an identity
+    /// only by that identity.
     pub(crate) fn push_subscribe(&self, body: &Value, principal: &str) -> CellResult<Value> {
         let endpoint = body["endpoint"].as_str().unwrap_or("");
         let who = body["who"].as_str().unwrap_or("");
         if endpoint.len() > ENDPOINT_MAX_BYTES || who.chars().count() > limits::PUSH_WHO_MAX_CHARS {
             return Err(CellError::invalid(format!("an endpoint is at most {ENDPOINT_MAX_BYTES} bytes, a who at most {} characters", limits::PUSH_WHO_MAX_CHARS)));
+        }
+        // a who that names an identity is that identity's own browser: what
+        // is pushed to a person (a chat's reply) reaches them alone
+        if npub::is_identity(who) && who != principal {
+            return Err(CellError::new(ErrorCode::Forbidden, "a who that is an identity (id:…) is the subscriber's own: sign in as them to subscribe for them"));
         }
         let url = egress::check(endpoint, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("endpoint: {e}")))?;
         if url.scheme() != "https" && !self.cfg.egress_local {

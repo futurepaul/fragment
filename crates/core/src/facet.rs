@@ -34,7 +34,7 @@ pub const LIMITS_MODULE: &str = "limits.js";
 const JS_SAFE_INTEGER_MAX: u64 = (1 << 53) - 1;
 
 /// Every limit the platform code reads, by its name there.
-fn numbers() -> [(&'static str, u64); 10] {
+fn numbers() -> [(&'static str, u64); 11] {
     [
         ("RECORD_BODY_MAX_BYTES", limits::RECORD_BODY_MAX_BYTES as u64),
         ("EFFECTS_MAX", limits::EFFECTS_MAX as u64),
@@ -46,6 +46,7 @@ fn numbers() -> [(&'static str, u64); 10] {
         ("POINTER_MAX_BYTES", blob::POINTER_MAX_BYTES as u64),
         ("PUSH_WHO_MAX_CHARS", limits::PUSH_WHO_MAX_CHARS as u64),
         ("PUSH_PAYLOAD_MAX_BYTES", webpush::PAYLOAD_MAX_BYTES as u64),
+        ("PEOPLE_MAX", crate::steps::PEOPLE_MAX as u64),
     ]
 }
 
@@ -289,6 +290,7 @@ mod tests {
             "export const POINTER_MAX_BYTES = 200;",
             "export const PUSH_WHO_MAX_CHARS = 64;",
             "export const PUSH_PAYLOAD_MAX_BYTES = 3800;",
+            "export const PEOPLE_MAX = 64;",
             r#"export const RESERVED_OP_NAMES = new Set(["constructor","fetch","alarm","webSocketMessage","webSocketClose","webSocketError"]);"#,
         ] {
             assert!(module.lines().any(|l| l == line), "{line}");

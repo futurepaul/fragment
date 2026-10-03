@@ -1,7 +1,7 @@
 # Computers: the platform's contract with an image
 
 Status: **the contract phase 4 builds** (docs/cloudflare-v1.md, decisions
-13, 18, 19, 22, 23, 39, 41–43). The platform side is the generic Computer
+13, 18, 19, 22, 23, 39, 41–44). The platform side is the generic Computer
 Durable Object in the cell. The image side is any image: ours runs
 Hermes (`images/hermes/`), and a stub image (`images/stub/`) proves
 the platform needs nothing Hermes-specific. Nothing here names an agent
@@ -37,7 +37,9 @@ container starts until someone asks again).
 - **Wakes:** a record on a channel one of its agents subscribed to with
   `wake: true`; an open port tab; a pre-wake (a page opened a subscribed
   fragment, or someone started typing there: it starts at once and stops
-  after 60 s if nothing arrives); the owner's `POST /api/computers/{id}/wake`.
+  after 60 s if nothing arrives); one of its agents added as a member of
+  any fragment (below: the platform posts `joined` and wakes it, held as
+  a record holds it); the owner's `POST /api/computers/{id}/wake`.
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
@@ -113,7 +115,13 @@ that names a PID from before a sleep can name a live process after it.
   them, never above them (decision 36).
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
-    identity, name, owner}]}`: the agents to run.
+    identity, name, owner}]}`: the agents to run. **They may change while
+    the computer runs** (its owner assigns or unassigns one): the guest
+    reads them again while awake and runs the new set, with nothing
+    restarted. The platform never restarts a computer for a change of its
+    agents, so an image must not rely on reading them once, at its start.
+    An agent unassigned signs nothing from that moment (the intercept
+    refuses it), whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy; drop it while waiting on a
     person (decision 42).
@@ -140,12 +148,26 @@ that names a PID from before a sleep can name a live process after it.
   fragment (its routines, and `joined` when it is added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`; the agents
-  themselves from `GET /api/computer`, read again every minute. So a new
-  chat reaches a sleeping computer only through `joined`: whatever adds
-  an agent to a fragment (the shell, the chat template) posts
-  `{kind: "joined", fragment}` to the agent's `tasks` after. An agent
-  newly assigned to a computer is followed within a minute while it is
-  awake; to a sleeping one, wake it (`POST /api/computers/{id}/wake`).
+  themselves from `GET /api/computer`, read again every minute (the
+  bridge), or every 3 s (our Hermes image, below).
+- **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
+  agents are woken eagerly, to hide a wake's latency). Whatever adds an
+  agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
+  accepts, a fragment an agent makes for its owner), the platform tells
+  its computer: the agent fragment itself posts `{kind: "joined",
+  fragment}` on its `tasks` (when it declares a postable `tasks`), once
+  for that membership, and the computer wakes (`joined`, held as a
+  record holds it). Awake, the guest lists its fragments again on
+  `joined`; woken, it lists them as it starts; either way it follows the
+  new chat before anyone speaks there. Nothing a template or the shell
+  does is needed, and nothing of theirs posts `joined`. The fragment the
+  agent joined keeps the notice in an outbox of its own until the
+  computer has it (`agent.told` in its events); a role change, or the
+  same member added again, is no new join. An agent newly assigned to a
+  computer is followed while it is awake, with nothing restarted: within
+  a minute on the stub, within seconds on our Hermes image. A sleeping
+  one reads it as it starts (wake it: `POST /api/computers/{id}/wake`, or
+  add the agent to a fragment).
 - What was said before an agent joined a chat is not for it: the guest
   skips a record whose `at` is before the agent's membership's `addedAt`
   (`GET /api/f/{name}/members`).
@@ -190,13 +212,16 @@ intercept. It is for an image's own disaster recovery (Litestream).
   request to one of the provider's own hosts, with `x-fragment-agent`:
   `Authorization: Bearer fragment-connection:github` to
   `api.github.com`. The intercept swaps in a short-lived token from
-  WorkOS Pipes for the agent's owner's account at that provider when
-  the owner allows that agent the connection (`PUT
-  /api/computers/{id}/agents/{fragment}/connections`, none by default),
-  and refuses otherwise (decision 22): 403 `forbidden` when the agent
-  is not allowed it, 403 `not_connected` when the owner has connected
-  no account there, or must authorize it again. The token is held until
-  a minute before it expires, at most ten minutes.
+  WorkOS Pipes for the agent's owner's account at that provider. An
+  agent may use every connection its owner has (decision 44: a person's
+  agents are not fenced from each other); its owner may narrow one agent
+  to a list (`PUT /api/computers/{id}/agents/{fragment}/connections
+  {connections: [provider]}`, and `{connections: null}` for every one
+  again, the default). It refuses (decision 22) with 403 `forbidden`
+  when the owner narrowed the agent to a list without that provider,
+  and 403 `not_connected` when the owner has connected no account
+  there, or must authorize it again. The token is held until a minute
+  before it expires, at most ten minutes.
 - An operator key (a paid API that needs only a key) is
   `fragment-key:<name>` in whichever header the provider takes it in
   (`x-api-key: fragment-key:search`). Any agent of the computer may use
@@ -219,9 +244,9 @@ intercept. It is for an image's own disaster recovery (Litestream).
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
 - Agents share a computer, so one agent's guest could send another's
-  `x-fragment-agent`: per-agent connections are a guardrail, not a wall
-  (decision 22). An agent that must not reach a connection runs on a
-  computer of its own.
+  `x-fragment-agent`, and that is by design: a person's agents are not
+  fenced from each other (decision 44), so a narrowed list is an agent's
+  specialization, never a wall. Walls stand between people (decision 36).
 
 ### Ports
 
@@ -232,7 +257,19 @@ one), at `/p/<port>/…`, for its owner only for now (delegates come with
 decision 41's sharing). A browser gets there with a one-time ticket its
 owner mints (`POST /api/computers/{id}/ports/{port}/ticket` → `{url}`),
 which that origin redeems into a session cookie of its own; a signed
-request (the CLI's) needs none. A WebSocket on a port is bridged through
+request (the CLI's) needs none. The shell shows a port in a tab of its
+own page (decision 11): the ticket's URL as a frame's `src`, redeemed in
+the frame into a partitioned cookie for the platform's page
+(`fragment_computer_frame`, `SameSite=None; Partitioned`), which
+browsers that block third-party cookies keep. Only the platform's page
+may frame a port (every answer carries `frame-ancestors <platform>`),
+and every fragment's page is one site with the computer's origin, so
+its cookies count only as on a fragment's (docs/api.md, Computers): on
+the port's own page's requests, a top-level visit (the tab's cookie) or
+a frame's navigation (the frame's), never another page's fetch or
+frame; a socket only from the port's own page. So an image's page may
+not frame its own ports either: a screen is one page, its sockets
+relative to it. A WebSocket on a port is bridged through
 the Computer DO and holds it awake while open. Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
 (decision 11). The page is served at the
@@ -270,10 +307,40 @@ settings and state):
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
+  Its agents change while it runs (`images/hermes/boot/src/agents.rs`),
+  and nothing restarts for it: no container, gateway or bridge, so no
+  other agent's turn is cut or waits. `hermes-boot` reads `GET
+  /api/computer` every 3 s. For an agent assigned since, it writes the
+  agent's profile as a boot does (its directories, its config whole
+  before its `.env`, its repo pulled), then asks the gateway to serve it
+  (the `rescan-profiles` verb on its control socket, `gateway.sock`, as
+  Hermes' own `profile create` does: Hermes v0.21.5's multiplexed gateway
+  serves a profile made after it started, and a relayed turn resolves
+  its profile's directory as it arrives), and only then names it in the
+  bridge's ready file (`BRIDGE_AGENTS_FILE`, docs/bridge.md): the bridge
+  runs only the agents that file names, so no turn reaches a profile
+  that is not whole (the 401 of a turn run in Hermes' default profile,
+  which names no agent to bill). On the lower rung (`cargo test -p
+  fragment-bridge --test docker -- --ignored`) an agent assigned to a
+  running image answers its first message about a second after it is
+  assigned. An agent unassigned leaves the ready file at once, so the
+  bridge stops running it; its profile is retired at the next start, when
+  no Hermes could be winding down a turn in it. The screen is the first
+  agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
+  that moves with the first agent, started by `hermes-boot screen-start`;
+  Litestream starts again when the set of databases it streams changes
+  (a new profile's appears at its first turn). Events: `agents.changed`,
+  `profile.written`, `agents.served` (the gateway's answer and its
+  `ms`), `agents.ready` (the whole change's `ms`).
+
 ## Billing
 
-- Awake time is metered at the instance's rate (`FRAGMENT_COMPUTER_INSTANCE`,
-  the price book's name for it) to the computer's owner (decision 24):
+- A computer's container starts at the size its awake time is priced at:
+  `FRAGMENT_COMPUTER_INSTANCE` names the price book's instance (default
+  `2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
+  as `instance` (`fragment_core::price::instance_size`: a Containers type
+  by name, or `<n>vcpu-<m>gib`, a custom size with 2 GB of disk a GiB).
+- Awake time is metered at the instance's rate to the computer's owner (decision 24):
   an interval every five minutes awake and one at each sleep, kept by the
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
@@ -286,7 +353,7 @@ settings and state):
 - At zero credit, or with agents stopped, no wake starts (decision 27):
   the owner's wake is refused with the ledger's reason (402
   `budget_used_up` at zero credit or a canceled seat; 403 for a guest,
-  who pays for nothing), which the view's `why` keeps; a record or a page wakes nothing; no model call or
+  who pays for nothing), which the view's `why` keeps; a record, a join or a page wakes nothing; no model call or
   key call is made. A computer already awake runs on until it sleeps.
 
 ## Tests
@@ -296,7 +363,8 @@ settings and state):
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
-  4's exit list).
+  4's exit list), a second agent assigned to the awake computer while the
+  first's turn runs included.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API, with the

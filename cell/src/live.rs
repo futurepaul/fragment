@@ -172,6 +172,12 @@ fn legacy_presence_frame(list: Vec<Present>) -> String {
 }
 
 impl FragmentCell {
+    /// Who is here now, as every page's presence list holds them: one
+    /// entry a socket that shares presence (a job's `presence` step).
+    pub(crate) fn present(&self) -> Vec<Present> {
+        present_on(&self.state.get_websockets_with_tag(LIVE_TAG))
+    }
+
     /// Opens a live socket for a caller who can see the fragment, resolved
     /// from `credential` (kept to ask the registry again later).
     pub(crate) fn live(&self, req: &Request, caller: &Caller, credential: Option<Credential>, principal: &str, link: bool) -> CellResult<Response> {
