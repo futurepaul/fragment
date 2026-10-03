@@ -21,6 +21,21 @@ a vendor's product beyond the credential it holds.
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | The share sheet and invites | Security: it acts as the fragment's owner. | The members and invites API |
 
+## Interim, until phase 5
+
+On master after the phase 1 cut, the shell's place is held by `/`
+(choose a username) and `/settings` (your fragments, a new fragment,
+CLI pairing, your picture), plus `/join/{name}`. All three go when the
+shell lands.
+
+## Fragment plumbing (not special cases)
+
+Every fragment gets these routes, and none of them knows what a
+fragment is for: `__signin` and `__signout`, `__op`, `__live`,
+`__people`, `__blob`, `__files` (the vault UI), people's pictures
+(`/api/users/{u}/picture`), and the frame-session redeem path the
+shell's tabs will use.
+
 ## Not special cases
 
 These are fragments or computers, or components any fragment may use:
