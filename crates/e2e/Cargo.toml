@@ -19,3 +19,4 @@ fragment-core = { path = "../core" }
 fragment-nip98 = { path = "../nip98", features = ["sign"] }
 fragment-devstack = { path = "../devstack" }
 fragment-fakes = { path = "../fakes" }
+fragment-templates = { path = "../templates" }
