@@ -85,6 +85,13 @@ pub struct Config {
     /// AI binding's input to `<url>/run/<model>` instead (a fake at the
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
+    /// `FRAGMENT_MODEL_URL` and `FRAGMENT_MODELS`: a self-hosted model
+    /// upstream (docs/self-host.md, seam 3), an OpenAI-compatible server's
+    /// base (with its `/v1`), and which of its models answers for each
+    /// catalog id the route calls. Its key, if it takes one, is the secret
+    /// bound as `MODEL_KEY` (keys.rs). It wins over the AI binding and the
+    /// gateway.
+    pub model_upstream: Option<ModelUpstream>,
     workos: Option<WorkOsConfig>,
     /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
     /// and the platform session live (default: the hostname suffix itself,
@@ -146,6 +153,27 @@ fn var(env: &Env, name: &str) -> Option<String> {
 /// malformed is refused at its first request (the deploy checks it first).
 fn providers(env: &Env) -> fragment_core::catalog::Catalog {
     var(env, "FRAGMENT_PROVIDERS").map(|v| fragment_core::catalog::Catalog::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_PROVIDERS: {e}"))).unwrap_or_default()
+}
+
+/// A self-hosted model upstream: an OpenAI-compatible server.
+#[derive(Debug, Clone)]
+pub struct ModelUpstream {
+    /// Its base, `/v1` included, without a trailing slash.
+    pub url: String,
+    /// Catalog id (the price book's label) to the server's model name.
+    pub models: BTreeMap<String, String>,
+}
+
+/// `FRAGMENT_MODEL_URL` with `FRAGMENT_MODELS`, a JSON object of catalog
+/// ids to the server's names. A URL without a map, a map naming no model,
+/// or a malformed one is refused at the first request.
+fn model_upstream(env: &Env) -> Option<ModelUpstream> {
+    let url = var(env, "FRAGMENT_MODEL_URL")?.trim_end_matches('/').to_string();
+    assert!(url.starts_with("http://") || url.starts_with("https://"), "FRAGMENT_MODEL_URL is an http(s) URL, not {url:?}");
+    let map = var(env, "FRAGMENT_MODELS").unwrap_or_else(|| panic!("FRAGMENT_MODEL_URL needs FRAGMENT_MODELS: {{\"<catalog id>\": \"<the server's model>\"}}"));
+    let models: BTreeMap<String, String> = serde_json::from_str(&map).unwrap_or_else(|e| panic!("FRAGMENT_MODELS is {{\"<catalog id>\": \"<the server's model>\"}}: {e}"));
+    assert!(!models.is_empty() && models.values().all(|m| !m.trim().is_empty()), "FRAGMENT_MODELS names at least one model, none empty");
+    Some(ModelUpstream { url, models })
 }
 
 /// Where this fleet runs, as its levers see it (`levers::fleet_of`): its
@@ -256,6 +284,7 @@ impl Config {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
+            model_upstream: model_upstream(env),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
