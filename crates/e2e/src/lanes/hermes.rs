@@ -133,6 +133,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let t1 = std::time::Instant::now();
     let r = say(1, "hello hermes")?;
     let first = turn_for(&r);
+    // Hermes' first reply after a wake takes 5 to 7 s on a laptop: past a
+    // frame's usual 5 s
+    page.patience(Duration::from_secs(30))?;
     let draft = page.until("draft", 600);
     let record = page.until("record", 600);
     page.close();
