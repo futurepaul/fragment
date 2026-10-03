@@ -486,6 +486,8 @@ impl Suite {
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
+            model_upstream: None,
+            node: None,
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
@@ -508,6 +510,7 @@ impl Suite {
             node_logs: true,
             // a crash kills wrangler and workerd as one
             own_group: true,
+            containers: true,
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
