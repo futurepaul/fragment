@@ -20,12 +20,12 @@ python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py --help
 ```
 
 Your computer holds no keys. The helper acts through your owner's connected
-Linear account: it sends `Authorization: Bearer fragment-connection:linear`
-with `x-fragment-agent: $FRAGMENT_AS_AGENT` to `api.linear.app`, and the
-computer swaps in a short-lived token. A 403 `not_connected` means your
-owner has not connected Linear: ask them to connect it in the shell's
-Settings, under Connections. A 403 `forbidden` means they kept this agent
-from it. `LINEAR_API_KEY`, when set, is sent instead.
+Linear account: `LINEAR_API_KEY` holds the connection's placeholder (it
+names you), the helper sends it to `api.linear.app`, and the computer swaps
+in a short-lived token. Unset, your owner has not connected Linear, or this
+deployment does not offer it yet (a catalog row adds it): ask them to
+connect it in the shell's Settings, under Connections. A 403 `forbidden`
+means they kept this agent from it.
 
 ## Workflow
 

@@ -32,7 +32,8 @@ use sha2::{Digest, Sha256};
 use super::jobs::records;
 use super::ledger::{end_of, entries};
 use crate::api::{Api, Call, Socket};
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST, SWAP_KEY, SWAP_KEY_HOST, SWAP_KEY_MICROS, SWAP_KEY_VALUE};
+use super::credentials::{placeholder, swap_checks, Swapping, SWAP_CHECKS};
+use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
 
 pub(super) const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
 pub(super) const AGENT_JSON: &[u8] = br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
@@ -266,7 +267,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let owner_id = api.identity(&owner)?;
 
-    // the swap: the guest's request to a connection's host, with its placeholder
+    // the swap (Paul, 2026-10-04): the guest finds each credential its agent
+    // may use as a placeholder in its environment variable, and sends it as
+    // any SDK would, with no header of ours
     let fetched = |s: &Suite, n: u32, text: &str| -> Result<String> {
         let r = say(n, text)?;
         let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
@@ -277,14 +280,14 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let connections = format!("/api/computers/{id}/agents/{agent_name}/connections");
     let allow = |who: &crate::Keys, list: Value| api.signed(who, "PUT", &connections, Some(&json!({ "connections": list })));
     if !(fakes && scripted) {
-        // the agent's connections as its owner sets them; what the swap does
-        // with them needs the stub's fetch and the fakes' accounts and provider
+        // the agent's narrowing as its owner sets it; what the swap does with
+        // it needs the stub's fetch and the fakes' accounts and providers
         let r = allow(&stranger, json!([]))?;
-        s.ok("no one else narrows its agents' connections", r.status == 404, &r);
+        s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["nonesuch"]))?;
-        s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
+        s.ok("a provider the deployment does not offer is refused", r.status == 400, &r);
         let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
-        s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
+        s.ok("a body that names no providers is refused, never read as every one", r.status == 400, &r);
         let (r, again) = (allow(&owner, json!([]))?, allow(&owner, json!([]))?);
         s.ok(
             "its owner narrows the agent to none (a role's specialization, decision 44); again is the same",
@@ -292,35 +295,18 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             &r,
         );
         let r = allow(&owner, Value::Null)?;
-        s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in [
-            "by default it may use the connection, but its owner connected no account: refused, saying so",
-            "narrowed, it is refused a connection its owner has",
-            "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
-            "a placeholder sent to a host that is not its credential's is refused",
-            "an operator key is swapped into the header that named it",
-            "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
-            "a request with no placeholder goes on as it came",
-        ] {
-            s.skip(label, "it needs the stub's fetch, and the fakes' accounts and provider behind the swap");
+        s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+        for label in SWAP_CHECKS.iter().chain(&["narrowed, it is refused a provider its owner has"]) {
+            s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
-        let gh = format!("http://{SWAP_CONNECTION_HOST}/user with fragment-connection:{SWAP_CONNECTION}");
-        let seen_before = s.upstream.seen().len();
-        let said = fetched(s, 14, &format!("fetch {gh}"))?;
-        replies_so_far += 1;
-        s.ok(
-            "by default it may use the connection, but its owner connected no account: refused, saying so",
-            said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"),
-            &said,
-        );
-        s.ok("and nothing reaches the provider", s.upstream.seen().len() == seen_before, json!(s.upstream.seen()));
-        let r = allow(&stranger, json!([SWAP_CONNECTION]))?;
-        s.ok("no one else narrows its agents' connections", r.status == 404, &r);
+        replies_so_far += swap_checks(s, api, &Swapping { owner: &owner, stranger: &stranger, id: &id, agent: &agent_name, identity: &identity }, &fetched)?;
+        let r = allow(&stranger, json!([]))?;
+        s.ok("no one else narrows its agents' providers", r.status == 404, &r);
         let r = allow(&owner, json!(["notion"]))?;
-        s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
+        s.ok("a provider the deployment does not offer is refused", r.status == 400, &r);
         let r = api.signed(&owner, "PUT", &connections, Some(&json!({})))?;
-        s.ok("a body that names no connections is refused, never read as every one", r.status == 400, &r);
+        s.ok("a body that names no providers is refused, never read as every one", r.status == 400, &r);
         let r = allow(&owner, json!([]))?;
         let again = allow(&owner, json!([]))?;
         s.ok(
@@ -328,62 +314,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             r.status == 200 && r.body["agents"][0]["connections"] == json!([]) && again.status == 200 && again.body["agents"] == r.body["agents"],
             &r,
         );
-        s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
         let seen_before = s.upstream.seen().len();
-        let said = fetched(s, 15, &format!("fetch {gh}"))?;
+        let said = fetched(s, 29, &format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, &id, &agent_name, SWAP_CONNECTION)))?;
         replies_so_far += 1;
-        s.ok(
-            "narrowed, it is refused a connection its owner has",
-            said.starts_with("fetched 403") && said.contains("may not use the github connection") && s.upstream.seen().len() == seen_before,
-            &said,
-        );
+        s.ok("narrowed, it is refused a provider its owner has", said.starts_with("fetched 403") && said.contains("may not use google") && s.upstream.seen().len() == seen_before, &said);
         let r = allow(&owner, Value::Null)?;
-        s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        // the tokens this computer asks for, after any the run's earlier sections did
-        let minted_before = s.workos.tokens(SWAP_CONNECTION).len();
-        let minted = |s: &Suite| s.workos.tokens(SWAP_CONNECTION).split_off(minted_before);
-        let said = fetched(s, 16, &format!("fetch {gh}"))?;
-        replies_so_far += 1;
-        let tokens = minted(s);
-        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-        s.ok(
-            "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
-            said.starts_with("fetched 200") && tokens.len() == 1 && seen["host"] == SWAP_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {}", tokens[0]),
-            json!({ "said": said, "seen": seen, "tokens": tokens }),
-        );
-        s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
-        let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
-        replies_so_far += 1;
-        s.ok("a token is held until shortly before it expires", minted(s).len() == 1, json!(minted(s)));
-        s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
-        let seen_before = s.upstream.seen().len();
-        let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;
-        replies_so_far += 1;
-        s.ok(
-            "a placeholder sent to a host that is not its credential's is refused",
-            said.starts_with("fetched 403") && said.contains("is for api.github.test") && s.upstream.seen().len() == seen_before,
-            &said,
-        );
-        let said = fetched(s, 19, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-key:{SWAP_KEY} in x-api-key"))?;
-        replies_so_far += 1;
-        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-        s.ok(
-            "an operator key is swapped into the header that named it",
-            said.starts_with("fetched 200") && seen["host"] == SWAP_KEY_HOST && seen["auth"]["x-api-key"] == SWAP_KEY_VALUE,
-            json!({ "said": said, "seen": seen }),
-        );
-        let keyed = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, &format!("key:{id}:")).len() == 1);
-        let rows = entries(api, &owner_id, &format!("key:{id}:"));
-        s.ok(
-            "its call is metered to the agent's owner, as the agent, at the key's price and the margin",
-            keyed && rows[0]["entry"]["row"]["usage"] == json!({ "kind": "key", "key": SWAP_KEY, "units": 1 }) && rows[0]["entry"]["row"]["agent"] == identity.as_str()
-                && rows[0]["entry"]["charge"].as_i64().is_some_and(|c| c > SWAP_KEY_MICROS),
-            json!(rows),
-        );
-        let said = fetched(s, 22, &format!("fetch http://{SWAP_KEY_HOST}/plain with nothing-swapped"))?;
-        replies_so_far += 1;
-        let seen = s.upstream.seen().last().cloned().unwrap_or_default();
-        s.ok("a request with no placeholder goes on as it came", said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
+        s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
     }
 
     // the model intercept: the agent's call is the platform's model route, its owner paying
@@ -466,6 +402,32 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     replies_so_far += 1;
     let led = s.eventually(wake, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
     s.ok("unmentioned, the lead answers", led && agent_replies(&records(api, &owner, &chat_name, "chat"), &maple_id).len() == 1, "");
+
+    // a placeholder names its agent, not whoever sends it: the second
+    // agent's, sent by the lead, is the second's (a person's agents are not
+    // fenced: decision 44); removed from the computer, its tags are refused
+    if fakes && scripted {
+        let theirs = placeholder(s, &id, &maple_name, "perplexity");
+        let said = fetched(s, 24, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
+        replies_so_far += 1;
+        let uses = || api.signed(&owner, "GET", &format!("/api/computers/{id}/uses"), None).map(|r| r.body).unwrap_or(Value::Null);
+        let maples = |u: &Value| u["uses"].as_array().is_some_and(|l| l.iter().any(|x| x["provider"] == "perplexity" && x["agent"] == maple_name.as_str() && x["calls"] == 1));
+        let counted = s.eventually(Duration::from_secs(20), || maples(&uses()));
+        s.ok("another agent's placeholder on the same computer is that agent's: its call is counted as the second agent's", said.starts_with("fetched 200") && counted, json!({ "said": said, "uses": uses() }));
+        let r = api.signed(&owner, "DELETE", &format!("/api/computers/{id}/agents/{maple_name}"), None)?;
+        let seen_before = s.upstream.seen().len();
+        let said = fetched(s, 25, &format!("fetch http://api.perplexity.ai/search with {theirs}"))?;
+        replies_so_far += 1;
+        s.ok(
+            "an agent removed from the computer: its tags are refused, reaching no provider",
+            r.status == 200 && said.starts_with("fetched 403") && said.contains("names no agent on this computer") && s.upstream.seen().len() == seen_before,
+            json!({ "removed": r.status, "said": said }),
+        );
+    } else {
+        for label in ["another agent's placeholder on the same computer is that agent's: its call is counted as the second agent's", "an agent removed from the computer: its tags are refused, reaching no provider"] {
+            s.skip(label, "it needs the stub's fetch, and the fakes' providers behind the swap");
+        }
+    }
 
     // its ports, on its own origin, for its owner
     let r = api.signed(&stranger, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;

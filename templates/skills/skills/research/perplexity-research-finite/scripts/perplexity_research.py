@@ -15,16 +15,15 @@ PERPLEXITY_SONAR_URL = "https://api.perplexity.ai/v1/sonar"
 FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape"
 
 
-def env_key(name: str, placeholder: str) -> str:
-    # On a fragment computer the key is the operator's, swapped in at the
-    # computer's intercept: the placeholder is sent unless a key is set.
-    return os.getenv(name, "").strip() or placeholder
-
-
-def agent_headers() -> dict[str, str]:
-    # the agent this call is for: its owner pays (docs/computers.md)
-    agent = os.getenv("FRAGMENT_AS_AGENT", "").strip()
-    return {"x-fragment-agent": agent} if agent else {}
+def env_key(name: str) -> str:
+    # On a fragment computer the variable holds the operator's key's
+    # placeholder, which names this agent; the computer's intercept swaps
+    # in the real key on the way to the provider and meters the call.
+    key = os.getenv(name, "").strip()
+    if not key:
+        print(f"{name} is not set: this deployment does not offer that key", file=sys.stderr)
+        raise SystemExit(2)
+    return key
 
 
 def post_json(
@@ -49,11 +48,11 @@ def post_json(
 
 
 def perplexity_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {env_key('PERPLEXITY_API_KEY', 'fragment-key:perplexity')}", **agent_headers()}
+    return {"Authorization": f"Bearer {env_key('PERPLEXITY_API_KEY')}"}
 
 
 def firecrawl_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {env_key('FIRECRAWL_API_KEY', 'fragment-key:firecrawl')}", **agent_headers()}
+    return {"Authorization": f"Bearer {env_key('FIRECRAWL_API_KEY')}"}
 
 
 def compact_results(payload: dict[str, Any]) -> list[dict[str, Any]]:

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use super::computers::{agent_replies, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
-use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
+use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
 
 pub const SECTION: &str = "hermes";
 
@@ -232,20 +232,55 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "upload": up.status, "reply": reply_of(&looked), "ended": ended(&looked) }),
     );
 
-    // a connection over HTTPS: Hermes' curl with a placeholder, swapped at
-    // the intercept (an agent may use every connection its owner has: decision 44)
+    // its credentials in its terminal's environment (Paul, 2026-10-04): a
+    // connection its owner makes (an agent may use every one its owner has:
+    // decision 44), and the operator's keys, each a placeholder; and a stock
+    // curl over HTTPS, with no header of ours, gets the swap
     s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
+    // the owner's read of their connections tells the computer at once; the
+    // image reads its credentials every 3 s and writes them into the profile
+    api.signed(&owner, "GET", "/api/connections", None)?;
+    let found = format!("printenv {SWAP_CONNECTION_ENV} PERPLEXITY_API_KEY GOOGLE_PLACES_API_KEY | cut -c1-15 | tr '\\n' ' '");
+    let mut env_seen = None;
+    for n in 0..6u32 {
+        let r = say(70 + n, &format!("run: {found}"))?;
+        let asked = turn_for(&r);
+        s.eventually(TURN, || ended(&asked).is_some());
+        env_seen = reply_of(&asked);
+        if env_seen.as_deref().is_some_and(|t| t.contains("fcx_google_")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    s.ok(
+        "Hermes' terminal finds each credential in its standard environment variable: a placeholder naming the agent, the connection's once its owner connects it",
+        env_seen.as_deref().is_some_and(|t| t.contains("fcx_google_") && t.contains("fck_perplexity_") && t.contains("fck_google-plac")),
+        json!(env_seen),
+    );
     let seen_before = s.upstream.seen().len();
-    let curl = format!("curl -s https://{SWAP_CONNECTION_HOST}/user -H 'Authorization: Bearer fragment-connection:{SWAP_CONNECTION}' -H 'x-fragment-agent: {agent_name}'");
+    let curl = format!("curl -s https://{SWAP_CONNECTION_HOST}/drive/v3/files -H \"Authorization: Bearer ${SWAP_CONNECTION_ENV}\"");
     let r = say(6, &format!("run: {curl}"))?;
     let swapped = turn_for(&r);
     s.eventually(TURN, || ended(&swapped).is_some());
     let seen = s.upstream.seen().get(seen_before).cloned().unwrap_or_default();
     let tokens = s.workos.tokens(SWAP_CONNECTION);
     s.ok(
-        "Hermes' HTTPS call to a connection's host reaches it with the owner's token in the placeholder's place",
-        seen["host"] == SWAP_CONNECTION_HOST && tokens.last().is_some_and(|t| seen["auth"]["authorization"] == format!("Bearer {t}")),
+        "a stock curl over HTTPS, with the connection's variable and no header of ours, reaches its host with the owner's token from Pipes in the placeholder's place",
+        seen["host"] == SWAP_CONNECTION_HOST && tokens.last().is_some_and(|t| seen["auth"]["authorization"] == format!("Bearer {t}")) && seen["agent"].is_null(),
         json!({ "reply": reply_of(&swapped), "seen": seen }),
+    );
+    // Hermes keeps PERPLEXITY_API_KEY from its terminal's passthrough (its
+    // own providers' names): the image's credentials file sets it
+    let seen_before = s.upstream.seen().len();
+    let r = say(77, "run: curl -s https://api.perplexity.ai/search -H \"Authorization: Bearer $PERPLEXITY_API_KEY\" -d '{\"query\":\"x\"}'")?;
+    let keyed = turn_for(&r);
+    s.eventually(TURN, || ended(&keyed).is_some());
+    let seen = s.upstream.seen().get(seen_before).cloned().unwrap_or_default();
+    let key = SWAP_KEYS.iter().find(|(k, _, _)| *k == "perplexity").map(|(_, v, _)| *v).unwrap_or("");
+    s.ok(
+        "an operator key's variable, one Hermes keeps from passthrough, is its terminal's too: a stock curl gets the key swapped in, metered",
+        seen["host"] == "api.perplexity.ai" && seen["auth"]["authorization"] == format!("Bearer {key}"),
+        json!({ "reply": reply_of(&keyed), "seen": seen }),
     );
 
     // The managed skills and its own, where its profile looks: its own

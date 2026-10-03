@@ -46,9 +46,10 @@ const r = await job.fetch("https://api.example.com/v1/search", {
 fragment secret set garden EXAMPLE_KEY      # the human gives the value; it never comes back
 ```
 
-The keys your computer's swap fills (`fragment-key:…`) are for your own
-calls from your computer, not for an app: an app's key is the fragment's
-secret, which its owner provides.
+The placeholders in your computer's environment (`PERPLEXITY_API_KEY=fck_…`,
+which its swap fills) are for your own calls from your computer, and work
+nowhere else: an app's key is the fragment's secret, which its owner
+provides.
 
 ## Preferred Architecture
 

@@ -327,6 +327,52 @@ pub const DEFAULT_BROWSER: i64 = 90_000;
 /// Cloudflare Images: $0.50 per thousand unique transformations.
 pub const DEFAULT_IMAGES: i64 = 500_000;
 
+/// The operator keys' list prices per call (decision 37; Paul, 2026-10-04:
+/// Perplexity, Google Places, xAI, ElevenLabs), `(name, micros, per
+/// calls)`, read from each vendor's own pricing page on 2026-10-03. A
+/// catalog row of the operator kind takes its name's price here unless it
+/// names its own (`fragment_core::catalog`). The swap meters a call, not
+/// what the vendor counts (tokens, posts, minutes), so a vendor that bills
+/// by those is priced at a typical call of the managed skill that uses it,
+/// and the estimate says what it assumes.
+pub const DEFAULT_KEYS: [(&str, i64, u64); 4] = [
+    // Perplexity's Search API (`POST /search`, the perplexity-research
+    // skill's search and Hermes' own web search): $5.00 per 1,000
+    // requests. Source: docs.perplexity.ai/getting-started/pricing. A Sonar
+    // Pro brief (`/v1/sonar`) also bills tokens ($3 in, $15 out per
+    // million) and a request fee of $6 to $14 per 1,000: it is metered at
+    // the search's price, under what it costs (docs/technical-debt-ledger.md).
+    ("perplexity", 5_000_000, 1_000),
+    // Google Places API (New), Text Search Enterprise: $35.00 per 1,000
+    // calls (0 to 100,000 a month). The goplaces skill's field masks name
+    // rating, userRatingCount, websiteUri, nationalPhoneNumber, priceLevel
+    // and regularOpeningHours, Enterprise fields; Place Details Enterprise
+    // is $20.00, so a call is priced at the dearer of its two. Source:
+    // developers.google.com/maps/billing-and-pricing/pricing (last updated
+    // 2026-09-28), the free monthly caps not counted.
+    ("google-places", 35_000_000, 1_000),
+    // xAI's X Search (the x-search skill: `/v1/responses` with the
+    // `x_search` tool): $5 per 1,000 posts fetched and $10 per 1,000 user
+    // profiles, plus tokens. Source: docs.x.ai/developers/tools/x-search
+    // (prices in effect since 2026-09-21) and docs.x.ai/docs/models
+    // (grok-4.3: $1.25 in, $2.50 out per million). A call is taken as 20
+    // posts ($0.10) and 10,000 tokens in and 1,000 out ($0.015): $0.115,
+    // priced at $0.12.
+    ("xai", 120_000, 1),
+    // ElevenLabs' Music API (`/v1/music`, the music-generation skill):
+    // $0.15 per minute of music generated. Source: elevenlabs.io/pricing/api.
+    // A call is taken as a minute; the skill's jingles are 15 s, its
+    // longest compositions 5 minutes. Text to speech is $0.08 per 1,000
+    // characters on the same key.
+    ("elevenlabs", 150_000, 1),
+];
+
+/// The list price of operator key `name` per call, when the price book
+/// has one: `(micros, per calls)`.
+pub fn default_key_price(name: &str) -> Option<(i64, u64)> {
+    DEFAULT_KEYS.iter().find(|(n, _, _)| *n == name).map(|(_, micros, per)| (*micros, *per))
+}
+
 /// Why a book is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -629,6 +675,22 @@ mod tests {
         let mut keyed = book.clone();
         keyed.keys.push(KeyPrice { key: "search".into(), micros: 5_000_000, per: 1_000 });
         assert_eq!(keyed.price(&Usage::Key { key: "search".into(), units: 1 }).unwrap(), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "no credits fee on an operator key");
+    }
+
+    /// Goal: each operator key Paul named (2026-10-04) has a list price
+    /// per call, and one call of each is charged that and the margin.
+    #[test]
+    fn the_operator_keys_list_prices() {
+        let mut book = PriceBook::defaults();
+        book.keys = DEFAULT_KEYS.iter().map(|(key, micros, per)| KeyPrice { key: key.to_string(), micros: *micros, per: *per }).collect();
+        assert_eq!(book.validate(), Ok(()));
+        let call = |key: &str| book.price(&Usage::Key { key: key.into(), units: 1 }).unwrap();
+        assert_eq!(call("perplexity"), Priced { list: 5_000, cost: 5_000, charge: 7_500 }, "$5 per 1,000 searches");
+        assert_eq!(call("google-places"), Priced { list: 35_000, cost: 35_000, charge: 52_500 }, "$35 per 1,000 Enterprise text searches");
+        assert_eq!(call("xai"), Priced { list: 120_000, cost: 120_000, charge: 180_000 });
+        assert_eq!(call("elevenlabs"), Priced { list: 150_000, cost: 150_000, charge: 225_000 }, "a minute of music");
+        assert_eq!(default_key_price("perplexity"), Some((5_000_000, 1_000)));
+        assert_eq!(default_key_price("nonesuch"), None);
     }
 
     /// Goal: the margin and the fee are the operator's. Method: a book at

@@ -27,17 +27,22 @@ pub struct Change {
     pub removed: Vec<Agent>,
     /// The agent whose desktop the screen shows (the first) is another.
     pub screen: bool,
+    /// Still here, with other credentials (a connection made or lost, an
+    /// operator key offered, its owner's narrowing): its `.env` and its
+    /// credentials file are written again, nothing restarted.
+    pub credentials: Vec<Agent>,
 }
 
 impl Change {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && !self.screen
+        self.added.is_empty() && self.removed.is_empty() && !self.screen && self.credentials.is_empty()
     }
 }
 
 /// The change from `running` to `read`. The same fragment is the same
 /// agent: a profile is named by its fragment, and what else the platform
-/// says of it (its identity, its name) the bridge reads for itself.
+/// says of it (its identity, its name) the bridge reads for itself, but
+/// for its credentials, which are its profile's.
 pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
     let had: BTreeSet<&str> = running.iter().map(|a| a.fragment.as_str()).collect();
     let has: BTreeSet<&str> = read.iter().map(|a| a.fragment.as_str()).collect();
@@ -46,6 +51,7 @@ pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
         added: read.iter().filter(|a| !had.contains(a.fragment.as_str())).cloned().collect(),
         removed: running.iter().filter(|a| !has.contains(a.fragment.as_str())).cloned().collect(),
         screen: running.first().map(|a| &a.fragment) != read.first().map(|a| &a.fragment),
+        credentials: read.iter().filter(|a| running.iter().any(|r| r.fragment == a.fragment && r.credentials != a.credentials)).cloned().collect(),
     }
 }
 
@@ -73,7 +79,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into() }
+        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into(), credentials: vec![] }
     }
 
     fn names(agents: &[Agent]) -> Vec<&str> {
@@ -108,6 +114,25 @@ mod tests {
         assert!(diff(&[agent("juniper")], &[renamed]).is_empty());
         let c = diff(&[agent("juniper"), agent("maple"), agent("oak")], &[agent("juniper"), agent("oak"), agent("maple")]);
         assert!(c.is_empty(), "{c:?}");
+    }
+
+    /// Valid and replay: an agent whose credentials changed is named so,
+    /// added and removed ones are not; the same credentials again are no
+    /// change.
+    #[test]
+    fn a_change_of_credentials_rewrites_the_profile_alone() {
+        let with = |label: &str, placeholder: &str| {
+            let mut a = agent(label);
+            a.credentials = vec![fragment_bridge::runtime::Credential { provider: "google".into(), kind: "connection".into(), env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: placeholder.into(), hosts: vec!["www.googleapis.com".into()] }];
+            a
+        };
+        let c = diff(&[agent("juniper"), agent("maple")], &[with("juniper", "fcx_google_a"), agent("maple")]);
+        assert_eq!((names(&c.credentials), c.added.is_empty(), c.removed.is_empty()), (vec!["juniper.paul"], true, true), "connected");
+        let c = diff(&[with("juniper", "fcx_google_a")], &[agent("juniper")]);
+        assert_eq!(names(&c.credentials), vec!["juniper.paul"], "disconnected");
+        assert!(diff(&[with("juniper", "fcx_google_a")], &[with("juniper", "fcx_google_a")]).is_empty());
+        let c = diff(&[agent("juniper")], &[agent("juniper"), with("oak", "fcx_google_b")]);
+        assert!(c.credentials.is_empty() && names(&c.added) == vec!["oak.paul"], "a new agent's profile is written whole anyway");
     }
 
     #[test]

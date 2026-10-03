@@ -39,8 +39,8 @@ Use the lightest reliable source for the question:
 | Private company valuation or latest funding rounds | `perplexity-research-finite` |
 
 Notes:
-- FRED's API takes its key in the URL, which your computer's credential
-  swap cannot fill, so use FRED's keyless CSV download instead (below).
+- FRED's API takes its key in the URL (`api_key=`), and the platform
+  offers no FRED key, so use FRED's keyless CSV download instead (below).
 - Exchange API keys are per-user and should be requested only for authenticated trading actions.
 - Do not rely on a shared Massive/Polygon key in the platform baseline.
 

@@ -10,7 +10,7 @@ use crate::records::Step as ToolStep;
 const T0: u64 = 1_000_000;
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.to_string(), owner: "id:paul".into() }
+    Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.to_string(), owner: "id:paul".into(), credentials: vec![] }
 }
 
 fn engine(agents: &[Agent]) -> Engine {
@@ -44,7 +44,7 @@ fn kinds(s: &Step) -> Vec<String> {
 }
 
 fn started(s: &Step) -> Option<TurnStart> {
-    s.effects.iter().find_map(|e| match e { Effect::Runtime(Command::Start(t)) => Some(t.clone()), _ => None })
+    s.effects.iter().find_map(|e| match e { Effect::Runtime(Command::Start(t)) => Some((**t).clone()), _ => None })
 }
 
 fn commands(s: &Step) -> Vec<Command> {

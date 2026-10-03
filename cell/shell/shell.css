@@ -375,6 +375,23 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-section p code { padding: 1px 5px; border-radius: 5px; background: var(--chat-code); }
 .settings-section p a { color: var(--text-secondary); text-underline-offset: 2px; }
 .settings-section pre.command { width: 100%; margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
+/* settings' connections: one block per provider (shell.js connectionsSection) */
+.provider { width: 100%; display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.provider-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.provider-name { font-weight: 600; }
+.provider-kind { font-size: 12px; color: var(--text-tertiary); }
+.provider-state { margin-left: auto; font-size: 13px; color: var(--text-secondary); }
+.provider-state.connected, .provider-state.set, .provider-state.offered { color: var(--success); }
+.provider-state.needs_reauthorization { color: var(--danger-text); }
+.provider-agents, .provider-uses { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; font-size: 13px; }
+.provider .settings-key { flex: 0 0 auto; min-width: 80px; font-size: 13px; }
+.provider .use { color: var(--text-secondary); }
+.provider .use + .use::before { content: "·"; margin-right: 8px; color: var(--text-tertiary); }
+.provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
+.provider-key input { height: 30px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: none; color: var(--text-primary); font: inherit; font-size: 13px; }
+.chip { height: 26px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-tertiary); font-size: 12.5px; }
+.chip[aria-pressed="true"] { background: var(--bg-active); color: var(--text-primary); }
+.chip:disabled { opacity: .6; }
 .sheet iframe { display: block; width: min(92vw, 460px); height: 600px; border: 0; }
 .picture { gap: 10px; cursor: pointer; }
 .picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }

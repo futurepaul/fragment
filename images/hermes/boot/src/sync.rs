@@ -471,7 +471,7 @@ mod tests {
         }
         let (addr, _stop) = fake::start(repo.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into() };
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-round-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (profile, state) = (root.join("profile"), root.join("sync"));

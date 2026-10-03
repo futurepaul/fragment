@@ -12,11 +12,17 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
-//! - `fetch <http url> with <placeholder> [in <header>]`: the guest's own
-//!   request, as the agent, with a credential's placeholder in a header
-//!   (`authorization: Bearer …` unless named): the reply is the answer's
-//!   status and its first 300 characters (the computer's swap, decisions
-//!   22 and 37);
+//! - `fetch <http url> with <value> [in <header> | in query <param> | as
+//!   basic <user>]`: the guest's own request, as any SDK sends one, with no
+//!   header of ours: `<value>` is `$<NAME>`, the agent's credential in that
+//!   environment variable as `GET /api/computer` lists it now, or a literal;
+//!   it goes in a header (`authorization: Bearer …` unless named), a query
+//!   parameter, or basic auth's password beside `<user>`. The reply is the
+//!   answer's status and its first 300 characters (the computer's swap,
+//!   decisions 22 and 37);
+//! - `credentials`: what the agent's guest is given now (`GET
+//!   /api/computer`): each credential's provider, its environment variables
+//!   and its placeholder, `; ` between;
 //! - `think <text>`: one model call through the computer's model intercept
 //!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
 //!   model's answer;
@@ -79,7 +85,7 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
             Command::Start(ts) => {
                 let (tx, rx) = mpsc::channel(8);
                 turns.insert(ts.turn.clone(), tx);
-                tokio::spawn(turn(cfg.clone(), ts, rx, io.events.clone()));
+                tokio::spawn(turn(cfg.clone(), *ts, rx, io.events.clone()));
             }
             Command::Stop { turn } => {
                 if let Some(tx) = turns.get(&turn) {
@@ -98,25 +104,65 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
     }
 }
 
-/// `fetch <url> with <placeholder> [in <header>]`, sent as `agent`: the
-/// answer's status and body.
+/// Where `fetch` puts its value.
+#[derive(Debug, PartialEq, Eq)]
+enum Place<'a> {
+    Header(&'a str),
+    Query(&'a str),
+    Basic(&'a str),
+}
+
+/// `fetch`'s words: the URL, the value (`$NAME` or a literal), and where it goes.
+fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>), String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.as_slice() {
+        [_, url, "with", v] => Ok((url, v, Place::Header("authorization"))),
+        [_, url, "with", v, "in", "query", q] => Ok((url, v, Place::Query(q))),
+        [_, url, "with", v, "as", "basic", user] => Ok((url, v, Place::Basic(user))),
+        [_, url, "with", v, "in", h] => Ok((url, v, Place::Header(h))),
+        _ => Err("say `fetch <http url> with <$NAME or a value> [in <header> | in query <param> | as basic <user>]`".into()),
+    }
+}
+
+/// `agent`'s credentials, as `GET /api/computer` lists them now.
+async fn credentials_of(agent: &str) -> Result<Vec<crate::runtime::Credential>, String> {
+    let api = std::env::var("FRAGMENT_API").map_err(|_| "no FRAGMENT_API".to_string())?;
+    let computer = crate::api::Api::new(&api)?.computer().await.map_err(|e| format!("GET /api/computer: {e}"))?;
+    let a = computer.agents.into_iter().find(|a| a.fragment == agent).ok_or_else(|| format!("{agent} is not on this computer"))?;
+    Ok(a.credentials)
+}
+
+/// The placeholder in `name` for `agent` (what an image puts in that
+/// environment variable).
+async fn credential(agent: &str, name: &str) -> Result<String, String> {
+    let all = credentials_of(agent).await?;
+    all.iter().find(|c| c.env.iter().any(|e| e == name)).map(|c| c.placeholder.clone()).ok_or_else(|| format!("no credential of {agent}'s is in ${name}"))
+}
+
+/// `fetch <url> with <value> [in <header> | in query <param> | as basic
+/// <user>]`, as `agent`'s guest sends it (no header of ours): the answer's
+/// status and body.
 async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
+    use base64::Engine;
     use http_body_util::{BodyExt, Empty, Limited};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let (url, placeholder, header) = match words.as_slice() {
-        [_, url, "with", p] => (*url, *p, "authorization"),
-        [_, url, "with", p, "in", h] => (*url, *p, *h),
-        _ => return Err("say `fetch <http url> with <placeholder> [in <header>]`".into()),
+    let (url, value, place) = fetch_words(text)?;
+    let value = match value.strip_prefix('$') {
+        Some(name) => credential(agent, name).await?,
+        None => value.to_string(),
     };
-    let value = if header == "authorization" { format!("Bearer {placeholder}") } else { placeholder.to_string() };
-    let base = crate::net::Base::parse(url)?;
-    let req = hyper::Request::get(url)
+    let (url, header, header_value) = match place {
+        Place::Header("authorization") => (url.to_string(), "authorization", format!("Bearer {value}")),
+        Place::Header(h) => (url.to_string(), h, value),
+        Place::Query(q) => (format!("{url}{}{q}={value}", if url.contains('?') { '&' } else { '?' }), "accept", "*/*".to_string()),
+        Place::Basic(user) => (url.to_string(), "authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{value}")))),
+    };
+    let base = crate::net::Base::parse(&url)?;
+    let req = hyper::Request::get(&url)
         .header("host", base.authority())
-        .header("x-fragment-agent", agent)
-        .header(header, value)
+        .header(header, header_value)
         .body(Empty::<bytes::Bytes>::new())
         .map_err(|e| e.to_string())?;
     let client = Client::builder(TokioExecutor::new()).build_http();
@@ -193,6 +239,13 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("think failed: {e}"),
         };
     }
+    if text.trim() == "credentials" {
+        reply = match credentials_of(&ts.agent.fragment).await {
+            Ok(all) if all.is_empty() => "credentials: none".to_string(),
+            Ok(all) => format!("credentials: {}", all.iter().map(|c| format!("{} {} {}", c.provider, c.env.join(","), c.placeholder)).collect::<Vec<_>>().join("; ")),
+            Err(e) => format!("credentials failed: {e}"),
+        };
+    }
     if text.starts_with("fetch ") {
         reply = match fetch(&ts.agent.fragment, &ts.text).await {
             Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
@@ -245,4 +298,22 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         }
     }
     emit(Event::End { turn: id, outcome: Outcome::Idle }).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `fetch`'s grammar: a header (authorization by default), a query
+    /// parameter, or basic auth; anything else is refused, saying how.
+    #[test]
+    fn fetch_reads_where_its_value_goes() {
+        assert_eq!(fetch_words("fetch http://a.test/x with $PERPLEXITY_API_KEY").unwrap(), ("http://a.test/x", "$PERPLEXITY_API_KEY", Place::Header("authorization")));
+        assert_eq!(fetch_words("fetch http://a.test/x with $K in xi-api-key").unwrap(), ("http://a.test/x", "$K", Place::Header("xi-api-key")));
+        assert_eq!(fetch_words("fetch http://a.test/x with $K in query key").unwrap(), ("http://a.test/x", "$K", Place::Query("key")));
+        assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api")));
+        for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
+            assert!(fetch_words(bad).is_err(), "{bad}");
+        }
+    }
 }

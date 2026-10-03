@@ -62,13 +62,12 @@ struct Deployment {
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
-    /// The WorkOS Pipes providers a computer's swap offers, each with its
-    /// hosts (`{"github": ["api.github.com"]}`; decision 22).
+    /// The provider catalog a computer's swap offers (decisions 22 and 37;
+    /// `fragment_core::catalog`): each row a connection, an operator key or
+    /// an own key, with its hosts, placements, environment variables and
+    /// (an operator key's) price, and an operator key's `key_file`.
     #[serde(default)]
-    connections: BTreeMap<String, Vec<String>>,
-    /// The operator's keys a computer's swap offers (decision 37).
-    #[serde(default)]
-    operator_keys: BTreeMap<String, OperatorKey>,
+    providers: Vec<Value>,
     /// The price book's version: raise it with every change to a key's
     /// price, or ledgers made before keep the book they have.
     price_book_version: Option<u32>,
@@ -103,22 +102,27 @@ struct Image {
     build_vars: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperatorKey {
-    hosts: Vec<String>,
-    /// The file holding the key.
-    key_file: PathBuf,
-    /// What its use costs at list price: `micros` per `per` calls (the
-    /// margin is added). A key with no price is not lent.
-    price: KeyPrice,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct KeyPrice {
-    micros: i64,
-    per: u64,
+/// The deployment's catalog, and the file each operator key's value is
+/// in: a row's `key_file` is the deploy's (its secret), the rest the
+/// cell's (`FRAGMENT_PROVIDERS`). An operator key names one; no other row
+/// may.
+fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(String, PathBuf)>)> {
+    let mut rows = vec![];
+    let mut key_files = vec![];
+    for row in &d.providers {
+        let mut row = row.clone();
+        let name = row["name"].as_str().unwrap_or("?").to_string();
+        let key_file = row.as_object_mut().and_then(|o| o.remove("key_file"));
+        match (row["kind"].as_str(), key_file) {
+            (Some("operator"), Some(Value::String(f))) => key_files.push((name.clone(), PathBuf::from(f))),
+            (Some("operator"), _) => bail!("providers: the operator key {name} names its key_file"),
+            (_, Some(_)) => bail!("providers: {name} is no operator key, so it names no key_file"),
+            (_, None) => {}
+        }
+        rows.push(serde_json::from_value(row).with_context(|| format!("providers: {name}"))?);
+    }
+    let catalog = fragment_core::catalog::Catalog::of(rows).map_err(|e| anyhow::anyhow!("providers: {e}"))?;
+    Ok((catalog, key_files))
 }
 
 #[derive(Deserialize)]
@@ -247,14 +251,9 @@ fn load(config: &Path) -> Result<Deployment> {
 }
 
 /// What the cell would refuse at its first request, refused before a
-/// deploy: the swap's names and hosts, and a default image it has.
+/// deploy: the provider catalog, and a default image it has.
 fn checked(d: Deployment) -> Result<Deployment> {
-    fragment_core::swap::parse_hosts(&serde_json::to_string(&d.connections)?).map_err(|e| anyhow::anyhow!("connections: {e}"))?;
-    let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
-    fragment_core::swap::parse_hosts(&serde_json::to_string(&hosts)?).map_err(|e| anyhow::anyhow!("operator_keys: {e}"))?;
-    if let Some((name, _)) = d.operator_keys.iter().find(|(_, k)| k.price.micros < 1 || k.price.per < 1) {
-        bail!("operator_keys: {name}'s price is at least one micro-dollar per at least one call");
-    }
+    catalog_of(&d)?;
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -336,8 +335,8 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
-    let operator_keys: Vec<(String, String)> =
-        d.operator_keys.iter().map(|(name, k)| Ok((fragment_core::swap::key_secret_name(name), read_secret(&k.key_file)?))).collect::<Result<_>>()?;
+    let (catalog, key_files) = catalog_of(&d)?;
+    let operator_keys: Vec<(String, String)> = key_files.iter().map(|(name, file)| Ok((fragment_core::catalog::key_secret_name(name), read_secret(file)?))).collect::<Result<_>>()?;
     let tools = devstack::Tools::locate()?;
     crate::build()?;
     let deploy_id = git_head()?;
@@ -432,14 +431,8 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
     }
-    if !d.connections.is_empty() {
-        v.insert("FRAGMENT_CONNECTIONS".into(), Value::String(serde_json::to_string(&d.connections)?));
-    }
-    if !d.operator_keys.is_empty() {
-        let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
-        v.insert("FRAGMENT_OPERATOR_KEYS".into(), Value::String(serde_json::to_string(&hosts)?));
-        let prices: Vec<Value> = d.operator_keys.iter().map(|(name, k)| json!({ "key": name, "micros": k.price.micros, "per": k.price.per })).collect();
-        v.insert("FRAGMENT_KEY_PRICES".into(), Value::String(serde_json::to_string(&prices)?));
+    if !catalog.is_empty() {
+        v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(catalog.providers())?));
     }
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
@@ -565,8 +558,7 @@ mod tests {
             ai_gateway: None,
             default_plan: None,
             computers: None,
-            connections: BTreeMap::new(),
-            operator_keys: BTreeMap::new(),
+            providers: vec![],
             price_book_version: None,
             test_secret_file: None,
         }
@@ -681,13 +673,23 @@ mod tests {
         assert!(names(&deployment(Some("fragment.club"), None), None).is_err());
     }
 
+    /// The example and the hosted e2e's configs parse and check, each with
+    /// the platform's catalog: Google, and the four operator keys at their
+    /// list prices, each key's file named.
     #[test]
-    fn the_example_config_parses() {
-        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        assert!(names(&d, Some("dev")).is_ok());
-        let d = checked(d).unwrap();
-        assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"));
+    fn the_example_and_e2e_configs_parse() {
+        for file in ["deploy/example.jsonc", "deploy/e2e.jsonc"] {
+            let text = fs::read_to_string(devstack::repo_root().join(file)).unwrap();
+            let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+            assert!(names(&d, Some("dev")).is_ok(), "{file}");
+            let d = checked(d).unwrap();
+            assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
+            let (catalog, files) = catalog_of(&d).unwrap();
+            let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
+            assert_eq!(files.len(), 4, "{file}: each operator key's file");
+            assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
+        }
     }
 
     /// OpenRouter went (a hard cut): a config that still names its key is
@@ -701,16 +703,31 @@ mod tests {
         assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
     }
 
-    /// A swap's names and hosts, and a default image, are checked before
-    /// anything deploys.
+    /// The provider catalog, its key files, and a default image are
+    /// checked before anything deploys.
     #[test]
-    fn a_bad_swap_or_image_is_refused_before_a_deploy() {
-        let mut d = deployment(None, None);
-        d.connections.insert("GitHub".into(), vec!["api.github.com".into()]);
-        assert!(checked(d).is_err());
-        let mut d = deployment(None, None);
-        d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into(), price: KeyPrice { micros: 1, per: 1 } });
-        assert!(checked(d).is_err());
+    fn a_bad_catalog_or_image_is_refused_before_a_deploy() {
+        let row = |extra: Value| {
+            let mut r = json!({ "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["PERPLEXITY_API_KEY"] });
+            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            r
+        };
+        let with = |rows: Vec<Value>| {
+            let mut d = deployment(None, None);
+            d.providers = rows;
+            d
+        };
+        let d = with(vec![row(json!({ "key_file": "~/.config/fragment/secrets/perplexity-api-key" }))]);
+        let (catalog, files) = catalog_of(&d).unwrap();
+        assert_eq!(catalog.get("perplexity").unwrap().price.map(|p| (p.micros, p.per)), Some((5_000_000, 1_000)), "the price book's list price");
+        assert_eq!(files, vec![("perplexity".to_string(), PathBuf::from("~/.config/fragment/secrets/perplexity-api-key"))]);
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("key_file"), "the key's file is the deploy's, never the cell's");
+        assert!(checked(d).is_ok());
+        assert!(checked(with(vec![row(json!({}))])).is_err(), "an operator key names its file");
+        assert!(checked(with(vec![row(json!({ "key_file": "k", "name": "Perplexity" }))])).is_err());
+        assert!(checked(with(vec![row(json!({ "key_file": "k", "hosts": ["localhost"] }))])).is_err());
+        let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key_file": "k" });
+        assert!(checked(with(vec![google])).is_err(), "a connection has no key file");
         let mut d = deployment(None, None);
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new() });
         assert!(checked(d).is_err());

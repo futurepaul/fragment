@@ -6,15 +6,15 @@ description: Use when the user wants to inspect or update Monday.com boards, ite
 # Monday.com via your owner's connection
 
 Use Monday's GraphQL API (`https://api.monday.com/v2`) through your owner's
-connected Monday account. Your computer holds no keys: send the
-connection's placeholder as the token and name yourself, and the computer
-swaps in a short-lived token:
+connected Monday account. Your computer holds no keys: `MONDAY_API_TOKEN`
+holds the connection's placeholder (it names you); send it as the token,
+and the computer swaps in a short-lived one. Unset, your owner has not
+connected Monday, or this deployment does not offer it yet:
 
 ```bash
 monday() {
   curl -sS -X POST "https://api.monday.com/v2" \
-    -H "Authorization: fragment-connection:monday" \
-    -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+    -H "Authorization: $MONDAY_API_TOKEN" \
     -H "API-Version: 2024-10" \
     -H "Content-Type: application/json" \
     --data "$(jq -cn --arg q "$1" '{query: $q}')"

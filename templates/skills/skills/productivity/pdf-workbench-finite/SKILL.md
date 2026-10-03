@@ -28,10 +28,12 @@ What this needs on your computer:
 GEMINI_API_KEY=...
 ```
 
-The platform offers no Gemini key here, and `nano-pdf` (Google's SDK)
-cannot use your computer's credential swap. If `GEMINI_API_KEY` is missing,
-stop and ask the person whether they want to give one for this task before
-attempting edits or adds; never store it in a file that syncs.
+The platform offers no Gemini key yet; when a deployment does, your
+computer's environment holds its placeholder in `GEMINI_API_KEY`, which
+`nano-pdf` (Google's SDK) reads unmodified, and the computer swaps in the
+key. If `GEMINI_API_KEY` is missing, stop and ask the person whether they
+want to give one for this task before attempting edits or adds; never
+store it in a file that syncs.
 
 ## What nano-pdf does
 

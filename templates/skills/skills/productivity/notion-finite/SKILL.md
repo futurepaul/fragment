@@ -17,13 +17,15 @@ Use the Notion API via curl to create, read, update pages, databases (data sourc
 ## Prerequisites
 
 Your computer holds no keys. Requests act through your owner's connected
-Notion account: send `Authorization: Bearer fragment-connection:notion` and
-`x-fragment-agent: $FRAGMENT_AS_AGENT`, and the computer swaps in a
-short-lived token for `api.notion.com`.
+Notion account: `NOTION_TOKEN` (the variable Notion's own SDK examples
+read) holds the connection's placeholder, which names you; send it as a
+bearer token, and the computer swaps in a short-lived token for
+`api.notion.com`.
 
-1. A 403 `not_connected` means your owner has not connected Notion: ask
-   them to connect it in the shell's Settings, under Connections. A 403
-   `forbidden` means they kept this agent from it.
+1. Unset, your owner has not connected Notion, or this deployment does
+   not offer it yet (a catalog row adds it): ask them to connect it in the
+   shell's Settings, under Connections. A 403 `forbidden` means they kept
+   this agent from it.
 2. **Important:** the connection sees only the pages and databases your
    owner granted it when they connected Notion; ask them to share a page
    with it there if a request answers 404.
@@ -34,7 +36,7 @@ All requests use this pattern:
 
 ```bash
 curl -s -X GET "https://api.notion.com/v1/..." \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json"
 ```
@@ -47,7 +49,7 @@ The `Notion-Version` header is required. This skill uses `2025-09-03` (latest). 
 
 ```bash
 curl -s -X POST "https://api.notion.com/v1/search" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{"query": "page title"}'
@@ -57,7 +59,7 @@ curl -s -X POST "https://api.notion.com/v1/search" \
 
 ```bash
 curl -s "https://api.notion.com/v1/pages/{page_id}" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03"
 ```
 
@@ -65,7 +67,7 @@ curl -s "https://api.notion.com/v1/pages/{page_id}" \
 
 ```bash
 curl -s "https://api.notion.com/v1/blocks/{page_id}/children" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03"
 ```
 
@@ -73,7 +75,7 @@ curl -s "https://api.notion.com/v1/blocks/{page_id}/children" \
 
 ```bash
 curl -s -X POST "https://api.notion.com/v1/pages" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{
@@ -89,7 +91,7 @@ curl -s -X POST "https://api.notion.com/v1/pages" \
 
 ```bash
 curl -s -X POST "https://api.notion.com/v1/data_sources/{data_source_id}/query" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{
@@ -102,7 +104,7 @@ curl -s -X POST "https://api.notion.com/v1/data_sources/{data_source_id}/query" 
 
 ```bash
 curl -s -X POST "https://api.notion.com/v1/data_sources" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{
@@ -120,7 +122,7 @@ curl -s -X POST "https://api.notion.com/v1/data_sources" \
 
 ```bash
 curl -s -X PATCH "https://api.notion.com/v1/pages/{page_id}" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{"properties": {"Status": {"select": {"name": "Done"}}}}'
@@ -130,7 +132,7 @@ curl -s -X PATCH "https://api.notion.com/v1/pages/{page_id}" \
 
 ```bash
 curl -s -X PATCH "https://api.notion.com/v1/blocks/{page_id}/children" \
-  -H "Authorization: Bearer fragment-connection:notion" -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "Authorization: Bearer $NOTION_TOKEN" \
   -H "Notion-Version: 2025-09-03" \
   -H "Content-Type: application/json" \
   -d '{

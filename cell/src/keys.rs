@@ -1,7 +1,8 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
 //! WorkOS's API key, and the operator's keys a computer's swap sends
-//! (`FRAGMENT_KEY_<NAME>`). Only the platform
+//! (`FRAGMENT_KEY_<NAME>`); and what is derived from the host secret: the
+//! key placeholders' tags are made with (`tag_keys`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
 //! Worker Loader, with an env the platform builds (`js::app_env`), so no
 //! author code can name one. A value sealed here names the Durable Object
@@ -143,24 +144,60 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
 /// A WorkOS Pipes access token for `user`'s account at `provider`
 /// (`POST /data-integrations/{provider}/token`): (status, WorkOS's answer,
 /// `{active, access_token: {access_token, expires_at, …}}` or `{active:
-/// false, error}`).
+/// false, error}`). Asked only to swap a token in: it may refresh one.
 pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
-    assert!(fragment_core::swap::valid_name(provider), "a provider is checked before WorkOS is asked");
+    assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
     post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+}
+
+/// A connection's state, without a token (WorkOS Pipes' connected account,
+/// `GET /user_management/users/{user}/connected_accounts/{provider}`):
+/// what Pipes says of `user`'s account at `provider`, never minting or
+/// refreshing a token. 404 is no account.
+pub async fn pipes_state(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<fragment_proto::computer::ProviderState> {
+    use fragment_proto::computer::ProviderState;
+    assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
+    // it goes in a path: a user id is WorkOS' token (`user_01…`), nothing else
+    if user.is_empty() || !user.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return Err(CellError::host(format!("a WorkOS user id that is no token: {user:?}")));
+    }
+    let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
+    let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/connected_accounts/{provider}"), Method::Get, Some(&key), None, "WorkOS").await?;
+    match (status, answer["state"].as_str()) {
+        (200, Some("connected")) => Ok(ProviderState::Connected),
+        (200, Some("needs_reauthorization")) => Ok(ProviderState::NeedsReauthorization),
+        (200, _) | (404, _) => Ok(ProviderState::NotConnected),
+        (s, _) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not say whether {provider} is connected ({s}): {}", answer["message"].as_str().unwrap_or("no reason given")))),
+    }
 }
 
 /// A WorkOS Pipes consent URL for `user` to connect `provider`
 /// (`POST /data-integrations/{provider}/authorize`, spike S5): (status,
 /// WorkOS's answer, `{url, state}`).
 pub async fn pipes_authorize(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
-    assert!(fragment_core::swap::valid_name(provider), "a provider is checked before WorkOS is asked");
+    assert!(fragment_core::catalog::valid_name(provider), "a provider is checked before WorkOS is asked");
     let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
     post_json(&format!("{api}/data-integrations/{provider}/authorize"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
 }
 
-/// The operator's key `name` (`swap::key_secret_name`), when the
+/// The operator's key `name` (`catalog::key_secret_name`), when the
 /// deployment holds it.
 pub fn operator_key(env: &Env, name: &str) -> Option<String> {
-    secret(env, &fragment_core::swap::key_secret_name(name))
+    secret(env, &fragment_core::catalog::key_secret_name(name))
+}
+
+/// The keys placeholders' tags are made with (`swap::TagKey`), derived
+/// from the host secret: the current one's first, then the previous one's
+/// while a rotation is under way (a guest reads its placeholders again
+/// within seconds). Only the platform holds them.
+pub fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>> {
+    let hosts = host_secrets(env);
+    if hosts.is_empty() {
+        return Err(CellError::host(format!("{HOST_SECRET} is not set")));
+    }
+    if hosts.iter().any(|h| h.len() < fragment_core::seal::HOST_SECRET_MIN_BYTES) {
+        return Err(sealing(SealError::WeakHostSecret));
+    }
+    Ok(hosts.iter().map(|h| fragment_core::swap::TagKey::derive(h)).collect())
 }
