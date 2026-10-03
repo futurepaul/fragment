@@ -129,7 +129,9 @@ speaking Cloudflare's APIs) returns once this product works.
 13. **One computer per person for now.** A computer is its own entity,
     so ephemeral computers and bring-your-own machines can return
     without a redesign. A computer runs an image. The image, not the
-    platform, decides what runs: today, Hermes.
+    platform, decides what runs: today, Hermes. The default size is 2 vCPU
+    and 6 GiB (Paul, 2026-10-02), the smallest 2-vCPU shape Cloudflare
+    allows at 3 GiB per vCPU.
 14. **An agent is a fragment** (kind `agent`) with its own identity.
     Fragments are how agents keep state:
     - its repo: `SOUL.md` (its job and persona), `memories/`, `skills/`,
@@ -642,9 +644,9 @@ Each one needs a test in the phase that ports its feature.
     gateway until raised;
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
-- **Model context.** GLM-5.3, the medium tier, lists a 64K context
-  window, which may be tight for long Hermes runs. GLM-5.3 Flash takes
-  1M; spike S3 sent it 257K.
+- **Model context.** Cloudflare lists GLM-5.3, the medium tier, at 64K,
+  but Paul expects 1M like GLM-5.3 Flash (spike S3 sent Flash 257K).
+  The AI Gateway spike checks it with a prompt past 64K.
 - **Slow cold wakes.** Hermes takes about 21 s to wake with a restore,
   and 42–82 s on a new image. The chat must show the computer waking.
   The idle window and the $200 always-on seat hide it. Hermes' boot
