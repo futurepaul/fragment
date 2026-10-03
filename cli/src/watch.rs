@@ -217,8 +217,8 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bo
     let live_up = Arc::new(AtomicBool::new(false));
     let mut live_state = "off";
     if live {
-        let url = watch_url(&client.host, name, view_token(client, name).as_deref());
-        let (signer, feed, up) = (client.id.clone(), tx.clone(), live_up.clone());
+        let url = watch_url(&client.host, &client.signer, name, view_token(client, name).as_deref());
+        let (signer, feed, up) = (client.signer.clone(), tx.clone(), live_up.clone());
         std::thread::spawn(move || live_listener(&url, &signer, feed, up));
         live_state = "connecting";
     }
@@ -314,19 +314,20 @@ fn wakeup_of(frame: &str) -> Wakeup {
 
 /// The change feed's URL: the host's with its scheme made a websocket's
 /// (http → ws, https → wss), and the share link's view token if any.
-fn watch_url(host: &str, name: &str, view: Option<&str>) -> String {
+fn watch_url(host: &str, signer: &crate::api::Signer, name: &str, view: Option<&str>) -> String {
     let ws = host.trim_end_matches('/').replacen("http", "ws", 1);
-    match view {
-        Some(t) => format!("{ws}/f/{name}/__watch?view={t}"),
-        None => format!("{ws}/f/{name}/__watch"),
-    }
+    let path = match view {
+        Some(t) => format!("/f/{name}/__watch?view={t}"),
+        None => format!("/f/{name}/__watch"),
+    };
+    format!("{ws}{}", signer.path(&path))
 }
 
 /// the cell's change channel: frames arrive per remote mutation; reconnect
 /// with backoff forever (degradation is reported by the sweep still
 /// working). `up` says whether the socket is open: a sweep while it is not
 /// runs a full pass.
-fn live_listener(url: &str, signer: &crate::auth::Identity, tx: Sender<Wakeup>, up: Arc<AtomicBool>) {
+fn live_listener(url: &str, signer: &crate::api::Signer, tx: Sender<Wakeup>, up: Arc<AtomicBool>) {
     use tungstenite::client::IntoClientRequest;
     let mut backoff = 1u64;
     loop {
@@ -338,10 +339,12 @@ fn live_listener(url: &str, signer: &crate::auth::Identity, tx: Sender<Wakeup>, 
         };
         // signed fresh on every connect (NIP-98 events are good for a
         // minute): members-only fragments have no share link to present.
-        // The server sees the upgrade as a GET of the http(s) URL.
+        // The server sees the upgrade as a GET of the http(s) URL. An agent
+        // names itself, and its computer's egress signs.
         let http = url.replacen("ws", "http", 1);
-        if let Ok(v) = signer.nip98_header("GET", &http, &[]).parse() {
-            req.headers_mut().insert("authorization", v);
+        let (header, value) = signer.header("GET", &http, &[]);
+        if let Ok(v) = value.parse() {
+            req.headers_mut().insert(header, v);
         }
         if let Ok((mut socket, _)) = tungstenite::connect(req) {
             backoff = 1;
@@ -381,14 +384,15 @@ pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) ->
     use fragment_proto::live::{Cursor, LiveIn, LiveOut, Subscribe};
     use tungstenite::client::IntoClientRequest;
     // `v=2`: the current frames (live.rs), which `LiveOut` decodes
-    let http = format!("{}/f/{name}/__live?v=2", client.host.trim_end_matches('/'));
+    let http = client.url(&format!("/f/{name}/__live?v=2"));
     let ws_url = http.replacen("http", "ws", 1);
     let subscribe = |after: i64| LiveIn::Subscribe(Subscribe { channel: channel.to_string(), from: Cursor::After(after) }).encode();
     let mut last = after;
     let mut backoff = 1u64;
     loop {
         let mut req = ws_url.as_str().into_client_request().context("the live socket URL")?;
-        req.headers_mut().insert("authorization", client.id.nip98_header("GET", &http, &[]).parse().context("auth header")?);
+        let (header, value) = client.signer.header("GET", &http, &[]);
+        req.headers_mut().insert(header, value.parse().context("auth header")?);
         match tungstenite::connect(req) {
             Ok((mut socket, _)) => {
                 backoff = 1;
@@ -636,7 +640,11 @@ mod tests {
     /// `wss://wsbin.example`.
     #[test]
     fn the_feed_url_changes_only_the_scheme() {
-        assert_eq!(watch_url("https://httpbin.example/", "t", Some("v")), "wss://httpbin.example/f/t/__watch?view=v");
-        assert_eq!(watch_url("http://http.local:8790", "t", None), "ws://http.local:8790/f/t/__watch");
+        let key = crate::api::Signer::Key(auth::fixed(7));
+        assert_eq!(watch_url("https://httpbin.example/", &key, "t", Some("v")), "wss://httpbin.example/f/t/__watch?view=v");
+        assert_eq!(watch_url("http://http.local:8790", &key, "t", None), "ws://http.local:8790/f/t/__watch");
+        // an agent acting for its owner names them: a fragment's own route honors `for`
+        let agent = crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper.paul".into(), acting_for: Some("id:paul".into()) });
+        assert_eq!(watch_url("http://api.fragment.internal", &agent, "t", Some("v")), "ws://api.fragment.internal/f/t/__watch?view=v&for=id%3Apaul");
     }
 }

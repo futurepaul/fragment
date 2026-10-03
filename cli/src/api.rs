@@ -220,9 +220,67 @@ pub enum Signed {
     Url,
 }
 
+/// Who signs a request: this machine's key, or, inside a computer, the
+/// computer's API egress, as one of its agents (docs/computers.md): the
+/// request names the agent (`x-fragment-agent`) and the egress signs it, so
+/// nothing here holds a key.
+#[derive(Clone)]
+pub enum Signer {
+    Key(Identity),
+    Agent(AgentMode),
+}
+
+/// The agent mode: the agent fragment the egress signs as, and the person it
+/// acts for (`for`), on the routes that honor it (`honors_for`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentMode {
+    pub agent: String,
+    pub acting_for: Option<String>,
+}
+
+/// The header that names the agent a request acts as.
+pub const AGENT_HEADER: &str = "x-fragment-agent";
+
+/// Whether the platform honors `for` on `path`: a fragment's routes
+/// (`/api/f/…`, and its own at `/f/…`) and the fragment list; it refuses it
+/// on every other route (cell/src/lib.rs `signer`).
+pub fn honors_for(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments"
+}
+
+impl From<Identity> for Signer {
+    fn from(id: Identity) -> Signer {
+        Signer::Key(id)
+    }
+}
+
+impl Signer {
+    /// The path as sent: an agent acting for someone names them in `for`
+    /// on the routes that honor it.
+    pub fn path(&self, path: &str) -> String {
+        match self {
+            Signer::Agent(AgentMode { acting_for: Some(who), .. }) if honors_for(path) => {
+                let sep = if path.contains('?') { '&' } else { '?' };
+                format!("{path}{sep}for={}", encode_q(who))
+            }
+            _ => path.to_string(),
+        }
+    }
+
+    /// The header that says who sends `method url` with `body`: a NIP-98
+    /// signature by the key, or the agent's name for the egress to sign.
+    pub fn header(&self, method: &str, url: &str, body: &[u8]) -> (&'static str, String) {
+        match self {
+            Signer::Key(id) => ("authorization", id.nip98_header(method, url, body)),
+            Signer::Agent(mode) => (AGENT_HEADER, mode.agent.clone()),
+        }
+    }
+}
+
 pub struct Client {
     pub host: String,
-    pub id: Identity,
+    pub signer: Signer,
     /// `-v`: one stderr line per signed request
     pub verbose: bool,
     http: reqwest::blocking::Client,
@@ -255,10 +313,10 @@ impl Resp {
 }
 
 impl Client {
-    pub fn new(host: &str, id: Identity) -> Self {
+    pub fn new(host: &str, signer: impl Into<Signer>) -> Self {
         Self {
             host: host.trim_end_matches('/').to_string(),
-            id,
+            signer: signer.into(),
             verbose: false,
             // every request sets its own total timeout (`timeout_for`)
             http: reqwest::blocking::Client::builder()
@@ -266,6 +324,41 @@ impl Client {
                 .build()
                 .expect("the HTTP client builds (its TLS backend is compiled in)"),
         }
+    }
+
+    /// This machine's key, or a usage error: an agent holds none (its
+    /// computer's egress signs for it).
+    pub fn key(&self) -> Result<&Identity> {
+        match &self.signer {
+            Signer::Key(id) => Ok(id),
+            Signer::Agent(mode) => Err(anyhow::Error::new(CodedError {
+                code: Code::InvalidUsage,
+                msg: format!("{} is an agent and holds no key: its computer signs each request as it (FRAGMENT_AS_AGENT), so keys and logins are its owner's to manage", mode.agent),
+            })),
+        }
+    }
+
+    /// The agent mode, when this client acts as an agent.
+    pub fn agent(&self) -> Option<&AgentMode> {
+        match &self.signer {
+            Signer::Agent(mode) => Some(mode),
+            Signer::Key(_) => None,
+        }
+    }
+
+    /// The writer this client's commits name (a conflict copy's suffix): its
+    /// key's first 8 hex, or an agent's name's hash's.
+    pub fn writer_id(&self) -> String {
+        match &self.signer {
+            Signer::Key(id) => id.pubkey_hex().chars().take(8).collect(),
+            Signer::Agent(mode) => hex::encode(&<sha2::Sha256 as sha2::Digest>::digest(mode.agent.as_bytes())[..4]),
+        }
+    }
+
+    /// The URL a request to `path` goes to (with `for`, as an agent acting
+    /// for someone on a route that honors it).
+    pub fn url(&self, path: &str) -> String {
+        format!("{}{}", self.host, self.signer.path(path))
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> Result<Resp> {
@@ -279,12 +372,12 @@ impl Client {
     /// it has one.
     #[allow(clippy::too_many_arguments)]
     fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
-        let url = format!("{}{}", self.host, path);
+        let url = self.url(path);
         let verb: reqwest::Method = method.parse()?;
         let what = format!("{method} {path}");
         let build = || {
-            let auth = self.id.nip98_header(method, &url, if signed == Signed::Body { &body } else { &[] });
-            let mut req = self.http.request(verb.clone(), &url).header("authorization", auth).timeout(timeout);
+            let (header, value) = self.signer.header(method, &url, if signed == Signed::Body { &body } else { &[] });
+            let mut req = self.http.request(verb.clone(), &url).header(header, value).timeout(timeout);
             if let Some(t) = content_type {
                 req = req.header("content-type", t);
             }
@@ -574,6 +667,71 @@ mod tests {
         assert_eq!(page(413), Code::TooLarge);
         assert_eq!(page(429), Code::RateLimited);
         assert_eq!(page(400), Code::ServerError, "a 400 without a code names no reason");
+    }
+
+    /// A host that answers `{}` to everything and keeps each request's
+    /// method, path, query pairs, and the two headers that say who sent it.
+    #[allow(clippy::type_complexity)]
+    fn recording_host() -> (Server, Arc<std::sync::Mutex<Vec<(String, String, Vec<(String, String)>, Option<String>, Option<String>)>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let server = Server::start(
+            0,
+            Arc::new(move |r: &fragment_fakes::http::Request| {
+                let entry = (r.method.clone(), r.path.clone(), r.pairs.clone(), r.header("authorization").map(str::to_string), r.header(AGENT_HEADER).map(str::to_string));
+                log.lock().unwrap().push(entry);
+                FakeResponse::json(200, &serde_json::json!({}))
+            }),
+        )
+        .expect("start the recording host");
+        (server, seen)
+    }
+
+    /// Goal: inside a computer the CLI holds no key; its egress signs each
+    /// request as the agent the request names (docs/computers.md). Method: an
+    /// agent-mode client's requests name the agent and carry no
+    /// authorization; acting for its owner, a fragment's routes and the
+    /// fragment list name the owner in `for`, and no other route does (the
+    /// platform refuses `for` there); a key-mode client signs and names no agent.
+    #[test]
+    fn an_agent_names_itself_and_signs_nothing() {
+        let (server, seen) = recording_host();
+        let agent = Client::new(&server.url, Signer::Agent(AgentMode { agent: "juniper.paul".into(), acting_for: Some("id:paul".into()) }));
+        agent.get("/api/fragments").unwrap();
+        agent.get("/api/identities/me").unwrap();
+        agent.post_json_by_id("/api/f/garden.paul/ops/add", &serde_json::json!({ "id": "x", "input": {} })).unwrap();
+        agent.get("/api/f/garden.paul/channels/chat?after=3").unwrap();
+        agent.get("/api/ledger").unwrap();
+        let key = Client::new(&server.url, crate::auth::fixed(7));
+        key.get("/api/fragments").unwrap();
+        let seen = seen.lock().unwrap();
+        let for_of = |pairs: &Vec<(String, String)>| pairs.iter().find(|(k, _)| k == "for").map(|(_, v)| v.clone());
+        for (i, (method, path, pairs, auth, named)) in seen.iter().take(5).enumerate() {
+            assert_eq!(named.as_deref(), Some("juniper.paul"), "request {i} ({method} {path}) names its agent");
+            assert!(auth.is_none(), "request {i} carries no signature of its own: {auth:?}");
+            let expected = matches!(path.as_str(), "/api/fragments" | "/api/f/garden.paul/ops/add" | "/api/f/garden.paul/channels/chat").then(|| "id:paul".to_string());
+            assert_eq!(for_of(pairs), expected, "{method} {path}");
+        }
+        assert_eq!(seen[3].2.iter().find(|(k, _)| k == "after").map(|(_, v)| v.as_str()), Some("3"), "a query of its own is kept beside `for`");
+        let (_, _, pairs, auth, named) = &seen[5];
+        assert!(auth.as_deref().is_some_and(|a| a.starts_with("Nostr ")) && named.is_none() && for_of(pairs).is_none(), "a key signs, and names no agent");
+        // an agent acting for no one names no one
+        let alone = Signer::Agent(AgentMode { agent: "juniper.paul".into(), acting_for: None });
+        assert_eq!(alone.path("/api/fragments"), "/api/fragments");
+        assert!(agent.key().is_err() && key.key().is_ok(), "an agent holds no key");
+        assert_eq!(agent.writer_id(), agent.writer_id());
+        assert_eq!(agent.writer_id().len(), 8);
+        assert_ne!(agent.writer_id(), key.writer_id());
+    }
+
+    #[test]
+    fn for_is_named_on_a_fragments_routes_and_the_list_only() {
+        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live?v=2", "/api/fragments", "/api/fragments?x=1"] {
+            assert!(honors_for(yes), "{yes}");
+        }
+        for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
+            assert!(!honors_for(no), "{no}");
+        }
     }
 
     /// Every code has its own name, and GUIDE.md lists each one.
