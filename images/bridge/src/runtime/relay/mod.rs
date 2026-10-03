@@ -121,6 +121,8 @@ struct Inflight {
     order: u64,
     frame: String,
     acked: bool,
+    /// Its inbound went out on a greeted connection at least once.
+    sent: bool,
     /// Reply messages, by the id the bridge gave them, and their parts.
     parts: HashMap<String, u32>,
     /// Progress messages, and how many of their lines are steps already.
@@ -340,12 +342,17 @@ impl Loop {
         let _ = self.events.send(e).await;
     }
 
-    fn send(&self, frame: String) {
-        if let Some((_, tx)) = &self.conn {
-            if self.greeted && tx.try_send(Message::text(frame)).is_err() {
-                crate::ev!("relay.send_dropped", { "why": "the connection's queue is full or closed; it is handed again on the next dial" });
-            }
+    /// Sends a frame on the greeted connection: whether it went.
+    fn send(&self, frame: String) -> bool {
+        let Some((_, tx)) = &self.conn else { return false };
+        if !self.greeted {
+            return false;
         }
+        let sent = tx.try_send(Message::text(frame)).is_ok();
+        if !sent {
+            crate::ev!("relay.send_dropped", { "why": "the connection's queue is full or closed; it is handed again on the next dial" });
+        }
+        sent
     }
 
     async fn command(&mut self, c: Command) {
@@ -353,13 +360,15 @@ impl Loop {
             Command::Start(ts) => self.start(ts),
             Command::Stop { turn } => {
                 let Some(f) = self.inflight.get_mut(&turn) else { return };
-                if f.acked {
+                if f.acked || f.sent {
+                    // Hermes has it (or may): interrupt it now, and again at
+                    // its ack or the next dial, should this one be lost.
                     f.stopped = true;
                     let frame = wire::interrupt(&f.profile, &f.chat);
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
                 } else {
-                    // Never taken: it never starts.
+                    // Never sent: it never starts.
                     self.forget(&turn);
                     self.emit(Event::End { turn, outcome: Outcome::Stopped }).await;
                 }
@@ -373,7 +382,7 @@ impl Loop {
                 let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[] };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
-                self.send(frame.clone());
+                let _ = self.send(frame.clone());
                 self.answers.push(PendingAnswer { buffer, frame });
             }
             Command::Forget { turn } => self.forget(&turn),
@@ -411,10 +420,10 @@ impl Loop {
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame: frame.clone(), acked: false, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, outcome: None, said: false, stopped: false });
+        let sent = self.send(frame.clone());
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, outcome: None, said: false, stopped: false });
         self.by_chat.insert(chat, turn.clone());
-        crate::ev!("relay.inbound", { "turn": turn, "connected": self.conn.is_some() && self.greeted });
-        self.send(frame);
+        crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
 
     async fn wire(&mut self, w: Wire) {
@@ -458,32 +467,46 @@ impl Loop {
                     let _ = tx.try_send(Message::text(wire::descriptor()));
                 }
                 // Every inbound not acked, in the order handed, then every
-                // answer: Hermes drops what it already saw.
-                let mut unacked: BTreeMap<u64, String> = BTreeMap::new();
-                for f in self.inflight.values().filter(|f| !f.acked) {
-                    unacked.insert(f.order, f.frame.clone());
+                // answer, then every Stop: Hermes drops what it already saw.
+                let mut unacked: BTreeMap<u64, (String, String)> = BTreeMap::new();
+                for (id, f) in self.inflight.iter().filter(|(_, f)| !f.acked) {
+                    unacked.insert(f.order, (id.clone(), f.frame.clone()));
                 }
-                for frame in unacked.into_values() {
-                    self.send(frame);
+                for (id, frame) in unacked.into_values() {
+                    let sent = self.send(frame);
+                    if let Some(f) = self.inflight.get_mut(&id) {
+                        f.sent |= sent;
+                    }
                 }
                 for a in &self.answers {
-                    self.send(a.frame.clone());
+                    let _ = self.send(a.frame.clone());
+                }
+                let stops: Vec<String> = self.inflight.values().filter(|f| f.stopped && f.acked).map(|f| wire::interrupt(&f.profile, &f.chat)).collect();
+                for frame in stops {
+                    let _ = self.send(frame);
                 }
             }
             FromGateway::InboundAck { buffer_id } => {
                 if let Some(f) = self.inflight.get_mut(&buffer_id) {
                     if !f.acked {
                         f.acked = true;
+                        // Stopped before Hermes took it: tell it now.
+                        let stop = f.stopped.then(|| wire::interrupt(&f.profile, &f.chat));
+                        if let Some(frame) = stop {
+                            let _ = self.send(frame);
+                        }
                         self.emit(Event::Accepted { turn: buffer_id }).await;
                     }
                 } else {
                     self.answers.retain(|a| a.buffer != buffer_id);
                 }
             }
-            FromGateway::GoingIdle => self.send(wire::going_idle_ack()),
+            FromGateway::GoingIdle => {
+                let _ = self.send(wire::going_idle_ack());
+            }
             FromGateway::Outbound { request_id, action } => {
                 let answer = self.act(action).await;
-                self.send(wire::result(&request_id, answer));
+                let _ = self.send(wire::result(&request_id, answer));
             }
             FromGateway::Other(_) => {}
         }

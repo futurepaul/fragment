@@ -138,8 +138,9 @@ pub async fn restore_gate(cfg: &Config, mut stop: watch::Receiver<bool>) -> bool
 
 enum Msg {
     Input(Input),
-    /// Re-read `GET /api/computer`, then list this agent's fragments.
-    Discover(String),
+    /// `GET /api/computer` as read (in a task of its own), and the agent
+    /// whose fragments to list now (`None`: those due).
+    Computer(api::Computer, Option<String>),
 }
 
 /// What followers read of the engine without asking it: the cursors, as of
@@ -214,12 +215,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     crate::ev!("keepalive", { "hold": on });
                     let _ = keep_tx.send(on);
                 }
-                Effect::Discover { agent } => {
-                    let inbox = inbox_tx.clone();
-                    tokio::spawn(async move {
-                        let _ = inbox.send(Msg::Discover(agent)).await;
-                    });
-                }
+                Effect::Discover { agent } => reread(&api, &inbox_tx, Some(agent)),
             }
         }
         Ok(())
@@ -235,6 +231,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
 
     let mut tick = tokio::time::interval(Duration::from_millis(1000));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut computer_read = Instant::now();
     let mut stop_rx = stop.clone();
     // bounded by the bridge's life: one input per pass, ended by `stop`
     let result = loop {
@@ -244,22 +241,20 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
             m = inbox.recv() => {
                 let Some(m) = m else { break Ok(()) };
                 let step = match m {
-                    Msg::Input(input) => Some(engine.step(input, crate::log::now_ms())),
-                    Msg::Discover(agent) => match ask_once(&api).await {
-                        Some(c) => {
-                            let s = engine.step(Input::Agents(c.agents.clone()), crate::log::now_ms());
-                            for a in c.agents.iter().filter(|a| a.fragment == agent) {
-                                follows.discover(a.clone());
-                            }
-                            Some(s)
+                    Msg::Input(input) => engine.step(input, crate::log::now_ms()),
+                    Msg::Computer(c, only) => {
+                        let s = engine.step(Input::Agents(c.agents.clone()), crate::log::now_ms());
+                        // An agent that left this computer is followed no more.
+                        follows.keep_only(&c.agents);
+                        match only {
+                            Some(agent) => c.agents.iter().filter(|a| a.fragment == agent).for_each(|a| follows.discover(a.clone())),
+                            None => follows.rediscover_due(&c.agents),
                         }
-                        None => None,
-                    },
-                };
-                if let Some(s) = step {
-                    if let Err(e) = act(&engine, s) {
-                        break Err(e);
+                        s
                     }
+                };
+                if let Err(e) = act(&engine, step) {
+                    break Err(e);
                 }
             }
             _ = tick.tick() => {
@@ -267,7 +262,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                 if let Err(e) = act(&engine, s) {
                     break Err(e);
                 }
-                follows.rediscover_due(engine.agents());
+                // The computer's agents are read again this often: one assigned
+                // to it while it is awake is followed from then.
+                if computer_read.elapsed() >= Duration::from_millis(limits::COMPUTER_EVERY_MS) {
+                    computer_read = Instant::now();
+                    reread(&api, &inbox_tx, None);
+                }
             }
             r = &mut runtime_task => break runtime_result(r, name),
         }
@@ -282,6 +282,17 @@ fn runtime_result(r: Result<Result<(), crate::runtime::RuntimeError>, tokio::tas
         Ok(Err(e)) => Err(BridgeError::Runtime(e.to_string())),
         Err(e) => Err(BridgeError::Runtime(format!("the {name} runtime panicked: {e}"))),
     }
+}
+
+/// Reads `GET /api/computer` in a task of its own (a slow platform never
+/// holds the engine), into the inbox.
+fn reread(api: &Api, inbox: &mpsc::Sender<Msg>, only: Option<String>) {
+    let (api, inbox) = (api.clone(), inbox.clone());
+    tokio::spawn(async move {
+        if let Some(c) = ask_once(&api).await {
+            let _ = inbox.send(Msg::Computer(c, only)).await;
+        }
+    });
 }
 
 async fn ask_once(api: &Api) -> Option<api::Computer> {
@@ -324,6 +335,20 @@ struct Follows {
 }
 
 impl Follows {
+    /// Stops following for agents no longer on this computer.
+    fn keep_only(&self, agents: &[Agent]) {
+        let mut running = self.running.lock().expect("followers");
+        running.retain(|(agent, fragment, channel), h| {
+            let keep = agents.iter().any(|a| &a.fragment == agent);
+            if !keep {
+                crate::ev!("follow.dropped", { "agent": agent, "fragment": fragment, "channel": channel, "why": "the agent left this computer" });
+                h.abort();
+            }
+            keep
+        });
+        self.last.lock().expect("last").retain(|agent, _| agents.iter().any(|a| &a.fragment == agent));
+    }
+
     fn rediscover_due(&self, agents: &[Agent]) {
         let every = Duration::from_millis(limits::DISCOVER_EVERY_MS);
         let due: Vec<Agent> = {
@@ -421,6 +446,11 @@ impl ViewCache {
         match api.people(&agent.fragment, fragment, &ids).await {
             Ok(names) => self.view.names = names,
             Err(e) => crate::ev!("people.unread", { "fragment": fragment, "error": e.to_string() }),
+        }
+        // A writer no one could name is "someone" until the next read, not
+        // a reason to read again at each of its records.
+        for id in ids {
+            self.view.names.entry(id).or_insert_with(|| "someone".into());
         }
         self.read_at = Some(Instant::now());
         Ok(())

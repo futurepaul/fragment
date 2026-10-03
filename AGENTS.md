@@ -112,6 +112,13 @@ debt ledger).
   into the celld fork), `crates/templates` (`templates/`, embedded),
   `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
   `crates/devstack`, `crates/e2e`.
+- `images/` (the computer images: the bridge, the stub, our Hermes image;
+  docs/bridge.md) is its own workspace: `cargo test --workspace` and
+  `cargo clippy --workspace --all-targets -- -D warnings` there (CI:
+  `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
+  docker -- --ignored` builds both images and runs them in Docker
+  (linux/amd64) against a fake API and a scripted model, real Hermes
+  included.
 - `.github/workflows/ci.yml` runs `check` only. The celld e2e on macOS
   left CI with the move to Cloudflare; run `cargo xtask e2e` locally until
   phase 2 brings the e2e back on Linux (workerd) and as the hosted lane

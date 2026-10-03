@@ -128,6 +128,10 @@ pub const VIEW_TTL_MS: u64 = 30_000;
 /// as cron skips a missed run.
 pub const TASKS_BACKLOG_MS: u64 = 60 * 60 * 1000;
 
+/// `GET /api/computer` is read again this often while awake, so an agent
+/// assigned to the computer meanwhile is followed within it.
+pub const COMPUTER_EVERY_MS: u64 = 60 * 1000;
+
 /// The agent's fragments are listed again this often while awake (a new
 /// chat is also announced on its `tasks` channel, which is immediate).
 pub const DISCOVER_EVERY_MS: u64 = 5 * 60 * 1000;

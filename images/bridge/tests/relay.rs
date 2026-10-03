@@ -123,6 +123,27 @@ async fn stop_interrupts_hermes() {
     bridge.stop().await;
 }
 
+/// Goal: Stop while a turn waits on an approval closes its card as
+/// stopped and interrupts Hermes, which ends the turn with no reply.
+#[tokio::test]
+async fn stop_during_an_approval() {
+    let (fake, bridge, hermes, _dir) = setup("relay-stop-approval", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "something risky" }));
+    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the prompt card", |w| !w.bodies(&chat, "work", "turn.prompt").is_empty()).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "stop", "turn": turn }));
+    fake.until(WAIT, "the turn's end", |w| !w.bodies(&chat, "work", "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed")[0]["outcome"], "stopped");
+        assert_eq!(w.bodies(&chat, "work", "turn.end")[0]["outcome"], "stopped");
+        assert!(replies(w, &chat).is_empty());
+    });
+    hermes.with(|s| assert_eq!(s.interrupted, 1, "Hermes heard the Stop mid-approval"));
+    bridge.stop().await;
+}
+
 /// Goal: a message is kept until Hermes acks it: one handed while Hermes is
 /// away reaches it when it dials again, and is answered once.
 #[tokio::test]
