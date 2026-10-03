@@ -528,12 +528,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&agent, &[("app.mjs", Some(routine_app(&chat_name).as_bytes())), ("fragment.json", Some(ROUTINE_JSON))]);
     s.deploy(&agent);
     std::thread::sleep(QUEUE_DRAIN);
-    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
-    s.ok("asleep, it waits for its routine", r.body["phase"] == "asleep", &r);
+    // its cron runs every minute, so a routine may wake it before it sleeps:
+    // asked until asleep, and only a routine after that counts
+    let mut last = Value::Null;
+    let slept = s.eventually(Duration::from_secs(90), || {
+        let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        last = r.as_ref().map(|r| r.body.clone()).unwrap_or(Value::Null);
+        last["phase"] == "asleep"
+    });
+    s.ok("asleep, it waits for its routine", slept, &last);
     // the stub says the routine's text; a real model says what it likes, in a reply of its own
     let replied_before = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
     let routine = |recs: &[Value]| match scripted {
-        true => agent_replies(recs, &identity).iter().any(|r| echoed(r, "water the plants")),
+        true => agent_replies(recs, &identity).iter().skip(replied_before).any(|r| echoed(r, "water the plants")),
         false => agent_replies(recs, &identity).iter().skip(replied_before).any(said_something),
     };
     let ran = s.eventually(Duration::from_secs(150) + if scripted { Duration::ZERO } else { wake }, || routine(&records(api, &owner, &chat_name, "chat")));
