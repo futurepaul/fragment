@@ -43,6 +43,10 @@ struct Deployment {
     /// deployment's come from the zone.
     platform_host: Option<String>,
     fragment_suffix: Option<String>,
+    /// A Cloudflare API token with DNS Edit on the zones, by path: with it,
+    /// a deploy makes the proxied record its routes need when it is
+    /// missing (xtask/src/dns.rs). Without it, they are made by hand.
+    dns_token_file: Option<PathBuf>,
     /// Files holding the secrets.
     host_secret_file: PathBuf,
     codestorage: CodeStorage,
@@ -78,8 +82,17 @@ struct Computers {
     /// By name: each image's Dockerfile and build context, relative to the
     /// repo (`images/hermes/Dockerfile`, `images`), and its build variables.
     images: BTreeMap<String, Image>,
-    /// The container's instance type (default: Cloudflare's).
-    instance_type: Option<String>,
+    /// The container's instance type (default: Cloudflare's): a named one
+    /// (`standard-2`) or a size, `{vcpu, memory_mib, disk_mb}` (decision
+    /// 13's 2 vCPU and 6 GiB is one).
+    instance_type: Option<InstanceType>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum InstanceType {
+    Named(String),
+    Sized { vcpu: f64, memory_mib: u32, disk_mb: u32 },
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -167,6 +180,8 @@ struct Names {
     /// `--<branch>`, for a branch.
     label_suffix: Option<String>,
     routes: Vec<String>,
+    /// The hosts those routes answer on, which must be proxied.
+    dns: Vec<crate::dns::Wanted>,
     /// Repos this deployment makes are named with this before them.
     repo_prefix: Option<String>,
 }
@@ -187,6 +202,8 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
                 suffix: d.zone.clone(),
                 label_suffix: Some(format!("--{b}")),
                 routes: vec![format!("{b}.{}/*", d.zone), format!("*--{b}.{}/*", d.zone)],
+                // one wildcard covers every branch's platform and fragments
+                dns: vec![crate::dns::Wanted { zone: d.zone.clone(), name: format!("*.{}", d.zone) }],
                 repo_prefix: Some(format!("{b}--")),
             })
         }
@@ -202,6 +219,11 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             suffix: suffix.clone(),
             label_suffix: None,
             routes: vec![format!("{platform}/*"), format!("*.{suffix}/*")],
+            // each its own zone on the account (the config's comment says so)
+            dns: vec![
+                crate::dns::Wanted { zone: platform.clone(), name: platform.clone() },
+                crate::dns::Wanted { zone: suffix.clone(), name: format!("*.{suffix}") },
+            ],
             repo_prefix: None,
         }),
         (Some(_), _, _) => bail!("a config with platform_host and fragment_suffix deploys one deployment of its own: no --branch"),
@@ -298,6 +320,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let org_key = read_secret(&d.codestorage.private_key_file)?;
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
+    let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     if let Some(p) = &d.default_plan {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
@@ -418,6 +441,10 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
 
     println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
+    match &dns_token {
+        Some(token) => crate::dns::ensure(token, &d.account_id, &n.dns)?,
+        None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
+    }
     ensure(wrangler(&tools, &d.account_id).args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id).args(["queues", "create", q]), "a queue")?;
@@ -474,6 +501,7 @@ mod tests {
             zone: "finite.place".into(),
             platform_host: platform.map(str::to_string),
             fragment_suffix: suffix.map(str::to_string),
+            dns_token_file: None,
             host_secret_file: "h".into(),
             codestorage: CodeStorage { org: "o".into(), private_key_file: "k".into(), api: None },
             workos: WorkOs { client_id_file: "c".into(), api_key_file: "a".into() },
@@ -497,6 +525,8 @@ mod tests {
 
         assert_eq!(n.platform_host, "dev.finite.place");
         assert_eq!(n.routes, ["dev.finite.place/*", "*--dev.finite.place/*"]);
+        // one wildcard in the zone covers the platform and every fragment
+        assert_eq!(n.dns, [crate::dns::Wanted { zone: "finite.place".into(), name: "*.finite.place".into() }]);
         assert_eq!((n.label_suffix.as_deref(), n.repo_prefix.as_deref()), (Some("--dev"), Some("dev--")));
         for bad in ["", "Dev", "a--b", "-a", "a-", "a.b", "seventeen-letters"] {
             assert!(names(&deployment(None, None), Some(bad)).is_err(), "{bad:?}");
@@ -508,6 +538,13 @@ mod tests {
         let d = deployment(Some("fragment.club"), Some("fragment.boats"));
         let n = names(&d, None).unwrap();
         assert_eq!(n.routes, ["fragment.club/*", "*.fragment.boats/*"]);
+        assert_eq!(
+            n.dns,
+            [
+                crate::dns::Wanted { zone: "fragment.club".into(), name: "fragment.club".into() },
+                crate::dns::Wanted { zone: "fragment.boats".into(), name: "*.fragment.boats".into() },
+            ]
+        );
         assert_eq!((n.label_suffix, n.repo_prefix), (None, None));
         assert!(names(&d, Some("b")).is_err());
         assert!(names(&deployment(None, None), None).is_err());

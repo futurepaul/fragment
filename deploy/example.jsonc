@@ -8,6 +8,10 @@
   // record (`*` AAAA 100::), which Universal SSL covers.
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "example.dev",
+  // A Cloudflare API token with Zone · DNS · Edit on the zone(s) (and
+  // Account · AI Gateway · Edit, to make the gateway below): with it, a
+  // deploy makes that record when it is missing. Without it, make it by hand.
+  // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
   // A deployment of its own names its hosts (production: "fragment.club"
   // and "fragment.boats", each a zone on the account). Without them,
   // `--branch <b>` deploys a branch at <b>.<zone>.

@@ -34,6 +34,7 @@ use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
 mod deploy;
+mod dns;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
