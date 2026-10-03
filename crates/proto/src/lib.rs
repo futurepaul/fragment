@@ -940,7 +940,10 @@ pub struct Join {
 pub struct Rotated {
     pub inbox_token: String,
     pub view_token: String,
-    pub webhook_secret: String,
+    /// The owner's alone: an agent sharing for its owner rotates the links,
+    /// never the webhook secret, and is never told it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
     /// The scopes renewed: `inbox`, `view`, `webhook`.
     pub rotated: Vec<String>,
 }
@@ -1615,7 +1618,7 @@ mod tests {
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {
-        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: "w".into(), rotated: vec!["view".into()] };
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: Some("w".into()), rotated: vec!["view".into()] };
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
     }
 
