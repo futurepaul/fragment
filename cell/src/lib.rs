@@ -62,6 +62,7 @@ mod share;
 mod subscriptions;
 
 use fragment_core::body::{LimitedBody, TooLarge};
+use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
 use fragment_nip98::Payload;
 use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
@@ -259,8 +260,8 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 /// - a top-level navigation (GET or HEAD, from anywhere): the origin's own
 ///   (`fragment_site`, `fragview`, `fragment_anon`), as Lax means them;
 /// - a frame's navigation (an `iframe`, or an `object` or `embed`, which
-///   show a page too): the frame cookie (`__frame`), and the answer shows
-///   only in the page that framed it (`bound`);
+///   show a page too): the frame cookie (`/auth/frame`'s), and the answer
+///   shows only in the page that framed it (`bound`);
 /// - anything else from another page (an image, a script, a fetch, a form
 ///   or a POST navigation): none, so it is served as to a stranger;
 /// - no Fetch Metadata (a browser from before 2023, or not a browser): the
@@ -299,15 +300,16 @@ pub(crate) fn fetched(req: &Request) -> CellResult<Fetched> {
 }
 
 /// A navigation's answer: it differs by the kind of navigation (`Vary`),
-/// and a frame's shows only inside the page that framed it through
-/// `__frame` (its session's `embedder`), or, with no frame session, inside
-/// this origin's own pages, and is never reused from a cache without that.
-/// An app's own policy stays: a second one only narrows it.
-fn bound(resp: Response, framed: bool, embedder: Option<&str>) -> CellResult<Response> {
+/// and a frame's (`ancestors`: `fragment_core::frames::ancestors`) shows
+/// only in the pages that names: the platform's for a frame session its
+/// mint made (`/auth/frame`), this origin's own, or, for a stranger's
+/// answer, those and the platform's. It is never reused from a cache
+/// without that. An app's own policy stays: a second one only narrows it.
+fn bound(resp: Response, ancestors: Option<&str>) -> CellResult<Response> {
     let h = resp.headers().clone();
     h.append("vary", "sec-fetch-dest")?;
-    if framed {
-        h.append("content-security-policy", &format!("frame-ancestors {}", embedder.unwrap_or("'self'")))?;
+    if let Some(ancestors) = ancestors {
+        h.append("content-security-policy", &format!("frame-ancestors {ancestors}"))?;
         h.set("cache-control", "private, no-cache")?;
     }
     Ok(resp.with_headers(h))
@@ -716,13 +718,23 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     };
     let mut credential = site_credential(&req, url, &body, name, mode, fetched)?;
     // a frame's page shows only in the page its session was made for: that
-    // session is asked for here, for the page's origin (`bound`)
-    let (mut signed, mut embedder) = (None, None);
+    // session is asked for here, for the page's origin (`bound`). Only the
+    // platform's page has one (its mint names it): a session for any
+    // other is no one's, so no answer names another page.
+    let platform = cfg.platform(url);
+    let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
         if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
-            (signed, embedder) = (Some(Signed::new(live.identity, None)), live.embedder);
+            if live.embedder.as_deref() == Some(platform.as_str()) {
+                (signed, framed) = (Some(Signed::new(live.identity, None)), Framed::Session);
+            }
         }
         credential = None;
+    }
+    // a frame whose navigation this origin's own cookies count in is one
+    // of its own page's (`fetched`: same-origin), as whoever they name
+    if framed == Framed::Stranger && fetched.site {
+        framed = Framed::OwnPage;
     }
     let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
     let mut resp = forward(env, &req, bytes_body(body), Forward { routed, inner: format!("/serve/{rest}"), extra: vec![] }).await?;
@@ -737,7 +749,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         };
     }
     match fetched.navigation {
-        true => bound(resp, fetched.framed, embedder.as_deref()),
+        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
         false => Ok(resp),
     }
 }

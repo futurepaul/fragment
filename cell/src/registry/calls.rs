@@ -468,6 +468,11 @@ pub(crate) struct Mint {
     pub fragment: String,
     pub return_to: String,
     pub consent: Consent,
+    /// A frame redemption's: the origin of the page whose frame redeems it
+    /// (the platform's own, `/auth/frame`), the only page the fragment's
+    /// answers to that frame may show in. `None`: a top-level one.
+    #[serde(default)]
+    pub embedder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

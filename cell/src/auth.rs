@@ -16,6 +16,10 @@
 //!                                 a fragment that is not theirs, nor shared with them, a
 //!                                 question first ("Continue to X as you?"), asked once
 //!   POST /auth/fragment?name=&return=      the yes (remembered), then the redemption
+//!   GET  /auth/frame?name=&return=         the same for a frame of the platform's own page (the
+//!                                 shell's tabs), as Fetch Metadata says it is: a frame redemption
+//!                                 bound to the platform's origin; a note in the frame, and a word
+//!                                 to the page, where a tab must ask first or no one is signed in
 //!   GET  /cli?key=<npub>&proof=   the signed-in person approves a CLI key: the link
 //!                                 carries the key's own proof (a NIP-98 event by it for
 //!                                 `POST <platform>/cli/approve`, ten minutes good), so
@@ -27,7 +31,8 @@
 //! only on a top-level visit; a fleet whose platform shares the fragments'
 //! domain puts them on one site, where the pages' forms, fetches, and
 //! frames carry it. Either way every page here refuses frames (`unframed`;
-//! the share sheet alone is framed, by the platform's own page: share.rs)
+//! the share sheet and the frame mint's notes alone are framed, by the
+//! platform's own page: share.rs, `frame_note`)
 //! and severs a window that opened it (`unopened`), and every form is
 //! refused from another origin (`same_origin`). Sharing's pages (share.rs) add a form token and armed
 //! buttons.
@@ -41,9 +46,8 @@
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie (a
-//! frame's partitioned one, in a frame, from a frame redemption: nothing
-//! mints one since the desktop went, until the shell does; see
-//! docs/technical-debt-ledger.md); `__signin` without a
+//! frame's partitioned one, in a frame, from a frame redemption:
+//! `/auth/frame`'s); `__signin` without a
 //! token starts at the platform, from a navigation of a page of its own
 //! only; `__signout` (a POST from the fragment's own page) ends its
 //! sessions in the registry and drops the cookies. Which cookies count on
@@ -544,26 +548,10 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let (name, back) = fragment_asked(url)?;
                 let signed_out = || to_login(&platform, &format!("/auth/fragment?name={name}&return={}", enc(&back)));
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
-                // the registry checks the session is live as it mints, and
-                // mints only for a fragment the person said yes to
-                let mint = |consent| calls::Mint { token: token.clone(), fragment: name.clone(), return_to: back.clone(), consent };
-                let minted = match ask_registry(env, &mint(Consent::Remembered)).await {
-                    Err(e) if e.code == ErrorCode::Unauthenticated => return signed_out(),
-                    minted => minted?,
-                };
-                if let Some(redeem) = minted.redeem {
-                    return to_signin(cfg, url, &name, &redeem);
-                }
-                // silent on their own fragments and those shared with them,
-                // which know them already (answer 1, docs/fragment-boats.md)
-                let who = Signed::new(minted.identity, None);
-                match share::ask(env, url, &name, &who, Method::Get, "/api/status", None).await {
-                    Ok(_) => {
-                        let minted = ask_registry(env, &mint(Consent::Member)).await?;
-                        to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a member's mint answered no redemption"))?)
-                    }
-                    Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => consent_page(&token, &who, &name, &back),
-                    Err(e) => Err(e),
+                match mint_for(env, url, &token, &name, &back, None).await? {
+                    Minting::Redeem(redeem) => to_signin(cfg, url, &name, &redeem),
+                    Minting::Ask(who) => consent_page(&token, &who, &name, &back),
+                    Minting::SignedOut => signed_out(),
                 }
             }
             (Method::Post, ["auth", "fragment"]) => {
@@ -572,9 +560,11 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Ok(posted) => posted,
                     Err(page) => return Ok(page),
                 };
-                let minted = ask_registry(env, &calls::Mint { token: session, fragment: name.clone(), return_to: back, consent: Consent::Given }).await?;
+                let given = calls::Mint { token: session, fragment: name.clone(), return_to: back, consent: Consent::Given, embedder: None };
+                let minted = ask_registry(env, &given).await?;
                 Ok(to_signin(cfg, url, &name, minted.redeem.as_deref().ok_or_else(|| CellError::host("a given mint answered no redemption"))?)?.with_status(303))
             }
+            (Method::Get, ["auth", "frame"]) => frame(&req, env, cfg, url).await,
             (Method::Get, ["cli"]) => {
                 let key = query(url, "key").unwrap_or_default();
                 let proof = query(url, "proof").unwrap_or_default();
@@ -630,6 +620,142 @@ fn to_signin(cfg: &Config, url: &Url, name: &str, redeem: &str) -> CellResult<Re
     redirect(&format!("{}__signin?token={redeem}", cfg.canonical(url, name)), &[])
 }
 
+/// What a platform session may sign a browser in to a fragment with.
+enum Minting {
+    /// A single-use redemption for its `__signin`.
+    Redeem(String),
+    /// Nothing yet: the fragment is not the person's, nor shared with them,
+    /// and they have not said yes to it (whom to ask).
+    Ask(Signed),
+    /// The platform session ended, or never began.
+    SignedOut,
+}
+
+/// A redemption of the platform session `token` for `name` (a frame's,
+/// bound to `embedder`, when it names one), when the person may be known
+/// there: they said yes to it before, or are in it. The registry checks
+/// the session is live as it mints, and mints only for a fragment the
+/// person said yes to unless the fragment knows them already.
+async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, embedder: Option<&str>) -> CellResult<Minting> {
+    let mint = |consent| calls::Mint { token: token.to_string(), fragment: name.to_string(), return_to: back.to_string(), consent, embedder: embedder.map(str::to_string) };
+    let minted = match ask_registry(env, &mint(Consent::Remembered)).await {
+        Err(e) if e.code == ErrorCode::Unauthenticated => return Ok(Minting::SignedOut),
+        minted => minted?,
+    };
+    if let Some(redeem) = minted.redeem {
+        return Ok(Minting::Redeem(redeem));
+    }
+    // silent on their own fragments and those shared with them, which know
+    // them already (answer 1, docs/fragment-boats.md)
+    let who = Signed::new(minted.identity, None);
+    match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
+        Ok(_) => {
+            let minted = ask_registry(env, &mint(Consent::Member)).await?;
+            Ok(Minting::Redeem(minted.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?))
+        }
+        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => Ok(Minting::Ask(who)),
+        Err(e) => Err(e),
+    }
+}
+
+/// `GET /auth/frame?name=&return=`: a frame of the platform's own page (a
+/// tab of the shell's) signs in to the fragment `name` (docs/api.md, Frame
+/// sessions). Only such a frame mints: its Fetch Metadata, which no page's
+/// script sets, must say it is a frame's navigation started by a page on
+/// this origin (`fragment_core::frames::platform_frame`), and this origin
+/// must be the platform's, so the frame redemption's embedder (the only
+/// page the fragment's answers to it may show in) is the platform's origin
+/// and nothing a request names. A page on any other origin, a fragment's
+/// (its author's code) included, cannot start one; nor can a fleet whose
+/// fragments share the platform's origin (no suffix), where a fragment's
+/// page is the platform's own.
+///
+/// The token travels only in the redirect: a page cannot read the URL its
+/// cross-origin frame was sent to, nor `fetch` this route (its dest is not
+/// a frame's), and the fragment spends it in a frame only. Each frame load
+/// mints one: the registry keeps a session's newest
+/// `REDEMPTIONS_PER_SESSION_MAX` unspent, and its newest
+/// `SITE_SESSIONS_PER_FRAGMENT_MAX` frame sessions on each fragment, apart
+/// from its top-level ones, so a shell reloading its tabs ends none of
+/// those.
+async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    let platform = cfg.platform(url);
+    let header = |k: &str| req.headers().get(k).map(Option::unwrap_or_default);
+    let framed = fragment_core::frames::platform_frame(&header("sec-fetch-dest")?, &header("sec-fetch-mode")?, &header("sec-fetch-site")?);
+    if !framed || url.origin().ascii_serialization() != platform {
+        return page(403, "Not a frame of the platform", "<p>This signs in a frame of the platform's own page, and nothing else. Open the fragment itself instead.</p>");
+    }
+    if cfg.host_suffix.is_none() {
+        return page(403, "Not on this fleet", "<p>Here every fragment shares the platform's origin, so a frame of the platform's page signs in to none of them.</p>");
+    }
+    let (name, back) = fragment_asked(url)?;
+    let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return frame_note(&platform, &name, &back, Unsigned::SignedOut) };
+    match mint_for(env, url, &token, &name, &back, Some(&platform)).await? {
+        Minting::Redeem(redeem) => {
+            let mut resp = to_signin(cfg, url, &name, &redeem)?;
+            // the platform's page, by its path, is nothing the fragment hears
+            resp.headers_mut().set("referrer-policy", "no-referrer")?;
+            Ok(resp)
+        }
+        // asking is a tab's: the question is a page no frame shows (`consent_page`)
+        Minting::Ask(_) => frame_note(&platform, &name, &back, Unsigned::Consent),
+        Minting::SignedOut => frame_note(&platform, &name, &back, Unsigned::SignedOut),
+    }
+}
+
+/// Why a frame of the platform's page did not sign in to a fragment.
+#[derive(Clone, Copy)]
+enum Unsigned {
+    /// The fragment does not know the person, and they have not said yes.
+    Consent,
+    /// No one is signed in to the platform.
+    SignedOut,
+}
+
+impl Unsigned {
+    /// The word the page around the frame hears (`why`).
+    fn why(self) -> &'static str {
+        match self {
+            Unsigned::Consent => "consent",
+            Unsigned::SignedOut => "signed-out",
+        }
+    }
+}
+
+/// What a frame of the platform's page shows in place of a fragment it
+/// cannot sign in to, and the word it sends the page around it
+/// (`{fragment: "signin-blocked", name, why}`), to the platform's origin
+/// alone. Only the platform's own pages may frame it; it holds a link and
+/// nothing else, and runs only its own inline script.
+fn frame_note(platform: &str, name: &str, back: &str, why: Unsigned) -> CellResult<Response> {
+    assert!(fragment_core::frames::is_origin(platform), "a message's target is the platform's origin");
+    assert!(fragment_proto::valid_fragment_name(name), "a frame's note names a fragment by its checked name");
+    let label = share::label(name);
+    let l = esc(label);
+    let (title, body) = match why {
+        Unsigned::Consent => (
+            format!("Open {label} to continue"),
+            format!(
+                "<p><b>{l}</b> is not yours, and no one shared it with you: it learns who you are only once you say so, in a tab of its own.</p>\
+                 <p><a href=\"/auth/fragment?name={qn}&amp;return={qb}\" target=\"_blank\" rel=\"noopener\">Open {l} in a tab</a></p>",
+                qn = esc(&enc(name)),
+                qb = esc(&enc(back)),
+            ),
+        ),
+        Unsigned::SignedOut => (format!("Sign in to see {label}"), format!("<p>You're signed out, so <b>{l}</b> can't show here as you.</p><p><a href=\"/auth/login\" target=\"_top\">Sign in</a></p>")),
+    };
+    let body = format!(
+        "{body}<script>parent.postMessage({{ fragment: \"signin-blocked\", name: {name:?}, why: {w:?} }}, {platform:?})</script>",
+        w = why.why(),
+    );
+    let h = Headers::new();
+    h.set("content-type", "text/html; charset=utf-8")?;
+    h.set("cache-control", "no-store")?;
+    h.set("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")?;
+    h.set("x-frame-options", "SAMEORIGIN")?;
+    Ok(Response::ok(html(&title, &body))?.with_headers(h))
+}
+
 /// "Continue to X as you?": a fragment that is not the person's, nor
 /// shared with them, learns who they are only once they say yes. A
 /// sharing page's protections (share.rs): unframed, a form token, a button
@@ -655,16 +781,18 @@ fn consent_page(session: &str, who: &Signed, name: &str, back: &str) -> CellResu
 }
 
 /// What a frame shows when it cannot sign in: its browser kept the frame
-/// cookie out, or a page framed its sign-in without a frame redemption.
-/// A link to open the fragment in a tab of its own, and a word
-/// to the page around it (`{fragment: "signin-blocked", name}`). It holds
-/// nothing but the link, so any page may frame it.
+/// cookie out, or a page framed its sign-in without the platform's mint
+/// (`/auth/frame`). A link to open the fragment in a tab of its own, and a
+/// word to the page around it (`{fragment: "signin-blocked", name, why:
+/// "cookies"}`; the platform's own notes say the other whys). It holds
+/// nothing but the link, so any page may frame it, and the word goes to
+/// whichever page that is: it names only the fragment that page framed.
 fn blocked(cfg: &Config, url: &Url, name: &str, back: &str) -> CellResult<Response> {
     let label = esc(share::label(name));
     let open = format!("{}__signin?return={}", cfg.canonical(url, name), enc(back));
     let body = format!(
         "<p><b>{label}</b> can't sign you in inside this page.</p><p><a href=\"{o}\" target=\"_blank\" rel=\"noopener\">Open {label} in a tab</a></p>\
-         <script>parent.postMessage({{ fragment: \"signin-blocked\", name: {n:?} }}, \"*\")</script>",
+         <script>parent.postMessage({{ fragment: \"signin-blocked\", name: {n:?}, why: \"cookies\" }}, \"*\")</script>",
         o = esc(&open),
         n = name,
     );

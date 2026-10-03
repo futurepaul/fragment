@@ -194,6 +194,15 @@ pub fn pathmode(s: &mut Suite, _: &Api) -> Result<()> {
     s.deploy(&c);
     let r = api.page(&name, "", None)?;
     s.ok("a page is served by path", r.status == 200 && r.text.contains("by path"), &r);
+    let session = api.sign_in(&Api::email_of(&owner))?;
+    let frame = vec![("sec-fetch-dest", "iframe".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-site", "same-origin".to_string())];
+    let url = format!("{}/auth/frame?name={name}&return=/", api.base);
+    let r = api.call(Call { method: "GET", url, cookie: Some(format!("fragment_session={session}")), extra: frame, ..Call::default() })?;
+    s.ok(
+        "the frame mint refuses (403): every fragment shares the platform's origin here, so a fragment's page is the platform's own",
+        r.status == 403 && !r.header("location").contains("__signin"),
+        &r,
+    );
     let r = api.browser_op(&name, "sign", "p1", json!({ "text": "hi" }), None)?;
     s.ok("a browser call works by path", r.status == 200, &r);
     s.ok("its cookie is scoped to the fragment's path", r.header("set-cookie").contains(&format!("Path=/f/{name}/;")), r.header("set-cookie"));

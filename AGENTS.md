@@ -69,7 +69,7 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, secrets,
-  delegation, files, deploy, templates, share, isolation, ops, public,
+  delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   push, ai, ledger, agents, addon, computers, hermes, sync, restart,
@@ -80,7 +80,9 @@ prebuilt bundle is in the debt ledger).
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
-  Chrome serves the whole run, a fresh browser context per section);
+  Chrome serves the whole run, a fresh browser context per section;
+  frames, and computers' frame checks, start one of their own that
+  blocks third-party cookies, as Safari does);
   `--only triggers` waits for a cron
   minute (up to a minute; a full run deploys its cron fragment sections
   earlier). A section that errors or panics is one FAIL and the sections

@@ -13,8 +13,9 @@
 //! carries a file. Put to sleep, a record on the chat wakes it, its
 //! `/data` restored, and nothing is answered twice. A second agent on the
 //! same computer answers when @mentioned, the lead otherwise. Its ports
-//! answer its owner on its own origin through a one-time ticket, and no
-//! one else. A routine, its agent fragment's cron, wakes it asleep.
+//! answer its owner on its own origin through a one-time ticket, in a tab
+//! or in a frame of the platform's page (frames.rs, `computer_ports`), and
+//! no one else. A routine, its agent fragment's cron, wakes it asleep.
 
 use std::time::Duration;
 
@@ -336,6 +337,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
+    // and in a frame of the platform's page (the shell's tab onto its screen)
+    super::frames::computer_ports(s, api, &owner, &id, &origin, cookie.as_deref().unwrap_or(""))?;
 
     // its image pin: an upgrade at the next wake, then a rollback, its data kept
     let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();

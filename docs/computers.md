@@ -232,7 +232,19 @@ one), at `/p/<port>/…`, for its owner only for now (delegates come with
 decision 41's sharing). A browser gets there with a one-time ticket its
 owner mints (`POST /api/computers/{id}/ports/{port}/ticket` → `{url}`),
 which that origin redeems into a session cookie of its own; a signed
-request (the CLI's) needs none. A WebSocket on a port is bridged through
+request (the CLI's) needs none. The shell shows a port in a tab of its
+own page (decision 11): the ticket's URL as a frame's `src`, redeemed in
+the frame into a partitioned cookie for the platform's page
+(`fragment_computer_frame`, `SameSite=None; Partitioned`), which
+browsers that block third-party cookies keep. Only the platform's page
+may frame a port (every answer carries `frame-ancestors <platform>`),
+and every fragment's page is one site with the computer's origin, so
+its cookies count only as on a fragment's (docs/api.md, Computers): on
+the port's own page's requests, a top-level visit (the tab's cookie) or
+a frame's navigation (the frame's), never another page's fetch or
+frame; a socket only from the port's own page. So an image's page may
+not frame its own ports either: a screen is one page, its sockets
+relative to it. A WebSocket on a port is bridged through
 the Computer DO and holds it awake while open. Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
 (decision 11). The page is served at the

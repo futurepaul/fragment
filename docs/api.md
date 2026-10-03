@@ -211,6 +211,7 @@ random bytes, the registry keeps their SHA-256).
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
+| `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403, and so is every request on a fleet without a suffix |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once; a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
@@ -223,7 +224,10 @@ rides along on a fragment page's form, fetch, or frame. Either way every
 page here answers `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
 one and lay its button under a click; its redirects still run in a
-frame, but a frame's `__signin` refuses what they mint) and `Cross-Origin-Opener-Policy:
+frame, but a frame's `__signin` refuses what they mint), but for the
+share sheet and `/auth/frame`'s notes, which only the platform's own
+pages may frame (`frame-ancestors 'self'`, `X-Frame-Options:
+SAMEORIGIN`), and `Cross-Origin-Opener-Policy:
 same-origin` (a page that opens one in a window of its own is severed
 from it: its handle reads `closed`, and can neither navigate nor message
 it), and every form here (`/auth/new`, `/auth/username`, `/auth/picture`,
@@ -283,29 +287,64 @@ request whose cookies do not count is served as to a stranger:
 | no Fetch Metadata (a browser from before 2023, or not a browser) | count | no |
 
 Every navigation's answer carries `Vary: Sec-Fetch-Dest`. A frame's
-navigation is answered `Content-Security-Policy: frame-ancestors
-<origin>` naming the page its frame session was made for, or
-`frame-ancestors 'self'` without one, and `Cache-Control: private,
-no-cache`: a fragment shows signed in only in the page its frame session
-was made for, and in another fragment's page not at all. A signed
-request (the CLI's, an agent's) carries no cookies and is unchanged.
+navigation is answered `Cache-Control: private, no-cache` and a
+`Content-Security-Policy: frame-ancestors` naming who may show it:
+
+- signed in by a frame session: `<platform>`, the platform's exact
+  origin, the page its mint was for (a frame session made for any other
+  page is no one's);
+- from the fragment's own page (`same-origin`), as whoever its cookies
+  name: `'self'`;
+- any other frame, whose answer is a stranger's (no cookie of the
+  person's counts there): `'self' <platform>`, so the shell shows a
+  public fragment to someone signed out, and no other page may lay it
+  under a click.
+
+A fragment shows signed in only in the platform's page, and in another
+fragment's page not at all. A signed request (the CLI's, an agent's)
+carries no cookies and is unchanged.
 
 ### Frame sessions
 
-A frame session is a fragment's session in a frame of one other page,
-bound to that page's origin (docs/fragment-boats.md, decision 2). Nothing
-mints one now (the desktop's `__frame` did, until the cut:
-docs/technical-debt-ledger.md), but `__signin` still redeems one:
+A frame session is a fragment's session in a frame of the platform's
+own page (the shell's tabs: docs/cloudflare-v1.md, decision 6), bound to
+the platform's origin (docs/fragment-boats.md, design C):
 
-- a frame redemption (single-use, 60 s, for one fragment only, bound to
-  the framing page's origin) is redeemed at `<fragment>/__signin?token=`
-  only in a frame's navigation;
-- there it becomes `fragment_frame` (`HttpOnly; Secure; SameSite=None;
+- `GET <platform>/auth/frame?name=&return=` mints it, for a frame of the
+  platform's own page only: its Fetch Metadata, which no page's script
+  sets, must be a frame's navigation (`Sec-Fetch-Dest: iframe` or
+  `frame`, `Sec-Fetch-Mode: navigate`) that a page on the platform's
+  origin started (`Sec-Fetch-Site: same-origin`), on the platform's own
+  origin. A page on any other origin (a fragment's page, its author's
+  code, framed in the shell or anywhere) sends `same-site` or
+  `cross-site` and is refused (403); so is a top-level visit, a fetch, an
+  `object` or `embed`, and a request without Fetch Metadata. A fleet
+  without a suffix, whose fragments share the platform's origin, mints
+  none (403).
+- Signed in, it follows `/auth/fragment`'s consent: on the person's own
+  fragments, those shared with them, and those they said yes to, a frame
+  redemption (single-use, 60 s, for that fragment only, its embedder the
+  platform's origin; a session holds at most 16 unspent) and → the
+  fragment's `__signin?token=` (`302`, `no-store`, `no-referrer`). The
+  platform's page never sees the token: it cannot read the URL its
+  cross-origin frame was sent to.
+- Otherwise a note in the frame, which only the platform's own pages may
+  frame: on any other fragment, "Open X in a tab" (to `/auth/fragment`,
+  where the question is asked: it is never shown in a frame); signed
+  out, "Sign in". The note posts `{fragment: "signin-blocked", name, why}`
+  to the platform's origin alone, `why` being `consent` or `signed-out`.
+- The fragment redeems a frame redemption at `__signin?token=` only in a
+  frame's navigation (shown to a top-level page it is 401, and spent);
+  there it becomes `fragment_frame` (`HttpOnly; Secure; SameSite=None;
   Partitioned`, `__Host-` over https): kept by browsers that block
-  third-party cookies (CHIPS), in the framing page's partition only. The
-  frame then goes to `__signin?check=frame&return=`: with the cookie
+  third-party cookies (CHIPS), in the platform page's partition only.
+  The frame then goes to `__signin?check=frame&return=`: with the cookie
   kept, on to `return`; without it, the page offering the fragment in a
-  tab of its own.
+  tab of its own, which posts `{fragment: "signin-blocked", name, why:
+  "cookies"}` to the page around it (as a frame of `__signin` that no
+  mint sent does).
+- The frame's cookie counts only in frames and on the fragment's own
+  page (above): it opens no top-level page.
 
 ### Asking first
 
@@ -1176,7 +1215,23 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider]}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once; none by default. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400 |
-| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform; a signed request needs none |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+
+On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
+sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by
+a frame's navigation (the shell's tab onto a port), it sets
+`fragment_computer_frame` (`HttpOnly; Secure; SameSite=None;
+Partitioned`), in the platform page's partition. Both are `__Host-` over
+https, last 12 hours, and name the computer's owner only. Every answer
+on that origin but a socket's upgrade carries `Content-Security-Policy:
+frame-ancestors <platform>`: only the platform's page may frame a port.
+Every fragment's page is one site with that origin, so which cookie
+counts follows the Fetch Metadata, as on a fragment's (Which cookies
+count, above): `fragment_computer` on the origin's own page's requests
+and a top-level navigation, `fragment_computer_frame` on its own page's
+requests and a frame's navigation, neither on another page's image,
+script, fetch or form; a socket from any page but the origin's own is
+403.
 
 A computer is woken by a record on a channel one of its agents
 subscribed to with `{channel, wake: true}` (only its egress asks for
