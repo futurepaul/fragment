@@ -175,9 +175,16 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let r = hand_for_paul("POST", "rotate", Some(json!({ "scopes": ["view"] })))?;
     let after = api.status(&paul, &app)?.body["viewToken"].as_str().unwrap_or("").to_string();
     s.ok(
-        "it rotates the share link",
-        r.status == 200 && r.body["rotated"] == json!(["view"]) && r.body["viewToken"] == after.as_str() && !before.is_empty() && after != before,
+        "it rotates the share link, and is never told the webhook secret",
+        r.status == 200 && r.body["rotated"] == json!(["view"]) && r.body["viewToken"] == after.as_str() && !before.is_empty() && after != before && r.body.get("webhookSecret").is_none(),
         &r,
+    );
+    let r = hand_for_paul("POST", "rotate", Some(json!({ "scopes": ["webhook"] })))?;
+    let defaults = hand_for_paul("POST", "rotate", Some(json!({})))?;
+    s.ok(
+        "but the webhook secret is the owner's to rotate (403), and a rotate that names nothing renews only the links",
+        r.status == 403 && defaults.status == 200 && defaults.body["rotated"] == json!(["inbox", "view"]) && defaults.body.get("webhookSecret").is_none(),
+        json!({ "webhook": r.body, "defaults": defaults.body }),
     );
     let r = hand_for_paul("DELETE", &format!("members/{bob_id}"), None)?;
     let bobs = listed(api, &bob, &app)?;

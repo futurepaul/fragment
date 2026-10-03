@@ -651,14 +651,21 @@ impl FragmentCell {
     pub(crate) fn rotate(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
         let all = ["inbox", "view", "webhook"];
+        // an agent shares: it renews the links people and apps hold (the
+        // inbox, the share link), never code.storage's webhook secret
+        let agent = actor.for_owner.is_some();
+        let defaults: &[&str] = if agent { &["inbox", "view"] } else { &all };
         let want: Vec<String> = match &body["scopes"] {
-            Value::Null => all.iter().map(|s| s.to_string()).collect(),
+            Value::Null => defaults.iter().map(|s| s.to_string()).collect(),
             Value::Array(a) if !a.is_empty() => a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect(),
-            Value::Array(_) => all.iter().map(|s| s.to_string()).collect(),
+            Value::Array(_) => defaults.iter().map(|s| s.to_string()).collect(),
             _ => return Err(CellError::invalid("scopes must be an array of inbox, view, webhook")),
         };
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
             return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view, webhook)")));
+        }
+        if agent && want.iter().any(|w| w == "webhook") {
+            return Err(CellError::new(ErrorCode::Forbidden, "an agent rotates the inbox and share links, never the webhook secret: its owner does"));
         }
         for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>()), ("webhook", MetaKey::WebhookSecret, js::random_hex::<16>())] {
             if want.iter().any(|w| w == scope) {
@@ -673,7 +680,7 @@ impl FragmentCell {
         json_response(&Rotated {
             inbox_token: self.must(MetaKey::InboxToken)?,
             view_token: self.must(MetaKey::ViewToken)?,
-            webhook_secret: self.must(MetaKey::WebhookSecret)?,
+            webhook_secret: if agent { None } else { Some(self.must(MetaKey::WebhookSecret)?) },
             rotated: rotated.iter().map(|s| s.to_string()).collect(),
         })
     }

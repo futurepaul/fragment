@@ -940,7 +940,10 @@ pub struct Join {
 pub struct Rotated {
     pub inbox_token: String,
     pub view_token: String,
-    pub webhook_secret: String,
+    /// The owner's alone: an agent sharing for its owner rotates the links,
+    /// never the webhook secret, and is never told it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
     /// The scopes renewed: `inbox`, `view`, `webhook`.
     pub rotated: Vec<String>,
 }
