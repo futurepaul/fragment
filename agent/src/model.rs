@@ -1,11 +1,9 @@
 //! The model service (OpenRouter) as a turn calls it: each completion
 //! bounded so it finishes, retried once when it does not, and never silent.
 //!
-//! The node ends any fetch after `CELLD_FETCH_TIMEOUT_S` (120 s), counted to
-//! the last byte of its body (reqwest's request timeout), so streaming does
-//! not save a long answer: a completion must end within it. Each call asks
-//! for at most `MAX_TOKENS` and has a deadline of its own (`DEADLINE_MS`,
-//! under the node's, so a slow call ends here, named). The whole answer is
+//! Each call asks for at most `MAX_TOKENS` and has a deadline of its own
+//! (`DEADLINE_MS`, counted to the last byte of its body), so a slow call
+//! ends here, named, and streaming does not save a long answer. The whole answer is
 //! read before goose sees it (nothing streams to viewers: a step is a whole
 //! record), so a call that fails is made again whole:
 //!

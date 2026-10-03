@@ -1,9 +1,8 @@
-# fragment-next CI: `cargo xtask check` (host tests and clippy on host and
-# wasm, warnings denied). The celld e2e on macOS went with the move to
-# Cloudflare (docs/cloudflare-v1.md, Paul 2026-10-03: "we'll return to our
-# celld roots once we have cloudflare perfect"); the e2e comes back in
-# phase 2, on Linux against workerd and as the hosted lane on a preview.
-# The last workflow that ran it is at tag celld-final.
+# fragment CI on Linux: `cargo xtask check` (host tests and clippy on host
+# and wasm, warnings denied), and `cargo xtask e2e`: the cell and the
+# agents' Worker under `wrangler dev` (workerd), with fakes only at the
+# vendor boundaries (docs/cloudflare-v1.md, phase 2). The celld e2e on
+# macOS is at tag celld-final.
 name: ci
 
 on:
@@ -35,3 +34,41 @@ jobs:
           key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-
       - run: cargo xtask check
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/worker-build
+            ~/.cache/worker-build
+            target
+            cell/target
+            agent/target
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          restore-keys: e2e-${{ runner.os }}-
+      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
+      - run: npm ci
+      # one run's scratch (each node boot's log, the lanes' screenshots) is
+      # kept when a check fails: uploaded below
+      - run: cargo xtask e2e
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-scratch
+          path: target/e2e/
+          retention-days: 7

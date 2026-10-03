@@ -7,7 +7,7 @@
 //! section's.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,7 +27,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("sync-home");
     s.login(api, &home);
     let create = |s: &Suite, base: &str| -> Result<(String, Value)> {
-        let c = s.cli_json(api, &home, &["create", &s.name(base), "--json"])?;
+        let c = s.cli_json(api, &home, &["create", &s.name(base), "--show-tokens", "--json"])?;
         s.hook(api, &c);
         Ok((c["name"].as_str().unwrap_or("").to_string(), c))
     };
@@ -75,7 +75,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::write(dir.join("first.md"), "first")?;
     let log_path = s.scratch.join(format!("sync-watch-{name}.log"));
     let log = std::fs::File::create(&log_path)?;
-    let mut child = Command::new(&s.cli)
+    let mut child = s.bare_cli()
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)
@@ -104,7 +104,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
     s.ok("two saves are two passes of one head read, one listing, and one commit each", saved && asked == expected, format!("{asked:?}"));
     let err = s.scratch.join(format!("sync-watch-second-{name}.log"));
-    let mut second = Command::new(&s.cli)
+    let mut second = s.bare_cli()
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)

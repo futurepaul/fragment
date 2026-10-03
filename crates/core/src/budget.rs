@@ -5,11 +5,14 @@
 //! reports. The worst case here is an estimate per kind of step, not the
 //! model's price times its tokens; the person's own OpenRouter key, whose
 //! limit is their allowance, is the hard stop behind it.
+//!
+//! Superseded by `crate::ledger` and `crate::price` (docs/ledger.md): this
+//! module goes with the cell's OpenRouter-backed Ledger cell when the cell
+//! moves onto the new ledger (docs/cloudflare-v1.md, phase 3).
 
 use crate::steps::Step;
 
-/// One US dollar in micro-dollars.
-pub const USD: i64 = 1_000_000;
+pub use crate::price::{dollars, USD};
 /// A text completion's reservation, and each model call's of an agent: on
 /// the platform's model (`fragment_proto::AGENT_MODEL`, about $1.20 in and
 /// $4.00 out per million tokens), a call of 150,000 tokens in and 4,096
@@ -31,18 +34,6 @@ pub fn micros(usd: f64) -> i64 {
         return 0;
     }
     (usd * USD as f64).ceil() as i64
-}
-
-/// Micro-dollars as dollars for people: `$0.0412`, `$20.00`.
-pub fn dollars(m: i64) -> String {
-    let sign = if m < 0 { "-" } else { "" };
-    let m = m.abs();
-    let (whole, frac) = (m / USD, m % USD);
-    if frac % 10_000 == 0 {
-        format!("{sign}${whole}.{:02}", frac / 10_000)
-    } else {
-        format!("{sign}${whole}.{:06}", frac).trim_end_matches('0').to_string()
-    }
 }
 
 /// The UTC month a time falls in, `YYYY-MM`.

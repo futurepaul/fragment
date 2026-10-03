@@ -1,6 +1,6 @@
 # fragment wire contract
 
-The cell (`cell/`, Rust on celld) answers everything below; the CLI and
+The cell (`cell/`, Rust on Cloudflare Workers) answers everything below; the CLI and
 the browser library are its clients. Errors are `{"error": "<code>",
 "message": "..."}` (codes in `crates/proto`). `cargo xtask e2e` proves
 every route. The TypeScript runtime this replaced was deleted in phase 2
@@ -11,15 +11,17 @@ computers, the desktop, and the personal agent's chat went at the cut
 
 ## Configuration
 
-Worker variables, rendered from the fleet's settings (ROADMAP decision
-13; `cell/.dev.vars` in dev). None is a secret: the fleet's secrets are
-the node's environment, where only `KEYS` reads them (below).
+Worker variables, rendered from the deployment's config by `cargo xtask
+deploy` (`deploy/example.jsonc`; `.dev.vars` in dev). None is a secret:
+the deployment's secrets are Worker secrets (below).
 
 | Variable | Meaning |
 |---|---|
 | `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below); unset, from `/f/<name>/` |
+| `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
+| `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
 | `FRAGMENT_LEGACY_HOST_SUFFIX` | where fragments were served before the suffix moved: a fragment's host under it redirects to its host under the suffix (Moved hosts, below); counted only beside a different suffix. fragment.club's is `fragment.club`, its suffix `fragment.boats` |
 | `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, a held run's video to settle, or a template or the agent it declares still to land. Any other fragment is polled once a day |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
@@ -36,34 +38,27 @@ the node's environment, where only `KEYS` reads them (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `GET /api/test/env` answers the Worker variables; `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens through `KEYS` as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, and `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, and `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older |
 
-The node's environment (Fly secrets on a fleet; `devstack` in dev and
-the e2e), read by `KEYS`, the native service in our celld fork
-(`crates/native`, docs/hardening.md). The cell asks `KEYS` to seal and
-open (for the calling cell only), to sign code.storage tokens (for a
-`Fragment`), to exchange WorkOS's code (for the `Registry`), and to call
-OpenRouter's key API (for a `Ledger`); it never holds these keys:
+Worker secrets (`cargo xtask deploy` uploads them from the files the
+deployment's config names; `.dev.vars` in dev), read only by
+`cell/src/keys.rs`. An app's isolate gets an env the platform builds, so
+no author code can name one:
 
-| Variable | Meaning |
+| Secret | Meaning |
 |---|---|
-| `FRAGMENT_KEYS_HOST_SECRET` | seals secrets at rest, per cell (at least 32 bytes) |
-| `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
-| `FRAGMENT_KEYS_CODESTORAGE_ORG`, `FRAGMENT_KEYS_CODESTORAGE_PRIVATE_KEY` | the org and its PKCS#8 P-256 key (a one-line PEM may carry literal `\n`) |
-| `FRAGMENT_KEYS_WORKOS_API_KEY`, `FRAGMENT_KEYS_WORKOS_URL` | WorkOS's API key and base (default https://api.workos.com) |
-| `FRAGMENT_KEYS_OPENROUTER_MANAGEMENT_KEY`, `FRAGMENT_KEYS_OPENROUTER_URL` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI |
+| `FRAGMENT_HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes) |
+| `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
+| `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
+| `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
+| `OPENROUTER_MANAGEMENT_KEY` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI (until phase 3 moves models to AI Gateway) |
 
-And the fork's settings the fleet turns on: `CELLD_FACET_MAX_BYTES`
-(the app database's hard stop, 20 MiB), `CELLD_DYNAMIC_LOCKDOWN=1`
-(loaded workers without `eval` or `Atomics.wait`),
-`CELLD_INTERNAL_PEER_ONLY=1` (the internal listener serves only
-fleet-signed peers), with `CELLD_EGRESS_PUBLIC_ONLY=1` from phase 3, and
-`CELLD_MAX_REQUEST_BODY_BYTES` (256 MiB, the largest body any route
-takes: a blob; celld's default is 1 GiB).
+A request body is at most what the zone's Cloudflare plan takes (100 MB
+on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
 
 Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
 Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
-jobs), `BLOBS` (R2 over the fleet bucket: the bytes of large files),
+jobs), `BLOBS` (the deployment's R2 bucket: the bytes of large files),
 `DELIVERIES` (the `fragment-deliveries` queue, and its dead-letter queue
 `fragment-deliveries-dead`, both consumed by the cell).
 
@@ -389,7 +384,7 @@ and styles only inline and images only from the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`. The fragment's own key is made by the node's `KEYS` and stays sealed there. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -532,9 +527,9 @@ app's `fetch`) meets the node's own stop, 4 MiB above. The app runs
 without code generation from strings (`eval`, `new Function`) and
 without `Atomics.wait`, and a turn whose heap grows past twice the
 isolate's limit (128 MiB) ends with "Worker exceeded its memory limit"
-(422). When the node serving the fragment cannot load another app (celld
-keeps at most 255 per node until it restarts), calls into the app answer
-503 `node_full` and the rest of the fragment works (docs/hardening.md).
+(422). When the app's facet is at its concurrency limit (the Workers
+runtime's), calls into it answer 503 `node_full` and the rest of the
+fragment works (docs/hardening.md).
 
 ### Files
 
@@ -689,7 +684,7 @@ conversation; `principal` who asked), recorded once.
 
 ### Jobs and triggers
 
-A job is a method called `(input, job)` that runs as a celld Workflow,
+A job is a method called `(input, job)` that runs as a Cloudflare Workflow,
 outside any request. Each `await` on a `job.*` step is durable. The
 steps are the five below, the files steps (`job.files.*`), `job.push`,
 and the AI steps (`job.ai.*`), all above:
@@ -702,9 +697,8 @@ and the AI steps (`job.ai.*`), all above:
   text(), json()}`: the app's one way out. `{{NAME}}` in a header value
   is the fragment's secret `NAME`, added by the platform at the egress
   point; the app never holds it. http(s) only; loopback, private, and
-  `.internal` addresses are refused (on hosted fleets celld also checks
-  where a name resolves: a name with no public address fails the step
-  for good, `egress refused: …`); redirects are answered, not
+  `.internal` addresses are refused (and a Worker's fetch reaches only
+  the public internet: a name with no public address fails the step); redirects are answered, not
   followed; a body of at most 256 KiB, a response of at most 1 MiB, 120
   seconds. Every fetch carries `x-fragment-hops`.
 - `job.publish(channel, body, kind)`: a record, once per step.
@@ -926,8 +920,8 @@ passes as it came. Agents act on fragments through the API above,
 signing with their own keys. An agent's name is `<label>.<username>`,
 its owner's (a bare label is one of the signer's own); making one also
 registers it as its maker's, in the same request. Owner routes check the
-caller is the agent's registered owner. Each agent's key is made by the
-node's `KEYS` and signs there. Its turns spend its owner's month: each
+caller is the agent's registered owner. Each agent's key is made in its
+cell and kept sealed for it. Its turns spend its owner's month: each
 model call reserves its worst case there first, with the owner's org key
 that answers, and settles to the cost reported after (`POST
 /api/budget/reserve` and `/settle`, signed by the agent; Budgets). Its

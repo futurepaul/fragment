@@ -33,11 +33,37 @@ fn unfinished_chunked(api: &Api, path: &str, total: usize, wait: Duration) -> Re
         }
         sent += chunk.len();
     }
-    let mut head = [0u8; 512];
-    match sock.read(&mut head) {
-        Ok(n) if n > 0 => Ok(String::from_utf8_lossy(&head[..n]).lines().next().map(str::to_string)),
-        _ => Ok(None),
+    // the status line and what of the body follows it within the wait (an
+    // answer may arrive in more than one packet)
+    let mut answer = Vec::new();
+    let mut buf = [0u8; 1024];
+    while answer.len() < 2048 {
+        match sock.read(&mut buf) {
+            Ok(n) if n > 0 => answer.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+        let text = String::from_utf8_lossy(&answer);
+        // headers and a body as long as they declare: the whole answer
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let declared = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()));
+            if declared.is_none_or(|n| body.len() >= n) {
+                break;
+            }
+        }
     }
+    Ok((!answer.is_empty()).then(|| String::from_utf8_lossy(&answer).into_owned()))
+}
+
+/// Whether an answer to an unfinished chunked body refused it as it
+/// arrived: the router's 413, or, under `wrangler dev`, the local proxy's
+/// 500 when the Worker answered before the upload ended (miniflare's
+/// "Network connection lost": the Worker stopped reading; Cloudflare's
+/// edge has no such proxy, and the hosted lane wants the 413 itself).
+fn refused_as_it_arrived(answer: Option<&str>) -> bool {
+    answer.is_some_and(|a| {
+        let line = a.lines().next().unwrap_or("");
+        line.contains(" 413 ") || (line.contains(" 500 ") && a.contains("Network connection lost") && a.contains("miniflare"))
+    })
 }
 
 pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
@@ -334,9 +360,9 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     // chunk that crosses the limit, not after it has all been buffered
     let wait = Duration::from_secs(15);
     let line = unfinished_chunked(api, "/api/fragments", limits::BODY_MAX_BYTES + 128 * 1024, wait)?;
-    s.ok("a chunked body over 2 MiB is refused as it arrives (413 before it ends)", line.as_deref().is_some_and(|l| l.contains(" 413 ")), format!("{line:?}"));
+    s.ok("a chunked body over 2 MiB is refused as it arrives (413 before it ends)", refused_as_it_arrived(line.as_deref()), format!("{line:?}"));
     let line = unfinished_chunked(api, "/cli/approve", 64 * 1024, wait)?;
-    s.ok("and so is a chunked approval form past its limit, before anyone is signed in", line.as_deref().is_some_and(|l| l.contains(" 413 ")), format!("{line:?}"));
+    s.ok("and so is a chunked approval form past its limit, before anyone is signed in", refused_as_it_arrived(line.as_deref()), format!("{line:?}"));
     let r = api.unsigned("GET", "/healthz", None)?;
     s.ok("the node stays healthy", r.status == 200, &r);
     let r = api.call(Call {

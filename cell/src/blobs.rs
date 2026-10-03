@@ -1,6 +1,6 @@
 //! Blobs (docs/MODEL.md: a file of 1 MiB or more is a pointer in git;
-//! phase 2 slice E). The bytes live in the fleet's blob store (`BLOBS`,
-//! celld's R2 over the fleet bucket) under `<fragment npub>/<sha256>`.
+//! phase 2 slice E). The bytes live in the deployment's R2 bucket
+//! (`BLOBS`) under `<fragment npub>/<sha256>`.
 //!
 //! An editor's client uploads the bytes (`PUT blobs/<sha>`: the cell hashes
 //! them on the way in and keeps them only if they are what they claim),

@@ -1,6 +1,5 @@
-//! Secrets at the egress point (docs/secrets.md). Sealing and opening are
-//! the node's `KEYS` (crates/native/src/seal.rs): the host secret is never
-//! in a cell. What stays here is the pure part the cell needs.
+//! Secrets at the egress point (docs/secrets.md); sealing and opening are
+//! `seal.rs`.
 
 /// The secret names a header value refers to as `{{NAME}}` (a job's
 /// fetch; the cell substitutes them at its egress point).

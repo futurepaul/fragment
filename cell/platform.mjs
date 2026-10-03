@@ -62,8 +62,7 @@ import {
 
 const LEDGER = "_fragment_ops";
 // A mutation that leaves the app's database over APP_DB_MAX_BYTES rolls
-// back. The node's own hard stop (CELLD_FACET_MAX_BYTES) sits above it, so
-// the runtime's bookkeeping always has room.
+// back.
 const STORAGE_FULL = Symbol("storage_full");
 // Half of a character (a lone surrogate, as from cutting a string inside an
 // emoji) in JSON text: JSON.stringify escapes one as \udXXX (lowercase), and
@@ -402,8 +401,55 @@ class Job {
   }
 }
 
+// What an app may not do with its Durable Object, taken away before the
+// author's constructor runs (spike S1, docs/cloudflare-v1.md): an alarm
+// wedges the facet (every call answers `internal error` until the platform
+// Worker is deployed again), an async transaction or a KV write outside
+// SQL would bypass the mutation's own transaction and its cap, and a
+// facet of its own would hold a database outside the app's cap. Cron is
+// fragment.json's triggers; writes are a mutation's SQL. Each is replaced
+// on the object and on its prototype, which this isolate (the app's own,
+// from the Worker Loader) alone uses, so author code finds no original.
+const REFUSED = {
+  setAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
+  getAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
+  deleteAlarm: "an app has no alarm: fragment.json's triggers run it on a schedule",
+  transaction: "a mutation is the app's transaction (its SQL commits with it)",
+  put: "an app writes its SQLite (ctx.storage.sql), in a mutation",
+  delete: "an app writes its SQLite (ctx.storage.sql), in a mutation",
+  deleteAll: "an app writes its SQLite (ctx.storage.sql), in a mutation",
+};
+const NO_FACETS = "an app runs in one facet; it starts none of its own";
+
+function refuse(why) {
+  return () => {
+    throw new Error(why);
+  };
+}
+
+// Each object once: the isolate builds an App again for each facet that
+// runs this code, and they share the prototypes.
+const LOCKED = new WeakSet();
+
+function lock(ctx) {
+  const storage = ctx.storage;
+  for (const target of [storage, Object.getPrototypeOf(storage)]) {
+    if (LOCKED.has(target)) continue;
+    for (const [key, why] of Object.entries(REFUSED)) {
+      Object.defineProperty(target, key, { value: refuse(why), writable: false, configurable: false });
+    }
+    LOCKED.add(target);
+  }
+  for (const target of [ctx, Object.getPrototypeOf(ctx)]) {
+    if (LOCKED.has(target)) continue;
+    Object.defineProperty(target, "facets", { get: refuse(NO_FACETS), configurable: false });
+    LOCKED.add(target);
+  }
+}
+
 export class App extends AuthorApp {
   constructor(ctx, env) {
+    lock(ctx);
     super(ctx, env);
     const sql = ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (
@@ -435,7 +481,7 @@ export class App extends AuthorApp {
     try {
       return this.#mutate(id, name, inputSha, JSON.parse(inputText), meta);
     } catch (e) {
-      // over the cap (or at the node's hard stop): the transaction rolled back
+      // over the cap (or the runtime's own limit): the transaction rolled back
       if (e === STORAGE_FULL || /database or disk is full|SQLITE_FULL/.test(describe(e))) return JSON.stringify({ error: "storage_full" });
       throw e;
     }

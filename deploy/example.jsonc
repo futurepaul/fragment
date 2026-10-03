@@ -1,0 +1,32 @@
+// A deployment's configuration for `cargo xtask deploy --config <file>`
+// (xtask/src/deploy.rs). Keep yours outside the repo: it names your
+// account and where your secrets are. Every secret is a file read by path,
+// never a value here.
+{
+  // Your Cloudflare account (`wrangler whoami`), and the zone the
+  // deployment's routes are on. The zone needs one proxied wildcard DNS
+  // record (`*` AAAA 100::), which Universal SSL covers.
+  "account_id": "0123456789abcdef0123456789abcdef",
+  "zone": "example.dev",
+  // A deployment of its own names its hosts (production: "fragment.club"
+  // and "fragment.boats", each a zone on the account). Without them,
+  // `--branch <b>` deploys a branch at <b>.<zone>.
+  // "platform_host": "fragment.club",
+  // "fragment_suffix": "fragment.boats",
+  // 32 random bytes or more, as text: seals every value at rest. Rotating:
+  // the new one here, the old one stays a while as FRAGMENT_HOST_SECRET_PREVIOUS.
+  "host_secret_file": "~/.config/fragment/secrets/host-secret",
+  // Every fragment's git. The org's signing key, in PEM.
+  "codestorage": {
+    "org": "your-org",
+    "private_key_file": "~/.config/fragment/secrets/codestorage-private-key.pem"
+  },
+  // Sign-in: a WorkOS environment with AuthKit on, its redirect URI
+  // https://<platform>/auth/callback.
+  "workos": {
+    "client_id_file": "~/.config/fragment/secrets/workos-client-id",
+    "api_key_file": "~/.config/fragment/secrets/workos-api-key"
+  },
+  // npubs that may top up budgets and release usernames.
+  "operators": []
+}

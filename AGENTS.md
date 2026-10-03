@@ -7,10 +7,11 @@ Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
 cut: fragment.club runs the `celld` branch, tag `celld-final`, until
-cutover, decision 35) and, until phase 2 of that plan, on celld
-(https://celld.dev/docs/). The cut (decision 33) took Hermes, computers,
-the desktop, the personal agent's chat, sandcastle, and the fleet's
-deploy path off master; they live at the tag `celld-final`.
+cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
+`wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
+took Hermes, computers, the desktop, the personal agent's chat,
+sandcastle, and the fleet's deploy path off master; they live at the tag
+`celld-final`.
 
 ## Read first
 
@@ -48,30 +49,33 @@ deploy path off master; they live at the tag `celld-final`.
 
 ## Commands
 
-The cell (`cell/`, Rust on celld), the CLI (`cli/`), and the harness
-(`xtask/`, `crates/`). All tooling is Rust; the repo has no shell,
-Python, or Node tooling (the notes viewer's prebuilt bundle is in the
-debt ledger).
+The cell (`cell/`, Rust on Workers), the CLI (`cli/`), and the harness
+(`xtask/`, `crates/`). All tooling is Rust; the repo has no shell or
+Python tooling. Its JavaScript from npm is wrangler and the Sandbox SDK
+the cell's shim bundles, pinned in `package.json` (the notes viewer's
+prebuilt bundle is in the debt ledger).
 
 - One-time setup: `cargo install worker-build --version 0.8.5 --locked`,
   `rustup target add wasm32-unknown-unknown`, an LLVM clang that compiles
   for wasm32 (Apple's does not: `brew install llvm`, or Nix, which xtask
   finds; or name one with `CC_wasm32_unknown_unknown` and
-  `AR_wasm32_unknown_unknown`), then `cargo xtask celld` (builds our celld
-  fork, v0.6.0 with `KEYS` and the hardening settings, into
-  `target/celld/bin`).
+  `AR_wasm32_unknown_unknown`), Node 22 or later, and `npm ci` at the repo
+  root (the pinned wrangler; `WRANGLER_BIN` names another).
 - `cargo xtask build`: the cell and the agents for wasm32.
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
   builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
-  a fresh `celld dev` node and the in-process fakes (sections, in order:
+  a fresh `wrangler dev` node (workerd) and the in-process fakes, which
+  stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, secrets,
   files, deploy, templates, share, isolation, ops, public, effects,
   facet-cap, app-lockdown, site, watch, schemas, channels, live, routes,
   cli, browser, jobs, triggers, appfiles, blobs, notes, push, ai,
-  budget, agents, addon, sync, restart, pathmode, node-full;
-  `crates/e2e/src/lanes/mod.rs`). The share, isolation, browser, and
+  budget, agents, addon, sync, restart, pathmode;
+  `crates/e2e/src/lanes/mod.rs`). A check local workerd cannot make (its
+  CPU and memory limits, a Workflow that sleeps through a crash) is a
+  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section);
   `--only triggers` waits for a cron
@@ -80,12 +84,14 @@ debt ledger).
   after it still run. The node runs from a staged copy of the cell in the
   run's own scratch (`target/e2e/<run>/cell`), so the e2e and `cargo
   xtask dev` can run at once. That scratch holds each node boot's log
-  (`celld-<port>-<boot>.log`, the node's own logs on) and is removed when
+  (`node-<port>-<boot>.log`, wrangler's debug logs on) and is removed when
   every check passes, kept when one fails (`FRAGMENT_E2E_KEEP=1` keeps it
   anyway).
-- `cargo xtask dev [--clean]`: the dev stack in the foreground: the cell
-  on :8790 with fragments at `http://<label>--<username>.fragment.localhost:8790/`,
-  agents (`agent/`, goose's loop) co-hosted on the same node (the router
+- `cargo xtask dev [--clean]`: the dev stack in the foreground under
+  `wrangler dev`: the cell on :8790 with fragments at
+  `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
+  when `cell/src` or `crates/` change,
+  agents (`agent/`, goose's loop) beside it in the same process (the router
   hands them `/api/agents` and `/api/a/*`), whose turns spend their
   owner's budget (a per-person OpenRouter key, minted with the management
   key `OPENROUTER_MANAGEMENT_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
@@ -93,8 +99,8 @@ debt ledger).
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
   `WORKOS_API_KEY_FILE` name its files. Each boot's log is
-  `target/devstack/celld-8790-<boot>.log` (printed at start;
-  `FRAGMENT_NODE_LOGS=1` adds the node's own logs). Point the CLI at it with
+  `target/devstack/node-8790-<boot>.log` (printed at start;
+  `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
   fetch local addresses (`FRAGMENT_EGRESS_LOCAL=allow`).
 - `cargo xtask try <todo|inbox|notes> [name]` (with `cargo xtask dev` running):
@@ -107,21 +113,25 @@ debt ledger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank` and `calories`, which has a goose agent of its own); the
   platform's "new" page offers all but `notes`.
+- `cargo xtask deploy --config <file> [--branch <name>]`: builds and
+  deploys to Cloudflare from a deployment's config, kept outside the repo
+  (`deploy/example.jsonc`; xtask/src/deploy.rs). A branch is a complete
+  copy at `<branch>.<zone>`, its fragments at
+  `<label>--<username>--<branch>.<zone>`. `cargo xtask teardown --config
+  <file> --branch <name>` removes one (irreversible: ask Paul).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
-  logic, host-tested), `crates/nip98`, `crates/native` (`KEYS`, built
-  into the celld fork), `crates/templates` (`templates/`, embedded),
+  logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
+  `crates/templates` (`templates/`, embedded),
   `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
   `crates/devstack`, `crates/e2e`.
-- `.github/workflows/ci.yml` runs `check` only. The celld e2e on macOS
-  left CI with the move to Cloudflare; run `cargo xtask e2e` locally until
-  phase 2 brings the e2e back on Linux (workerd) and as the hosted lane
-  (docs/cloudflare-v1.md). `release.yml` still builds the CLI for macOS
-  and Linux.
-- Nothing on master deploys. fragment.club (the hosted fleet) deploys
-  only from the `celld` branch (tag `celld-final`) until cutover: its
-  fleet file, node image, `cargo xtask deploy`/`fleet`/`e2e --fleet`,
+- `.github/workflows/ci.yml` runs `check` and `e2e` on Linux.
+  `release.yml` builds the CLI for macOS and Linux.
+- Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
+  zone `finite.place` in Paul's account, and production only at cutover.
+  fragment.club (the celld fleet on Fly) deploys only from the `celld`
+  branch (tag `celld-final`) until cutover: its fleet file, node image
   and docs/operate.md's commands are that branch's. Deploys to the
-  hosted fleet and changes to its Fly app, bucket, or DNS are Paul's to
+  hosted fleet, production deploys, and DNS changes are Paul's to
   approve.
 
 ## Rules
@@ -129,9 +139,9 @@ debt ledger).
 - Secrets are files read by path (`docs/finite-next-lessons.md`,
   Resources); never print them, pass them on a command line, or commit
   them.
-- `cargo xtask dev` runs `celld dev` on `cell/`, which rebuilds when it
+- `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
-  variables, so the two can run at once.
+  variables, state and dev registry, so the two can run at once.
 - The remote is `fragment-rs`, github.com/futurepaul/fragment: work goes
   up as a branch and a pull request against `master` (branch names under
   `ci/` are refused). The coordinating session reviews and merges a PR

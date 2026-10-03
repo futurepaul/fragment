@@ -1,0 +1,285 @@
+# The usage ledger
+
+Status: **the pure core is built** (phase 3 of docs/cloudflare-v1.md,
+decisions 24–28 and 36–37; spike S4). It is `crates/core/src/ledger.rs`
+(the state machine) and `crates/core/src/price.rs` (the price book), with
+the public wire types in `crates/proto/src/ledger.rs`. The Ledger Durable
+Object that runs it, and the meter sources that feed it, are the
+integrator's (below). It supersedes `crates/core/src/budget.rs` and the
+OpenRouter-backed `Ledger` cell (`cell/src/ledger.rs`), which go when the
+cell moves onto it.
+
+## The model
+
+- **One ledger per payer.** A payer is a person. The caller decides who
+  pays a row and sends it to that person's ledger, which keys on nothing
+  else (decision 36):
+  - an agent's model calls, operator-key calls and compute bill the
+    agent's owner;
+  - a fragment's hosting (requests, storage, dynamic workers,
+    screenshots) and its AI steps bill the fragment's owner.
+- **Guests pay for nothing.** A guest's ledger refuses reservations and
+  meter batches (`guest_payer`). A guest owns nothing billable.
+- **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
+  included, a computer that sleeps); `seat_always_on` ($200 a month,
+  $100 included, an always-on computer whose awake time is not metered).
+  Stripe charges the seat itself; the ledger only knows the credit.
+- **Seat state** comes from a hook: `active`, `past_due`, `canceled`.
+  - A seat gets its included credit only while `active`.
+  - `past_due` keeps this month's credit. The next month's arrives when
+    the seat is active again.
+  - `canceled` stops agents. Fragments keep serving and writing on
+    whatever credit is left.
+  - Hooks arrive out of order, so each carries `seq` (the hook's own
+    order). A change older than the last applied changes nothing.
+- **Credit.**
+  - Included credit arrives at the start of each UTC month (lazily: the
+    first mutation of the month, and every read, see it). It expires at
+    the month's end. Skipped months grant nothing.
+  - A seat that becomes active, or a plan that grows, mid-month gets the
+    difference, once. Nothing is taken back when a plan shrinks.
+  - Purchased credit (grants) stays until spent.
+  - A charge draws included credit first, then purchased.
+  - Included credit that arrives while the person owes pays the debt
+    first. So a debt is paid once, and a negative purchased balance
+    means the included credit is gone.
+- **Caps** (decision 26). Each fragment has a monthly cap on its owner's
+  ledger, $5 until the owner sets one. Its spend is every charge on that
+  ledger in that fragment this month, plus what is held in it. At the
+  cap the fragment is closed to AI steps and agent turns by anyone but
+  its owner (and the owner's agents acting for them). A reservation may
+  cross the cap; only a fragment already at it is closed. Caps never stop
+  writes or wakes. A late row counts in its own month.
+- **Zero** (decision 27). At a balance of zero or less, agents stop: no
+  turns, no wakes, no AI steps (`agents_stopped`, `no_credit`).
+  Fragments keep serving and taking writes.
+- **Overdraft and read-only.** At a balance of minus the overdraft ($2
+  unless an operator sets another) the person's fragments go read-only.
+  They stay read-only until the balance is above zero again. An operator
+  who changes the overdraft decides it afresh.
+- **Meters always record.** Usage that happened is charged, past zero
+  and past the overdraft. A reservation must fit the balance less what is
+  held (`credit_short`); a settle larger than its reservation is charged
+  in full.
+- **Standing** is a pure function, `standing_of(plan, seat, balance,
+  read_only)`: `ok`, `agents_stopped {why}` or `read_only {why}`, with
+  `why` one of `guest`, `seat_canceled`, `no_credit`, `overdrawn`.
+
+## The price book
+
+A price is micro-dollars per a fixed count of its unit, so Cloudflare's
+own prices are exact integers. A row's charge is
+`ceil(list × (1 + fee) × (1 + margin))`, computed exactly in 128 bits and
+rounded up once per row. The fee is AI Gateway's 5% on credits, so it
+applies to AI (tokens and neurons) only. The margin is the operator's,
+50% by default. Each row also keeps its list price (for reconciling with
+the gateway's log `cost`) and its cost basis (list plus fee).
+
+| Meter (`Usage`) | Unit | Default list price | Source |
+|---|---|---|---|
+| `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`); the AI model catalog page for Opus (S4) |
+| `neurons` | thousandths of a neuron | $0.011 per thousand neurons | Workers AI pricing; S4 matched it to tokens on every call |
+| `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
+| `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
+| `requests` | requests | $0.45 per million | Workers Standard $0.30 plus the Durable Object request $0.15 |
+| `dynamic_workers` | unique dynamic workers per UTC day | $0.002 each | Dynamic Workers pricing |
+| `browser` | ms of Browser Rendering | $0.09 an hour | Browser Rendering pricing |
+| `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
+| `key` | the key's own unit | set per key (`micros` per `per` units) | the operator; none by default |
+
+Checked against S4's real numbers: a $0.004 Flash turn is charged
+$0.0063; the gateway's own `cost` equals our list price on every call;
+neurons and tokens agree within half a micro-dollar on the spike's 17
+calls. The defaults are consts in `price.rs`, each with its source. The
+operator's book comes from the deploy's configuration and is versioned:
+a ledger takes only a newer version, and a hold keeps the price it was
+held at.
+
+## The state machine
+
+Pure: no I/O, no clock (time is an argument). The state has two parts:
+
+- **The head** (`Ledger`): the plan, the seat, the balance's parts, the
+  read-only latch, the overdraft, the price book, and the reservations
+  held (at most 256). Small and bounded; kept whole.
+- **The store** (`trait Store`): what grows with use, by id. References
+  (`Entry`), batches, commands, each fragment's spend by month, and caps.
+  The Durable Object keeps these in SQLite tables; `Memory` keeps them in
+  maps for tests.
+
+A mutation decides before it writes, so a refusal writes nothing. Every
+mutation first brings the ledger to its time's month.
+
+| Mutation | Idempotent by | Answer |
+|---|---|---|
+| `grant(GrantCredit)` | its `id` (Stripe's payment id, or the operator's) | `()` |
+| `set_plan(SetPlan)` | its `id` | `()` |
+| `set_seat(SetSeat)` | its `id`; ordered by `seq` | `()` |
+| `set_overdraft(SetOverdraft)` | its `id` | `()` |
+| `set_cap(SetFragmentCap)` | its `id` | `()` |
+| `set_book(SetPriceBook)` | its `id`; ordered by `version` | `()` |
+| `reserve(Reserve)` | the call's `ref` | `held {amount}`, `settled {charge}` or `released` |
+| `settle(Settle)` | the call's `ref` | `{charge, basis}`: `usage`, `reservation` or `expired` |
+| `release(Release)` | the call's `ref` | `back`, or `settled {charge}` |
+| `meter(Meter)` | the batch's id; each row by its `ref` | `{charged, rows_new, rows_before, refused: [{index, why}]}` |
+| `sweep(now)` | (time) | `{expired: [{ref, charge}], forgotten}` |
+
+- **Replays.** The same id again answers as the first did and changes
+  nothing. The same id with another body is refused
+  (`conflicting_body`). A refusal is not remembered, so the same id may
+  be tried again (a step after a top-up).
+- **A replayed reservation answers where its reference stands.** While
+  held that is its first answer. Once settled it is `settled {charge}`,
+  so a retried step learns its call was paid and never makes it again
+  (bug 2).
+- **References are one namespace.** A meter row cannot reuse a
+  reservation's reference, and the reverse. Sources prefix theirs
+  (`aig:`, `step:`, `awake:`), so two sources never collide.
+- **Settles.** A settle without usage, or with a usage the book cannot
+  price, is charged its reservation: the money path fails closed. A
+  settle after a release is refused (`ended`): a call that used anything
+  settles; only one that used nothing is released (bug 3).
+- **Sweeps** run from the Durable Object's alarm at `next_sweep_ms`.
+  A hold older than 6 hours is settled at its reservation (its caller
+  died, and whether it used anything is unknown). References and batches
+  older than 90 days are forgotten, and a row from before that is
+  refused as `stale`, so a forgotten reference is never charged again.
+  Commands are never forgotten.
+- **Reads** (`standing`, `gate`, `fragment_open`, `may_spend`, `status`)
+  roll a copy of the head to their own month and change nothing.
+  `may_spend(spend, fragment, by_owner)` is the whole question when the
+  payer owns the fragment (or there is none). When another person owns
+  it, that owner's ledger also answers `fragment_open`.
+
+Every refusal is a typed `Refused`, with `code()` (the platform's
+`ErrorCode`: every money refusal is 402 `budget_used_up`) and `message()`
+for people.
+
+## Limits
+
+| Limit | Value | Why |
+|---|---|---|
+| `BATCH_ROWS_MAX` | 1,000 rows | one request and one transaction, far under the body limit |
+| `RESERVATION_MAX` | $25 | the dearest call the tiers allow is about $10 |
+| `HOLDS_MAX` | 256 | a computer's agents and a person's jobs hold a few dozen; past this, something leaks |
+| `GRANT_MAX` | $10,000 | more is a typo |
+| `CAP_MAX` | $10,000 | more is no cap |
+| `OVERDRAFT_MAX` | $1,000 | someone trusted with more is someone to invoice |
+| `price::CHARGE_MAX` | $100,000 a row | no call or sample costs that; a row that would is a bug upstream |
+| `price::QUANTITY_MAX` | 10^15 per quantity | keeps the 128-bit math from overflowing |
+| `ID_MAX_BYTES` | 256, printable ASCII | ids and names |
+| `HOLD_MAX_MS` | 6 hours | no call holds for hours |
+| `REF_KEEP_MS` | 90 days | the audit retention; sources retry within hours |
+| `CLOCK_SKEW_MS` | 5 minutes | a row's source runs on its own clock |
+
+## The Ledger Durable Object (proposed)
+
+One `Ledger` DO per person, named by the person's identity. Each route is
+one `transactionSync` over the head and the store. The bodies are the
+core's types (inner) or proto's (public); answers are JSON of the answer
+types, and refusals are `ErrorBody {error: code(), message: message()}`.
+
+Tables:
+
+- `head`: one row of columns (plan, seat, seat_seq, overdraft, month,
+  included_granted, included_left, purchased_left, read_only, the
+  totals) plus the book (JSON: bounded and typed) and `holds (ref, amount,
+  fragment, at_ms)`;
+- `entries (ref PRIMARY KEY, kind, at_ms, …)`, `batches (id PRIMARY KEY,
+  digest, answer, at_ms)`, `commands (id PRIMARY KEY, command, at_ms)`;
+- `spend (month, fragment, micros, PRIMARY KEY (month, fragment))`,
+  `caps (fragment PRIMARY KEY, micros)`.
+
+Inner routes (platform code only, through the DO's stub):
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /reserve` | `Reserve` | `Reserved` |
+| `POST /settle` | `Settle` | `Settled` |
+| `POST /release` | `Release` | `Released` |
+| `POST /meter` | `Meter` | `Metered` |
+| `POST /may-spend` | `{spend, fragment, byOwner}` | `{}` or the refusal |
+| `POST /fragment-open` | `{fragment}` | `{}` or `cap_reached` |
+| `POST /grant`, `/plan`, `/seat`, `/overdraft`, `/cap` | proto's `GrantCredit`, `SetPlan`, `SetSeat`, `SetOverdraft`, `SetFragmentCap` | `{}` |
+| `POST /status` | `{}` | proto's `LedgerStatus` |
+
+Before each route the DO compares its book's version with the
+configured one and applies `SetPriceBook {id: "book:<version>"}` when the
+configuration is newer. Its alarm runs `sweep` at `next_sweep_ms`.
+
+Public routes (a hard cut of `/api/budget`):
+
+- `GET /api/ledger` (the person; an agent reads its owner's) →
+  `LedgerStatus`.
+- `PUT /api/f/<name>/cap {id, micros}` (the fragment's owner).
+- Operators: `POST /api/ledger/<user>/grant|plan|seat|overdraft` with
+  proto's bodies (the CLI's `fragment budget … top-up` becomes `fragment
+  ledger grant`).
+
+## How each meter reaches it
+
+Each source keeps an outbox in its own SQLite and flushes one batch per
+payer through the ledger Queue, under a batch id of its own
+(`<source>:<seq>`). A crash between the ledger's apply and the outbox's
+mark sends the same batch again, which answers as before.
+
+- **Model calls** (the computer's model intercept, lesson 7). Before the
+  call it reserves a worst case (tokens in from the body's size, out at
+  the tier's capped `max_tokens`) under the intercept's own call id. It
+  streams, takes only the last, cumulative usage (S4), and settles with
+  it. A call that failed before any token is released. A call whose
+  stream broke settles without usage, at its worst case. The gateway's
+  log id rides along for reconciliation; the gateway's per-user spend
+  rule is only a backstop. The payer is the agent's owner; the fragment
+  is the agent's.
+- **AI steps** (a job's `ai.*`, voice input). The step's reference
+  (`step:<fragment>@<incarnation>/run/<run>/step/<index>`) is reserved
+  before the call, settled after, and released on a final failure. A
+  retried step whose reservation answers `settled` reuses the result the
+  DO kept beside the reference and never calls the model again (bug 2).
+  The payer is the fragment's owner, `capped` when the spender is not.
+- **The in-fragment agent's turns**: as model calls, the fragment's owner
+  paying.
+- **Operator keys** (decision 37): the intercept reserves a `key` worst
+  case and settles the units used.
+- **Compute** (the Computer DO). It meters each awake interval at sleep,
+  and every few minutes while awake, as `awake {instance, ms}` rows
+  (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
+  ledger waives an always-on seat's awake time; no wake starts when
+  `may_spend(wake)` refuses.
+- **Storage** (a cron, hourly). It samples each fragment's R2 prefix, its
+  SQLite and its git repository, and meters `bytes × hours since the last
+  sample` (`store:<fragment>:<class>:<hour>`) to the fragment's owner. A
+  computer's backups bill the computer's owner.
+- **Requests** (the Fragment DO, which sees each one): a row per minute
+  (`req:<fragment>:<minute>`) to the fragment's owner.
+- **Dynamic workers** (the Fragment DO): one row the first time a code
+  version loads on a UTC day (`dw:<fragment>:<version>:<day>`).
+- **Screenshots and images** (the deploy path): `browser` and `images`
+  rows to the fragment's owner.
+
+## Where Stripe plugs in
+
+- **Credit:** a paid checkout or invoice becomes `GrantCredit {id:
+  <payment id>, by: "stripe"}`. Its id may come again any time;
+  commands are never forgotten.
+- **A seat's state:** subscription events become `SetSeat {seat, seq:
+  <the event's time in ms>}`, and the subscription's price picks
+  `SetPlan`.
+
+## Assumptions (Paul's to confirm)
+
+- `past_due` keeps agents running on this month's credit, and gets no new
+  month's credit until active again.
+- A canceled seat keeps paying for its fragments' hosting from what is
+  left; `guest` is for people who never had a seat.
+- Mid-month upgrades grant the difference at once; downgrades take
+  nothing back.
+- A debt is paid from the next month's included credit first.
+- A cap counts every charge in the fragment on its owner's ledger,
+  the owner's own agents' included. Only others are stopped by it.
+- An agent's own usage cap (decision 14) is not built: the same
+  mechanism, keyed by the agent's fragment, would carry it.
+- An abandoned hold is charged its worst case after 6 hours.
+- The default instance rate assumes a 12 GB disk and 5% CPU; git storage
+  is priced at R2's until code.storage's price is known.

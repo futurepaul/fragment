@@ -3,7 +3,7 @@
 //!
 //! A **run** is one execution of an operation outside a request: a job
 //! someone called, or a mutation or job a trigger started. Each run is a
-//! celld Workflow instance (`Job` in entry.mjs) that drives it one step at
+//! Workflow instance (`Job` in entry.mjs) that drives it one step at
 //! a time by calling back into this supervisor:
 //!
 //!   POST /job/advance {run, attempt, count, failed?}   re-run the job's body
@@ -53,7 +53,6 @@ use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
 
-use crate::cs::FetchError;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
@@ -857,11 +856,7 @@ impl FragmentCell {
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
-        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| match e {
-            // the node refused the address (CELLD_EGRESS_PUBLIC_ONLY): no retry passes
-            FetchError::Refused(why) => permanent(format!("{host}: {why}")),
-            FetchError::Failed(why) => StepFail::Retry(format!("{host}: {why}")),
-        })?;
+        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.0)))?;
         let status = resp.status_code();
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
@@ -1211,13 +1206,13 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "seq": record.seq, "runs": runs }))
     }
 
-    /// A secret's value, for the egress point only (`KEYS` opens it for
-    /// this cell alone). A value sealed under a previous host secret, or by
-    /// the cell itself before `KEYS`, comes back resealed and is stored so.
+    /// A secret's value, for the egress point only (it opens in this cell
+    /// alone). A value sealed under a previous host secret comes back
+    /// resealed and is stored so.
     pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
         let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let opened = keys::open(&self.env, &sealed, &self.must(MetaKey::Npub)?).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        let opened = keys::open(&self.env, &self.scope(), &sealed).map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));

@@ -8,25 +8,25 @@ capability, never a key.**
 ## Where secrets live
 
 Each secret is stored in the cell that owns it, encrypted at rest, and
-nowhere else. Sealing is the node's `KEYS` (`crates/native`, our celld
-fork; docs/hardening.md H1): the key is HKDF-SHA256 of the fleet's host
-secret salted with **the calling cell's scope as the host attests it**, so
-a value opens only for the cell that sealed it; it is AES-256-GCM sealed
-as `w2.<key id>.<nonce‖ciphertext>`, where the key id names which host
-secret sealed it. The host secret is in the node's environment, never in
-a cell. Rotating it: set the new one as `FRAGMENT_KEYS_HOST_SECRET` and
-the old as `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` (Fly secrets); values
-sealed under the old one still open, and come back resealed, which the
-cell stores. Values the cells sealed themselves before `KEYS` (`w1`,
-salted with the fragment's npub or the org) open the same way when the
-cell names that salt, and are resealed as `w2` on first use.
+nowhere else. Sealing is `crates/core/src/seal.rs`, used by
+`cell/src/keys.rs` (since phase 2 of docs/cloudflare-v1.md; before it,
+the celld fork's native `KEYS`): the key is HKDF-SHA256 of the
+deployment's host secret salted with **the sealing Durable Object's class
+and id**, so a value opens only in the object that sealed it; it is
+AES-256-GCM sealed as `w2.<key id>.<nonce‖ciphertext>`, where the key id
+names which host secret sealed it. The host secret is a Worker secret
+(`FRAGMENT_HOST_SECRET`), in the platform Worker's env only: an app's
+isolate gets an env the platform builds. Rotating it: set the new one as
+`FRAGMENT_HOST_SECRET` and the old as `FRAGMENT_HOST_SECRET_PREVIOUS`;
+values sealed under the old one still open, and come back resealed, which
+the cell stores.
 
 | Secret | Home |
 |---|---|
 | A person's model credential (their OpenRouter key, minted by the platform with their budget as its limit), their GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The fleet's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key | the node's environment (Fly secrets; `node_secrets` in the fleet file), used only by `KEYS`: never a Worker variable, a JS heap, or the deployment manifest in the bucket |
-| A fragment's own nostr key, an agent's nostr key | made by `KEYS` and sealed for their cell; `KEYS` signs with them (an agent's NIP-98 headers), so they never reach a cell unsealed |
+| The deployment's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env |
+| A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
 Never in git, a log, a command line, or a channel record. Rotating a secret means changing it in its home; everything that

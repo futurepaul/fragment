@@ -1,4 +1,4 @@
-//! The fragment platform on celld, in Rust.
+//! The fragment platform on Cloudflare Workers, in Rust.
 //!
 //! The router (this file's `fetch`) verifies NIP-98, bounds request
 //! bodies, decides which fragment a request is for, and hands it to that
@@ -81,12 +81,8 @@ pub use registry::RegistryCell;
 const PASSED_HEADERS: [&str; 9] =
     ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
 
-/// A WebSocket upgrade's own handshake, passed too: when the fragment's cell
-/// lives on another node, celld tunnels the upgrade there and answers the
-/// client's key itself, so it needs the client's handshake, not just
-/// `Upgrade` (without these, every live socket that lands on the other node
-/// fails: 502 "the cell accepted a WebSocket for a request that did not
-/// upgrade").
+/// A WebSocket upgrade's own handshake, passed too, so the fragment's
+/// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
 #[event(queue)]
@@ -129,17 +125,6 @@ fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<St
         .map_err(|e| CellError::new(ErrorCode::Unauthenticated, e.to_string()))
 }
 
-/// Tries at reaching the registry when the node refused its route for now
-/// (a cell queued too long behind the others waking after a restart), with
-/// a pause that doubles between them.
-const REGISTRY_ATTEMPTS: u32 = 3;
-const REGISTRY_RETRY_MS: u64 = 250;
-/// How celld names that refusal in the error a Worker's fetch throws (its
-/// routed-request error, `route failed: CapacityExhausted`): it is answered
-/// only for a request still queued at the gate, so the registry never saw
-/// it. A fetch's error reaches the Worker as its message alone.
-const REFUSED_BEFORE_IT_RAN: &str = "CapacityExhausted";
-
 /// Asks the registry cell one of its calls (`registry/calls.rs`: the path,
 /// the body, and the answer are one definition both ends compile against).
 /// Its refusals pass through; not reaching it, a failure inside it, or an
@@ -159,22 +144,11 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
         let bytes = resp.bytes().await?;
         Ok::<_, worker::Error>((status, bytes))
     };
-    let mut attempt = 0;
-    let (status, bytes) = loop {
-        match ask().await {
-            Ok(answer) => break answer,
-            // Only that refusal is asked again. Any other throw may come
-            // after the registry acted (a failure inside it, a connection
-            // dropped mid-answer), and its calls are not idempotent: a
-            // second Mint is a second redemption, a second ClaimUsername
-            // answers "taken" to the person who got the name.
-            Err(e) if attempt + 1 < REGISTRY_ATTEMPTS && e.to_string().contains(REFUSED_BEFORE_IT_RAN) => {
-                Delay::from(std::time::Duration::from_millis(REGISTRY_RETRY_MS << attempt)).await;
-                attempt += 1;
-            }
-            Err(e) => return Err(unavailable(e.to_string())),
-        }
-    };
+    // Asked once: a throw may come after the registry acted (a failure
+    // inside it, a connection dropped mid-answer), and its calls are not
+    // idempotent (a second Mint is a second redemption, a second
+    // ClaimUsername answers "taken" to the person who got the name).
+    let (status, bytes) = ask().await.map_err(|e| unavailable(e.to_string()))?;
     if status == 200 {
         let answer = serde_json::from_slice::<C::Answer>(&bytes).map_err(|e| unavailable(format!("its answer: {e}")))?;
         return C::checked(answer);
@@ -868,7 +842,6 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let rest = rest.to_vec();
             identities(req, env, &url, &rest).await
         }
-        (Method::Get, ["api", "test", "env"]) if cfg.test_hooks => json_answer(&Value::Object(js::env_vars(env.as_ref())?)),
         (Method::Post, ["api", "test", hook @ ("keys" | "fragment")]) if cfg.test_hooks => {
             /// The fragment a test hook's body names (the rest is the fragment's to read).
             #[derive(Deserialize)]

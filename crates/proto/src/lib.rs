@@ -43,8 +43,7 @@ pub mod limits {
     /// A secret's value.
     pub const SECRET_MAX_BYTES: usize = 64 * 1024;
     /// The app facet's database (docs/MODEL.md): a mutation that leaves it
-    /// larger rolls back (the platform checks). The node stops every write
-    /// 4 MiB above it (`CELLD_FACET_MAX_BYTES`, our celld fork).
+    /// larger rolls back (the platform checks).
     pub const APP_DB_MAX_BYTES: u64 = 16 * 1024 * 1024;
     /// Secrets per fragment.
     pub const SECRETS_MAX: usize = 100;
@@ -333,8 +332,8 @@ pub enum ErrorCode {
     /// 507: the app's database is at its cap (`limits::APP_DB_MAX_BYTES`);
     /// the mutation was rolled back.
     StorageFull,
-    /// 503: the node serving this fragment cannot load another app until it
-    /// restarts (celld's loaded-worker limit; docs/hardening.md).
+    /// 503: the app is answering as many calls at once as the runtime lets
+    /// it (a dynamic worker's concurrency limit); try again shortly.
     NodeFull,
     /// 410: the fragment moved to another host; the message names its URL
     /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
@@ -1268,6 +1267,7 @@ fn write_canonical(v: &Value, out: &mut String) {
     }
 }
 
+pub mod ledger;
 pub mod live;
 
 #[cfg(test)]

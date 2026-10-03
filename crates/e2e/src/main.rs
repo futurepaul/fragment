@@ -1,12 +1,13 @@
-//! The fragment end-to-end suite: a real `celld dev` node serving the real
-//! cell (from a staged copy under `target/e2e/cell`, so a running `xtask
-//! dev` is never touched), the code.storage fake from `crates/fakes`
-//! (webhooks included), the real CLI, and signed HTTP the way the CLI and
-//! a browser send it.
+//! The fragment end-to-end suite: the real cell and agents' Worker under
+//! `wrangler dev` (workerd, from staged copies under `target/e2e/<run>`, so
+//! a running `xtask dev` is never touched), the code.storage fake from
+//! `crates/fakes` (webhooks included), the real CLI, and signed HTTP the
+//! way the CLI and a browser send it. The fakes stand only at vendor
+//! boundaries (code.storage, WorkOS, the model, a push service): this is
+//! the lower rung under the hosted lane.
 //!
 //! `cargo xtask e2e [--only <section>[,<section>...] | --except <section>[,...]]`.
-//! Each section makes its own fragments, so any set can run alone (CI's
-//! shards run it that way, in parallel). Every check prints `ok` or
+//! Each section makes its own fragments, so any set can run alone. Every check prints `ok` or
 //! `FAIL`, and a section that stops early is one FAIL, with the sections
 //! after it still run; the process exits non-zero when any check fails.
 //! A run's scratch (`target/e2e/<run>`: the staged cell, each node boot's
@@ -74,6 +75,8 @@ pub struct Suite {
     asked: Vec<String>,
     passed: usize,
     failed: Vec<String>,
+    /// Checks this rung cannot make, each with why and where it is made.
+    skipped: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
     ran: Vec<String>,
     /// A lane stopped early: the next section to run gets the node back as
@@ -107,15 +110,14 @@ pub struct Suite {
     project: PathBuf,
     /// The agents' script (phase 5), co-hosted on the node.
     agents_project: PathBuf,
-    /// More environment for the next node started (celld settings a lane tries).
-    pub node_env_extra: Vec<(String, String)>,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
 }
 
 impl Suite {
-    /// The fleet's secrets (label, value): the node holds them, never a cell.
-    pub fn fleet_secrets(&self) -> Vec<(&'static str, String)> {
+    /// The deployment's secrets (label, value): the platform Worker holds
+    /// them, never an app.
+    pub fn deployment_secrets(&self) -> Vec<(&'static str, String)> {
         vec![
             ("host secret", self.host_secret.clone()),
             // a line of the PEM's body: found however the PEM was escaped
@@ -163,6 +165,13 @@ impl Suite {
         }
     }
 
+    /// A check local workerd cannot make (it is the hosted lane's): said,
+    /// counted, and never a pass.
+    pub fn skip(&mut self, label: &str, why: &str) {
+        self.skipped.push(label.to_string());
+        println!("skip  {label}: {why}");
+    }
+
     pub fn fail(&mut self, label: &str, detail: impl std::fmt::Display) {
         self.failed.push(label.to_string());
         println!("FAIL  {label}: {detail}");
@@ -183,7 +192,6 @@ impl Suite {
     /// scripted.
     fn recover(&mut self) -> Result<()> {
         self.openrouter.clear_script();
-        self.node_env_extra.clear();
         self.shape = Shape::Plain;
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
@@ -234,7 +242,7 @@ impl Suite {
     /// Starts the node; `suffix` serves fragments from their own hosts.
     pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
         assert!(self.node.is_none(), "one node at a time");
-        let env = devstack::Fleet {
+        devstack::Fleet {
             host_secret: self.host_secret.clone(),
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
@@ -263,7 +271,7 @@ impl Suite {
             test_hooks: true,
         }
         .configure(&self.project)?;
-        // the agents' script is co-hosted, as the fleet runs it: the
+        // the agents' Worker runs beside it, as a deployment runs it: the
         // router hands it /api/agents and /api/a/*, its inboxes included
         devstack::AgentFleet {
             host_secret: self.host_secret.clone(),
@@ -273,13 +281,10 @@ impl Suite {
             test_hooks: true,
         }
         .configure(&self.agents_project)?;
-        let env = env.into_iter().chain(self.node_env_extra.iter().cloned()).collect();
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,
             clean,
-            watch: false,
-            env,
             with: vec![self.agents_project.clone()],
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included
@@ -372,8 +377,17 @@ impl Suite {
         self.cli_command(api, home, args).current_dir(cwd).output().expect("run the fragment CLI")
     }
 
-    fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
+    /// The CLI as a lane spawns it itself (a watcher, a piped input): its
+    /// config under the HOME the lane sets, on every system.
+    pub fn bare_cli(&self) -> Command {
         let mut c = Command::new(&self.cli);
+        // a Linux runner's XDG_CONFIG_HOME would put every lane's key in one place
+        c.env_remove("XDG_CONFIG_HOME");
+        c
+    }
+
+    fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
+        let mut c = self.bare_cli();
         c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
         c
     }
@@ -496,6 +510,7 @@ fn main() -> Result<()> {
         asked: vec![],
         passed: 0,
         failed: vec![],
+        skipped: vec![],
         ran: vec![],
         recovery_due: false,
         lost: None,
@@ -516,7 +531,6 @@ fn main() -> Result<()> {
         scratch,
         project,
         agents_project,
-        node_env_extra: vec![],
         shape: Shape::Plain,
     };
     s.start(true, true)?;
@@ -536,12 +550,12 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    println!("\n{} passed, {} failed", s.passed, s.failed.len());
+    println!("\n{} passed, {} failed, {} skipped (the hosted lane's)", s.passed, s.failed.len(), s.skipped.len());
     if !s.failed.is_empty() {
         for f in &s.failed {
             println!("  FAIL {f}");
         }
-        println!("kept for a look: {} (each node boot's log is celld-<port>-<boot>.log there)", s.scratch.display());
+        println!("kept for a look: {} (each node boot's log is node-<port>-<boot>.log there)", s.scratch.display());
         std::process::exit(1);
     }
     if std::env::var_os("FRAGMENT_E2E_KEEP").is_some() {
