@@ -210,6 +210,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         seen
     };
     s.ok("its chat is framed, signed in on the chat's own origin, and the agent answers the job in it", signed && answered, &host);
+    let sidebar = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.getElementById('sidebar').getBoundingClientRect().width > 0", wait);
+    s.ok("at a desktop's width the sidebar shows beside the chat", sidebar, "");
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
 
     // a second agent, from the sidebar

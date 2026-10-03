@@ -100,8 +100,10 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
   const onDouble = (gutter, fn) => gutter.addEventListener("mousedown", (e) => { if (e.detail === 2) fn(); });
   onDouble(gutterRight, () => { s.right = DEFAULTS.right; store.set(KEY, s); write(); });
 
+  // The grid's own size, not the window's: it is hidden until the person is
+  // signed in, and a fit made while it measured nothing hid the sidebar.
   let frame = 0;
-  addEventListener("resize", () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(write); });
+  new ResizeObserver(() => { cancelAnimationFrame(frame); frame = requestAnimationFrame(write); }).observe(grid);
   narrow.addEventListener("change", () => { overlay = null; write(); });
   write();
 
