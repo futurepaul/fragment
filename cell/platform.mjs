@@ -106,8 +106,6 @@ function base64(data) {
   return btoa(s);
 }
 
-// 20 seconds apart: a video has about 15 minutes to finish.
-const VIDEO_POLLS_MAX = 45;
 // 2, 4, 8, 16, then 30 seconds apart: an agent's turn has about 20 minutes
 // to end, in at most 81 of a run's 256 steps.
 const AGENT_POLLS_MAX = 40;
@@ -343,38 +341,25 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // image and video through OpenRouter with the platform's key; the owner's
-  // ledger pays for each (docs/ledger.md):
-  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, usage }
-  //   ai.image({ prompt, path, model?, aspect_ratio? })  → { path, size, sha256 }: a file on main
-  //   ai.video({ prompt, path, model?, duration?, resolution?, aspect_ratio? })
-  // A video takes minutes: the job polls it and sleeps between polls, all as steps.
+  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
+  // for each (docs/ledger.md):
+  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, tier, usage }
+  //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
+  //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
     const step = (kind, args) => this.#step(kind, args);
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
     return {
       text: (opts) => step("ai.text", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
-      video: async (opts = {}) => {
-        checkPath(opts.path);
-        const { path, ...rest } = clean(opts);
-        const { id } = await step("ai.video.start", rest);
-        for (let i = 0; i < VIDEO_POLLS_MAX; i++) {
-          const st = await step("ai.video.poll", { id });
-          if (st.status === "completed") return step("ai.video.save", { id, path, url: st.urls?.[0] });
-          // which statuses are final is the platform's (ai.rs): the step says
-          if (st.ended) throw new Error(`video ${id} ${st.status}${st.error ? `: ${st.error}` : ""}`);
-          await this.sleep("20 seconds");
-        }
-        throw new Error(`video ${id} was not ready after ${VIDEO_POLLS_MAX} polls`);
-      },
+      video: (opts = {}) => step("ai.video", clean(opts)),
     };
   }
 
   // One turn of the fragment's own agent (fragment.json's `agent`), for
   // the run's principal: resolves to { text, turn }. The turn is named by
   // the run and this step, so a retried or replayed run reattaches to it;
-  // the job waits for it in polls and sleeps, as for a video. A turn that
+  // the job waits for it in polls and sleeps, all as steps. A turn that
   // fails or is stopped throws a StepError.
   async agent({ prompt, conversation, channel } = {}) {
     if (typeof prompt !== "string" || prompt === "") throw new TypeError("job.agent({ prompt }): prompt is a string");

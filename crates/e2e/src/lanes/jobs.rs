@@ -293,7 +293,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         misfit["status"] == "succeeded"
             && misfit["output"]["caught"] == true
             && misfit["output"]["name"] == "StepError"
-            && misfit["output"]["message"].as_str().is_some_and(|m| m.contains("ai.video") && m.contains("missing field `prompt`")),
+            && misfit["output"]["message"].as_str().is_some_and(|m| m.contains("ai.image") && m.contains("missing field `prompt`")),
         &misfit,
     );
 

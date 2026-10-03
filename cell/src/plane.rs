@@ -569,9 +569,9 @@ impl FragmentCell {
     /// a day after the last: something outside the platform may have
     /// written its repo in the last day (a storage token was minted for it,
     /// or a webhook arrived), a run is in flight (each pass checks it
-    /// against its Workflow) or held with a video's reservation to give
-    /// back, or a template or a declared agent is still to land (each pass
-    /// tries again). The rest of the alarm's work has due times of its own.
+    /// against its Workflow) or ended with a reservation to give back, or a
+    /// template or a declared agent is still to land (each pass tries
+    /// again). The rest of the alarm's work has due times of its own.
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage twice.
     pub(crate) fn busy(&self) -> CellResult<bool> {
@@ -580,18 +580,18 @@ impl FragmentCell {
             outside_at: Option<String>,
             pending: i64,
             running: i64,
-            videos: i64,
+            holds: i64,
         }
         let rows: Vec<Busy> = self.typed(
             "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
                EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
-               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS videos",
+               EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS holds",
             vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);
-        Ok(outside || b.pending != 0 || b.running != 0 || b.videos != 0)
+        Ok(outside || b.pending != 0 || b.running != 0 || b.holds != 0)
     }
 
     /// Something outside the platform may write the repo from now on (a

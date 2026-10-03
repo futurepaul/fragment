@@ -1,7 +1,6 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
-//! WorkOS's API key, the OpenRouter key that pays for media steps until
-//! phase 7, and the operator's keys a computer's swap sends
+//! WorkOS's API key, and the operator's keys a computer's swap sends
 //! (`FRAGMENT_KEY_<NAME>`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
 //! Worker Loader, with an env the platform builds (`js::app_env`), so no
@@ -26,7 +25,6 @@ pub const HOST_SECRET: &str = "FRAGMENT_HOST_SECRET";
 pub const HOST_SECRET_PREVIOUS: &str = "FRAGMENT_HOST_SECRET_PREVIOUS";
 pub const CODESTORAGE_PRIVATE_KEY: &str = "CODESTORAGE_PRIVATE_KEY";
 pub const WORKOS_API_KEY: &str = "WORKOS_API_KEY";
-pub const OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
 
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
@@ -156,12 +154,4 @@ pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> Ce
 /// deployment holds it.
 pub fn operator_key(env: &Env, name: &str) -> Option<String> {
     secret(env, &fragment_core::swap::key_secret_name(name))
-}
-
-/// The deployment's own OpenRouter key, which pays for image and video
-/// steps until phase 7 (ai.rs; the debt ledger), or `None` when it has
-/// none (those steps are off). It is added at the egress point only; the
-/// payer's ledger meters what each call cost.
-pub fn openrouter_key(env: &Env) -> Option<String> {
-    secret(env, OPENROUTER_API_KEY)
 }

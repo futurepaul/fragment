@@ -24,7 +24,7 @@ This repo holds:
 - **the agents** (`agent/`): goose's loop in a Durable Object per agent,
   a Worker beside the cell's; an agent joins fragments as a member.
 - **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
-  code.storage, Workers AI, OpenRouter, WorkOS, and a push service, and the e2e suite
+  code.storage, Workers AI, WorkOS, and a push service, and the e2e suite
   that drives the real cell, CLI, and a browser.
 
 Read [docs/MODEL.md](docs/MODEL.md) for the model,
@@ -91,7 +91,7 @@ crates/proto   wire types and limits
 crates/core    the cell's pure logic, host-tested (schemas, cron, globs, the ledger and price book, web push)
 crates/nip98   NIP-98 signing and verification
 crates/templates  templates/, embedded in the CLI and the cell
-crates/fakes   code.storage, Workers AI, OpenRouter, WorkOS, and push-service fakes
+crates/fakes   code.storage, Workers AI, WorkOS, and push-service fakes
 
 crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite

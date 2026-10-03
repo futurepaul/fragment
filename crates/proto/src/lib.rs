@@ -119,7 +119,7 @@ pub mod limits {
     pub const HOP_DEPTH_MAX: u32 = 16;
     /// Inbox records whose runs have not succeeded; past this a post is 429.
     pub const INBOX_PENDING_MAX: u64 = 1000;
-    /// Steps one job run may take (a video waits in polls and sleeps).
+    /// Steps one job run may take (an agent's turn waits in polls and sleeps).
     pub const JOB_STEPS_MAX: usize = 256;
     /// Every step result of one run together (the job re-reads them at each step).
     pub const JOB_RESULTS_MAX_BYTES: usize = 4 * 1024 * 1024;

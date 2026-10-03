@@ -96,10 +96,10 @@ prebuilt bundle is in the debt ledger).
   when `cell/src` or `crates/` change,
   agents (`agent/`, goose's loop) beside it in the same process (the router
   hands them `/api/agents` and `/api/a/*`), whose model calls go through
-  the model route to the Workers AI fake on :8796 (echoes; dev never calls
-  a real model) and spend their owner's ledger (dev people are seats, with
-  the month's included credit; images and videos only with the key
-  `OPENROUTER_API_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  the model route to the Workers AI fake on :8796 (echoes, and draws
+  placeholder JPEGs for image steps; dev never calls a real model) and
+  spend their owner's ledger (dev people are seats, with the month's
+  included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -127,7 +127,7 @@ prebuilt bundle is in the debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, Workers AI, OpenRouter, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, WorkOS, a push service),
 
   `crates/devstack`, `crates/e2e`.
 - `images/` (the computer images: the bridge, the stub, our Hermes image;

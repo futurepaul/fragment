@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use fragment_core::price::{PriceBook, Usage};
-use fragment_fakes::workers_ai::Used;
+use fragment_fakes::workers_ai::{image_bytes, Used, IMAGE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -286,18 +286,31 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": run, "calls": s.ai.calls().len() - calls }),
     );
     lever(api, &name, "fail-after-paid", json!({ "times": 1 }))?;
-    let images = || s.openrouter.calls().iter().filter(|c| c.1 == "/api/v1/images").count();
+    let images = || s.ai.calls().iter().filter(|c| c.model == IMAGE_MODEL).count();
     let drawn = images();
-    let r = api.op(&owner, &name, "draw", "d-1", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.png" }))?;
+    let r = api.op(&owner, &name, "draw", "d-1", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
-    let image = charge(&Usage::Billed { vendor: "openrouter".into(), micros: 2_000 });
+    // Workers AI's price: 4.80 neurons a 512×512 tile, 9.60 a step (fragment_core::media)
+    let image = |tiles: u64, steps: u64| charge(&Usage::Neurons { milli: tiles * 4_800 + steps * 9_600 });
     s.ok(
-        "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2)",
+        "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2), charged its 4 tiles and 4 steps in neurons",
         run["status"] == "succeeded"
-            && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.png") == Some(fragment_fakes::openrouter::image_bytes("a lighthouse"))
+            && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
             && images() == drawn + 1
-            && run_charged(api, &owner_id, &name, &run) == image,
+            && run_charged(api, &owner_id, &name, &run) == image(4, 4),
         json!({ "run": run, "images": images() - drawn }),
+    );
+    let r = api.op(&owner, &name, "draw", "d-wide", json!({ "prompt": "a wide shore", "path": "art/shore.jpg", "steps": 8 }))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let step = run_steps(api, &owner_id, &name, &run);
+    s.ok(
+        "an image is charged the tiles it covers (1536×1024: 6) and the steps it took, past its 1024×1024 reservation, from its usage",
+        run["status"] == "succeeded"
+            && step.len() == 1
+            && step[0]["entry"]["end"]["basis"] == "usage"
+            && run_charged(api, &owner_id, &name, &run) == image(6, 8)
+            && m(&ledger(api, &owner), "reservedMicros") == 0,
+        json!({ "run": run, "step": step }),
     );
     // a replay pays only for the step it had not paid for: the first call
     // answers, the second is refused for good

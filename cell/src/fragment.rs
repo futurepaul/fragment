@@ -145,9 +145,8 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
 CREATE INDEX IF NOT EXISTS delivery_outbox_waiting ON delivery_outbox (id) WHERE attempts > 0;
 CREATE TABLE IF NOT EXISTS charges (
-  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, video TEXT, at INTEGER NOT NULL);
+  ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS charges_run ON charges (run);
-CREATE INDEX IF NOT EXISTS charges_video ON charges (video) WHERE video IS NOT NULL;
 CREATE TABLE IF NOT EXISTS paid (
   key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS paid_run ON paid (run);

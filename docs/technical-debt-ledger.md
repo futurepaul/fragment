@@ -329,45 +329,24 @@ fragment.club until cutover (decisions 34–35).
   already lists them), with an e2e check; or every socket re-resolves
   its key on a timer, not only at a frame it sends.
 
-## Images and videos stay on OpenRouter, with the deployment's key
+## Video steps are off
 
-- **Observed:** phase 3 of docs/cloudflare-v1.md moved text onto Workers
-  AI through the model route, and left `job.ai.image` and `job.ai.video`
-  on OpenRouter (cell/src/ai.rs), paid by the deployment's own key (the
-  Worker secret `OPENROUTER_API_KEY`), each call reserved at a fixed
-  worst case (an image $0.10, a video $0.10 a second: `fragment_core::media`)
-  and metered on the payer's ledger as OpenRouter's reported cost
-  (`Usage::Billed`, the margin on top, no fee).
-- **Risk:** a second vendor and a second key for the deployment to hold;
-  a reported cost the platform cannot check against a price of its own;
-  an image or video dearer than its fixed worst case reserves less than
-  it costs (the settle charges it in full, so only the hold is short).
-  OpenRouter's account balance is the deployment's, not the person's: a
-  person cannot pass their ledger, but the deployment can run its
-  OpenRouter credit out for everyone.
-- **First proof:** a settle whose `usage` charge is above its
-  reservation, or an OpenRouter 402 on a step.
-- **Delete when:** phase 7 moves image (and video) generation onto
-  Cloudflare's own inference (decision 17's `fal-image-editing` move),
-  metered from its usage like text, and `OPENROUTER_API_KEY`, the
-  OpenRouter fake, `Usage::Billed`'s OpenRouter vendor and
-  `fragment_core::media` go with it.
-
-## A held run's video that finishes anyway is not charged
-
-- **Observed:** the reliability pass (audit R13), kept through phase 3. A
-  run held while its video still waits for its cost gives the reservation
-  back, since nothing polls the video any more. OpenRouter may still
-  finish it and charge the deployment's key; the ledger never learns that
-  cost.
-- **Risk:** the deployment pays OpenRouter for a video no ledger was
-  charged for, at most one per held run.
-- **First proof:** the deployment key's usage (`GET /api/v1/key`) above
-  the ledgers' `Billed` charges for OpenRouter.
-- **Delete when:** a released video is polled once more on the alarm
-  until OpenRouter says it ended, and settled at what it reports, with a
-  check that holds a run mid-video and sees the cost arrive; or videos
-  leave OpenRouter (the entry above).
+- **Observed:** 2026-10-03, when OpenRouter was cut (Paul: "I thought we
+  didn't need openrouter now that we're using ai gateway?"). Images moved
+  onto Workers AI (FLUX.1 [schnell] through the AI binding,
+  cell/src/ai.rs); Workers AI's catalog has no video model (2026-10-03), so
+  `job.ai.video` is a step the platform refuses ("video steps are off
+  until they run on Cloudflare": `fragment_core::media::Refusal::VideoOff`),
+  and OpenRouter's key, its fake and `Usage::Billed` went with it.
+- **Risk:** a fragment that made videos (meatproxy's `fragment:ai`,
+  docs/published-fragments.md) cannot, and an agent asked for one can
+  only say so.
+- **First proof:** a held run whose error is that refusal.
+- **Delete when:** a video model runs on Cloudflare (Workers AI's
+  catalog, or a provider through AI Gateway's Unified Billing), metered
+  from its usage as images are, with `job.ai.video` back as steps and an
+  e2e check that a video is drawn, stored as a blob and charged; or Paul
+  drops videos, and `job.ai.video` goes with this entry.
 
 ## The price book is the core's defaults
 

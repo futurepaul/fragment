@@ -220,13 +220,9 @@ pub struct Fleet {
     pub job_retry_delay_s: u32,
     /// How long a blob no branch names is kept (`None`: the cell's 7 days).
     pub blob_grace_s: Option<u32>,
-    /// Where image and video steps go (`None`: OpenRouter itself), and the
-    /// deployment's key for them (`None`: they are off).
-    pub openrouter_url: Option<String>,
-    pub openrouter_key: Option<String>,
-    /// Where the model route sends its calls (`FRAGMENT_AI_URL`: the Workers
-    /// AI fake in dev and the e2e; `None`: the AI binding, through
-    /// `ai_gateway`).
+    /// Where the model route sends its calls, text and images
+    /// (`FRAGMENT_AI_URL`: the Workers AI fake in dev and the e2e; `None`:
+    /// the AI binding, through `ai_gateway`).
     pub ai_url: Option<String>,
     pub ai_gateway: Option<String>,
     /// A new person's plan (`FRAGMENT_DEFAULT_PLAN`; `None`: the cell's, guest).
@@ -291,12 +287,6 @@ impl Fleet {
         let grace = self.blob_grace_s.map(|g| g.to_string());
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
-        }
-        if let Some(u) = &self.openrouter_url {
-            vars.push(("OPENROUTER_API_URL", u.as_str()));
-        }
-        if let Some(k) = &self.openrouter_key {
-            vars.push(("OPENROUTER_API_KEY", k.as_str()));
         }
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));
