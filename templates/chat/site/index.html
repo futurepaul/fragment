@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <title>Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+  <!-- the blessed chat template (docs/chat-records.md): every URL here is
+       relative, so it works on a fragment's host, under /f/<name>/, and
+       served from the platform's release (decision 40) -->
+  <link rel="stylesheet" href="./chat.css">
+</head>
+<body>
+  <script type="module">
+    import { mount } from "./chat.js";
+    mount(document.body);
+  </script>
+</body>
+</html>

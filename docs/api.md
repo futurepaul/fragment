@@ -586,7 +586,9 @@ like any other (uploads never committed included). It is served as the
 type its upload's `content-type` declared when that is passive media
 (JPEG, PNG, WebP, GIF, MP4, WebM, MP3, WAV, PDF: `blob::served_type`),
 else as `application/octet-stream`, so a blob never runs as a page or a
-script there.
+script there. An editor's page uploads one there too (`PUT
+__blob/<sha256>`, `fragment.blob(file)`): a chat's attachments
+(docs/chat-records.md).
 
 CLI: `fragment blob put <name> <file>` uploads a file as a blob, typed
 by its extension, and prints its sha256.
@@ -867,12 +869,13 @@ API answers on the platform's host):
 | `__tree` | `{type, ref: "live", sha, count, files}`, content only |
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
-| `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404 |
+| `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
+| `__members` | viewers and up (the share link too): `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}`, the first added first, as `GET /api/f/{name}/members` answers it (a chat's agents, its lead the first agent added) |
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
 | `__fragment.js` | the browser library (below) |
-| `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL); an id the registry does not hold is left out |
+| `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture, name?, fragment?}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment` and its label as its `name`, which `@mentions` it); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |
 | `__live` | WebSocket, anyone who can see the fragment: channel subscriptions from a cursor, presence, change signals, queries (below) |
 | `__watch` | WebSocket, viewers and up (the share link, or a signed upgrade): `{type: "hello", ref, sha}`, then `{type: "changed", ref: "main", sha, paths}` per external move of main |
@@ -975,7 +978,10 @@ follows live; after a reconnect it resumes after the last record;
 `onDraft` hears the channel's drafts while it is live),
 `presence.set(data)` (changes within 150 ms go as one, the latest),
 `presence.on(fn)` (called with everyone here now, and on each change),
-`me()`, `closed(fn)`. The page's
+`blob(file, {name?, type?})` (a File or Blob uploaded as one of the
+fragment's blobs, its SHA-256 computed in the page, as an editor; answers
+`{sha256, size, type, name}`, a chat attachment's shape, read at
+`./__blob/<sha256>`), `me()`, `closed(fn)`. The page's
 socket reconnects by itself after a jittered wait (half to one and a
 half times a backoff that doubles from 1 to 30 seconds), except after a
 close the fragment means for good: 4003 (the page's access was revoked)

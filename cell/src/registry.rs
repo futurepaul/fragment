@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_fragments (
+  identity TEXT PRIMARY KEY, fragment TEXT NOT NULL);
 ";
 
 #[durable_object]
@@ -386,8 +388,9 @@ impl RegistryCell {
     }
 
     /// What anyone may know of identities, as a page shows a name: a
-    /// person's username and picture, or that it is someone's agent. An id
-    /// the registry does not hold (an anonymous visitor's) is left out.
+    /// person's username and picture, or that it is someone's agent (and,
+    /// made from an agent fragment, its name and fragment). An id the
+    /// registry does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
         if b.ids.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
@@ -400,10 +403,29 @@ impl RegistryCell {
                 (IdentityKind::Person, Some(u)) => self.picture_of(&id)?.map(|p| format!("/api/users/{u}/picture?v={}", &p.sha[..12])),
                 _ => None,
             };
+            let fragment = match who.kind {
+                IdentityKind::Agent => self.agent_fragment(&id)?,
+                _ => None,
+            };
+            // an agent's name is its fragment's label (docs/computers.md)
+            let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
             // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture });
+            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment });
         }
         Ok(ProfilesAnswer { profiles })
+    }
+
+    /// The agent fragment an agent was made from, if it was.
+    fn agent_fragment(&self, id: &str) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            fragment: String,
+        }
+        let row = self.row::<Row>("SELECT fragment FROM agent_fragments WHERE identity = ?", vec![id.into()])?;
+        if row.as_ref().is_some_and(|r| !fragment_proto::valid_fragment_name(&r.fragment)) {
+            return Err(CellError::host(format!("agent_fragments.fragment of {id} is not a fragment's name")));
+        }
+        Ok(row.map(|r| r.fragment))
     }
 
     fn view(&self, who: &Identity, created: Option<bool>) -> CellResult<IdentityView> {
@@ -473,25 +495,35 @@ impl RegistryCell {
         if owner.kind != IdentityKind::Person {
             return Err(CellError::new(ErrorCode::Forbidden, "an agent's owner is a person"));
         }
-        match self.key_row(&b.key)? {
-            Some(row) if !row.active() => Err(conflict("this key was revoked")),
+        if b.fragment.as_deref().is_some_and(|f| !fragment_proto::valid_fragment_name(f)) {
+            return Err(CellError::invalid("an agent's fragment is <label>.<username>"));
+        }
+        let (agent, created) = match self.key_row(&b.key)? {
+            Some(row) if !row.active() => return Err(conflict("this key was revoked")),
             Some(row) => {
                 let holder = self.stored_identity(&row.identity, &format!("the key {}", b.key))?;
                 // a replay of the same registration answers the same agent
-                if holder.kind == IdentityKind::Agent && holder.owner.as_deref() == Some(owner.id.as_str()) {
-                    return self.view(&holder, Some(false));
+                if holder.kind != IdentityKind::Agent || holder.owner.as_deref() != Some(owner.id.as_str()) {
+                    return Err(conflict("this key already belongs to someone"));
                 }
-                Err(conflict("this key already belongs to someone"))
+                (holder, false)
             }
             None => {
                 let n = self.count("SELECT COUNT(*) AS n FROM identities WHERE owner = ? AND kind = 'agent'", vec![owner.id.as_str().into()])?;
                 if n >= limits::AGENTS_PER_OWNER_MAX {
                     return Err(CellError::invalid(format!("a person owns at most {} agents", limits::AGENTS_PER_OWNER_MAX)));
                 }
-                let agent = self.make(IdentityKind::Agent, Some(&owner.id), &b.key, &owner.id)?;
-                self.view(&agent, Some(true))
+                (self.make(IdentityKind::Agent, Some(&owner.id), &b.key, &owner.id)?, true)
             }
+        };
+        // its name, for pages (`profiles`): the fragment its key is
+        if let Some(fragment) = &b.fragment {
+            self.exec(
+                "INSERT INTO agent_fragments (identity, fragment) VALUES (?, ?) ON CONFLICT (identity) DO UPDATE SET fragment = excluded.fragment",
+                vec![agent.id.as_str().into(), fragment.as_str().into()],
+            )?;
         }
+        self.view(&agent, Some(created))
     }
 
     /// Holds an agent below its owner (`held`: the most it acts with), or

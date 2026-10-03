@@ -178,6 +178,24 @@ fragment.club until cutover (decisions 34–35).
   "Photoshop file" exception in MODEL), and a per-fragment policy keeps
   the bytes named by the last N live commits.
 
+## A chat's attachments are collected as blobs nothing names
+
+- **Observed:** phase 5, the chat template. A chat's files are blobs
+  named only by records (`attachments[].sha256`, docs/chat-records.md):
+  a page's upload (`PUT __blob/<sha256>`) and an agent's (the bridge's
+  `PUT /api/f/{chat}/blobs/{sha256}`). The blob collection keeps only
+  blobs a pointer at `main` or `live` names, so these go after
+  `FRAGMENT_BLOB_GRACE_S` (7 days; 4 s in the e2e, whose chat and
+  computers lanes read them at once).
+- **Risk:** a week-old picture in a chat is a broken image, and a file an
+  agent made is gone.
+- **First proof:** any chat older than a week with a file in it.
+- **Delete when:** a record that names blobs keeps them while it is kept
+  (the channel's append marks them, its trim lets them go), or blobs
+  carry a reference count of their own; the rule must name no template
+  (decision "The rule"), so it is a record convention the platform
+  documents, or a field of the post itself.
+
 ## The notes viewer is a prebuilt bundle
 
 - **Observed:** phase 2 slice G. `templates/notes/site/assets/` is

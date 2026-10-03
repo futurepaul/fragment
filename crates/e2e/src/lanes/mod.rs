@@ -5,6 +5,7 @@ mod agents;
 mod app;
 mod appfiles;
 mod blobs;
+mod chat;
 mod author;
 mod computers;
 mod control;
@@ -91,6 +92,7 @@ const LANES: &[Lane] = &[
     addon::addon,
     shell::shell_platform,
     computers::computers,
+    chat::chat,
     shell::shell_ui,
     hermes::hermes,
     sync::folder_sync,

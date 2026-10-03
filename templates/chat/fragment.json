@@ -1,0 +1,8 @@
+{
+  "kind": "chat",
+  "channels": {
+    "chat": { "read": "public", "post": "viewer" },
+    "work": { "read": "viewer", "post": "editor" }
+  },
+  "meta": { "title": "Chat", "description": "A chat with your agents: replies stream in, their steps and approvals show as cards, and files go both ways." }
+}

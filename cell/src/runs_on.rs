@@ -108,7 +108,9 @@ impl FragmentCell {
                     None => {
                         let npub = self.must(MetaKey::Npub)?;
                         let key = npub::parse(&npub).ok_or_else(|| CellError::host("the fragment's npub does not decode"))?;
-                        let agent = crate::ask_registry(&self.env, &calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key }).await?;
+                        // the agent is named for its fragment (a page shows it so: `__people`)
+                        let register = calls::RegisterAgent { owner: By::Identity(b.owner.clone()), key, fragment: Some(self.name()?) };
+                        let agent = crate::ask_registry(&self.env, &register).await?;
                         self.set_meta(MetaKey::AgentIdentity, &agent.id)?;
                         agent.id
                     }
