@@ -768,7 +768,9 @@ async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::Js
         headers.set(k, v)?;
     }
     let mut init = RequestInit::new();
-    init.with_method(req.method()).with_headers(headers);
+    // a fragment's redirect (an app's) is the browser's to follow: followed
+    // here, it came back to the fragment at its Location, outside its routes
+    init.with_method(req.method()).with_headers(headers).with_redirect(RequestRedirect::Manual);
     if body.is_some() {
         init.with_body(body);
     }

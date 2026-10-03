@@ -428,7 +428,7 @@ and styles only inline and images only from the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat` and `agent` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps). `notes` is the CLI's only (`fragment new --template notes`). |
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent` and `brain` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
@@ -482,7 +482,7 @@ and `app.mjs` (with `applib/**.mjs|js`, at most 64 modules and 4 MiB in
 all) from the live commit. A live commit with an invalid `fragment.json`
 keeps the last good code and says why in `status.code.error`.
 
-A fragment on a blessed template (`chat`, `agent`: docs/cloudflare-v1.md,
+A fragment on a blessed template (`chat`, `agent`, `brain`: docs/cloudflare-v1.md,
 decision 40) names it in `fragment.json` (`template`) and runs the
 platform release's manifest (with its own `meta` over the template's),
 site, and code: the template's `app.mjs` and `applib/`, when it carries
@@ -582,7 +582,9 @@ cell tries again, waiting 10 s and doubling to an hour, for about two days
 (`effects.delayed` on the first failure, `effects.abandoned` if it gives
 up). A replay of a pending mutation tries at once. An optional
 `fetch(request)` answers every path that is not a site file (any
-method), with `x-fragment-principal` and `x-fragment-role` set.
+method), with `x-fragment-principal` and `x-fragment-role` set; a
+redirect it answers reaches the browser as it is (the platform follows
+none: followed, it came back into the app at its `Location`).
 
 The app's database holds at most 16 MiB: a mutation that would leave it
 larger rolls back and answers 507 `storage_full`; the app still reads,
@@ -1269,7 +1271,8 @@ standing stops, their computer and agents, connections, and pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent); its sidebar lists their fragments, each one's share sheet
 (`/share/<name>`) in a dialog, and the catalog makes an app from a
-template. It calls the API with the person's platform session
+template (its Brain, a blessed `brain` with a title, as a chat is made).
+It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
 `Sec-Fetch-Site: same-origin`, and, writing, the platform's exact

@@ -43,6 +43,8 @@ const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
   { template: "blank", name: "Blank", about: "One page to start from." },
+  // blessed (decision 40): named, not copied, and made with a title, as a chat is
+  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
 ];
 
 // me: the signed-in person; fragments: their list (name, role, kind,
@@ -631,7 +633,8 @@ function showCatalog() {
       add.disabled = true;
       error.textContent = "";
       try {
-        const made = await api("POST", "/api/fragments", { name: input.value.trim() || freeLabel(t.template), template: t.template });
+        const label = input.value.trim();
+        const made = await api("POST", "/api/fragments", { name: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
         await load();
         viewer.close("catalog");
         openApp(made.name);

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Brain</title>
+<!-- The blessed brain template's page (docs/cloudflare-v1.md, decisions 30
+     and 40): the notes template's viewer (assets/, its prebuilt bundle,
+     shared through a symlink), reading api/tree and api/file from the
+     brain's app, and the brain's search beside it (brain.js). Every URL is
+     relative, so it works on a fragment's host, under /f/<name>/, and
+     served from the platform's release. -->
+<link rel="stylesheet" href="assets/viewer.css">
+<link rel="stylesheet" href="brain.css">
+<script type="module">
+  // The viewer asks for a room whose state changes when files do; here that
+  // is the last_change query, re-run live by the browser library.
+  import * as fragment from "./__fragment.js";
+  window.fragment = {
+    room: () => ({
+      on(event, handler) {
+        if (event === "state") fragment.live("last_change", {}, (change) => change && handler(change));
+      },
+    }),
+  };
+</script>
+<script type="module" src="assets/viewer.js"></script>
+<script type="module" src="brain.js"></script>
+</head>
+<body>
+<div id="side">
+  <div id="brand">brain</div>
+  <form id="search" role="search" autocomplete="off">
+    <input id="q" type="search" placeholder="search the brain…" maxlength="256" aria-label="search the brain">
+  </form>
+  <input id="filter" type="search" placeholder="filter files…" autocomplete="off" aria-label="filter files">
+  <nav id="tree" aria-label="files"></nav>
+  <div id="recent-label">recent</div>
+  <nav id="recent" aria-label="recently changed"></nav>
+</div>
+<main id="main"><div id="content"></div></main>
+</body>
+</html>

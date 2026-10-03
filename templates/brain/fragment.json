@@ -1,0 +1,54 @@
+{
+  "kind": "brain",
+  "operations": {
+    "search": {
+      "kind": "query",
+      "input": {
+        "type": "object",
+        "required": ["q"],
+        "additionalProperties": false,
+        "properties": {
+          "q": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+          "wiki": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "index_status": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
+    "guide": { "kind": "query", "input": { "type": "object", "additionalProperties": false, "properties": {} } },
+    "last_change": { "kind": "query" },
+    "changed": {
+      "kind": "job",
+      "input": {
+        "type": "object",
+        "properties": {
+          "paths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+          "more": { "type": "integer", "minimum": 0 },
+          "full": { "type": "boolean" }
+        }
+      }
+    },
+    "mark": {
+      "kind": "mutation",
+      "input": {
+        "type": "object",
+        "required": ["paths", "full"],
+        "additionalProperties": false,
+        "properties": {
+          "paths": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 300 } },
+          "full": { "type": "boolean" }
+        }
+      }
+    },
+    "reindex": {
+      "kind": "query",
+      "role": "editor",
+      "input": { "type": "object", "additionalProperties": false, "properties": { "full": { "type": "boolean" } } }
+    }
+  },
+  "triggers": [{ "files": "**", "run": "changed" }],
+  "meta": {
+    "title": "Brain",
+    "description": "A knowledge base your agents keep: wikis of sources and pages, searched by section, shared with whoever you add."
+  }
+}

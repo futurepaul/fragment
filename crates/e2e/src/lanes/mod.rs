@@ -5,6 +5,7 @@ mod agents;
 mod app;
 mod appfiles;
 mod blobs;
+mod brain;
 mod chat;
 mod author;
 mod computers;
@@ -87,6 +88,7 @@ const LANES: &[Lane] = &[
     appfiles::appfiles,
     blobs::blobs,
     notes::notes,
+    brain::brain,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,

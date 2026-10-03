@@ -1,5 +1,5 @@
-//! Blessed templates (docs/cloudflare-v1.md, decision 40): a chat or an
-//! agent fragment names its template in `fragment.json` (`template`), and
+//! Blessed templates (docs/cloudflare-v1.md, decision 40): a chat, an agent
+//! or a brain fragment names its template in `fragment.json` (`template`), and
 //! the platform's release serves that template's manifest, its site, and
 //! its app code (`app.mjs`, with `applib/`), so one deploy of the platform
 //! updates every chat, with no copies to drift. The fragment's own repo
@@ -21,7 +21,7 @@ use crate::Template;
 use sha2::{Digest, Sha256};
 
 /// The templates the platform serves from its release.
-pub const BLESSED: [&str; 2] = ["agent", "chat"];
+pub const BLESSED: [&str; 3] = ["agent", "chat", "brain"];
 
 /// A blessed template's files, when `name` is one.
 pub fn template(name: &str) -> Option<Template> {
@@ -41,11 +41,14 @@ pub fn manifest(name: &str) -> Result<Manifest, String> {
 /// Which release of a blessed template a fragment runs: a hash of its
 /// files, so a platform deploy that changes any of them is seen at the
 /// fragment's next request (cell/src/plane.rs installs it again). The files
-/// are constants of this build, so each hash is made once per isolate.
+/// are constants of this build, so each template's hash is made once per
+/// isolate, when a fragment on it first asks (a chat never hashes the
+/// brain's 3 MiB viewer).
 pub fn release(name: &str) -> Option<String> {
-    static RELEASES: OnceLock<BTreeMap<&'static str, String>> = OnceLock::new();
-    let releases = RELEASES.get_or_init(|| BLESSED.iter().filter_map(|n| Some((*n, hash(template(n)?)))).collect());
-    releases.get(name).cloned()
+    static RELEASES: [OnceLock<String>; BLESSED.len()] = [const { OnceLock::new() }; BLESSED.len()];
+    let at = BLESSED.iter().position(|n| *n == name)?;
+    let t = template(name)?;
+    Some(RELEASES[at].get_or_init(|| hash(t)).clone())
 }
 
 fn hash(t: Template) -> String {
@@ -172,6 +175,32 @@ mod tests {
         assert!(code("chat").unwrap().is_some(), "the chat carries its push (decision 9)");
         assert!(template("todo").is_none(), "a template not blessed is only ever copied");
         assert_eq!(code("todo"), Ok(None), "and its code is no release's");
+    }
+
+    /// Goal: a brain (decision 30) is the notes viewer and the brain's own
+    /// code, all of it the template's. Method: its page loads the viewer and
+    /// its search; the viewer's files are the notes template's very bytes
+    /// (one copy in the binary, through the symlink build.rs follows); its
+    /// code carries its sections and its guide, which is one template
+    /// literal; its file trigger keeps the index.
+    #[test]
+    fn a_brain_is_the_notes_viewer_and_its_own_search() {
+        let page = std::str::from_utf8(site_file("brain", "site/index.html").expect("a brain has a page")).unwrap();
+        assert!(page.contains("assets/viewer.js") && page.contains("brain.js"), "its page is the viewer and its search");
+        for (path, bytes) in crate::NOTES.iter().filter(|(p, _)| p.starts_with("site/assets/")) {
+            let brain = site_file("brain", path).unwrap_or_else(|| panic!("the brain serves the viewer's {path}"));
+            assert!(std::ptr::eq(brain.as_ptr(), bytes.as_ptr()), "{path} is embedded once");
+        }
+        let m = manifest("brain").unwrap();
+        assert_eq!(m.kind(), fragment_proto::FragmentKind::Brain);
+        assert!(m.triggers.iter().any(|t| t.run == "changed"), "a file trigger keeps its index");
+        let c = code("brain").unwrap().expect("a brain carries code");
+        assert!(c.modules.contains_key("applib/sections.mjs") && c.modules.contains_key("applib/guide.mjs"), "{:?}", c.modules.keys());
+        let guide = c.modules["applib/guide.mjs"];
+        let text = guide.split_once("String.raw`").map(|(_, t)| t).expect("the guide is String.raw");
+        let body = text.strip_suffix("`;\n").expect("one template literal, to the end");
+        assert!(!body.contains('`') && !body.contains("${"), "the guide holds no backtick or substitution");
+        assert!(body.contains("raw/") && body.contains("fragment call <brain> search"), "it says how to ingest and search");
     }
 
     /// Goal: what counts as code is what a fragment on a template may not
