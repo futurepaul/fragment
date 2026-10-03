@@ -230,6 +230,12 @@ speaking Cloudflare's APIs) returns once this product works.
     Flash (cheap), GLM-5.3 (medium), both on Workers AI, and Claude Opus
     5.5 (high). The computer's model intercept adds the gateway credential
     and reads usage for the ledger.
+
+    **The high tier stays off until Cloudflare raises Unified Billing's
+    Opus limit** (about 2 calls a minute per edge machine; spike S4).
+    Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no
+    sharding. Ask Cloudflare with the production account's limits
+    request.
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;
@@ -836,10 +842,9 @@ Each one needs a test in the phase that ports its feature.
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
 - **Opus through Unified Billing is limited to about 2 calls a minute per
-  edge machine**, so about 2 a minute per computer (spike S4). The high
-  tier needs Cloudflare to raise it, or BYOK for Anthropic (exempt; ZDR
-  then rests on Anthropic's terms), or sharding across gateways
-  (untested).
+  edge machine**, so about 2 a minute per computer (spike S4). Paul chose
+  to wait for Cloudflare to raise it (decision 23): the high tier is off
+  until then. BYOK and sharding were declined.
 - **Workers AI rate limits.** GLM-5.3 and Flash are "paid models":
   20 requests a minute per model per account on standard billing, and 50
   with prepaid credits through a gateway. At about 4 calls a Hermes
