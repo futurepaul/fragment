@@ -1618,7 +1618,7 @@ mod tests {
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {
-        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: "w".into(), rotated: vec!["view".into()] };
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: Some("w".into()), rotated: vec!["view".into()] };
         assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
     }
 
