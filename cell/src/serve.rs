@@ -297,7 +297,10 @@ impl FragmentCell {
         headers.set("x-fragment-principal", &who)?;
         headers.set("x-fragment-role", role.as_str())?;
         let mut init = RequestInit::new();
-        init.with_method(req.method()).with_headers(headers);
+        // the app's redirect is the browser's to follow: followed here, it
+        // came back into the app at its Location (an app sending a blob's
+        // bytes to `__file`) and the app answered that path instead
+        init.with_method(req.method()).with_headers(headers).with_redirect(RequestRedirect::Manual);
         if !matches!(req.method(), Method::Get | Method::Head) {
             let body = req.bytes().await?;
             if !body.is_empty() {
