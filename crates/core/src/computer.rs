@@ -7,7 +7,8 @@
 //!
 //! What it decides:
 //! - **Waking.** A record on a subscribed channel, an open port tab, a
-//!   page's presence (a pre-wake), or the owner. A wake while asleep
+//!   page's presence (a pre-wake), one of its agents added to a fragment,
+//!   or the owner. A wake while asleep
 //!   starts the container; one while it starts or is awake holds it
 //!   longer; one while it is going to sleep starts it again once it is
 //!   asleep (the newest push wins: lesson 3 of docs/cloudflare-v1.md).
@@ -72,13 +73,18 @@ pub enum Wake {
     Tab,
     /// Its owner asked (the shell, the CLI): also lifts "won't wake".
     Owner,
+    /// One of its agents was added to a fragment (Paul, 2026-10-03: agents
+    /// are woken eagerly, to hide a wake's latency): the guest lists its
+    /// agent's fragments and follows the new one before anyone speaks
+    /// there, and is held as a record holds it, since someone is about to.
+    Joined,
 }
 
 impl Wake {
     fn hold_ms(self) -> i64 {
         match self {
             Wake::Presence => PREWAKE_MS,
-            Wake::Record | Wake::Tab | Wake::Owner => IDLE_MS,
+            Wake::Record | Wake::Tab | Wake::Owner | Wake::Joined => IDLE_MS,
         }
     }
 }
@@ -478,6 +484,25 @@ mod tests {
         assert_eq!(l.held_until_ms(), T + 3_000 + IDLE_MS);
     }
 
+    /// Goal: an agent added to a fragment wakes its sleeping computer and
+    /// holds it as a record does; awake, it only holds it longer; a
+    /// computer that won't wake is not started by it (only its owner lifts
+    /// that).
+    #[test]
+    fn an_agent_joining_a_fragment_wakes_it() {
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Joined }, T);
+        assert_eq!(s.actions, vec![Action::Start { generation: 1 }]);
+        l.apply(Event::Ready { generation: 1 }, T + 2_000);
+        assert_eq!(l.held_until_ms(), T + IDLE_MS);
+        let s = l.apply(Event::Wake { why: Wake::Joined }, T + 60_000);
+        assert!(s.actions.is_empty(), "awake, a join only holds it: {s:?}");
+        assert_eq!(l.held_until_ms(), T + 60_000 + IDLE_MS);
+        let mut failed = Lifecycle { phase: Phase::Failed { why: "pull failed".into() }, ..Lifecycle::new() };
+        let s = failed.apply(Event::Wake { why: Wake::Joined }, T);
+        assert!(s.actions.is_empty() && s.refused.is_some(), "{s:?}");
+    }
+
     /// Goal: a wake racing a sleep wins, and starts a new generation once
     /// the old one is gone; the old one's late reports change nothing.
     #[test]
@@ -604,7 +629,7 @@ mod tests {
                 now += (rng(&mut seed) % 120_000) as i64;
                 let g = l.generation().saturating_sub(rng(&mut seed) % 2);
                 let event = match rng(&mut seed) % 11 {
-                    0 => Event::Wake { why: [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner][(rng(&mut seed) % 4) as usize] },
+                    0 => Event::Wake { why: [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined][(rng(&mut seed) % 5) as usize] },
                     1 => Event::Ready { generation: g },
                     2 => Event::StartFailed { generation: g, why: "sim".into() },
                     3 => Event::Opened { socket: if rng(&mut seed).is_multiple_of(2) { Socket::Tab } else { Socket::Keepalive } },

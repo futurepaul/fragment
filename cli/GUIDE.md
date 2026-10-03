@@ -412,7 +412,11 @@ after a top-up or next month.
 - At zero, agents and AI stop; your fragments keep serving and taking
   writes.
 - $2 below zero, your fragments go read-only (reads still serve) until a
-  top-up brings you above zero.
+  top-up brings you above zero: their cron and triggers start no runs
+  meanwhile (each shows in `fragment runs` as `blocked`, saying why), and
+  you make no new fragment.
+- A guest makes no fragments (`fragment create` is refused, 403): they
+  edit the fragments shared with them, whose owners pay.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
 
@@ -516,7 +520,7 @@ its wording:
 - `invalid_usage`: the command was called wrong (exit 2)
 - `invalid_request`: the host refused the request; the message says why (400)
 - `auth_failed`: no key here, or the host does not know it (401)
-- `forbidden`: signed, but your role does not allow it (403)
+- `forbidden`: signed, but your role, or your plan, does not allow it (403); the message says which (a guest makes no fragments)
 - `not_found`: no such fragment, route, or operation (404)
 - `name_taken`: it exists already (409)
 - `conflict`: the branch moved under a sync, a deploy, or a manifest-set

@@ -35,6 +35,11 @@
 //! overdraft; at it they go read-only, and stay read-only until the
 //! balance is above zero again or an operator changes the overdraft.
 //! Meters always record: what happened is charged, even past zero.
+//!
+//! Guests (decision 25; Paul, 2026-10-03): a guest pays for nothing, so a
+//! guest makes no fragment either, whose hosting would bill them. They
+//! edit the fragments shared with them, which bill those fragments'
+//! owners.
 
 use std::collections::BTreeMap;
 
@@ -144,6 +149,9 @@ pub enum Spend {
     Wake,
     /// A write to a fragment, whose hosting its owner pays (metered after).
     Write,
+    /// Making a fragment, whose hosting its maker will pay: a write to a
+    /// fragment of their own, and a guest makes none.
+    Create,
 }
 
 /// A paid call's worst case, held before the call is made.
@@ -155,7 +163,7 @@ pub struct Reserve {
     /// intercept's id for a model call).
     #[serde(rename = "ref")]
     pub reference: String,
-    /// `AgentTurn` or `AiStep`: wakes and writes reserve nothing.
+    /// `AgentTurn` or `AiStep`: wakes, writes and creates reserve nothing.
     pub spend: Spend,
     /// The call's worst case, priced with the ledger's book.
     pub worst: Usage,
@@ -337,6 +345,9 @@ pub enum Refused {
     Stale,
     /// A guest pays for nothing (decisions 25 and 36).
     GuestPayer,
+    /// A guest makes no fragment: its hosting would bill them, and a guest
+    /// pays for nothing (Paul, 2026-10-03).
+    GuestCreates,
     AgentsStopped { why: Why },
     ReadOnly { why: Why },
     /// The worst case does not fit what is available (the balance less
@@ -361,7 +372,7 @@ pub enum Invalid {
     Note,
     /// A batch with no rows, or more than `BATCH_ROWS_MAX`.
     Rows,
-    /// A wake or a write, which reserve nothing.
+    /// A wake, a write or a create, which reserve nothing.
     Spend,
     /// A capped reservation that names no fragment.
     Capped,
@@ -400,7 +411,9 @@ impl Refused {
             Refused::UnknownRef => ErrorCode::NotFound,
             Refused::TooManyHolds => ErrorCode::RateLimited,
             Refused::TooLarge => ErrorCode::TooLarge,
-            Refused::GuestPayer => ErrorCode::Forbidden,
+            // what a guest's plan does not allow, as a role does not: no
+            // amount of credit is short
+            Refused::GuestPayer | Refused::GuestCreates => ErrorCode::Forbidden,
             Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CreditShort { .. } | Refused::CapReached { .. } => ErrorCode::BudgetUsedUp,
         }
     }
@@ -418,6 +431,11 @@ impl Refused {
             Refused::TooLarge => "that is more than one call or row may cost".into(),
             Refused::Stale => "that row is older than the ledger remembers".into(),
             Refused::GuestPayer => "a guest pays for nothing: no agents, no AI, nothing billed".into(),
+            Refused::GuestCreates => {
+                "guests can't create fragments: a fragment's hosting bills its owner, and a guest pays for nothing; \
+                 a guest still edits the fragments shared with them, and a seat makes fragments of its own"
+                    .into()
+            }
             Refused::AgentsStopped { why } => format!("agents are stopped: {}", why_text(why)),
             Refused::ReadOnly { why } => format!("fragments are read-only: {}", why_text(why)),
             Refused::CreditShort { available, needed } => {
@@ -732,14 +750,19 @@ impl Money {
     }
 }
 
-/// Whether `spend` may start on these means.
+/// Whether `spend` may start on these means. Making a fragment is a write
+/// to one of the payer's own: it goes as a write does, but a guest, whose
+/// fragments would be billed nothing, makes none.
 fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
     if money.plan == Plan::Guest {
-        return Err(Refused::GuestPayer);
+        return Err(match spend {
+            Spend::Create => Refused::GuestCreates,
+            Spend::AgentTurn | Spend::AiStep | Spend::Wake | Spend::Write => Refused::GuestPayer,
+        });
     }
     match (spend, money.standing()) {
         (_, Standing::ReadOnly { why }) => Err(Refused::ReadOnly { why }),
-        (Spend::Write, Standing::AgentsStopped { .. } | Standing::Ok) => Ok(()),
+        (Spend::Write | Spend::Create, Standing::AgentsStopped { .. } | Standing::Ok) => Ok(()),
         (_, Standing::AgentsStopped { why }) => Err(Refused::AgentsStopped { why }),
         (_, Standing::Ok) => Ok(()),
     }

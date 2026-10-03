@@ -274,7 +274,7 @@ impl FragmentCell {
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
         let queued = if appended || !self.outboxed(record)? { self.outbox_record(record)? } else { false };
-        let fired = self.fire_channel(record, depth);
+        let fired = self.fire_channel(record, depth).await;
         if queued {
             self.drain_deliveries().await;
         }
@@ -358,6 +358,25 @@ impl FragmentCell {
             self.launch_queued().await;
         }
         Ok((record, !appended))
+    }
+
+    /// A record the platform appends for the fragment itself (as its own
+    /// key, as a trigger's run acts), once by `key` while the record is
+    /// kept: it reaches sockets, subscriptions and triggers as a post's
+    /// does. It is the platform's own write, so it waits on no standing
+    /// (the debt ledger: the platform's own writes go on past the
+    /// overdraft). Answers the record, and whether this call appended it.
+    pub(crate) async fn append_own(&self, channel: &str, body: &Value, key: &str) -> CellResult<(ChannelRecord, bool)> {
+        let decl = self.declared_channel(channel)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no channel named {channel:?}")))?;
+        // a postable channel keeps its newest records (`append`): the
+        // platform's own never grow one without bound
+        if decl.post.is_none() {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} takes no posts, nor the platform's own records")));
+        }
+        let own = self.own_key()?;
+        let (record, appended) = self.append_once(channel, &own, POST_KIND, body, key, POST_INDEX)?;
+        self.published(&record, appended, POST_TRIGGERS_DEPTH).await?;
+        Ok((record, appended))
     }
 
     /// The record an earlier post under `key` appended, when it is this

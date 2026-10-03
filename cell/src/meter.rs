@@ -22,9 +22,11 @@
 //!
 //! The owner's standing gates the fragment's writes (decision 27): past
 //! the overdraft, the owner's fragments refuse mutations, posts, file
-//! writes, deploys and blob uploads with a 402 that says why, and keep
-//! serving reads. The fragment asks the owner's ledger at most once a
-//! `STANDING_CACHE_MS`, rather than on every write.
+//! writes, deploys, blob uploads and replays with a 402 that says why, and
+//! keep serving reads; their cron and triggers start no runs, each one
+//! recorded `blocked` with the reason instead (jobs.rs `start_run`). The
+//! fragment asks the owner's ledger at most once a `STANDING_CACHE_MS`,
+//! rather than on every write.
 
 use fragment_core::ledger::{Meter, MeterRow, Metered, Refused, Spend};
 use fragment_core::price::{StorageClass, Usage};
@@ -365,37 +367,49 @@ impl FragmentCell {
     /// Whether the fragment takes writes now (decision 27): refused, 402,
     /// once its owner's balance is past the overdraft, until a top-up
     /// brings it above zero. A guest's fragments are billed nothing and
-    /// take writes. A ledger that does not answer refuses nothing: writes
-    /// are the product, and an outage costs cents at most; that answer is
-    /// not kept, so the next write asks again.
+    /// take writes.
     pub(crate) async fn writable(&self) -> CellResult<()> {
-        let now = js::now_ms();
-        let seen = *self.standing.borrow();
-        let why = match seen {
-            Some((at, why)) if now - at < STANDING_CACHE_MS => why,
-            _ => {
-                let owner = self.must(MetaKey::Owner)?;
-                let asked = ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await;
-                let why = match asked {
-                    Ok(_) => None,
-                    Err(e) => match e.refused {
-                        Some(Refused::ReadOnly { why }) => Some(why),
-                        Some(_) => None,
-                        None => {
-                            console_error!("{}", json!({ "event": "meter.standing-unknown", "message": e.message }));
-                            return Ok(());
-                        }
-                    },
-                };
-                *self.standing.borrow_mut() = Some((now, why));
-                why
-            }
-        };
-        match why {
+        match self.read_only().await? {
             None => Ok(()),
-            Some(why) => Err(CellError::new(ErrorCode::BudgetUsedUp, format!("this fragment's owner's {}", Refused::ReadOnly { why }.message()))),
+            Some(why) => Err(read_only_refusal(why)),
         }
     }
+
+    /// Why the owner's fragments are read-only, when they are: what the
+    /// fragment last heard (`STANDING_CACHE_MS`), or the owner's ledger
+    /// now. A fresh answer waits on nothing, so a caller that asked a
+    /// moment before (a write's check) reads it within its own turn. A
+    /// ledger that does not answer says none: writes are the product, and
+    /// an outage costs cents at most; that answer is not kept, so the next
+    /// question asks again.
+    pub(crate) async fn read_only(&self) -> CellResult<Option<Why>> {
+        let now = js::now_ms();
+        let seen = *self.standing.borrow();
+        if let Some((at, why)) = seen.filter(|(at, _)| now - at < STANDING_CACHE_MS) {
+            assert!(at <= now, "a standing is heard before it is read");
+            return Ok(why);
+        }
+        let owner = self.must(MetaKey::Owner)?;
+        let asked = ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await;
+        let why = match asked {
+            Ok(_) => None,
+            Err(e) => match e.refused {
+                Some(Refused::ReadOnly { why }) => Some(why),
+                Some(_) => None,
+                None => {
+                    console_error!("{}", json!({ "event": "meter.standing-unknown", "message": e.message }));
+                    return Ok(None);
+                }
+            },
+        };
+        *self.standing.borrow_mut() = Some((now, why));
+        Ok(why)
+    }
+}
+
+/// A write refused past the owner's overdraft, saying why.
+pub(crate) fn read_only_refusal(why: Why) -> CellError {
+    CellError::new(ErrorCode::BudgetUsedUp, format!("this fragment's owner's {}", Refused::ReadOnly { why }.message()))
 }
 
 /// The ledger queue's consumer: each batch applied on its payer's ledger,

@@ -7,7 +7,9 @@
 //! the registry resolves to the identity holding it. An agent member's
 //! owner is recorded beside it: the owner reads what the agent reads
 //! (fragment.rs, `standing`). Kinds and owners never change once
-//! registered, so the copy here cannot go stale.
+//! registered, so the copy here cannot go stale. A new agent member's
+//! computer is told it joined, through an outbox of its own (runs_on.rs):
+//! nothing that adds an agent need post `joined` itself.
 //!
 //! Each identity's list of fragments is an index in its `Principal` cell.
 //! The fragment is the authority: a change is written here with an outbox
@@ -260,6 +262,7 @@ impl FragmentCell {
         }
         self.check_room(current)?;
         let by = self.caller_id(caller)?;
+        let now = js::now_ms();
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = excluded.people_only",
@@ -267,7 +270,7 @@ impl FragmentCell {
                 target.id.as_str().into(),
                 body.role.as_str().into(),
                 by.into(),
-                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(now),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
                 SqlStorageValue::Integer(i64::from(body.people_only)),
@@ -275,6 +278,11 @@ impl FragmentCell {
         )?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
+        // a new agent member's computer hears it joined (runs_on.rs); a
+        // role change is no join
+        if current.is_none() && target.kind == IdentityKind::Agent {
+            self.agent_added(&target.id, target.owner.as_deref(), now)?;
+        }
         // sharing with an agent says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
             Some(owner) => format!("{} (an agent) is now {}; its owner {owner} reads what it reads", target.id, body.role.as_str()),
@@ -290,7 +298,9 @@ impl FragmentCell {
                 self.reopen_sockets(&format!("p:{owner}"), "your agent's role changed");
             }
         }
+        // the agent's list holds this fragment before its computer is told
         self.flush_index().await;
+        self.flush_joined().await;
         let row = self.rows(&format!("SELECT {MEMBER_COLUMNS} FROM members WHERE principal = ?"), vec![target.id.as_str().into()])?;
         json_response(&member_json(&row[0])?)
     }
@@ -317,6 +327,7 @@ impl FragmentCell {
         let owner = owner.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
+        self.agent_removed(&target)?;
         self.index_change(&target, None)?;
         self.sharing_changed()?;
         self.close_sockets(&format!("p:{target}"), "membership revoked");
@@ -461,6 +472,7 @@ impl FragmentCell {
         }
         // A full fragment refuses before the invite spends a use.
         self.check_room(current)?;
+        let now = js::now_ms();
         self.exec(
             "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
@@ -468,7 +480,7 @@ impl FragmentCell {
                 who.as_str().into(),
                 role.as_str().into(),
                 format!("invite:{id}").into(),
-                SqlStorageValue::Integer(js::now_ms()),
+                SqlStorageValue::Integer(now),
                 opt(caller.kind().map(IdentityKind::as_str)),
                 opt(caller.owner()),
             ],
@@ -476,8 +488,13 @@ impl FragmentCell {
         self.exec("UPDATE invites SET uses_left = uses_left - 1 WHERE id = ?", vec![id.as_str().into()])?;
         self.index_change(&who, Some(role))?;
         self.sharing_changed()?;
+        // an agent that accepts an invite joins as one added does (runs_on.rs)
+        if current.is_none() && caller.kind() == Some(IdentityKind::Agent) {
+            self.agent_added(&who, caller.owner(), now)?;
+        }
         self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
+        self.flush_joined().await;
         json_response(&json!({ "name": name, "role": role, "joined": true }))
     }
 

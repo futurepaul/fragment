@@ -232,9 +232,9 @@ speaking Cloudflare's APIs) returns once this product works.
 22. **Connections through WorkOS Pipes.** WorkOS holds and refreshes the
     tokens. The computer holds only placeholders. Its HTTPS intercept
     swaps in a short-lived token for an identity allowed that
-    connection. Templates ask before sending email, sharing files or
-    accepting invites. Per-agent limits are a guardrail, not a wall,
-    because agents share a computer.
+    connection: an agent may use every connection its owner has, unless
+    its owner narrows it to a list (decision 44). Templates ask before
+    sending email, sharing files or accepting invites.
 23. **Models through AI Gateway**, Unified Billing, with zero data
     retention on and the gateway's request logs off. Three tiers: GLM-5.3
     Flash (cheap), GLM-5.3 (medium), both on Workers AI, and Claude Opus
@@ -259,17 +259,23 @@ speaking Cloudflare's APIs) returns once this product works.
     Each meter batches into the payer's ledger, so no global object sits
     on a hot path.
 25. **Plans.** Guests sign in free and use fragments shared with them;
-    they have no agents. A $100 seat includes $50 of credit a month and
-    a computer that sleeps when idle. A $200 seat includes an always-on
-    computer (its awake time not metered), SimpleX, and $100 of credit.
-    More credit can be bought. Stripe arrives later through two hooks:
-    granting credit, and a seat's state.
+    they have no agents, and can't create fragments (Paul, 2026-10-03):
+    a fragment's hosting bills its owner, and a guest pays for nothing.
+    A guest still edits a paid person's fragment shared with them, which
+    bills that fragment's owner (decision 26). A $100 seat includes $50
+    of credit a month and a computer that sleeps when idle. A $200 seat
+    includes an always-on computer (its awake time not metered), SimpleX,
+    and $100 of credit. More credit can be bought. Stripe arrives later
+    through two hooks: granting credit, and a seat's state.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
 27. **At zero credit** agents stop: no turns, no wakes, no AI steps. The
     shell says why. Fragments keep serving and taking writes on a $2
-    overdraft, then go read-only until a top-up.
+    overdraft, then go read-only until a top-up. Read-only, their cron
+    and triggers start no runs either: each run they would have started
+    is recorded `blocked`, with the reason, and they start again once the
+    owner has credit (Paul, 2026-10-03).
 28. **Sign-up is invite-only** at cutover.
 
 ### Fragments, brains, sites
@@ -375,6 +381,13 @@ speaking Cloudflare's APIs) returns once this product works.
     found that traffic from the container, even a socket to another DO,
     doesn't count as activity; only a socket the Computer DO accepts
     does.
+
+    **Adding an agent wakes it too** (Paul, 2026-10-03: wake agents
+    aggressively to hide latency, and leave templates no convention to
+    remember). When an agent that runs on a computer becomes a member of
+    any fragment, the platform itself posts `{kind: "joined", fragment}`
+    on the agent fragment's `tasks` and wakes its computer, so the guest
+    follows the new fragment before anyone speaks there.
 40. **Blessed templates run the platform's current version.** A chat,
     agent, brain or skills fragment names its template, and it serves
     that template's code from the current platform release. One deploy
@@ -399,6 +412,22 @@ speaking Cloudflare's APIs) returns once this product works.
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing
     of ours.
+
+### A person's agents (Paul, 2026-10-03)
+
+44. **A person's agents aren't fenced from each other.** Paul: "agents
+    are owned by a person, they don't need to be super fenced from each
+    other." Assume that, in the end, every agent and computer a person
+    owns sees everything that person has on any of their agents or
+    computers. Roles, personas and permissions are a UX matter, and a way
+    to give agents some specialization; they are not walls between one
+    person's agents. So:
+    - an agent may use every connection its owner has, by default; its
+      owner may narrow one agent to a list (`connections: null` is every
+      one, a list only those: docs/computers.md);
+    - limits between one person's agents are specialization, never a
+      security boundary. Walls stand between people (decision 36), and
+      an agent is held below its owner only by its owner's choice.
 
 ## Lessons from cloudflare/agents
 
@@ -997,7 +1026,9 @@ Each one needs a test in the phase that ports its feature.
     swap;
   - restore time for a large `/data`.
 - **Isolation between agents.** Agents on one computer share it, so
-  per-agent connection limits are not a security boundary.
+  per-agent connection limits are not a security boundary. Decision 44
+  takes that as the design: one person's agents are not fenced from
+  each other, and a per-agent list is specialization.
 - **SimpleX cost.** An always-on computer costs about $42 a month at
   list price.
 

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::computers::{agent_replies, routine_app, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
+use super::computers::{agent_replies, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST};
@@ -106,13 +106,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let chat = s.create(api, &owner, &chat_name)?;
     s.commit(&chat, &[("fragment.json", Some(CHAT_JSON))]);
     s.deploy(&chat);
-    api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
-    let joined = json!({ "id": "joined-1", "body": { "kind": "joined", "fragment": chat_name } });
-    api.signed(&owner, "POST", &format!("/api/f/{agent_name}/channels/tasks"), Some(&joined))?;
-
+    // the platform tells the agent's computer it joined, and wakes it
     let t0 = std::time::Instant::now();
-    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
-    s.ok("its owner wakes it", r.status == 200 && r.body["phase"] == "awake", &r);
+    api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
+    let woke = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    s.ok("adding its agent to the chat wakes it, joined posted on its tasks", woke && told(api, &owner, &agent_name, &chat_name).len() == 1, phase(api, &owner, &id));
     let subscribed = s.eventually(WAKE, || {
         api.signed(&owner, "GET", &format!("/api/f/{chat_name}/subscriptions"), None)
             .ok()
@@ -213,9 +211,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "upload": up.status, "reply": reply_of(&looked), "ended": ended(&looked) }),
     );
 
-    // a connection over HTTPS: Hermes' curl with a placeholder, swapped at the intercept
+    // a connection over HTTPS: Hermes' curl with a placeholder, swapped at
+    // the intercept (an agent may use every connection its owner has: decision 44)
     s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
-    api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}/connections"), Some(&json!({ "connections": [SWAP_CONNECTION] })))?;
     let seen_before = s.upstream.seen().len();
     let curl = format!("curl -s https://{SWAP_CONNECTION_HOST}/user -H 'Authorization: Bearer fragment-connection:{SWAP_CONNECTION}' -H 'x-fragment-agent: {agent_name}'");
     let r = say(6, &format!("run: {curl}"))?;

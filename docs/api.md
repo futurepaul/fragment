@@ -39,7 +39,7 @@ the deployment's secrets are Worker secrets (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, and `forget-standing` forgets what it heard of its owner's standing (meter.rs) |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), and `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute |
 
 Worker secrets (`cargo xtask deploy` uploads them from the files the
 deployment's config names; `.dev.vars` in dev), read only by
@@ -390,14 +390,14 @@ and styles only inline and images only from the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the platform's "new" page), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
@@ -735,8 +735,15 @@ credit first. What happened is always charged, past zero.
 - **Past the overdraft** ($2, an operator's to change) the person's
   fragments are read-only until a top-up brings the balance above zero:
   their mutations and jobs, channel posts, file writes, deploys, storage
-  tokens, blob uploads and inbox deliveries are refused, 402
-  `budget_used_up`, saying why; reads keep serving. A fragment asks its
+  tokens, blob uploads, inbox deliveries and replays are refused, 402
+  `budget_used_up`, saying why; reads keep serving. Their cron and
+  triggers start no runs: each run one would have started is recorded
+  `blocked`, its `error` the reason, and once the owner has credit they
+  start runs again (a blocked run may be replayed). The person makes no
+  new fragment meanwhile.
+- **Guests** make no fragments (`POST /api/fragments` is 403): a guest
+  pays for nothing. They edit the fragments shared with them, whose
+  owners pay (Paul, 2026-10-03). A fragment asks its
   owner's ledger at most once a minute (`STANDING_CACHE_MS`), so a
   change reaches it within a minute; a ledger that does not answer
   refuses no write.
@@ -833,7 +840,9 @@ delivery's `x-fragment-hops` is its depth. Deeper than 16 is `blocked`
 (`cycle.detected`). An operation's triggers pause themselves (`op.
 auto-paused`) after 5 held runs in 10 minutes or 120 triggered runs in
 an hour (blocked runs do not count); while paused, a trigger records a
-`blocked` run and cron skips. Held runs from before an unpause do not
+`blocked` run and cron skips. Past the owner's overdraft, every
+trigger's run (cron's included) is recorded `blocked`, saying why, until
+a top-up (decision 27). Held runs from before an unpause do not
 count toward the next auto-pause. A deploy whose code no longer has an
 operation drops its pause (an operation of that name later starts
 unpaused).
@@ -1191,20 +1200,27 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view |
-| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider]}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once; none by default. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400 |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once. `null`, the default, is every connection its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400, as is a body without `connections` |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform; a signed request needs none |
 
 A computer is woken by a record on a channel one of its agents
 subscribed to with `{channel, wake: true}` (only its egress asks for
 one: from anywhere else it names no URL, 400), by a page opening such a
 fragment (a pre-wake, at most every 30 s), by a request to one of its
-ports, and by its owner. Records its own agents post wake nothing.
+ports, by one of its agents becoming a member of any fragment, and by
+its owner. Records its own agents post wake nothing. An agent added to a
+fragment (a member's `PUT`, an invite it accepts, a fragment it makes
+for its owner) needs nothing more from whoever added it: the platform
+posts `{kind: "joined", fragment}` on the agent fragment's `tasks`, as
+that fragment, once for the membership, and wakes the computer (Paul,
+2026-10-03; docs/computers.md). The fragment it joined keeps the notice
+until the computer has it (`agent.told`, or `agent.untold` with why).
 
 A guest's request to a connection's or an operator key's host has the
 placeholders in its headers swapped (docs/computers.md). The swap's
 refusals reach the guest as the platform's: 403 `forbidden` (an agent
-not allowed that connection, or a placeholder sent to a host that is
-not its credential's), 403 `not_connected` (its owner has not connected
+its owner narrowed to connections without that one, or a placeholder
+sent to a host that is not its credential's), 403 `not_connected` (its owner has not connected
 that provider, or must connect it again), 401 (no `x-fragment-agent`).
 
 ### A chat's records (phase 7, slice C)

@@ -1,7 +1,7 @@
 # Computers: the platform's contract with an image
 
 Status: **the contract phase 4 builds** (docs/cloudflare-v1.md, decisions
-13, 18, 19, 22, 23, 39, 41–43). The platform side is the generic Computer
+13, 18, 19, 22, 23, 39, 41–44). The platform side is the generic Computer
 Durable Object in the cell. The image side is any image: ours runs
 Hermes (`images/hermes/`), and a stub image (`images/stub/`) proves
 the platform needs nothing Hermes-specific. Nothing here names an agent
@@ -37,7 +37,9 @@ container starts until someone asks again).
 - **Wakes:** a record on a channel one of its agents subscribed to with
   `wake: true`; an open port tab; a pre-wake (a page opened a subscribed
   fragment, or someone started typing there: it starts at once and stops
-  after 60 s if nothing arrives); the owner's `POST /api/computers/{id}/wake`.
+  after 60 s if nothing arrives); one of its agents added as a member of
+  any fragment (below: the platform posts `joined` and wakes it, held as
+  a record holds it); the owner's `POST /api/computers/{id}/wake`.
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
@@ -140,12 +142,23 @@ that names a PID from before a sleep can name a live process after it.
   fragment (its routines, and `joined` when it is added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`; the agents
-  themselves from `GET /api/computer`, read again every minute. So a new
-  chat reaches a sleeping computer only through `joined`: whatever adds
-  an agent to a fragment (the shell, the chat template) posts
-  `{kind: "joined", fragment}` to the agent's `tasks` after. An agent
-  newly assigned to a computer is followed within a minute while it is
-  awake; to a sleeping one, wake it (`POST /api/computers/{id}/wake`).
+  themselves from `GET /api/computer`, read again every minute.
+- **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
+  agents are woken eagerly, to hide a wake's latency). Whatever adds an
+  agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
+  accepts, a fragment an agent makes for its owner), the platform tells
+  its computer: the agent fragment itself posts `{kind: "joined",
+  fragment}` on its `tasks` (when it declares a postable `tasks`), once
+  for that membership, and the computer wakes (`joined`, held as a
+  record holds it). Awake, the guest lists its fragments again on
+  `joined`; woken, it lists them as it starts; either way it follows the
+  new chat before anyone speaks there. Nothing a template or the shell
+  does is needed, and nothing of theirs posts `joined`. The fragment the
+  agent joined keeps the notice in an outbox of its own until the
+  computer has it (`agent.told` in its events); a role change, or the
+  same member added again, is no new join. An agent newly assigned to a
+  computer is followed within a minute while it is awake; to a sleeping
+  one, wake it (`POST /api/computers/{id}/wake`).
 - What was said before an agent joined a chat is not for it: the guest
   skips a record whose `at` is before the agent's membership's `addedAt`
   (`GET /api/f/{name}/members`).
@@ -190,13 +203,16 @@ intercept. It is for an image's own disaster recovery (Litestream).
   request to one of the provider's own hosts, with `x-fragment-agent`:
   `Authorization: Bearer fragment-connection:github` to
   `api.github.com`. The intercept swaps in a short-lived token from
-  WorkOS Pipes for the agent's owner's account at that provider when
-  the owner allows that agent the connection (`PUT
-  /api/computers/{id}/agents/{fragment}/connections`, none by default),
-  and refuses otherwise (decision 22): 403 `forbidden` when the agent
-  is not allowed it, 403 `not_connected` when the owner has connected
-  no account there, or must authorize it again. The token is held until
-  a minute before it expires, at most ten minutes.
+  WorkOS Pipes for the agent's owner's account at that provider. An
+  agent may use every connection its owner has (decision 44: a person's
+  agents are not fenced from each other); its owner may narrow one agent
+  to a list (`PUT /api/computers/{id}/agents/{fragment}/connections
+  {connections: [provider]}`, and `{connections: null}` for every one
+  again, the default). It refuses (decision 22) with 403 `forbidden`
+  when the owner narrowed the agent to a list without that provider,
+  and 403 `not_connected` when the owner has connected no account
+  there, or must authorize it again. The token is held until a minute
+  before it expires, at most ten minutes.
 - An operator key (a paid API that needs only a key) is
   `fragment-key:<name>` in whichever header the provider takes it in
   (`x-api-key: fragment-key:search`). Any agent of the computer may use
@@ -219,9 +235,9 @@ intercept. It is for an image's own disaster recovery (Litestream).
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
 - Agents share a computer, so one agent's guest could send another's
-  `x-fragment-agent`: per-agent connections are a guardrail, not a wall
-  (decision 22). An agent that must not reach a connection runs on a
-  computer of its own.
+  `x-fragment-agent`, and that is by design: a person's agents are not
+  fenced from each other (decision 44), so a narrowed list is an agent's
+  specialization, never a wall. Walls stand between people (decision 36).
 
 ### Ports
 
@@ -286,7 +302,7 @@ settings and state):
 - At zero credit, or with agents stopped, no wake starts (decision 27):
   the owner's wake is refused with the ledger's reason (402
   `budget_used_up` at zero credit or a canceled seat; 403 for a guest,
-  who pays for nothing), which the view's `why` keeps; a record or a page wakes nothing; no model call or
+  who pays for nothing), which the view's `why` keeps; a record, a join or a page wakes nothing; no model call or
   key call is made. A computer already awake runs on until it sleeps.
 
 ## Tests
