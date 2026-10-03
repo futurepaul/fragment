@@ -131,9 +131,7 @@ fn dev(args: &[String]) -> Result<()> {
         egress_local: true,
         job_retry_delay_s: 2,
         blob_grace_s: None,
-        openrouter_url: None,
-        // images and videos only with a key of the deployment's own (real OpenRouter: real money)
-        openrouter_key: read("OPENROUTER_API_KEY_FILE")?,
+        // text and images: the Workers AI fake (dev never calls a real model)
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
         // a dev person is a seat, with the month's included credit

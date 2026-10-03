@@ -19,6 +19,7 @@
 //! `FRAGMENT_AI_URL` instead, and the same input is POSTed to
 //! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
+//! A job's image step calls its model on the same transport (`run`).
 //!
 //! Who calls: the agents' Worker, `POST /api/models/v1/chat/completions`
 //! (`route`), signed by the agent, `for` naming whom it acts for and
@@ -199,7 +200,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     }
     let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, tier: call.tier };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
-    let mut upstream = match transport(env, cfg, &bounded, &meta).await {
+    let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;
@@ -269,8 +270,15 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
 /// what it bought before it settles (ai.rs).
 pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     assert!(!bounded.stream, "an unmetered call is read whole");
+    run(env, bounded.model, &bounded.input, payer, agent).await
+}
+
+/// One call of a catalog model with its input, on the same transport,
+/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
+/// caller bounds the input and meters it).
+pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
-    let mut resp = transport(env, Config::from_env(env), bounded, &meta).await?;
+    let mut resp = transport(env, Config::from_env(env), model, input, &meta).await?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
     let bytes = read_whole(&mut resp).await?;
@@ -327,9 +335,10 @@ struct Metadata {
     agent_id: Option<String>,
 }
 
-/// Makes the bounded call: through the AI binding and the deployment's
-/// gateway, or, in dev and the e2e, to the fake at `FRAGMENT_AI_URL`.
-async fn transport(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata) -> CellResult<Response> {
+/// Makes a bounded call: `input` to `model`, through the AI binding and
+/// the deployment's gateway, or, in dev and the e2e, to the fake at
+/// `FRAGMENT_AI_URL`.
+async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata) -> CellResult<Response> {
     let mut metadata = json!({ "user_id": meta.user_id });
     if let Some(agent) = &meta.agent_id {
         metadata["agent_id"] = json!(agent);
@@ -348,15 +357,15 @@ async fn transport(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata) 
             h.set("x-session-affinity", agent)?;
         }
         let mut init = RequestInit::new();
-        init.with_method(Method::Post).with_headers(h).with_body(Some(bounded.input.to_string().into()));
-        let req = Request::new_with_init(&format!("{url}/run/{}", bounded.model), &init)?;
+        init.with_method(Method::Post).with_headers(h).with_body(Some(input.to_string().into()));
+        let req = Request::new_with_init(&format!("{url}/run/{model}"), &init)?;
         return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
     }
     let Some(gateway) = &cfg.ai_gateway_id else {
         return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
     };
     let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
-    js::ai_run(env.as_ref(), bounded.model, &bounded.input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
+    js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
 }
 
 /// An answer's body, at most `ANSWER_MAX_BYTES`.

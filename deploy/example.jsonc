@@ -27,15 +27,13 @@
     "client_id_file": "~/.config/fragment/secrets/workos-client-id",
     "api_key_file": "~/.config/fragment/secrets/workos-api-key"
   },
-  // The AI Gateway the model route calls through: one of your own, named
-  // (never "default", which makes one that logs), with Unified Billing,
-  // zero data retention on and its logs off. Without it, models are off.
+  // The AI Gateway the model route and image steps call through: one of
+  // your own, named (never "default", which makes one that logs), with
+  // Unified Billing, zero data retention on and its logs off. Without it,
+  // models and images are off.
   // "ai_gateway": "fragment",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
-  // OpenRouter, for image and video steps until they move onto Cloudflare.
-  // Without it, they are off.
-  // "openrouter_api_key_file": "~/.config/fragment/secrets/openrouter-api-key",
   // npubs that grant credit, set plans, seats and overdrafts, and release
   // usernames.
   "operators": [],

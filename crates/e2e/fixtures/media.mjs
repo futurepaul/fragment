@@ -1,5 +1,6 @@
 // Deliveries and AI (slice F): pushes from a mutation and a job, and
-// text (the model route), images and video (OpenRouter) as a job's steps.
+// text (the model route) and images (Workers AI) as a job's steps; a video
+// step, which the platform refuses.
 import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
@@ -27,10 +28,12 @@ export class App extends DurableObject {
     return await job.ai.text({ model: "high", prompt: text });
   }
 
-  async draw({ prompt, path }, job) {
-    return await job.ai.image({ prompt, path });
+  // whatever else the input names goes to the step too (steps, or a key it refuses)
+  async draw({ prompt, path, ...rest }, job) {
+    return await job.ai.image({ prompt, path, ...rest });
   }
 
+  // videos are off until they run on Cloudflare: the step says so
   async film({ prompt, path }, job) {
     return await job.ai.video({ prompt, path, duration: 6, resolution: "768p" });
   }

@@ -88,7 +88,7 @@ pub const ID_MAX_BYTES: usize = 256;
 /// A grant's note for people.
 pub const NOTE_MAX_BYTES: usize = 512;
 /// A reservation older than this is settled at its worst case by the next
-/// sweep. No call holds for hours (a video job polls for minutes), so its
+/// sweep. No call holds for hours (a long model answer takes minutes), so its
 /// caller died, and whether the call used anything is unknown: the money
 /// path fails closed, as it does for a call that reports no usage.
 pub const HOLD_MAX_MS: i64 = 6 * HOUR_MS;

@@ -517,7 +517,7 @@ impl FragmentCell {
             "advance" => {
                 let answer = self.advance(decode(body)?).await?;
                 if answer.get("failed").is_some() || answer.get("done").is_some() {
-                    // the run ended: nothing settles its holds now (a video still waiting on its cost)
+                    // the run ended: nothing settles its holds now
                     self.release_ended_holds().await;
                 }
                 Ok(answer)
@@ -780,7 +780,7 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideoStart(_) | Step::AiVideoPoll { .. } | Step::AiVideoSave { .. }) => {
+            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
                 self.step_ai(run, index, &ai).await
             }
             Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,

@@ -55,9 +55,6 @@ struct Deployment {
     ai_gateway: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
-    /// The deployment's OpenRouter key, which pays for image and video
-    /// steps until phase 7. Without it, they are off.
-    openrouter_api_key_file: Option<PathBuf>,
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
@@ -301,7 +298,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let org_key = read_secret(&d.codestorage.private_key_file)?;
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
-    let openrouter = d.openrouter_api_key_file.as_deref().map(read_secret).transpose()?;
     if let Some(p) = &d.default_plan {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
@@ -434,9 +430,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         "CODESTORAGE_PRIVATE_KEY": org_key,
         "WORKOS_API_KEY": workos_key,
     });
-    if let Some(k) = openrouter {
-        secrets["OPENROUTER_API_KEY"] = json!(k);
-    }
     for (name, key) in operator_keys {
         secrets[name] = json!(key);
     }
@@ -487,7 +480,6 @@ mod tests {
             operators: vec![],
             ai_gateway: None,
             default_plan: None,
-            openrouter_api_key_file: None,
             computers: None,
             connections: BTreeMap::new(),
             operator_keys: BTreeMap::new(),
@@ -529,6 +521,17 @@ mod tests {
         assert!(names(&d, Some("dev")).is_ok());
         let d = checked(d).unwrap();
         assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"));
+    }
+
+    /// OpenRouter went (a hard cut): a config that still names its key is
+    /// refused, not deployed without it.
+    #[test]
+    fn a_config_naming_openrouter_is_refused() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["openrouter_api_key_file"] = json!("~/.config/fragment/secrets/openrouter-api-key");
+        let refused = serde_json::from_value::<Deployment>(v).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
     }
 
     /// A swap's names and hosts, and a default image, are checked before
