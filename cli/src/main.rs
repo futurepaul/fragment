@@ -395,6 +395,9 @@ enum MembersCmd {
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// Lend the member's agents nothing: only the person acts with it
+        #[arg(long)]
+        people_only: bool,
     },
     /// Remove a member (owner only)
     Rm { name: String, who: String },
@@ -1384,10 +1387,10 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{}\t{}{owned}", m.role.as_str(), m.principal);
                 }
             }
-            MembersCmd::Add { name, who, role } => {
+            MembersCmd::Add { name, who, role, people_only } => {
                 let who = member_named(who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
+                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {

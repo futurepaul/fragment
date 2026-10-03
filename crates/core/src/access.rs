@@ -19,6 +19,11 @@
 //! than its owner could, so a key that signs `for` someone else gains
 //! nothing its owner does not hold. Owner-only actions never go through an
 //! agent, whatever it acts for (`owner_only`).
+//!
+//! Decision 36 adds two limits. A share its fragment's owner marked
+//! "people only" lends an agent nothing: its owner's membership there does
+//! not count in the agent's cap. And an agent its owner holds below them
+//! acts with at most its hold, wherever it is and whomever it acts for.
 
 use fragment_proto::{Role, Visibility};
 
@@ -36,6 +41,8 @@ pub struct Standing {
     /// An agent acts for the caller this standing describes (its asker):
     /// what caps it. `None`: the caller acts as themselves.
     pub cap: Option<Cap>,
+    /// The caller is an agent held below its owner: the most it acts with.
+    pub held: Option<Role>,
 }
 
 /// What an agent acting for someone brings to a fragment (decision 17).
@@ -45,6 +52,8 @@ pub struct Cap {
     pub agent: Option<Role>,
     /// Its owner's membership.
     pub owner: Option<Role>,
+    /// The owner's share is "people only": it lends the agent nothing.
+    pub people_only: bool,
 }
 
 /// The most an agent ever acts with: owner-only actions are never its.
@@ -63,10 +72,14 @@ pub enum Purpose {
 /// and its cap.
 pub fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
     let own = own_role(visibility, standing, purpose);
-    match standing.cap {
+    let role = match standing.cap {
         None => own,
         // `None` is below every role: nothing on either side is nothing
         Some(cap) => own.min(cap_role(visibility, cap, standing.link)),
+    };
+    match standing.held {
+        Some(held) => role.map(|r| r.min(held)),
+        None => role,
     }
 }
 
@@ -89,8 +102,9 @@ fn own_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Opt
 /// anyone has) or its owner's membership, whichever is higher, and never
 /// above `AGENT_ROLE_MAX`.
 fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
-    let agent = own_role(visibility, Standing { member: cap.agent, owns_member_agent: false, link, signed: true, cap: None }, Purpose::Act);
-    agent.max(cap.owner).map(|r| r.min(AGENT_ROLE_MAX))
+    let agent = own_role(visibility, Standing { member: cap.agent, owns_member_agent: false, link, signed: true, cap: None, held: None }, Purpose::Act);
+    let owner = if cap.people_only { None } else { cap.owner };
+    agent.max(owner).map(|r| r.min(AGENT_ROLE_MAX))
 }
 
 /// The role an agent acting for someone holds in a fragment it lists for
@@ -98,7 +112,7 @@ fn cap_role(visibility: Visibility, cap: Cap, link: bool) -> Option<Role> {
 /// owner's); `None` leaves the fragment out. A call decides again, with
 /// the fragment's visibility.
 pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
-    let standing = Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(cap) };
+    let standing = Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(cap), held: None };
     effective_role(Visibility::Members, standing, Purpose::Act)
 }
 
@@ -171,17 +185,42 @@ mod tests {
     use Visibility as V;
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {
-        Standing { member, owns_member_agent: false, link, signed, cap: None }
+        Standing { member, owns_member_agent: false, link, signed, cap: None, held: None }
     }
 
     fn owner_of_agent() -> Standing {
-        Standing { member: None, owns_member_agent: true, link: false, signed: true, cap: None }
+        Standing { member: None, owns_member_agent: true, link: false, signed: true, cap: None, held: None }
     }
 
     /// An agent acting for someone whose membership is `asker`, beside its
     /// own membership and its owner's.
     fn acting(asker: Option<Role>, agent: Option<Role>, owner: Option<Role>) -> Standing {
-        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner }) }
+        Standing { member: asker, owns_member_agent: false, link: false, signed: true, cap: Some(Cap { agent, owner, people_only: false }), held: None }
+    }
+
+    /// Goal: decision 36's example and its two limits. Skyler's agent edits
+    /// what Paul shared with Skyler as an editor, acting for Skyler; a
+    /// people-only share lends it nothing; held at viewer it only reads,
+    /// wherever it is and for whomever it acts.
+    #[test]
+    fn delegation_and_its_limits() {
+        let d = |s, needs| decide(V::Members, s, Purpose::Act, needs);
+        let skylers_agent = acting(Some(Editor), None, Some(Editor));
+        assert_eq!(d(skylers_agent, Editor), Decision::Allow(Editor));
+        let people_only = Standing { cap: Some(Cap { agent: None, owner: Some(Editor), people_only: true }), ..skylers_agent };
+        assert_eq!(d(people_only, Viewer), Decision::Forbidden);
+        // its own membership still counts on a people-only share
+        let member_itself = Standing { cap: Some(Cap { agent: Some(Editor), owner: Some(Editor), people_only: true }), ..skylers_agent };
+        assert_eq!(d(member_itself, Editor), Decision::Allow(Editor));
+        let held = Standing { held: Some(Viewer), ..skylers_agent };
+        assert_eq!(d(held, Editor), Decision::Forbidden);
+        assert_eq!(d(held, Viewer), Decision::Allow(Viewer));
+        // held applies when it acts as itself too
+        let as_itself = Standing { member: Some(Editor), held: Some(Viewer), ..st(None, false, true) };
+        assert_eq!(d(as_itself, Editor), Decision::Forbidden);
+        // a hold never raises anything
+        let raised = Standing { held: Some(Editor), ..acting(Some(Viewer), None, Some(Editor)) };
+        assert_eq!(d(raised, Editor), Decision::Forbidden);
     }
 
     #[test]
@@ -258,7 +297,7 @@ mod tests {
 
     #[test]
     fn listing_for_an_asker() {
-        let cap = |agent, owner| Cap { agent, owner };
+        let cap = |agent, owner| Cap { agent, owner, people_only: false };
         assert_eq!(listed_role(Some(Owner), cap(None, Some(Owner))), Some(Editor));
         assert_eq!(listed_role(Some(Viewer), cap(Some(Editor), None)), Some(Viewer));
         assert_eq!(listed_role(Some(Editor), cap(None, None)), None);

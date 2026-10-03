@@ -346,7 +346,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
-            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone(), held: None };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
@@ -581,6 +581,16 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let key = proven_key(&add.proof, &req, url, &signer_key)?;
             json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: by() })).await?)
+        }
+        (Method::Put, [id, "held"]) => {
+            /// `PUT /api/identities/{agent}/held`'s body.
+            #[derive(Deserialize)]
+            struct Held {
+                held: Option<fragment_proto::Role>,
+            }
+            let agent = named_identity(id)?.ok_or_else(|| CellError::invalid("name the agent"))?;
+            let b: Held = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_answer(&ask_registry(env, &calls::Hold { agent, held: b.held, by: by() }).await?)
         }
         (Method::Delete, [id, "keys", k]) => {
             let identity = named_identity(id)?;

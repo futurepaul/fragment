@@ -559,6 +559,9 @@ pub struct Member {
     /// An agent member's owner, who reads what it reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// The share lends the member's agents nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub people_only: bool,
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -614,6 +617,10 @@ pub struct Identity {
     /// fragments go in). `None` until a person chooses one.
     #[serde(default)]
     pub username: Option<String>,
+    /// An agent held below its owner (decision 36): the most it acts with
+    /// anywhere. `None`: as its owner would.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Role>,
 }
 
 /// One of a person's sign-ins, as their identity shows it: the email is an
@@ -708,8 +715,13 @@ pub struct IdentityView {
 /// `PUT /api/f/<name>/members/<npub>` (owner)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct SetRole {
     pub role: Role,
+    /// The share lends the member's agents nothing (decision 36): only the
+    /// person acts with it.
+    #[serde(default)]
+    pub people_only: bool,
 }
 
 /// `POST /api/f/<name>/invites` (owner)

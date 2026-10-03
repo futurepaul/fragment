@@ -156,6 +156,7 @@ struct SessionRow {
     kind: Option<IdentityKind>,
     owner: Option<String>,
     username: Option<String>,
+    held: Option<fragment_proto::Role>,
     email: Option<String>,
 }
 
@@ -313,7 +314,7 @@ impl RegistryCell {
     pub(super) fn live_session(&self, token: &str, fragment: Option<&str>, frame: bool) -> CellResult<Live> {
         // the email's subquery reads `subjects_identity` (at most SUBJECTS_MAX)
         const Q: &str = concat!(
-            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, u.username, ",
+            "SELECT s.identity, s.fragment, s.parent, s.embedder, p.hash AS parent_live, i.kind, i.owner, i.held, u.username, ",
             "(SELECT email FROM subjects WHERE identity = s.identity ORDER BY linked_at LIMIT 1) AS email FROM sessions s ",
             "LEFT JOIN sessions p ON p.hash = s.parent AND p.revoked_at IS NULL AND p.expires_at > ? ",
             "LEFT JOIN identities i ON i.id = s.identity ",
@@ -333,7 +334,7 @@ impl RegistryCell {
         if row.parent.is_some() && row.parent_live.is_none() {
             return Err(not_signed_in());
         }
-        let identity = joined_identity(row.identity, row.kind, row.owner, row.username, "a session")?;
+        let identity = joined_identity(row.identity, row.kind, row.owner, row.username, row.held, "a session")?;
         Ok(Live { hash, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 

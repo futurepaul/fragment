@@ -92,6 +92,20 @@ impl Call for RegisterAgent {
     type Answer = IdentityView;
 }
 
+/// `POST /held`: an agent held below its owner, or let go (`held: None`),
+/// by its owner (decision 36).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Hold {
+    pub agent: String,
+    pub held: Option<fragment_proto::Role>,
+    pub by: By,
+}
+
+impl Call for Hold {
+    const PATH: &'static str = "/held";
+    type Answer = IdentityView;
+}
+
 /// A key changed on an identity (`None`: the asker's own) by `by` (its
 /// proof checked by the router).
 #[derive(Serialize, Deserialize)]

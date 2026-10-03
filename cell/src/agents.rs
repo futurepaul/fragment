@@ -149,7 +149,8 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .fragments
         .into_iter()
         .filter_map(|f| {
-            let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
+            // a people-only share is the fragment's to know: a call decides again
+            let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
             listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None })
         })
         .collect();
@@ -256,7 +257,7 @@ impl FragmentCell {
         let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block")?, stored(joined, "agent joined")?);
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let (_, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
-        let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+        let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()), held: None };
         let signed = Signed::new(identity, None);
         let wanted = match &live {
             None => None,
@@ -279,7 +280,7 @@ impl FragmentCell {
             return settled();
         };
         if self.member_role(&wanted.agent)?.is_none() {
-            self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor }).await?;
+            self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor, people_only: false }).await?;
         }
         let listen = json!({ "fragment": name, "channel": wanted.channel });
         let listening = ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?;

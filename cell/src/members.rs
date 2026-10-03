@@ -43,7 +43,7 @@ fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     }
 }
 
-const MEMBER_COLUMNS: &str = "principal, role, added_by, added_at, kind, owner";
+const MEMBER_COLUMNS: &str = "principal, role, added_by, added_at, kind, owner, people_only";
 
 fn member_json(r: &Value) -> CellResult<Member> {
     let s = |k: &str| r[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("members.{k}")));
@@ -54,6 +54,7 @@ fn member_json(r: &Value) -> CellResult<Member> {
         added_at: r["added_at"].as_i64().unwrap_or(0),
         kind: r["kind"].as_str().and_then(IdentityKind::parse),
         owner: r["owner"].as_str().map(str::to_string),
+        people_only: r["people_only"].as_i64() == Some(1),
     })
 }
 
@@ -233,8 +234,8 @@ impl FragmentCell {
         self.check_room(current)?;
         let by = self.caller_id(caller)?;
         self.exec(
-            "INSERT INTO members (principal, role, added_by, added_at, kind, owner) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT (principal) DO UPDATE SET role = excluded.role",
+            "INSERT INTO members (principal, role, added_by, added_at, kind, owner, people_only) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (principal) DO UPDATE SET role = excluded.role, people_only = excluded.people_only",
             vec![
                 target.id.as_str().into(),
                 body.role.as_str().into(),
@@ -242,6 +243,7 @@ impl FragmentCell {
                 SqlStorageValue::Integer(js::now_ms()),
                 target.kind.as_str().into(),
                 opt(target.owner.as_deref()),
+                SqlStorageValue::Integer(i64::from(body.people_only)),
             ],
         )?;
         self.index_change(&target.id, Some(body.role))?;

@@ -80,7 +80,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
   principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
-  kind TEXT, owner TEXT);
+  kind TEXT, owner TEXT, people_only INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS members_owner ON members (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS invites (
   id TEXT PRIMARY KEY, token_sha TEXT NOT NULL UNIQUE, role TEXT NOT NULL, uses_left INTEGER NOT NULL,
@@ -676,8 +676,9 @@ impl FragmentCell {
     /// it asks.
     pub(crate) fn standing(&self, caller: &Caller, link: bool) -> CellResult<Standing> {
         let Some(principal) = caller.principal() else {
-            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None });
+            return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
         };
+        let held = caller.signed.as_ref().and_then(|s| s.held);
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
             return self.standing_for(signed, link);
         }
@@ -692,7 +693,7 @@ impl FragmentCell {
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let member = row.role.as_deref().and_then(Role::parse);
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None })
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held })
     }
 
     /// An agent acting for someone (ROADMAP decision 17), in one statement:
@@ -713,17 +714,19 @@ impl FragmentCell {
             agent: i64,
             agent_role: Option<String>,
             owner_role: Option<String>,
+            people_only: Option<i64>,
         }
         let rows: Vec<Row> = self.typed(
             "SELECT (SELECT role FROM members WHERE principal = ?) AS role, EXISTS (SELECT 1 FROM members WHERE owner = ?) AS agent, \
-             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role",
-            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into()],
+             (SELECT role FROM members WHERE principal = ?) AS agent_role, (SELECT role FROM members WHERE principal = ?) AS owner_role, \
+             (SELECT people_only FROM members WHERE principal = ?) AS people_only",
+            vec![asker.into(), asker.into(), agent.id.as_str().into(), owner.into(), owner.into()],
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
         let member = role(row.role);
-        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role) };
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap) })
+        let cap = access::Cap { agent: role(row.agent_role), owner: role(row.owner_role), people_only: row.people_only == Some(1) };
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: Some(cap), held: agent.held })
     }
 
     /// Whether the caller sees the fragment as themselves (a member, or an
