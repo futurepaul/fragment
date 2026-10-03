@@ -739,7 +739,9 @@ exit says.
      - a computer's first start pulls the 3.8 GB image (about 29 s), now
        hidden behind setup;
      - an agent added to an awake Hermes computer had no profile (a 401):
-       hermes-boot adds it live, in progress.
+       hermes-boot now follows its computer's agents while it runs and has
+       Hermes take a new profile live (about 2 to 3 s from assign to its
+       first answer, nothing restarted; docs/computers.md).
    - Not yet: the hosted e2e lane on the preview; files in search.
 6. **Brains, skills, sites.** The brain and skills templates, Hermes'
    fragment skills, screenshots. Exit: from a chat, an agent builds,
