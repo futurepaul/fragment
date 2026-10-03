@@ -18,7 +18,8 @@ save the generated audio in the current project or a clear output directory.
 
 ## Provider Choice
 
-Prefer FAL MiniMax Music for:
+When `FAL_KEY` is set (this platform does not offer it yet), prefer FAL
+MiniMax Music for:
 
 - full songs;
 - vocals;
@@ -35,16 +36,17 @@ Use ElevenLabs Music for:
 
 ## Credentials
 
-Your computer holds no keys. Each call sends the operator's key
-placeholder in the header its provider reads, with `x-fragment-agent:
-$FRAGMENT_AS_AGENT`, and the computer swaps in the real key, metered to your
-owner:
+Your computer holds no keys. Its environment holds each operator key's
+placeholder (it names you) in the variable its provider's own SDK reads;
+send it in the header the provider reads, and the computer swaps in the
+real key, each call metered to your owner:
 
-- FAL: `Authorization: Key fragment-key:fal` (hosts `fal.run`, `queue.fal.run`)
-- ElevenLabs: `xi-api-key: fragment-key:elevenlabs` (hosts `api.elevenlabs.io`)
+- ElevenLabs: `ELEVENLABS_API_KEY`, sent as `xi-api-key` (hosts `api.elevenlabs.io`)
+- FAL: `FAL_KEY`, sent as `Authorization: Key …` (hosts `fal.run`, `queue.fal.run`)
 
-A 401 from a provider means this deployment does not offer its key; if
-neither answers, explain that music generation is not configured here.
+A variable that is unset means this deployment does not offer that key
+(the platform offers ElevenLabs; FAL is not offered yet): use the other,
+and if neither is set, explain that music generation is not configured here.
 
 ## FAL MiniMax Music
 
@@ -57,8 +59,8 @@ Use FAL MiniMax for real songs. Write or refine lyrics first, with short
 singable lines and structure tags like `[Intro]`, `[Verse]`, `[Pre Chorus]`,
 `[Chorus]`, `[Bridge]`, and `[Outro]`.
 
-Generate with FAL's synchronous endpoint (the standard library only; FAL's
-own client cannot send `x-fragment-agent`):
+Generate with FAL's synchronous endpoint (the standard library here; FAL's
+own client, which reads `FAL_KEY`, works as well):
 
 ```python
 import json
@@ -88,8 +90,7 @@ request = urllib.request.Request(
         "lyrics_optimizer": False,
     }).encode(),
     headers={
-        "Authorization": "Key " + (os.environ.get("FAL_KEY") or "fragment-key:fal"),
-        "x-fragment-agent": os.environ.get("FRAGMENT_AS_AGENT", ""),
+        "Authorization": "Key " + os.environ["FAL_KEY"],
         "Content-Type": "application/json",
     },
     method="POST",
@@ -120,8 +121,7 @@ length_ms=15000
 output='elevenlabs-music.mp3'
 
 curl -fsS -X POST "https://api.elevenlabs.io/v1/music" \
-  -H "xi-api-key: ${ELEVENLABS_API_KEY:-fragment-key:elevenlabs}" \
-  -H "x-fragment-agent: $FRAGMENT_AS_AGENT" \
+  -H "xi-api-key: $ELEVENLABS_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Accept: audio/mpeg" \
   --data "$(jq -cn \

@@ -9,12 +9,12 @@ Search and analyze X/Twitter content using Grok + x_search. Adapted from [OpenUn
 
 ## Setup
 
-Needs only Python's standard library. Your computer holds no keys: the
-helper calls xAI's REST Responses API with the operator's key placeholder
-`fragment-key:xai` (hosts `api.x.ai`) and `x-fragment-agent:
-$FRAGMENT_AS_AGENT`, and the computer swaps in the real key, metered to your
-owner. `XAI_API_KEY`, when set, is sent instead. A 401 means this deployment
-does not offer the `xai` key: say so rather than hunting for one.
+Needs only Python's standard library. Your computer holds no keys:
+`XAI_API_KEY` holds the operator's key's placeholder (it names you), the
+helper sends it to xAI's REST Responses API (hosts `api.x.ai`) as a bearer
+token, and the computer swaps in the real key, each call metered to your
+owner. xAI's own SDKs read the same variable. Unset, this deployment does
+not offer the `xai` key: say so rather than hunting for one.
 
 ## Commands
 

@@ -14,17 +14,15 @@ LINEAR_URL = "https://api.linear.app/graphql"
 
 
 def authorization() -> str:
-    # A personal key, when one is set, goes as Linear takes it (bare). On a
-    # fragment computer there is none: the owner's connected Linear account
-    # is swapped in at the computer's intercept for its placeholder.
+    # A personal key goes as Linear takes it (bare). On a fragment computer
+    # the variable holds the owner's Linear connection's placeholder, which
+    # the computer's intercept swaps for a token, in the form Linear's OAuth
+    # takes it.
     key = os.getenv("LINEAR_API_KEY", "").strip()
-    return key or "Bearer fragment-connection:linear"
-
-
-def agent_headers() -> dict[str, str]:
-    # the agent this call acts as (docs/computers.md)
-    agent = os.getenv("FRAGMENT_AS_AGENT", "").strip()
-    return {"x-fragment-agent": agent} if agent else {}
+    if not key:
+        print("LINEAR_API_KEY is not set: your owner has not connected Linear here, or this deployment does not offer it", file=sys.stderr)
+        raise SystemExit(2)
+    return key
 
 
 def post_graphql(
@@ -40,7 +38,6 @@ def post_graphql(
             "Content-Type": "application/json",
             "Authorization": authorization(),
             "User-Agent": "finite-linear-finite/1.0",
-            **agent_headers(),
         },
         method="POST",
     )
