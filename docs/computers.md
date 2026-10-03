@@ -302,7 +302,8 @@ settings and state):
   signalled, so a restored one always reads as an unclean exit, and a
   resumed turn would carry the old turn's message id and fold the
   person's next message into it, while the bridge has already ended it
-  (docs/chat-records.md). An agent fragment's optional
+  (docs/chat-records.md). The managed skills and the fragment CLI: below,
+  "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
@@ -332,6 +333,49 @@ settings and state):
   (a new profile's appears at its first turn). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
+
+### Skills and the CLI in our Hermes image
+
+The platform serves skills as any fragment's files; what installs them,
+and how a runtime finds them, is the image's.
+
+- **The managed set** (decision 17) is the owner's skills fragment's
+  `skills/`: a fragment on the blessed `skills` template lists and reads
+  the platform release's managed set as its files (templates/skills/README.md),
+  beneath any file of its own. `hermes-boot` finds it as the computer's
+  first agent acting for the computer's owner (`GET /api/fragments?for=`:
+  of kind `skills`, named under the owner's username, `skills.<username>`
+  first), lists it (`GET /api/f/{skills}/files?for=`) and fetches what is
+  new or changed (`…/file?path=&for=`, eight at once), each file by its
+  listed version. It installs them read-only (the boot's, mode 0644) at
+  `/data/hermes/managed-skills`, `skills/<category>/<name>/…` as
+  `<category>/<name>/…`, and removes what the listing no longer has; no
+  skills fragment means no managed skills. It does so off the boot's path,
+  at each start and every ten minutes while awake (`skills.installed`,
+  `skills.failed`); `/data` keeps the last install, so a wake fetches only
+  what a release changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all
+  (`skills.rs`); a file past one, or at a path that is no safe relative
+  path, is refused and the rest installs.
+- **Every profile** names that directory in `skills.external_dirs`, after
+  its own `skills/` (its agent fragment's, synced both ways: an agent's
+  own skills are versioned in its fragment). Hermes takes the first skill
+  of a name, so an agent's own wins over a managed one. Hermes' bundled
+  skills are the default profile's only; an agent's profile has its own
+  and the managed set, which is what the shell's Skills section lists. A
+  managed skill a session has not yet seen appears at its next session.
+- **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
+  from `cli/` with the image: the Hermes image's build context is the
+  repo's root). Each profile's `.env` names its agent and its owner
+  (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and its config passes those two to
+  its terminal (`terminal.env_passthrough`, scoped to the profile under the
+  one gateway), so a command in an agent's terminal acts as that agent:
+  the CLI's agent mode (cli/GUIDE.md, "As an agent") names the agent in
+  `x-fragment-agent`, signs nothing, and reaches the platform at
+  `FRAGMENT_API`, acting for the owner on the routes that honor `for`. The
+  egress signs. No key is in the container. The skills' helpers name the
+  agent the same way for the credential swap. `fragment sync` and `deploy`
+  still reach code.storage directly, with the short-lived, repo-scoped
+  token the platform mints for the agent.
 
 ## Billing
 

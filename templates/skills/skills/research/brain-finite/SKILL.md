@@ -18,27 +18,37 @@ nvk's llm-wiki (MIT, `LICENSE` beside this file).
 
 ## The contract
 
-What every brain answers, whatever release it runs:
+What every brain answers:
 
-- **Files.** Markdown pages at main, synced by `fragment sync`. A brain
-  needs no deploy: it reads its files at main.
-- **`search {q}`**, a query operation:
+- **Files.** Markdown pages at main, synced by `fragment sync` (or written
+  through the files API). A brain needs no deploy: it reads its files at
+  main, and a file trigger reindexes what changed. A file of 1 MiB or more
+  becomes one of its blobs on its own as it syncs.
+- **Wikis.** Each top-level folder is a wiki, with `raw/`, `wiki/`,
+  `inventory/`, `datasets/` and `output/`, and its own `AGENTS.md`,
+  `index.md` and `log.md`. The bytes of a source that is not markdown go
+  under `raw/assets/`, each with one source note whose frontmatter names
+  its `resource` and `finite_asset.content_hash`.
+- **`search {q, limit?, wiki?}`**, a query operation:
 
   ```sh
   fragment call <brain> search --input '{"q": "battery storage"}'
+  fragment call <brain> search --input '{"q": "tariff", "wiki": "garden", "limit": 20}'
   ```
 
-  answers ranked sections, best first: `{"results": [...]}`, each result
-  with at least `path` (the page), `heading` (the section) and `snippet`
-  (the matching text). A query is plain words, never search syntax.
+  answers ranked sections, best first: `{"results": [{rank, path, wiki,
+  title, heading, ancestry, snippet}], "pending"}`. `q` is plain words (1
+  to 256 characters, at most 16 words), each a prefix match and all of them
+  required; search syntax means nothing. `limit` is 1 to 50 (10 unless
+  you ask); `wiki` narrows it to one wiki. `pending` above 0 means the
+  index is still taking in a sync: ask again in a moment.
+- **`guide`**: the brain's own AGENTS.md, how to ingest into it and keep
+  it. Read it before you write:
 
-A brain's own release may say more (its conventions, more fields, more
-operations): read it before you write.
-
-```sh
-fragment call <brain> guide --input '{}'      # the brain's own guide, when it answers one
-fragment status <brain>                       # code.operations: what this brain answers
-```
+  ```sh
+  fragment call <brain> guide --input '{}'
+  fragment call <brain> index_status --input '{}'   # what is indexed, pending, or skipped and why
+  ```
 
 Where the brain's guide and a wiki's own `AGENTS.md` speak, they win over
 this skill.
@@ -47,7 +57,7 @@ this skill.
 
 ```sh
 fragment list --json                       # brains are kind "brain"
-fragment create garden-brain --template brain --title "Garden notes"
+fragment create garden-brain --template brain --title "Garden notes"   # a new brain, on the platform's brain template
 ```
 
 Ask which brain when several could fit; make one only when the human
@@ -70,7 +80,8 @@ fragment call <brain> search --input '{"q": "…"}'     # check that what you ad
    `type: source`, `title`, `source` (its URL) and `captured`; then its
    text, cleaned but not summarized. A source that is not markdown (an
    image, a PDF, a recording) keeps its bytes under `raw/assets/` and gets
-   one source note under `raw/` naming them.
+   one source note under `raw/` (`type: asset`, its `resource` path, and
+   `finite_asset` with its `content_type`, `size` and `content_hash`).
 3. **Synthesize into `wiki/`**: update the pages it bears on, or make one
    per durable topic, with frontmatter `title`, `summary`, `tags`,
    `sources` (the raw notes it draws from), `created` and `updated`.

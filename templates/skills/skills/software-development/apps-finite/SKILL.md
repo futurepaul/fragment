@@ -78,6 +78,19 @@ a channel, a live page), `inbox` (webhooks in, a job), `notes` (a folder
 of markdown as a live site), `calories` (an app with an agent of its own).
 Start from the closest one and read its files: they are working examples.
 
+When the human wants one of the platform's templates as it is, with no
+folder of yours, make it on the platform alone:
+
+```sh
+fragment create shopping --template todo                  # a todo, live at once, copied in as its first commit
+fragment create garden-talk --template chat --title "Garden talk"   # a chat on the platform's own chat
+```
+
+A blessed template (`chat`, `agent`, `skills`, `brain`) is named, not
+copied: it runs the platform's current release, and `--title` is its own
+title. Pull any fragment into a folder later with `fragment sync <name>
+--dir . --mode pull`.
+
 The folder:
 
 ```
