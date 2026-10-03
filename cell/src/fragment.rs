@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS invites (
   expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, invitee TEXT);
 CREATE TABLE IF NOT EXISTS index_outbox (
   principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS search_log (
+  n INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS search_outbox (
+  principal TEXT PRIMARY KEY, sent INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER);
+CREATE INDEX IF NOT EXISTS search_outbox_due ON search_outbox (next_at);
 CREATE TABLE IF NOT EXISTS joined_outbox (
   principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS secrets (
@@ -182,6 +187,9 @@ pub struct FragmentCell {
     pub(crate) standing: RefCell<crate::meter::StandingSeen>,
     /// The minute it last set the alarm to close a request count for.
     pub(crate) meter_armed: Cell<i64>,
+    /// A record woke an idle search cursor, and the alarm is not armed for
+    /// it yet (search.rs `log_search`; channels.rs `published` arms it).
+    pub(crate) search_woke: Cell<bool>,
     /// The code version and UTC day it last noted a dynamic worker for.
     pub(crate) dw_noted: RefCell<Option<(String, i64)>>,
 }
@@ -211,6 +219,7 @@ impl DurableObject for FragmentCell {
             live: RefCell::default(),
             standing: RefCell::new(None),
             meter_armed: Cell::new(-1),
+            search_woke: Cell::new(false),
             dw_noted: RefCell::new(None),
         }
     }
@@ -1255,7 +1264,7 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs the index, joined and delivery outboxes, due schedules,
+    /// The alarm runs the index, search, joined and delivery outboxes, due schedules,
     /// queued runs, and the pass: the poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
@@ -1264,6 +1273,7 @@ impl FragmentCell {
             return Ok(());
         }
         self.flush_index().await;
+        self.flush_search().await;
         self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
@@ -1325,7 +1335,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
+        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;

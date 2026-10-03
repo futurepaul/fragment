@@ -57,6 +57,7 @@ mod publish;
 mod push;
 mod registry;
 mod routed;
+mod search;
 mod runs_on;
 mod serve;
 mod share;
@@ -92,6 +93,9 @@ const PASSED_HEADERS: [&str; 9] =
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
+
+/// `PUT /api/fragments/{name}/archived`'s body, `{archived}`, is a few bytes.
+const ARCHIVED_BODY_MAX_BYTES: usize = 1024;
 
 #[event(queue)]
 async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
@@ -967,6 +971,32 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
+        }
+        // the signer's own view of a fragment of theirs (principal.rs): it
+        // changes nothing of the fragment's, nor anyone else's list
+        (Method::Put, ["api", "fragments", name, "archived"]) => {
+            let body = read_body(&mut req, ARCHIVED_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetArchived = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name, Some(&who))?;
+            let inner = json!({ "fragment": name, "archived": set.archived }).to_string();
+            let mut init = RequestInit::new();
+            init.with_method(Method::Put).with_body(Some(inner.into()));
+            let put = Request::new_with_init("https://principal.internal/archived", &init)?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(put).await?)
+        }
+        // search over the signer's own list (principal.rs): agents need none,
+        // and acting for someone (`for`) is not honored here
+        (Method::Get, ["api", "search"]) => {
+            let who = signer(env, &req, &url, &[]).await?;
+            let mut asked = url.query_pairs().filter(|(k, _)| k == "q").map(|(_, v)| v.into_owned());
+            let (Some(q), None) = (asked.next(), asked.next()) else {
+                return Err(CellError::invalid("name what to look for, once: ?q="));
+            };
+            let mut inner = Url::parse("https://principal.internal/search").map_err(|e| CellError::host(e.to_string()))?;
+            inner.query_pairs_mut().append_pair("q", &q);
+            let search = Request::new(inner.as_str(), Method::Get)?;
+            Ok(env.durable_object("PRINCIPAL")?.get_by_name(&who.identity.id)?.fetch_with_request(search).await?)
         }
         (_, ["api", "ledger", rest @ ..]) => {
             let rest = rest.to_vec();

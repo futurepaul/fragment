@@ -17,7 +17,8 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! platform's page reads the owner's list alone.
+//! platform's page reads the owner's list alone. A person's search cursor
+//! (search.rs) follows their row: made with a role, gone without one.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
 //! username): only they may accept it, so a forwarded link admits no one
@@ -88,16 +89,18 @@ pub(crate) fn migrate(sql: &SqlStorage) {
 
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
-    /// in the caller's turn, beside the membership write it mirrors.
+    /// in the caller's turn, beside the membership write it mirrors. Their
+    /// search cursor follows it (search.rs).
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
         let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
         self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
-        let role = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
         self.exec(
             "INSERT INTO index_outbox (principal, role, version, attempts, next_at) VALUES (?, ?, ?, 0, ?)
              ON CONFLICT (principal) DO UPDATE SET role = excluded.role, version = excluded.version, attempts = 0, next_at = excluded.next_at",
-            vec![principal.into(), role, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
-        )
+            vec![principal.into(), stored, SqlStorageValue::Integer(version), SqlStorageValue::Integer(js::now_ms())],
+        )?;
+        self.search_follows(principal, role)
     }
 
     /// What its members' lists show of it, at each install of live: its
@@ -194,6 +197,13 @@ impl FragmentCell {
                         SqlStorageValue::Integer(version),
                     ],
                 );
+            }
+        }
+        // a cursor made with a role is due at once: the alarm sends it
+        // (search.rs), after the row it follows is delivered here
+        if self.search_due_at().ok().flatten().is_some_and(|at| at <= js::now_ms()) {
+            if let Err(e) = self.schedule().await {
+                console_error!("{name}: the alarm was not armed for its search outbox ({:?}): {}", e.code, e.message);
             }
         }
     }
