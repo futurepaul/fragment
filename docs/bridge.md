@@ -50,7 +50,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}` |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run or runs |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}` |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |

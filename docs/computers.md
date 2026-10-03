@@ -116,10 +116,13 @@ holds. Other internet traffic goes out as it is (decision 43).
   include a postable `chat` (a chat), and `tasks` of the agent's own
   fragment (its routines, and `joined` when it is added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
-  as the agent, read again every 5 minutes and on `joined`. So a new
+  as the agent, read again every 5 minutes and on `joined`; the agents
+  themselves from `GET /api/computer`, read again every minute. So a new
   chat reaches a sleeping computer only through `joined`: whatever adds
   an agent to a fragment (the shell, the chat template) posts
-  `{kind: "joined", fragment}` to the agent's `tasks` after.
+  `{kind: "joined", fragment}` to the agent's `tasks` after. An agent
+  newly assigned to a computer is followed within a minute while it is
+  awake; to a sleeping one, wake it (`POST /api/computers/{id}/wake`).
 - What was said before an agent joined a chat is not for it: the guest
   skips a record whose `at` is before the agent's membership's `addedAt`
   (`GET /api/f/{name}/members`).
