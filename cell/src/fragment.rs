@@ -1233,7 +1233,7 @@ impl FragmentCell {
             code: self.code_status()?,
             view_token: Some(facts.view_token),
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
-            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name) },
+            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform(&caller.url) },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             name: facts.name,
         })

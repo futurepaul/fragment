@@ -21,14 +21,71 @@ use crate::Template;
 use sha2::{Digest, Sha256};
 
 /// The templates the platform serves from its release.
-pub const BLESSED: [&str; 2] = ["agent", "chat"];
+pub const BLESSED: [&str; 3] = ["agent", "chat", "skills"];
 
-/// A blessed template's files, when `name` is one.
+/// A blessed template's files, when `name` is one: named statics, never
+/// `crate::ALL`, so a binary links only the templates it names (build.rs:
+/// the cell carries the blessed ones and not `notes`).
 pub fn template(name: &str) -> Option<Template> {
-    if !BLESSED.contains(&name) {
-        return None;
+    match name {
+        "agent" => Some(crate::AGENT),
+        "chat" => Some(crate::CHAT),
+        "skills" => Some(crate::SKILLS),
+        _ => None,
     }
-    crate::ALL.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+}
+
+/// A blessed template's data, all of its files at most this many and this
+/// large, each file at most `DATA_FILE_MAX_BYTES`: a fragment lists it whole
+/// in one answer, and a computer installs it file by file.
+pub const DATA_FILES_MAX: usize = 1_000;
+pub const DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const DATA_FILE_MAX_BYTES: usize = 256 * 1024;
+
+/// Whether `path` of a blessed template is its data: what every fragment on
+/// it lists and reads from the release (`GET …/files`, `…/file`, `__files`,
+/// `__file`), beneath its own files at the same path. Everything but its
+/// manifest, its README, its code and its site, which the release serves
+/// otherwise (decision 40: no copies to drift).
+pub fn is_data(path: &str) -> bool {
+    path != "fragment.json" && path != "README.md" && !is_code(path) && !path.starts_with("site/")
+}
+
+/// One data file of a blessed template, as a fragment on it lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFile {
+    pub path: &'static str,
+    pub bytes: &'static [u8],
+    /// `release:<24 hex>`, a hash of its bytes: its `lastCommitSha` in a
+    /// listing, so a reader fetches again only what a release changed.
+    pub version: String,
+}
+
+/// A data file's version: a hash of its bytes.
+pub fn data_version(bytes: &[u8]) -> String {
+    format!("release:{}", hex::encode(&Sha256::digest(bytes)[..12]))
+}
+
+/// A blessed template's data files, in path order (none for a template
+/// that is not blessed). Made once per isolate.
+pub fn data(name: &str) -> &'static [DataFile] {
+    static DATA: OnceLock<BTreeMap<&'static str, Vec<DataFile>>> = OnceLock::new();
+    let all = DATA.get_or_init(|| {
+        BLESSED
+            .iter()
+            .filter_map(|n| {
+                let files = template(n)?.iter().filter(|(p, _)| is_data(p)).map(|(p, b)| DataFile { path: p, bytes: b, version: data_version(b) }).collect();
+                Some((*n, files))
+            })
+            .collect()
+    });
+    all.get(name).map_or(&[], Vec::as_slice)
+}
+
+/// One data file of a blessed template, when `path` is one.
+pub fn data_file(name: &str, path: &str) -> Option<&'static DataFile> {
+    let files = data(name);
+    files.binary_search_by(|f| f.path.cmp(path)).ok().map(|i| &files[i])
 }
 
 /// A blessed template's manifest, as it runs.
@@ -185,6 +242,83 @@ mod tests {
         for p in ["SOUL.md", "site/chat.js", "lib/x.mjs", "applib/notes.md", "app.js", "x/app.mjs"] {
             assert!(!is_code(p), "{p}");
         }
+    }
+
+    /// The named statics are the templates under templates/ of those names,
+    /// and only the blessed ones are named.
+    #[test]
+    fn blessed_templates_are_the_named_ones() {
+        for (name, files) in crate::ALL {
+            match template(name) {
+                Some(t) => assert!(std::ptr::eq(t, *files), "{name} is its own template"),
+                None => assert!(!BLESSED.contains(name), "{name} is blessed but not named"),
+            }
+        }
+        assert!(BLESSED.iter().all(|n| template(n).is_some()));
+        assert!(template("notes").is_none() && template("nope").is_none());
+    }
+
+    /// Goal: a blessed template's data is everything its fragments do not get
+    /// some other way. Method: the manifest, the README, code and the site are
+    /// not data; any other path is.
+    #[test]
+    fn data_is_everything_but_manifest_readme_code_and_site() {
+        for p in ["skills/research/arxiv-finite/SKILL.md", "skills/x/scripts/a.py", "LICENSE", "docs/README.md", "x/app.mjs"] {
+            assert!(is_data(p), "{p}");
+        }
+        for p in ["fragment.json", "README.md", "app.mjs", "applib/a.mjs", "site/index.html", "site/skills/x.md"] {
+            assert!(!is_data(p), "{p}");
+        }
+        assert!(data("agent").is_empty() && data("chat").is_empty(), "the agent and chat templates carry no data");
+        assert!(data("todo").is_empty() && data("nope").is_empty(), "a template that is not blessed has none to serve");
+        assert_eq!(data_version(b"a"), data_version(b"a"));
+        assert_ne!(data_version(b"a"), data_version(b"b"));
+        assert!(data_version(b"").starts_with("release:") && data_version(b"").len() == "release:".len() + 24);
+    }
+
+    /// Goal: decision 17's managed set, as the skills template carries it.
+    /// Method: every skill is `skills/<category>/<name>/SKILL.md` with a
+    /// frontmatter naming it and saying what it is for; names are unique; the
+    /// rewritten skills are there and what they replace is not; nothing
+    /// Finite-only or generated rides along; and it fits a listing.
+    #[test]
+    fn the_skills_template_is_the_managed_set() {
+        let files = data("skills");
+        assert!(!files.is_empty());
+        assert!(files.windows(2).all(|w| w[0].path < w[1].path), "in path order, as data_file searches it");
+        let total: usize = files.iter().map(|f| f.bytes.len()).sum();
+        assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
+        let mut names = std::collections::BTreeSet::new();
+        for f in files {
+            assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
+            assert!(f.bytes.len() <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.bytes.len());
+            assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
+            assert_eq!(data_file("skills", f.path), Some(f));
+            if let Ok(text) = std::str::from_utf8(f.bytes) {
+                for finite_only in ["/profile-assets/", "~/.finite/", "FINITECHAT_HOME", "/home/node/", ".hermes/.env", ".hermes/venv", "git.finite.chat"] {
+                    assert!(!text.contains(finite_only), "{} names {finite_only}", f.path);
+                }
+            }
+            // a skill is skills/<category>/<name>/ or, uncategorized, skills/<name>/
+            let parts: Vec<&str> = f.path.split('/').collect();
+            if parts.last() == Some(&"SKILL.md") {
+                assert!(matches!(parts.len(), 3 | 4), "{}: a skill sits at skills/<category>/<name>/ or skills/<name>/", f.path);
+                let text = std::str::from_utf8(f.bytes).expect("a SKILL.md is UTF-8");
+                let front = text.strip_prefix("---\n").and_then(|t| t.split_once("\n---")).map(|(f, _)| f).unwrap_or_else(|| panic!("{} has a frontmatter", f.path));
+                let name = front.lines().find_map(|l| l.strip_prefix("name:")).map(str::trim).unwrap_or_else(|| panic!("{} names itself", f.path));
+                assert_eq!(name, parts[parts.len() - 2], "{}: a skill's name is its directory's", f.path);
+                assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
+                assert!(names.insert(name.to_string()), "{name} twice");
+            }
+        }
+        for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"] {
+            assert!(names.contains(rewritten), "{rewritten}");
+        }
+        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite"] {
+            assert!(!names.contains(gone), "{gone} is replaced");
+        }
+        assert_eq!(names.len(), 43, "finite-skills' 47, less shared-skills, with sites, publishing and website building one skill, and brain and llm-wiki one");
+        assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
     #[test]
