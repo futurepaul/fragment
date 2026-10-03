@@ -1033,9 +1033,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             release_username(env, username).await
         }
         (method, ["api", "connections", rest @ ..]) => {
-            let who = signer(env, &req, &url, &[]).await?;
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
-            connections::route(env, &who.identity.id, who.identity.kind, method, &rest).await
+            connections::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

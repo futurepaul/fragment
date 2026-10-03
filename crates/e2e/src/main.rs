@@ -77,16 +77,39 @@ const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
-/// What the fleet's computers may swap in (docs/computers.md): one
-/// connection and one operator key, each with a host of its own, and the
-/// key's (test) value.
-pub const SWAP_CONNECTION: &str = "github";
-pub const SWAP_CONNECTION_HOST: &str = "api.github.test";
-pub const SWAP_KEY: &str = "search";
-pub const SWAP_KEY_HOST: &str = "api.search.test";
-pub const SWAP_KEY_VALUE: &str = "sk-e2e-search-7f3a9c";
-/// What one call of the key costs at list price: half a cent.
-pub const SWAP_KEY_MICROS: i64 = 5_000;
+/// What the fleet's computers may swap in (docs/computers.md): the
+/// platform's own catalog, as the hosted e2e deploys it
+/// (`deploy/e2e.jsonc`: Google, and the Perplexity, Google Places, xAI and
+/// ElevenLabs operator keys, at their real hosts, which the swap sends to
+/// the upstream fake), each key a test value; and an own key's provider
+/// behind basic auth, the e2e's alone.
+pub const SWAP_CONNECTION: &str = "google";
+pub const SWAP_CONNECTION_HOST: &str = "www.googleapis.com";
+pub const SWAP_CONNECTION_ENV: &str = "GOOGLE_OAUTH_ACCESS_TOKEN";
+/// The operator keys, each its test value and its environment variable.
+pub const SWAP_KEYS: [(&str, &str, &str); 4] = [
+    ("perplexity", "pplx-e2e-7f3a9c", "PERPLEXITY_API_KEY"),
+    ("google-places", "AIza-e2e-places-51b2", "GOOGLE_PLACES_API_KEY"),
+    ("xai", "xai-e2e-0c4d22", "XAI_API_KEY"),
+    ("elevenlabs", "sk_e2e_eleven_9e1f", "ELEVENLABS_API_KEY"),
+];
+pub const SWAP_OWN: &str = "e2e-mail";
+pub const SWAP_OWN_HOST: &str = "api.mail.test";
+pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
+
+/// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its key files
+/// dropped (the deploy's), and the own key's provider.
+pub fn swap_providers() -> Result<Value> {
+    let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
+    let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
+    let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
+    for r in &mut rows {
+        r.as_object_mut().context("a provider is an object")?.remove("key_file");
+    }
+    rows.push(json!({ "name": SWAP_OWN, "kind": "own", "hosts": [SWAP_OWN_HOST], "placements": [{ "basic": "password" }], "env": [SWAP_OWN_ENV] }));
+    fragment_core::catalog::Catalog::parse(&Value::Array(rows.clone()).to_string()).map_err(|e| anyhow!("the e2e's catalog: {e}"))?;
+    Ok(Value::Array(rows))
+}
 
 /// A vendor fake, the lanes' on a local run only: a section that touches
 /// one declares `Need::Fakes`, and the hosted lane skips it before it
@@ -432,10 +455,8 @@ impl Suite {
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
             computer_snapshots: false,
-            connections: Some(json!({ SWAP_CONNECTION: [SWAP_CONNECTION_HOST] }).to_string()),
-            operator_keys: Some(json!({ SWAP_KEY: [SWAP_KEY_HOST] }).to_string()),
-            operator_key_values: vec![(SWAP_KEY.into(), SWAP_KEY_VALUE.into())],
-            key_prices: Some(json!([{ "key": SWAP_KEY, "micros": SWAP_KEY_MICROS, "per": 1 }]).to_string()),
+            providers: Some(swap_providers()?.to_string()),
+            operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
         }
         .configure(&self.project)?;

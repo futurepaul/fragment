@@ -1,8 +1,9 @@
 //! The internet a computer's swap sends to (`FRAGMENT_SWAP_UPSTREAM`): the
-//! provider APIs a connection or an operator key is for. Every request is
-//! answered with what arrived (its host, from `x-fragment-upstream-host`,
-//! its method, path and auth headers), so a test reads what the provider
-//! would have seen, and each is recorded.
+//! provider APIs the deployment's catalog names. Every request is answered
+//! with what arrived (its host, from `x-fragment-upstream-host`, its
+//! method, path, query and auth headers, and any platform header that
+//! leaked), so a test reads what the provider would have seen, and each is
+//! recorded.
 
 use std::sync::{Arc, Mutex};
 
@@ -11,7 +12,7 @@ use serde_json::{json, Value};
 use crate::http::{Handler, Request, Response, Server};
 
 /// The headers a provider takes a credential in.
-const AUTH_HEADERS: [&str; 3] = ["authorization", "x-api-key", "x-goog-api-key"];
+const AUTH_HEADERS: [&str; 4] = ["authorization", "x-api-key", "x-goog-api-key", "xi-api-key"];
 
 pub struct Upstream {
     pub url: String,
@@ -30,6 +31,7 @@ fn seen_of(req: &Request) -> Value {
         "host": req.header("x-fragment-upstream-host"),
         "method": req.method,
         "path": req.path,
+        "query": req.pairs.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
         "auth": auth,
         "agent": req.header("x-fragment-agent"),
         "body": String::from_utf8_lossy(&req.body),

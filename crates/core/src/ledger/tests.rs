@@ -181,6 +181,13 @@ fn months_are_utc_and_count_from_1970() {
     assert_eq!(Month::of(1_709_164_800_000).label(), "2024-02", "2024-02-29");
     assert_eq!(Month::of(1_767_225_599_999).label(), "2025-12");
     assert_eq!(Month::of(1_767_225_600_000).label(), "2026-01");
+    // a label reads back as its month, and nothing else is one
+    for ms in [0, T0, T0 - 1, NOVEMBER, 1_709_164_800_000] {
+        assert_eq!(Month::parse(&Month::of(ms).label()), Some(Month::of(ms)));
+    }
+    for bad in ["", "2026", "2026-13", "2026-00", "1969-12", "26-10", "2026-1", "2026/10", "+026-10", "2026-10-01"] {
+        assert_eq!(Month::parse(bad), None, "{bad}");
+    }
 }
 
 #[test]

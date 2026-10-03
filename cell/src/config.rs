@@ -5,7 +5,6 @@
 //! code.storage key, and the WorkOS API key are Worker secrets, read only
 //! by keys.rs.
 
-use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use fragment_proto::ledger::Plan;
@@ -123,19 +122,15 @@ pub struct Config {
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
     /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
     pub deploy_id: String,
-    /// `FRAGMENT_CONNECTIONS`: the WorkOS Pipes providers a computer's guest
-    /// may use and each one's hosts (`{"github": ["api.github.com"]}`,
-    /// `fragment_core::swap`; none by default).
-    pub connections: BTreeMap<String, Vec<String>>,
-    /// `FRAGMENT_OPERATOR_KEYS`: the operator's keys and each one's hosts,
-    /// each key the secret `swap::key_secret_name` names.
-    pub operator_keys: BTreeMap<String, Vec<String>>,
-    /// `FRAGMENT_KEY_PRICES`: what each operator key's use costs
-    /// (`[{"key", "micros", "per"}]`, the price book's `keys`); a key with
-    /// no price is not swapped in. `FRAGMENT_PRICE_BOOK_VERSION` (default
-    /// the defaults' 1) grows with every change to them, or ledgers made
-    /// before keep their book.
-    pub key_prices: Vec<fragment_core::price::KeyPrice>,
+    /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
+    /// every credential a computer's guest may use: the WorkOS Pipes
+    /// connections, the operator's keys (each the secret
+    /// `catalog::key_secret_name` names, and each priced, which is the
+    /// price book's `keys`) and people's own keys, each with its hosts, its
+    /// placements and its environment variables. None by default.
+    /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults' 1) grows with
+    /// every change to a key's price, or ledgers made before keep their book.
+    pub providers: fragment_core::catalog::Catalog,
     pub price_book_version: u32,
     /// `FRAGMENT_COMPUTER_INSTANCE`: the price book's name for the
     /// deployment's computer instance (default the book's own default,
@@ -150,11 +145,10 @@ fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// A credentials-to-hosts variable (`swap::parse_hosts`): a deployment
-/// whose is malformed is refused at its first request (the deploy checks
-/// it first).
-fn hosts(env: &Env, name: &str) -> BTreeMap<String, Vec<String>> {
-    var(env, name).map(|v| fragment_core::swap::parse_hosts(&v).unwrap_or_else(|e| panic!("{name}: {e}"))).unwrap_or_default()
+/// The provider catalog (`FRAGMENT_PROVIDERS`): a deployment whose is
+/// malformed is refused at its first request (the deploy checks it first).
+fn providers(env: &Env) -> fragment_core::catalog::Catalog {
+    var(env, "FRAGMENT_PROVIDERS").map(|v| fragment_core::catalog::Catalog::parse(&v).unwrap_or_else(|e| panic!("FRAGMENT_PROVIDERS: {e}"))).unwrap_or_default()
 }
 
 /// Where this fleet runs, as its levers see it (`levers::fleet_of`): its
@@ -274,11 +268,7 @@ impl Config {
             levers_scoped: test_secret.is_some() && levers_fleet == fragment_core::levers::Fleet::Branch,
             test_secret,
             deploy_id: deploy_id(env),
-            connections: hosts(env, "FRAGMENT_CONNECTIONS"),
-            operator_keys: hosts(env, "FRAGMENT_OPERATOR_KEYS"),
-            key_prices: var(env, "FRAGMENT_KEY_PRICES")
-                .map(|v| serde_json::from_str(&v).unwrap_or_else(|e| panic!("FRAGMENT_KEY_PRICES is [{{\"key\", \"micros\", \"per\"}}]: {e}")))
-                .unwrap_or_default(),
+            providers: providers(env),
             price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
                 .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
                 .unwrap_or(1),
