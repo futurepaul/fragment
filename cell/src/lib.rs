@@ -66,6 +66,7 @@ mod share;
 mod shell;
 mod subscriptions;
 
+use fragment_core::access;
 use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
@@ -1063,7 +1064,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             if !valid_fragment_name(name) && !fragment_proto::valid_label(name) {
                 return Err(CellError::invalid("a fragment's name is <label>.<username>"));
             }
-            let owner_only = fragment_core::access::owner_only(method.as_ref(), rest);
+            let reserved = access::reserved(method.as_ref(), rest);
             let inner = match (method, rest) {
                 (Method::Delete, [] | [""]) => "/delete".to_string(),
                 (_, [] | [""]) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
@@ -1085,10 +1086,17 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 }
                 _ => Some(signer_for(env, &req, &url, &body).await?),
             };
-            // owner-only actions never go through an agent, whatever it acts
-            // for: only a person owns a fragment
-            if owner_only && principal.as_ref().is_some_and(|p| p.kind != IdentityKind::Person) {
-                return Err(CellError::new(ErrorCode::Forbidden, "an agent never manages members, invites, visibility, or links, nor deletes a fragment: its owner does"));
+            // An agent on a reserved route: deleting and the cap are never
+            // its, and it shares only for its own owner, unheld (Paul,
+            // 2026-10-04). Who it is decides that much here; the fragment
+            // decides the rest from its owner's share there, and decides
+            // again on its own (`access::agent_shares`).
+            if let (Some(reserved), Some(agent)) = (reserved, principal.as_ref().filter(|p| p.kind != IdentityKind::Person)) {
+                let for_owner = agent.acting_for.is_some() && agent.acting_for == agent.owner;
+                let sharer = access::Sharer { for_owner, held: agent.held };
+                if let Err(refusal) = access::agent_may_ask(reserved, sharer) {
+                    return Err(CellError::new(ErrorCode::Forbidden, refusal.message()));
+                }
             }
             let name = named_fragment(name, principal.as_ref())?;
             let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };

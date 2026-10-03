@@ -360,6 +360,14 @@ speaking Cloudflare's APIs) returns once this product works.
       creator.
     - Each agent's own model and compute bill its owner. The fragment's
       hosting bills the fragment's owner (decision 26).
+    - **Your agent can share on your behalf** (Paul, 2026-10-04: "Yes,
+      your agent can share on your behalf"). Acting for its own owner,
+      and not held below them, an agent shares a fragment its owner owns
+      as its owner would: members, invites, visibility, and rotating the
+      links. It never deletes a fragment or sets its cap, shares nothing
+      acting for anyone else or on what its owner only edits, and each
+      thing it shares is recorded as the agent's, for its owner
+      (`fragment_core::access::agent_shares`).
 37. **Agents can do anything they could do in Finite**, with
     credentials handled better.
     - Services that act as you (Gmail, Calendar, Drive, Notion, Linear,
@@ -800,9 +808,12 @@ exit says.
        templates sections.
      - **Sections** templates, brain, notes, deploy, site, shell,
        shell-ui, ledger, computers: 427 passed, 0 failed.
-   - The agent shares by its link: making an app public or adding members
-     is the owner's, since an agent acts at most as an editor (decision
-     36). Whether a person's own agents may share for them is Paul's call.
+   - The agent now shares as its owner would (decision 36, Paul,
+     2026-10-04): the exit's agent also makes the app public, which an
+     anonymous visitor opens, and adds a person as a viewer, who sees it
+     in their list (the real-Hermes lane, 42 passed, 0 failed). The
+     delegation section shares over the API with a signed agent: each
+     action, its record, and each refusal.
    - Not yet: the same on a preview (phase 7's hosted lane).
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
    blobs, secrets, AI steps. Exit: their e2e sections green, plus a test

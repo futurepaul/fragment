@@ -143,22 +143,24 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and changes it", r.status == 200 && todos(api, &owner, &other) == ["for the owner"], &r);
     let r = api.signed(&hand, "GET", &format!("/api/f/{other}/status?{}", acting(&stranger_id)), None)?;
     s.ok("for someone with no role there, nothing", r.status == 403, &r);
-    // owner-only actions never go through an agent, whomever it acts for
-    let owner_only = [
+    // sharing is its owner's, and theirs for them (Paul, 2026-10-04: the
+    // delegation section shares): for anyone else it shares nothing, and
+    // even for its owner it never deletes a fragment nor sets its cap
+    let sharing = [
         ("PUT", format!("/api/f/{other}/members/{stranger_id}"), Some(json!({ "role": "editor" }))),
         ("PUT", format!("/api/f/{other}/visibility"), Some(json!({ "visibility": "public" }))),
         ("POST", format!("/api/f/{other}/rotate"), None),
         ("POST", format!("/api/f/{other}/invites"), Some(json!({ "role": "editor" }))),
-        ("DELETE", format!("/api/f/{other}"), None),
     ];
-    let refused: Vec<(String, u16)> = owner_only
-        .iter()
-        .map(|(method, path, body)| (format!("{method} {path}"), api.signed(&hand, method, &format!("{path}?{}", acting(&owner_id)), body.as_ref()).map_or(0, |r| r.status)))
-        .collect();
+    let owner_only = [("DELETE", format!("/api/f/{other}"), None), ("PUT", format!("/api/f/{other}/cap"), Some(json!({ "id": "agent-cap", "micros": 1 })))];
+    let ask = |asker: &str, (method, path, body): &(&str, String, Option<Value>)| {
+        (format!("{method} {path} for {asker}"), api.signed(&hand, method, &format!("{path}?{}", acting(asker)), body.as_ref()).map_or(0, |r| r.status))
+    };
+    let refused: Vec<(String, u16)> = sharing.iter().map(|r| ask(&stranger_id, r)).chain(owner_only.iter().map(|r| ask(&owner_id, r))).collect();
     let st = api.status(&owner, &other)?;
     let members = api.signed(&owner, "GET", &format!("/api/f/{other}/members"), None)?;
     s.ok(
-        "an agent never changes members, visibility, links, or invites, nor deletes, even for its owner",
+        "an agent shares nothing of its owner's acting for anyone else, and never deletes nor sets a cap, even for its owner",
         refused.iter().all(|(_, status)| *status == 403) && st.status == 200 && st.body["visibility"] == "link" && members.body["members"].as_array().map(Vec::len) == Some(1),
         json!({ "refused": refused, "visibility": st.body["visibility"], "members": members.body }),
     );

@@ -172,16 +172,33 @@ and `POST /api/fragments` (a `POST` for anyone but the agent's owner is
 403: what an agent makes is its owner's); on any other route it is 400.
 A person's request naming `for` is 403, as is more than one `for` (400)
 or one that is not an identity (400). A call without `for` acts as the
-agent's own membership. Owner-only actions (members, other than leaving
-with `DELETE members/me`; invites; visibility; rotation; deletion) are
-403 for an agent whatever it names. A site request's query is its app's:
-`for` there means nothing to the platform.
+agent's own membership. A site request's query is its app's: `for`
+there means nothing to the platform.
+
+An agent shares for its owner (Paul, 2026-10-04: "your agent can share
+on your behalf"; `fragment_core::access::agent_shares`). Sharing is
+members (other than leaving with `DELETE members/me`), invites,
+visibility, and rotation. An agent acting `for` its own owner, and not
+held below them, shares a fragment its owner owns as its owner would,
+under the same rules (it grants viewer or editor, never owner, and never
+changes or removes the owner). Every other agent's sharing request is
+403, saying why: one acting as itself or for anyone else, one its owner
+holds (at any hold), and one on a fragment its owner does not own (an
+editor's agent shares nothing there). Deleting a fragment and setting
+its cap are 403 for every agent, whomever it acts for. What an agent
+shares names it: the member's `addedBy` and the invite's `createdBy` are
+the agent, and each change's event (`member.set`, `member.removed`,
+`invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`)
+carries `by` (who made it) and, for an agent, `for` (its owner), and its
+summary says "(an agent, for …)", so the owner sees what their agent
+shared.
 
 Membership is cell state: `fragment.json`'s `visibility`, `editors`, and
 `viewers` grant nothing (the cell records a `manifest.ignored` event).
-Only the owner manages members, invites, visibility, and tokens; a
-member may leave. Each identity's list of fragments is kept in its
-`Principal` cell, fed from each fragment's outbox.
+Only the owner, or their agent sharing for them, manages members,
+invites, visibility, and tokens; a member may leave. Each identity's
+list of fragments is kept in its `Principal` cell, fed from each
+fragment's outbox.
 
 ## Identities (phase 4 slice A)
 
@@ -465,19 +482,19 @@ and styles only inline and images only from the platform
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
-| `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
+| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
-| `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
-| `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
-| `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
-| `DELETE /api/f/{name}/invites/{id}` | owner | → `{ok, revoked}` |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
+| `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or their agent for them; or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
+| `POST /api/f/{name}/invites` | owner, or their agent for them | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
+| `GET /api/f/{name}/invites` | owner, or their agent for them | → `{invites: [...]}` without tokens |
+| `DELETE /api/f/{name}/invites/{id}` | owner, or their agent for them | → `{ok, revoked}` |
 | `POST /api/f/{name}/join` | any signer | `{token}` → `{name, role, joined}`; a stronger existing role is kept; a fragment at its 1000 members is 400, and the invite keeps its use; an invite for another identity is 403, and keeps its use |
 | `POST /api/f/{name}/join/preview` | any signer | `{token}` → `{name, role, invitedBy, invitee, expiresAt, current}`: what joining would grant (`current`: the signer's role now), joining no one; 404 for a token that names no open invite (the platform's `/join` page shows it) |
-| `PUT /api/f/{name}/visibility` | owner | `{visibility}` → `{ok, visibility}` |
-| `POST /api/f/{name}/rotate` | owner | `{scopes?: [inbox, view, webhook]}` → `{inboxToken, viewToken, webhookSecret, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
+| `PUT /api/f/{name}/visibility` | owner, or their agent for them | `{visibility}` → `{ok, visibility}` |
+| `POST /api/f/{name}/rotate` | owner, or their agent for them | `{scopes?: [inbox, view, webhook]}` → `{inboxToken, viewToken, webhookSecret, rotated}` (`Rotated`): every token as it is now, and the scopes renewed; a new view token closes link holders' feeds |
 | `PUT /api/f/{name}/secrets/{KEY}` | editor | raw body (at most 64 KiB) → `{ok, name}`; sealed (AES-256-GCM, key HKDF'd from the host secret and the fragment's npub) |
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |

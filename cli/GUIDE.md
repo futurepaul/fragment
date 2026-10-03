@@ -63,7 +63,20 @@ FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:… fragment list
 Our Hermes image sets all three in each agent's terminal. `fragment
 whoami` says which agent it is and for whom it acts; `fragment login` and
 `fragment keys` refuse (exit 2): an agent's keys are its owner's to
-manage. Links meant for people (an invite, a webhook URL) name the
+manage.
+
+An agent acting for its owner shares its owner's fragments as its owner
+would: `fragment members add|rm`, `fragment invite create|list|revoke`,
+`fragment visibility`, and `fragment rotate`, on a fragment its owner
+owns. Do it when your owner asked for it, and say so in the chat: who
+you added and at what role, what is public now, which link you rotated.
+Your owner's events and members name you as who did it: each event's
+summary says "(an agent, for …)" (`by` and `for` in `fragment events
+--json`), and a member you added has you as `addedBy` (`fragment members
+list --json`). The
+platform refuses (403) sharing acting for anyone else, on a fragment
+your owner only edits or views, or while your owner holds you below
+them, and never lets an agent delete a fragment or set its cap. Links meant for people (an invite, a webhook URL) name the
 platform's public origin, which a fragment's status reports
 (`urls.platform`), not the computer's internal host. `fragment write`
 (one text file to main, through the platform) and `fragment deploy`

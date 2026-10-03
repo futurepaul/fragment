@@ -180,9 +180,10 @@ rollback), members and invites, call (operations), and read and follow
 Each call in an agent's turn acts with the lower of the role of the
 person who started the turn and a cap: the agent's own membership, or
 `editor` on fragments its owner belongs to. Owner-only actions never go
-through an agent. Replaces decision 3's "a chat guest has the owner's
-full authority", which let a guest reach everything the owner has.
-`docs/phase-7.md`.
+through an agent (since 2026-10-04, sharing does, for the agent's own
+owner: docs/cloudflare-v1.md, decision 36). Replaces decision 3's "a
+chat guest has the owner's full authority", which let a guest reach
+everything the owner has. `docs/phase-7.md`.
 
 ### 18. Channels a fragment declares postable (Paul, 2026-09-25)
 
