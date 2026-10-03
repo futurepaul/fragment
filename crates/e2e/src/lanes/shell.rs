@@ -418,7 +418,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
 
     // both agents in one chat, search, and archiving, as the person uses them
-    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &first_label }, &shots)?;
+    let first_title = row.as_str().unwrap_or("").to_string();
+    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &first_label, first_title: &first_title }, &shots)?;
 
     // an app's window
     b.click(&page, "#add-app")?;
@@ -496,6 +497,8 @@ struct Person<'a> {
     session: &'a str,
     username: &'a str,
     first: &'a str,
+    /// Its title, as the shell shows it ("Novatron DX").
+    first_title: &'a str,
 }
 
 /// A JS string literal.
@@ -562,10 +565,10 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
          const direct = Object.fromEntries([...document.querySelectorAll('#chats .agent-row:not([data-group])')].map((r) => [r.querySelector('.label').textContent, color(r.querySelector('.agent-avatar'))])); \
          return { key: g.dataset.key, label: g.querySelector('.label').textContent, stack: [...g.querySelectorAll('.avatar-stack .agent-avatar')].map(color), direct, heading: document.querySelectorAll('#agent-mark .avatar-stack .agent-avatar').length }; })()",
     )?;
-    let colors = json!([row["direct"]["Reader"], row["direct"][me.first]]);
+    let colors = json!([row["direct"]["Reader"], row["direct"][me.first_title]]);
     s.ok(
         "the sidebar shows it as a group: its agents' names, their colours stacked (the lead's first, each its identity's)",
-        made && row["label"] == format!("Reader, {}", me.first).as_str() && row["stack"] == colors && colors[0].is_string() && row["heading"] == 2,
+        made && row["label"] == format!("Reader, {}", me.first_title).as_str() && row["stack"] == colors && colors[0].is_string() && row["heading"] == 2,
         &row,
     );
     let group = row["key"].as_str().unwrap_or("").trim_start_matches("chat:").to_string();
@@ -601,14 +604,14 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("searching a message's words lists it under Messages, in its chat", found, b.eval(page, "document.getElementById('search-results').innerText")?);
     let _ = b.screenshot(page, &shots.join("desktop-search.png"));
     b.click(page, &hit)?;
-    let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first)), wait);
+    let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
     s.ok("clicking it opens its chat", opened, b.eval(page, "document.getElementById('chat-title').textContent")?);
 
     // archiving, from the chat's menu: the person's own view
     let row_of = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
     b.click(page, "#agent-heading")?;
     let archived = menu_item(b, page, "Archive")?;
-    let left = b.until(page, &format!("!{} && {} && document.getElementById('chat-title').textContent !== {}", row_of(&first_chat), row_of(&group), js(me.first)), wait);
+    let left = b.until(page, &format!("!{} && {} && document.getElementById('chat-title').textContent !== {}", row_of(&first_chat), row_of(&group), js(me.first_title)), wait);
     s.ok("Archive, from its menu: the chat leaves the sidebar, and another opens", archived && left, b.eval(page, "document.getElementById('chats').innerText")?);
     b.click(page, "#search-agents")?;
     b.eval(page, &fill("#workspace-search", "water garden"))?;
@@ -616,7 +619,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let marked = b.until(page, &format!("[...document.querySelectorAll({rows})].some((r) => r.querySelector('.meta')?.textContent === 'Archived')"), wait);
     s.ok("search still finds it, marked archived", marked, b.eval(page, "document.getElementById('search-results').innerText")?);
     b.click(page, &hit)?;
-    b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(me.first)), wait);
+    b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(me.first_title)), wait);
     b.click(page, "#agent-heading")?;
     let unarchived = menu_item(b, page, "Unarchive")?;
     let back = b.until(page, &row_of(&first_chat), wait);
