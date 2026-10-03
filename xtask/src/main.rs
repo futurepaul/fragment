@@ -287,7 +287,7 @@ fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
     let read = |path: &str| std::fs::read_to_string(root.join(path)).with_context(|| format!("read {path}"));
-    let copies = ["cli/GUIDE.md", "README.md", "cell/src/auth.rs"].map(|path| read(path).map(|text| (path, text)));
+    let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
@@ -310,7 +310,7 @@ const RELEASE_ASSETS: [(&str, &str); 3] =
     [("aarch64-apple-darwin", "Darwin-arm64"), ("x86_64-apple-darwin", "Darwin-x86_64"), ("x86_64-unknown-linux-musl", "Linux-x86_64")];
 
 /// cli/SKILL.md (`fragment skill`) is a skill, and its one-line install,
-/// which the platform's home page, GUIDE.md, and the README copy, fetches
+/// which the shell's settings, GUIDE.md, and the README copy, fetches
 /// the latest release's `fragment-$(uname -s)-$(uname -m).tar.gz`: the
 /// release workflow (`.github/workflows/release.yml`) must build exactly
 /// those assets, each a tarball of `fragment` alone. Otherwise a renamed

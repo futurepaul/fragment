@@ -314,8 +314,9 @@ function agentOfChat(name) {
   return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.fragment ?? null;
 }
 
-function openChat(name) {
+function openChat(name, push = true) {
   if (!byName(name)) return;
+  if (push) at("/");
   state.page = null;
   $("settings-page").hidden = true;
   $("frames").hidden = false;
@@ -606,8 +607,34 @@ $("update-go").onclick = async () => {
   }
 };
 
+// ---- where the page is: `/` its chats, `/settings` its settings; each
+// view says so in the address, so a reload or a link stays put ----
+const SETTINGS = "/settings";
+function at(path) {
+  if (location.pathname !== path) history.pushState(null, "", path);
+}
+addEventListener("popstate", () => {
+  const shown = !$("layout").hidden;
+  if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
+  else if (shown && location.pathname !== SETTINGS && byName(state.current)) openChat(state.current, false);
+  else start().catch((e) => notice("This page did not load", e.message));
+});
+
 // ---- settings: the person's account, credit, computer and agents ----
 const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
+// what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
+const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fragments are read-only, and your agents are stopped" };
+const WHY = {
+  guest: "a guest has no agents",
+  seat_canceled: "the seat was canceled",
+  no_credit: "the credit is used up; adding credit starts them again",
+  overdrawn: "the balance reached the overdraft; credit that brings it above zero ends it",
+};
+// The CLI's one-line install, for macOS and Linux (cli/SKILL.md's: `cargo
+// xtask check` holds the two to each other and to the release's assets),
+// and a coding agent's skill, in Claude Code's folder.
+const INSTALL = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
+const SKILL = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
 function section(title, ...children) {
   const s = el("section", "settings-section");
   s.append(el("h2", null, title), ...children);
@@ -618,7 +645,14 @@ function line(label, value) {
   p.append(el("span", "settings-key", label), el("span", "settings-value", value));
   return p;
 }
-async function openSettings() {
+// a sentence whose `quoted` parts are code
+function say(text) {
+  const p = el("p");
+  text.split("`").forEach((part, i) => p.append(i % 2 ? el("code", null, part) : part));
+  return p;
+}
+async function openSettings(push = true) {
+  if (push) at(SETTINGS);
   state.page = "Settings";
   $("frames").hidden = true;
   const page = $("settings-page");
@@ -628,8 +662,15 @@ async function openSettings() {
   renderChats();
   leaveSidebar();
   const [ledger, linked] = await Promise.all([api("GET", "/api/ledger").catch(() => null), api("GET", "/api/connections").catch(() => null)]);
-  const email = state.me.subjects?.find((x) => x.email)?.email ?? "—";
-  const account = section("Account", line("Username", `@${state.me.username}`), line("Signed in as", email));
+  const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
+  const id = line("Identity", state.me.id);
+  id.lastChild.classList.add("mono");
+  const account = section(
+    "Account",
+    line("Username", `@${state.me.username}`),
+    line(emails.length > 1 ? "Sign-ins" : "Signed in as", emails.join(", ") || "—"),
+    id,
+  );
   // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
   const picture = el("label", "quiet picture");
   const shown = el("img");
@@ -647,23 +688,31 @@ async function openSettings() {
     const r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
     if (r.ok) {
       state.me = await api("GET", "/api/identities/me");
-      openSettings();
+      openSettings(false);
     } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
   };
   account.append(picture);
+  // another sign-in (an email, a provider) that is this person too, and signing out
+  const actions = el("div", "settings-actions");
+  const link = el("a", "quiet", "Add another sign-in");
+  link.href = `/auth/link?return=${encodeURIComponent(SETTINGS)}`;
   const signout = el("form");
   signout.method = "post";
   signout.action = "/auth/logout";
   const out = el("button", "quiet", "Sign out");
   out.type = "submit";
   signout.append(out);
-  account.append(signout);
+  actions.append(link, signout);
+  account.append(actions);
+  const standing = ledger?.standing?.standing;
   const credit = ledger
     ? section(
         "Credit",
         line("Plan", ledger.plan === "seat_always_on" ? "Always-on seat" : ledger.plan === "seat" ? "Seat" : "Guest"),
         line("This month", `${usd(ledger.availableMicros ?? ledger.balanceMicros ?? 0)} left`),
-        ...(ledger.standing?.standing && ledger.standing.standing !== "ok" ? [el("p", "settings-warning", ledger.standing.why ? `Your agents are stopped: ${ledger.standing.why}` : "Your agents are stopped.")] : []),
+        ...(standing && standing !== "ok"
+          ? [el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + ".")]
+          : []),
       )
     : section("Credit", el("p", "muted", "Your credit could not be read."));
   const c = state.computer;
@@ -706,7 +755,7 @@ async function openSettings() {
           const { url } = await api("POST", `/api/connections/${encodeURIComponent(c.provider)}/authorize`, {});
           window.open(url, "_blank", "popup,width=520,height=720");
           // back from the provider: the section says so
-          addEventListener("focus", () => openSettings().catch(() => {}), { once: true });
+          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
         } catch (e) {
           go.textContent = e.message;
         } finally {
@@ -717,11 +766,28 @@ async function openSettings() {
     }
     return row;
   }) : [el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read.")]));
-  const cli = section("The command line", el("p", null, "Your agents and you can publish apps from a terminal: install the `fragment` CLI and run `fragment login`; it opens this platform to approve its key."));
-  const pair = el("a", "quiet", "Approve a CLI");
-  pair.href = "/cli";
-  cli.append(pair);
-  page.replaceChildren(account, credit, computer, agents, connections, cli);
+  // pairing the CLI: `fragment login` opens this platform to approve its key
+  const cli = section(
+    "The command line",
+    say("Your agents and you can publish apps from a terminal. Install `fragment` (macOS or Linux):"),
+    el("pre", "command", INSTALL),
+    say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
+    el("pre", "command", SKILL),
+  );
+  page.replaceChildren(account, credit, computer, agents, connections, cli, ...credited(WALLPAPER));
+}
+// The wallpaper's photographer, credited. A photo of the person's own
+// (later) is credited to no one: `credited(null)` is no section.
+const WALLPAPER = { by: "Teo Badini", at: "https://www.pexels.com/@teobadini/", on: "Pexels" };
+function credited(photo) {
+  if (!photo) return [];
+  const who = el("a", null, photo.by);
+  who.href = photo.at;
+  who.target = "_blank";
+  who.rel = "noopener";
+  const p = el("p", "muted");
+  p.append("Photo by ", who, ` on ${photo.on}`);
+  return [section("Wallpaper", p)];
 }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
@@ -835,11 +901,14 @@ async function start(open) {
   state.me = me;
   if (!me.username) return chooseUsername();
   await load();
-  if (!chats().length && !open) return firstAgent();
+  // the first agent is asked for at home; settings open as asked, chats or not
+  const settings = !open && location.pathname === SETTINGS;
+  if (!chats().length && !open && !settings) return firstAgent();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : chats()[0]?.name);
-  if (pick) openChat(pick);
+  if (settings) await openSettings(false);
+  else if (pick) openChat(pick);
   else notice("No chats yet", "Make an agent to start.");
   prewake();
 }

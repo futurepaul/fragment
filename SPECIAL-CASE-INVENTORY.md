@@ -15,7 +15,7 @@ a vendor's product beyond the credential it holds.
 | Surface | Why it is platform | Built on |
 |---|---|---|
 | Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`) | Security: it mints the credentials every other surface trusts. | WorkOS AuthKit; the registry |
-| The shell (`/chat`): sidebar, tabs, profile, search, first run | Security: it holds your session and frames your fragments and computers. The thin page users can't break. | The public fragment, computer, identity and ledger APIs |
+| The shell (`/`, `/settings`): sidebar, tabs, profile and settings, search, first run | Security: it holds your session and frames your fragments and computers. The thin page users can't break. | The public fragment, computer, identity and ledger APIs |
 | Identity and delegation | Security: who an agent acts for, and at what role. | The registry |
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
@@ -23,10 +23,9 @@ a vendor's product beyond the credential it holds.
 
 ## Interim, until phase 5
 
-On master after the phase 1 cut, the shell's place is held by `/`
-(choose a username) and `/settings` (your fragments, a new fragment,
-CLI pairing, your picture), plus `/join/{name}`. All three go when the
-shell lands.
+On master after the phase 1 cut, `/join/{name}` (accepting an invite)
+still holds a place of the shell's, as a page of its own. `/` and
+`/settings` are the shell's page now.
 
 ## Fragment plumbing (not special cases)
 

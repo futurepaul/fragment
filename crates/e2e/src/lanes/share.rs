@@ -491,29 +491,35 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{:?} {:?}", chrome.eval(&page, "window.__sheet.closed"), chrome.pages()?),
     );
 
-    // ---- the platform's settings, the one page that frames the sheet: its
-    // Share opens it in a dialog, and Done closes it
+    // ---- the shell, the one page that frames the sheet: an app's Share
+    // opens it in a dialog, and Done closes it (at /settings, which the
+    // shell opens whether or not the person has a chat yet)
     let home = chrome.open(&format!("{platform}/settings"))?;
-    let link = format!("a[data-share][href={sheet:?}]");
-    // A hand's click lands where the link is drawn: only once the page has
-    // loaded, its fonts are in, and the link's handler is set, or a layout
-    // still moving puts the click on the row's other link (on CI it opened
-    // the fragment itself).
-    let settled = format!("document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({link:?})?.onclick");
-    let listed = chrome.until(&home, &settled, wait);
+    chrome.viewport(&home, 1280, 800, false)?;
+    let row = format!("#apps .row[data-key={:?}]", format!("app:{chat}"));
+    let share = "#stack button[aria-label='Share…']";
+    // A hand's click lands where the button is drawn: only once the page has
+    // loaded and its fonts are in, or a layout still moving puts the click
+    // elsewhere.
+    let settled = |selector: &str| format!("document.readyState === 'complete' && document.fonts.status === 'loaded' && !!document.querySelector({selector:?})");
+    // (the sidebar laid out open, as a desktop's is)
+    let listed = chrome.until(&home, &format!("{} && document.getElementById('layout').classList.contains('left-open')", settled(&row)), wait);
     if listed {
-        chrome.click(&home, &link)?;
+        chrome.click(&home, &row)?;
+    }
+    let windowed = listed && chrome.until(&home, &settled(share), wait);
+    if windowed {
+        chrome.click(&home, share)?;
     }
     let inside = |chrome: &mut Browser| chrome.eval_in_frame(&home, "/share/", "document.body?.innerText ?? ''").ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-    let shown = listed && chrome.until(&home, "document.getElementById('share').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
+    let shown = windowed && chrome.until(&home, "document.getElementById('sheet').open", wait) && s.eventually(wait, || inside(&mut chrome).contains("General access"));
     chrome.screenshot(&home, &s.scratch.join("share-dialog.png"))?;
-    chrome.eval(&home, "window.before = true")?;
     let done = shown && chrome.eval_in_frame(&home, "/share/", "(document.querySelector('button[data-done]').click(), true)").is_ok();
-    let closed = done && chrome.until(&home, "!window.before && !document.getElementById('share').open", wait);
+    let closed = done && chrome.until(&home, &format!("!document.getElementById('sheet').open && !document.querySelector('#sheet iframe') && !!document.querySelector({row:?})"), wait);
     s.ok(
-        "the platform's settings open the sheet in a dialog (a frame on its own origin), and its Done closes it (the page reloads, showing what changed)",
+        "the shell opens an app's share sheet in a dialog (a frame on its own origin), and its Done closes it (the shell reads the list again)",
         shown && closed,
-        format!("listed {listed} shown {shown} done {done}: {}", inside(&mut chrome)),
+        format!("listed {listed} windowed {windowed} shown {shown} done {done}: {}", inside(&mut chrome)),
     );
     chrome.close(home)?;
 

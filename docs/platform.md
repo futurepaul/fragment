@@ -23,8 +23,9 @@ belongs in a template instead.
 
 | Path | What |
 |---|---|
-| `/`, `/settings`, `/auth/*`, `/cli` | Sign-in, choosing a username, the settings page (your fragments, a new one, pairing your CLI), approving the CLI's key |
-| `/share/<name>` | The share sheet, in a dialog on the settings page, or on a page of its own: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, and copies and renews the link. Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
+| `/`, `/settings` | The shell (docs/api.md, The shell): your chats and apps, and at `/settings` its settings (your account, credit, computer, connections, pairing your CLI) |
+| `/auth/*`, `/cli` | Sign-in, approving the CLI's key |
+| `/share/<name>` | The share sheet, in a dialog in the shell, or on a page of its own: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, and copies and renews the link. Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
 | `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
@@ -32,7 +33,7 @@ belongs in a template instead.
 No page on another origin may frame a platform page: every one answers
 `frame-ancestors 'none'` (PR `platform-no-framing`) but the share sheet,
 which answers `frame-ancestors 'self'` (and `X-Frame-Options:
-SAMEORIGIN`) so the settings page can show it in a dialog. `'self'` is the
+SAMEORIGIN`) so the shell can show it in a dialog. `'self'` is the
 platform's origin alone, and nothing but the platform's own pages is
 served there: every fragment is on an origin of its own (a fleet without
 a hostname suffix, where fragments share the platform's origin, is the

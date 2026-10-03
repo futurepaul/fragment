@@ -398,7 +398,7 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
 }
 
 /// Makes a fragment for a person, under their username: the API's create
-/// and the platform's "new" page, the one door every fragment is made
+/// (the shell's catalog calls it), the one door every fragment is made
 /// through (an agent's or a template's included). An agent makes one for
 /// its owner: the owner's (billed to them, in their list), under their
 /// username, with the agent an editor of it. Its maker's ledger is asked
@@ -932,7 +932,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             Some(resp) => Ok(resp),
             None => Err(CellError::new(ErrorCode::NotFound, format!("no shell file {}", file.join("/")))),
         },
-        (_, [""] | ["settings"] | ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
+        // the shell, for everyone: signed out it asks them to sign in,
+        // without a username it asks for one; `/settings` opens its settings
+        (Method::Get, [""] | ["settings"]) => Ok(shell::page(&req, cfg, &url)?),
+        (_, ["auth", ..] | ["cli"] | ["cli", "approve"]) => {
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }

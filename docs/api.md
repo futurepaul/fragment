@@ -200,9 +200,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /` | Signed out: a link to sign in. Signed in without a username: choosing one. Then: 302 to `/settings` |
-| `GET /settings` | (signed out: to sign in; without a username: to `/`) who is signed in, their credit this month and what their standing stops (Ledger), their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`, in a dialog: a frame of the sheet, whose Done closes it, and the page reloads), the "new fragment" form (blank, todo, inbox, calories), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
-| `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403 |
+| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/settings` it opens its settings |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
@@ -228,8 +226,8 @@ pages may frame (`frame-ancestors 'self'`, `X-Frame-Options:
 SAMEORIGIN`), and `Cross-Origin-Opener-Policy:
 same-origin` (a page that opens one in a window of its own is severed
 from it: its handle reads `closed`, and can neither navigate nor message
-it), and every form here (`/auth/new`, `/auth/username`, `/auth/picture`,
-`/auth/logout`, `/auth/fragment`, `/cli/approve`, and Sharing's below) is 403 from another
+it), and every form here (`/auth/username`, `/auth/logout`,
+`/auth/fragment`, `/cli/approve`, and Sharing's below) is 403 from another
 origin, a fragment's page included. A browser sends `Origin` with every
 POST (`null` from a page that hides its referrer), so a POST without one
 is no browser's.
@@ -419,7 +417,7 @@ click that opened a page (a double-click's second half) cannot confirm
 in it (the sheet's selects too). Both pages send no CORS headers (a
 fragment's page cannot read them, so it never holds a form's token),
 refuse every frame but the sheet's on the platform's own origin (the
-settings page's dialog: `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`;
+shell's dialog: `frame-ancestors 'self'`, `X-Frame-Options: SAMEORIGIN`;
 every fragment is another origin), sever their opener, allow scripts
 and styles only inline and images only from the platform
 (`Content-Security-Policy`), and keep their URL to the platform
@@ -430,7 +428,7 @@ and styles only inline and images only from the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the platform's "new" page), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
@@ -1223,8 +1221,17 @@ agents use them through the computer's swap (docs/computers.md).
 
 ## The shell (phase 5)
 
-The platform's one page is `/` (cell/shell/, its files at
-`/__shell/<file>`). It calls the API with the person's platform session
+The platform's one page is `/`, and `/settings` (cell/shell/, its files at
+`/__shell/<file>`): its script reads the path, opening its settings at
+`/settings` and the person's chats at `/`, and puts the view it shows in
+the address, so a reload stays put. Its settings hold the person's
+account (username, sign-ins, identity id, picture, `/auth/link` to add
+another sign-in, a POST to `/auth/logout`), their credit and what their
+standing stops, their computer and agents, connections, and pairing the
+CLI (the one-line install, `fragment login`, and `fragment skill` for a
+coding agent); its sidebar lists their fragments, each one's share sheet
+(`/share/<name>`) in a dialog, and the catalog makes an app from a
+template. It calls the API with the person's platform session
 rather than a key: a request on the platform's host is taken as the
 signed-in person when it carries `x-fragment-shell: 1` and
 `Sec-Fetch-Site: same-origin`, and, writing, the platform's exact
