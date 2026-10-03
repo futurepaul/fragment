@@ -336,6 +336,12 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-value { min-width: 0; overflow-wrap: anywhere; }
 .settings-warning { color: var(--danger-text); font-size: 14px; }
 .settings-section .row { width: 100%; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-actions form { margin: 0; }
+.settings-value.mono, .settings-section code { font: 500 12.5px/1.6 var(--font-mono); }
+.settings-section p code { padding: 1px 5px; border-radius: 5px; background: var(--chat-code); }
+.settings-section p a { color: var(--text-secondary); text-underline-offset: 2px; }
+.settings-section pre.command { width: 100%; margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--chat-code); font: 500 12.5px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); }
 .sheet iframe { display: block; width: min(92vw, 460px); height: 600px; border: 0; }
 .picture { gap: 10px; cursor: pointer; }
 .picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }

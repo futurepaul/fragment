@@ -120,7 +120,7 @@ prebuilt bundle is in the debt ledger).
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank` and `calories`, which has a goose agent of its own); the
-  platform's "new" page offers all but `notes`.
+  shell's catalog offers `todo`, `inbox` and `blank`.
 - `cargo xtask deploy --config <file> [--branch <name>]`: builds and
   deploys to Cloudflare from a deployment's config, kept outside the repo
   (`deploy/example.jsonc`; xtask/src/deploy.rs). A branch is a complete

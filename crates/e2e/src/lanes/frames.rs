@@ -1,9 +1,9 @@
 //! Frames (docs/api.md, Frame sessions; docs/fragment-boats.md, design C):
-//! the platform's own page frames fragments signed in, as the shell's tabs
-//! will, through its mint (`/auth/frame`), and nothing else mints. The
-//! shell is not built yet, so the platform's settings page (signed out,
-//! its home) stands in for it: the lane adds the frames with a script of
-//! its own over DevTools, as the shell's code will.
+//! the platform's own page, the shell, frames fragments signed in, as its
+//! tabs do, through its mint (`/auth/frame`), and nothing else mints. The
+//! lane loads the shell at `/` and adds the frames with a script of its
+//! own over DevTools, as the shell's code does (so each frame is one the
+//! lane chose, whatever the shell opens itself).
 //!
 //! Over HTTP, as a browser sends it: the mint answers only a frame of the
 //! platform's own page; its token works once, for its fragment only, and
@@ -51,6 +51,13 @@ export class App extends DurableObject {
 }
 "#;
 const WHO_JSON: &str = r#"{ "operations": { "whoami": { "kind": "mutation", "role": "viewer", "input": { "type": "object", "additionalProperties": false } } } }"#;
+
+/// The shell, once it has asked who is signed in and shows them their
+/// page: the sidebar, or, for a person with no chat yet, the first run's
+/// question.
+const SIGNED_IN: &str = "!!document.querySelector('#first-run-card textarea[name=job]') || (!document.getElementById('layout').hidden && !!document.querySelector('#chats > *'))";
+/// The shell signed out: it asks them to sign in.
+const SIGNED_OUT: &str = "!!document.querySelector('#first-run-card a[href^=\"/auth/login\"]')";
 
 /// What a page around frames hears from them: every message, with its origin.
 const LISTEN: &str = "(() => { window.heard = []; addEventListener('message', (e) => heard.push({ origin: e.origin, data: e.data })); return true; })()";
@@ -204,11 +211,12 @@ pub(super) fn safari_like(s: &Suite) -> Result<Option<Browser>> {
     Browser::launch_with(&s.scratch, &args, Some(&blocking))
 }
 
-/// A platform page, loaded (it shows `shows`), listening to its frames.
-fn platform_page(chrome: &mut Browser, api: &Api, path: &str, shows: &str) -> Result<Page> {
-    let page = chrome.open(&format!("{}{path}", api.base))?;
-    let loaded = chrome.until(&page, &format!("document.readyState === 'complete' && document.body.innerText.includes({shows:?})"), Duration::from_secs(20));
-    anyhow::ensure!(loaded, "the platform's {path} did not open");
+/// The shell's page at `/`, loaded (`ready`: `SIGNED_IN` or `SIGNED_OUT`),
+/// listening to its frames.
+fn platform_page(chrome: &mut Browser, api: &Api, ready: &str) -> Result<Page> {
+    let page = chrome.open(&format!("{}/", api.base))?;
+    let loaded = chrome.until(&page, &format!("document.readyState === 'complete' && ({ready})"), Duration::from_secs(20));
+    anyhow::ensure!(loaded, "the shell did not open ({ready}): {}", chrome.eval(&page, "document.body.innerText.slice(0, 300)")?);
     chrome.eval(&page, LISTEN)?;
     Ok(page)
 }
@@ -281,7 +289,7 @@ pub(super) fn computer_ports(s: &mut Suite, api: &Api, owner: &fragment_nip98::K
     };
     let session = api.sign_in(&Api::email_of(owner))?;
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &session)?;
-    let shell = platform_page(&mut chrome, api, "/settings", "Signed in as")?;
+    let shell = platform_page(&mut chrome, api, SIGNED_IN)?;
     frame(&mut chrome, &shell, &ticket()?)?;
     let computer = origin.split("//").nth(1).unwrap_or("").to_string();
     let shown = frame_says(s, &mut chrome, &shell, &computer, "This computer has no screen", wait);
@@ -312,7 +320,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
 
     // ---- the owner's page frames their own members-only fragment
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", owner_session)?;
-    let shell = platform_page(&mut chrome, api, "/settings", "Signed in as")?;
+    let shell = platform_page(&mut chrome, api, SIGNED_IN)?;
     frame(&mut chrome, &shell, &mint(n.own))?;
     let me = frame_says(s, &mut chrome, &shell, &host(n.own), &format!("me:{owner_id}"), wait);
     let op = me && frame_says(s, &mut chrome, &shell, &host(n.own), &format!("op:{owner_id}"), wait);
@@ -356,7 +364,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
 
     // ---- a fragment shared with the guest, in the guest's page
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", guest_session)?;
-    let theirs_page = platform_page(&mut chrome, api, "/settings", "Signed in as")?;
+    let theirs_page = platform_page(&mut chrome, api, SIGNED_IN)?;
     frame(&mut chrome, &theirs_page, &mint(n.shared))?;
     let me = frame_says(s, &mut chrome, &theirs_page, &host(n.shared), &format!("me:{guest_id}"), wait);
     let op = me && frame_says(s, &mut chrome, &theirs_page, &host(n.shared), &format!("op:{guest_id}"), wait);
@@ -368,7 +376,7 @@ fn in_chrome(s: &mut Suite, api: &Api, n: &Names<'_>, (owner_id, owner_session):
 
     // ---- signed out: a public fragment frames as a stranger sees it
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", "signed-out")?;
-    let home = platform_page(&mut chrome, api, "/", "Sign in")?;
+    let home = platform_page(&mut chrome, api, SIGNED_OUT)?;
     frame(&mut chrome, &home, &api.site_url(n.open, ""))?;
     let shown = frame_says(s, &mut chrome, &home, &host(n.open), "inside open", wait) && frame_says(s, &mut chrome, &home, &host(n.open), "me:anon:", wait);
     s.ok(

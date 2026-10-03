@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use super::app::ship;
 use super::jobs;
-use super::signin::{site_cookie, with_session};
+use super::signin::{site_cookie, who};
 use crate::api::{Api, Call};
 use crate::Suite;
 
@@ -151,8 +151,8 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let got = seen.lock().expect("upstream log").clone();
     s.ok("after a restart a sealed secret opens: the job's fetch carries it", ran["status"] == "succeeded" && got == [format!("Bearer {SECRET}")], format!("{ran} {got:?}"));
     // a browser's sessions, and the key its push subscriptions were made with
-    let r = with_session(&api, "GET", "/settings", &member_session)?;
-    s.ok("after a restart a browser's platform session still signs it in", r.status == 200 && r.text.contains(MEMBER_EMAIL), &r);
+    let r = who(&api, &member_session)?;
+    s.ok("after a restart a browser's platform session still signs it in", r.to_string().contains(MEMBER_EMAIL), &r);
     let r = push_key(&api)?;
     s.ok("and its site session on a fragment still works", r.status == 200, &r);
     s.ok("the fragment's VAPID key is the one it had (sealed, and opened again)", r.body["key"].is_string() && r.body["key"] == vapid, format!("{} vs {vapid}", r.body["key"]));

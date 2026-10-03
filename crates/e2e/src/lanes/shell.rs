@@ -18,7 +18,7 @@ use crate::Suite;
 
 /// A request as the shell's page sends it: the session cookie, the
 /// shell's header, `Sec-Fetch-Site: same-origin`, and its Origin.
-fn shell(api: &Api, session: &str, method: &'static str, path: &str, body: Option<&Value>, extra: &[(&'static str, String)]) -> Result<Reply> {
+pub(super) fn shell(api: &Api, session: &str, method: &'static str, path: &str, body: Option<&Value>, extra: &[(&'static str, String)]) -> Result<Reply> {
     let mut headers: Vec<(&str, String)> = vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())];
     for (k, v) in extra {
         headers.retain(|(h, _)| h != k);
@@ -83,7 +83,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{} / anonymous {}", owner_page.status, page.status),
     );
     let script = shell_site(s, api, &session, &agent, "agent.js")?;
-    s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), &script.status);
+    s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), script.status);
     let channels = shell(api, &session, "GET", &format!("/api/f/{agent}/channels"), None, &[])?;
     s.ok(
         "the template's channels run on it",
@@ -102,7 +102,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let deploy = shell(api, &session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
     s.ok("its job and settings are files of its own, deployed", r.status == 200 && deploy.status == 200, format!("{r} {deploy}"));
     let soul = shell_site(s, api, &session, &agent, "__file?path=SOUL.md")?;
-    s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), &soul.status);
+    s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), soul.status);
 
     // code of its own is a fork's, refused while it names the template
     let r = shell(
@@ -158,8 +158,9 @@ fn fill(selector: &str, value: &str) -> String {
 /// The shell in a browser (phase 5's exit, at desktop and phone sizes):
 /// first run (a username, the first agent), the agent's chat framed and
 /// signed in on its own origin with the agent's answer in it, a second
-/// agent, an app's window, settings, and the phone's layout. The agents
-/// run on the stub image (Docker), as the computers section's do.
+/// agent, an app's window, settings (at `/settings`, which the address
+/// keeps), and the phone's layout. The agents run on the stub image
+/// (Docker), as the computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("shell-ui") {
         return Ok(());
@@ -171,7 +172,14 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let shots = s.dir("shell-ui");
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
-    let session = api.sign_in(&format!("shell-ui-{}@e2e.test", crate::api::now_s()))?;
+    // signed out, settings is the shell asking them to sign in, and back to settings
+    let page = b.open(&format!("{}/settings", api.base))?;
+    let asked = b.until(&page, "document.querySelector('#first-run-card a.primary')?.getAttribute('href') === '/auth/login?return=%2Fsettings'", wait);
+    s.ok("signed out, /settings is the shell asking them to sign in, and to come back to settings", asked, b.eval(&page, "document.body.innerText.slice(0, 200)")?);
+    b.close(page)?;
+
+    let email = format!("shell-ui-{}@e2e.test", crate::api::now_s());
+    let session = api.sign_in(&email)?;
     b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
@@ -228,12 +236,44 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an app from the catalog opens in a window beside the chat", window, "");
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
 
-    // settings
+    // settings, at /settings: what a person needs of their account
+    let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
     b.click(&page, "#settings")?;
-    let settings = b.until(&page, "['Account', 'Credit', 'Computer', 'Connections'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
-    s.ok("settings: the account, credit, computer and connections", settings, b.eval(&page, "document.getElementById('settings-page').innerText.slice(0, 300)")?);
+    let settings = b.until(&page, "location.pathname === '/settings' && ['Account', 'Credit', 'Computer', 'Connections', 'The command line', 'Wallpaper'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    let text = b.eval(&page, "document.getElementById('settings-page').innerText")?;
+    let text = text.as_str().unwrap_or("");
+    let mut has = |q: &str| b.eval(&page, &format!("!!document.querySelector({q:?})")).ok() == Some(serde_json::json!(true));
+    s.ok(
+        "settings, at /settings: the account (who they are, their identity, another sign-in, signing out), credit, computer, connections, and the CLI",
+        settings
+            && text.contains(&format!("@{username}"))
+            && text.contains(&email)
+            && text.contains(&id)
+            && has("#settings-page a[href='/auth/link?return=%2Fsettings']")
+            && has("#settings-page form[method=post][action='/auth/logout'] button")
+            && text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
+            && text.contains("fragment login")
+            && text.contains("fragment skill > ~/.claude/skills/fragment/SKILL.md"),
+        &text[..text.len().min(600)],
+    );
+    let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
+    let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
+    s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
+    b.color_scheme(&page, "light")?;
+    b.eval(&page, "(document.getElementById('settings-page').scrollTop = 1e6, true)")?;
+    let _ = b.screenshot(&page, &shots.join("desktop-settings-end.png"));
+    b.reload(&page)?;
+    let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
+    s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
+    b.click(&page, "#chats .agent-row")?;
+    let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
+    b.eval(&page, "history.back(), true")?;
+    let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
+    b.eval(&page, "history.forward(), true")?;
+    let forward = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
+    s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname")?);
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;

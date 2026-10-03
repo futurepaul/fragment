@@ -2,10 +2,8 @@
 //! `registry/signin.rs`). WorkOS AuthKit authenticates people on the
 //! platform origin; the platform holds no key for them, only sessions.
 //!
-//! Platform origin:
+//! Platform origin (`/` and `/settings` are the shell's page: shell.rs):
 //!
-//!   GET  /                        choosing a username, then on to /settings; or sign in
-//!   GET  /settings                your fragments, a new one, pairing your CLI
 //!   GET  /auth/login?return=&login_hint=&invitation_token=   → WorkOS (a state cookie binds the
 //!                                 round trip; an invitation's token lets its invitee sign up, since
 //!                                 sign-up is off: WorkOS's "User invitation URL" points here)
@@ -26,6 +24,10 @@
 //!                                 approving adds the key at once
 //!   POST /cli/approve             (the form)
 //!
+//! The rest of a person's account (their picture, username, fragments,
+//! credit) is the API's, which the shell calls with this session
+//! (docs/api.md, The shell).
+//!
 //! On fragment.club the platform is cross-site from every fragment (they
 //! are on fragment.boats), so its session cookie reaches a fragment's page
 //! only on a top-level visit; a fleet whose platform shares the fragments'
@@ -41,8 +43,7 @@
 //! signed-in person carries the session's token, and the registry checks
 //! it in the same turn (`calls::By::Session`, `Mint`, `ApproveKey`,
 //! `Begin`'s `link_to`); a page that shows them gets their email with the
-//! session. Only a picture asks twice: its bytes are stored before the
-//! registry names them, so the session is checked before they are.
+//! session.
 //!
 //! A fragment's origin: `__signin?token=&return=` redeems the platform's
 //! redemption for this fragment only and sets its own session cookie (a
@@ -58,7 +59,7 @@
 //! admits goes through `/auth/fragment` and back.
 
 use fragment_core::{form, npub, site};
-use fragment_proto::{ErrorCode, FragmentList, IdentityKind, Role, Visibility};
+use fragment_proto::ErrorCode;
 use worker::*;
 
 use crate::ask_registry;
@@ -83,8 +84,7 @@ const LINK_PROOF_MAX: usize = 4096;
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
 
-/// A form of a few short fields: a new fragment's label and template, or a
-/// username.
+/// A form of a few short fields: a username.
 const SHORT_FORM_MAX_BYTES: usize = 4 * 1024;
 
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
@@ -264,108 +264,6 @@ pub(crate) fn same_origin(req: &Request, platform: &str) -> CellResult<()> {
     }
 }
 
-/// The platform bar's ledger: the person's credit this month, and what
-/// their standing stops, as the shell will say it (decision 27).
-async fn ledger_line(env: &Env, id: &str) -> String {
-    use fragment_core::ledger::Refused;
-    use fragment_core::price::dollars;
-    use fragment_proto::ledger::Standing;
-    match crate::ledger::ask(env, id, &crate::ledger::Status {}).await {
-        Ok(s) => {
-            let stopped = match s.standing {
-                Standing::Ok => String::new(),
-                Standing::AgentsStopped { why } => format!(" <b>{}.</b>", esc(&Refused::AgentsStopped { why }.message())),
-                Standing::ReadOnly { why } => format!(" <b>{}.</b>", esc(&Refused::ReadOnly { why }.message())),
-            };
-            format!("<p>Credit this month ({}): <b>{}</b> available.{stopped}</p>", esc(&s.month), dollars(s.available_micros.max(0)))
-        }
-        Err(_) => String::new(),
-    }
-}
-
-/// The fragments a person belongs to: each one's link, whose it is (and,
-/// on the owner's rows, which carry its sharing, who may open it), and its
-/// share sheet, where a member sees who is in.
-async fn fragments_list(env: &Env, cfg: &Config, url: &Url, id: &str) -> String {
-    let asked = async {
-        let list = Request::new("https://principal.internal/list", Method::Get)?;
-        env.durable_object("PRINCIPAL")?.get_by_name(id)?.fetch_with_request(list).await?.json::<FragmentList>().await
-    };
-    let Ok(list) = asked.await else { return String::new() };
-    let items: String = list
-        .fragments
-        .iter()
-        .map(|f| {
-            let link = cfg.canonical(url, &f.name);
-            let whose = match (f.role, f.sharing.as_ref().map(|s| s.visibility)) {
-                (Role::Owner, Some(Visibility::Public)) => "yours · anyone".to_string(),
-                (Role::Owner, Some(Visibility::Link)) => "yours · anyone with the link".to_string(),
-                (Role::Owner, Some(Visibility::Members)) => "yours · only the people in it".to_string(),
-                (Role::Owner, None) => "yours".to_string(),
-                (role, _) => format!("shared with you · {}", role.as_str()),
-            };
-            let shown = link.split("://").nth(1).unwrap_or(&link).trim_end_matches('/');
-            format!("<li><a href=\"{}\">{}</a> <small>{whose} · <a href=\"/share/{}\" data-share>Share</a></small></li>", esc(&link), esc(shown), esc(&f.name))
-        })
-        .collect();
-    match items.is_empty() {
-        true => "<h2>Your fragments</h2><p>None yet: make one below, or with <code>fragment init</code> in your terminal.</p>".to_string(),
-        // each one's share sheet, in a dialog
-        false => format!("<h2>Your fragments</h2><ul>{items}</ul>{}", share::DIALOG),
-    }
-}
-
-/// What follows a label in a fragment's address: `--<username>.<suffix>`
-/// (decision 16; a branch's mark before the dot), or, on a deployment
-/// without a suffix, `.<username>`.
-fn after_label(cfg: &Config, username: &str) -> String {
-    match &cfg.host_suffix {
-        Some(suffix) => format!("--{username}{}.{suffix}", cfg.host_label_suffix()),
-        None => format!(".{username}"),
-    }
-}
-
-/// The CLI's one-line install, for macOS and Linux: the latest release's
-/// tarball for this machine (`.github/workflows/release.yml`). `cargo xtask
-/// check` holds it to cli/SKILL.md's, and that to the release's assets.
-const INSTALL: &str = "mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin";
-/// A coding agent's skill, in Claude Code's folder (other agents take the
-/// same file in their own).
-const SKILL: &str = "mkdir -p ~/.claude/skills/fragment && fragment skill > ~/.claude/skills/fragment/SKILL.md";
-
-/// Pairing a CLI, and a coding agent that drives it.
-fn pair() -> String {
-    format!(
-        "<h2>Pair your CLI</h2><p>Install it (macOS or Linux; if <code>fragment</code> is not found after, put <code>~/.local/bin</code> on your PATH):</p><pre><code>{}</code></pre>\
-         <p>Then run <code>fragment login</code>: it opens this site to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:</p><pre><code>{}</code></pre>",
-        esc(INSTALL),
-        esc(SKILL)
-    )
-}
-
-/// The "new fragment" form: a label, and one of the platform's templates.
-fn new_form(after: &str) -> String {
-    let choices: String = crate::publish::TEMPLATES
-        .iter()
-        .enumerate()
-        .map(|(i, (name, t))| {
-            let (title, description) = crate::publish::describe(t);
-            format!(
-                "<p><label><input type=\"radio\" name=\"template\" value=\"{n}\"{c}> <b>{t}</b> {d}</label></p>",
-                n = esc(name),
-                c = if i == 0 { " checked" } else { "" },
-                t = esc(if title.is_empty() { name } else { &title }),
-                d = esc(&description),
-            )
-        })
-        .collect();
-    format!(
-        "<h2>New fragment</h2><form method=\"post\" action=\"/auth/new\">{choices}\
-         <p><input name=\"label\" required maxlength=\"63\" pattern=\"[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"name\" style=\"font:inherit;padding:.4em .6em;border-radius:8px;border:1px solid #aab\"><code>{a}</code> <button>Make it</button></p></form>",
-        a = esc(after),
-    )
-}
-
 pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
     redirect(&format!("{platform}/auth/login?return={}", enc(back)), &[])
 }
@@ -416,42 +314,12 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     )
 }
 
-/// `/settings`: who they are (their picture), their credit this month, their
-/// fragments with each one's share sheet, a new fragment, pairing a CLI,
-/// and signing out.
-async fn settings(env: &Env, cfg: &Config, url: &Url, live: calls::LiveSession) -> String {
-    let (who, email) = (live.identity, live.email.unwrap_or_default());
-    let username = who.username.clone().unwrap_or_default();
-    // the month and the fragments, asked of their cells at once
-    let (credit, fragments) = futures_util::future::join(ledger_line(env, &who.id), fragments_list(env, cfg, url, &who.id)).await;
-    format!(
-        "<p><img src=\"/api/users/{u}/picture\" alt=\"\" width=\"48\" height=\"48\" style=\"border-radius:50%;vertical-align:middle;object-fit:cover\" onerror=\"this.remove()\"> Signed in as <b>{u}</b> ({e}).</p>{b}{f}{n}{p}\
-         <h2>You</h2><form method=\"post\" action=\"/auth/picture\" enctype=\"multipart/form-data\"><p>Picture: <input type=\"file\" name=\"picture\" accept=\"image/png,image/jpeg,image/webp,image/gif\" required> <button>Set</button></p></form>\
-         <p><a href=\"/auth/logout\">Sign out</a> · <a href=\"/auth/link\">Add another sign-in to you</a> · <code>{id}</code></p>",
-        u = esc(&username),
-        e = esc(&email),
-        id = esc(&who.id),
-        b = credit,
-        f = fragments,
-        n = new_form(&after_label(cfg, &username)),
-        p = pair(),
-    )
-}
-
 /// Sign-in's routes on the platform origin (the router sends only these).
 pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
     let platform = cfg.platform(url);
     {
         match (method, segments) {
-            // the shell: signed out it asks them to sign in, without a username
-            // it asks for one (decision 16), and then it is their home
-            (Method::Get, [""]) => Ok(crate::shell::page(&req, cfg, url)?),
-            (Method::Get, ["settings"]) => match platform_session(&req, env, url).await? {
-                None => to_login(&platform, "/settings"),
-                Some((_, live)) if live.identity.username.is_none() && live.identity.kind == IdentityKind::Person => redirect("/", &[]),
-                Some((_, live)) => page(200, "Settings", &settings(env, cfg, url, live).await),
-            },
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
             // the registry checks the session is live as the sign-in begins
             (Method::Get, ["auth", "link"]) => match cookie_of(&req, SESSION_COOKIE, secure(url), "/")? {
@@ -477,44 +345,6 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     }
                     Err(e) => Err(e),
                 }
-            }
-            (Method::Post, ["auth", "new"]) => {
-                same_origin(&req, &platform)?;
-                let Some((_, live)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/settings") };
-                let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
-                let field = |name: &str| url::form_urlencoded::parse(&bytes).find(|(k, _)| k == name).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
-                let create = fragment_proto::CreateFragment { name: field("label"), visibility: None, template: Some(field("template")), title: None };
-                let owner = Signed::new(live.identity, None);
-                let v: serde_json::Value = match crate::create_fragment(env, cfg, url, create, owner).await {
-                    Ok(mut made) if made.status_code() == 200 => made.json().await?,
-                    Ok(mut made) => {
-                        let v: serde_json::Value = made.json().await.unwrap_or_default();
-                        return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/settings\">Back</a></p>", esc(v["message"].as_str().unwrap_or("it could not be made"))));
-                    }
-                    Err(e) => return page(400, "New fragment", &format!("<p>{}</p><p><a href=\"/settings\">Back</a></p>", esc(&e.message))),
-                };
-                let name = v["name"].as_str().ok_or_else(|| CellError::host("the create answered no name"))?;
-                // signed in on its own origin, then there
-                redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])
-            }
-            (Method::Post, ["auth", "picture"]) => {
-                // Two round trips, on purpose: the bytes land in BLOBS before
-                // the registry names them, so the session is checked first.
-                same_origin(&req, &platform)?;
-                let Some((token, _)) = platform_session(&req, env, url).await? else { return to_login(&platform, "/settings") };
-                let form = req.form_data().await?;
-                let Some(FormEntry::File(file)) = form.get("picture") else { return Err(CellError::invalid("choose a picture")) };
-                let bytes = file.bytes().await?;
-                if bytes.len() > fragment_proto::limits::PICTURE_MAX_BYTES {
-                    return page(400, "Picture", &format!("<p>A picture is at most {} KiB.</p><p><a href=\"/settings\">Back</a></p>", fragment_proto::limits::PICTURE_MAX_BYTES / 1024));
-                }
-                let Some(mime) = crate::picture_type(&bytes) else {
-                    return page(400, "Picture", "<p>A picture is a PNG, JPEG, WebP, or GIF.</p><p><a href=\"/settings\">Back</a></p>");
-                };
-                let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
-                crate::js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &bytes).await?;
-                ask_registry(env, &calls::SetPicture { by: calls::By::Session(token), sha, mime: mime.to_string() }).await?;
-                redirect("/settings", &[])
             }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
             (Method::Post, ["auth", "logout"]) => {

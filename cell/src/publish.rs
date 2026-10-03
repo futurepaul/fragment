@@ -16,9 +16,10 @@ use crate::files::{content_of, FileWrite, Wrote};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
 
-/// The templates a fragment can start from, in the order the platform's
-/// page offers them: the simplest first. `notes` stays with the CLI
-/// (`fragment new --template notes`): at 3 MiB it would double the cell.
+/// The templates a fragment can start from, the simplest first (a create
+/// that names none of them lists them in this order). `notes` stays with
+/// the CLI (`fragment new --template notes`): at 3 MiB it would double the
+/// cell.
 pub(crate) const TEMPLATES: [(&str, Template); 4] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES)];
 
 /// `live` moving under a deploy this many times is an error.
@@ -30,18 +31,6 @@ const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 pub(crate) fn template(name: &str) -> Option<Template> {
     TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
-}
-
-/// A template's fragment.json.
-fn manifest(t: Template) -> Value {
-    t.iter().find(|(p, _)| *p == "fragment.json").and_then(|(_, b)| serde_json::from_slice(b).ok()).unwrap_or_default()
-}
-
-/// A template's title and description, from its fragment.json.
-pub(crate) fn describe(t: Template) -> (String, String) {
-    let meta = manifest(t)["meta"].clone();
-    let text = |k: &str| meta[k].as_str().unwrap_or_default().to_string();
-    (text("title"), text("description"))
 }
 
 /// The template's fragment.json with the fragment's own name in it.

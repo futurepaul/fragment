@@ -1,14 +1,16 @@
 //! One-click fragments (docs/phase-6.md, step 2): a create from one of the
 //! platform's templates, the server-side commit and deploy routes (an
-//! agent's tools use them too), and the platform's "new" form.
+//! agent's tools use them too), and the shell's list and its "new" app.
 
 use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
+use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 
-use super::signin::{site_cookie, with_session};
-use crate::api::{url_enc, Api, Call, Reply};
+use super::shell::shell;
+use super::signin::site_cookie;
+use crate::api::{Api, Reply};
 use crate::Suite;
 
 /// A person with a CLI key and a platform session.
@@ -17,18 +19,6 @@ pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
     let session = api.sign_in(&format!("t-{}@e2e.test", &keys.pubkey_hex()[..12]))?;
     api.approve(&session, &keys)?;
     Ok((keys, session))
-}
-
-pub(super) fn post_form(api: &Api, path: &str, form: &str, session: &str, origin: &str) -> Result<Reply> {
-    api.call(Call {
-        method: "POST",
-        url: format!("{}{path}", api.base),
-        body: Some(form.as_bytes().to_vec()),
-        content_type: Some("application/x-www-form-urlencoded"),
-        cookie: Some(format!("fragment_session={session}")),
-        extra: vec![("origin", origin.to_string())],
-        ..Call::default()
-    })
 }
 
 pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
@@ -112,37 +102,37 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     let gone = api.signed(&owner, "GET", &format!("/api/f/{blank}/file?path=site/extra.txt"), None)?;
     s.ok("a write can remove a file", r.status == 200 && gone.status == 404, &gone);
 
-    // the platform's settings: the person's fragments, and making one
+    // the shell: the person's fragments, and making one (as its "new" app does)
     let shut = s.named(api, &owner, "tshut")?;
     let r = api.create_with(&owner, json!({ "name": shut, "template": "blank" }))?;
     anyhow::ensure!(r.status == 200, "making {shut}: {r}");
     let r = api.signed(&owner, "PUT", &format!("/api/f/{shut}/visibility"), Some(&json!({ "visibility": "members" })))?;
     anyhow::ensure!(r.status == 200, "{shut}'s visibility: {r}");
-    let home = with_session(api, "GET", "/settings", &owner_session)?;
-    let row = |page: &Reply, name: &str| page.text.split("<li>").find(|li| li.contains(&format!("/share/{name}\""))).unwrap_or_default().to_string();
+    let listed = |session: &str| shell(api, session, "GET", "/api/fragments", None, &[]);
+    let row = |list: &Reply, name: &str| list.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).cloned()).unwrap_or_default();
+    let home = listed(&owner_session)?;
     s.ok(
-        "the platform's settings list the person's fragments: each one's link, who may open it, and its share sheet",
-        home.text.contains("Your fragments")
-            && row(&home, &todo).contains(&format!("href=\"{}\"", api.site_url(&todo, "")))
-            && row(&home, &todo).contains("yours · anyone with the link")
-            && row(&home, &shut).contains("yours · only the people in it"),
+        "the shell lists the person's fragments: each one's name, and on their own who may open it (for its share sheet)",
+        home.status == 200
+            && row(&home, &todo)["role"] == "owner"
+            && row(&home, &todo)["sharing"]["visibility"] == "link"
+            && row(&home, &shut)["sharing"]["visibility"] == "members",
         &home,
     );
-    let theirs = with_session(api, "GET", "/settings", &editor_session)?;
-    s.ok("and says which are shared with them, and as what", row(&theirs, &blank).contains("shared with you · editor"), &theirs);
-    let offered: Vec<usize> = ["blank", "todo", "inbox", "calories"].iter().filter_map(|t| home.text.find(&format!("value=\"{t}\""))).collect();
-    s.ok("and offer the templates, the simplest first", home.text.contains("New fragment") && offered.len() == 4 && offered.is_sorted(), &home);
+    let theirs = listed(&editor_session)?;
+    s.ok("and says which are shared with them, and as what", row(&theirs, &blank)["role"] == "editor", &theirs);
     let label = s.name("tnew");
-    let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, &api.site_origin(&todo))?;
+    let make = |origin: String| shell(api, &owner_session, "POST", "/api/fragments", Some(&json!({ "name": label, "template": "todo" })), &[("origin", origin)]);
+    let r = make(api.site_origin(&todo))?;
     let st = api.status(&owner, &api.qualified(&owner, &label)?)?;
-    s.ok("a form from another origin (a fragment's page) is refused, and makes nothing", r.status == 403 && st.status == 404, format!("{r} / {st}"));
-    let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, &api.base)?;
+    s.ok("a create from another origin (a fragment's page) is no one's (401), and makes nothing", r.status == 401 && st.status == 404, format!("{r} / {st}"));
+    let r = make(api.base.clone())?;
     let name = api.qualified(&owner, &label)?;
-    s.ok("the form makes it and walks to its sign-in", r.status == 302 && r.header("location") == format!("/auth/fragment?name={}&return=/", url_enc(&name)), &r);
+    s.ok("the shell makes it from a template", r.status == 200 && r.body["name"] == name.as_str(), &r);
     let r = api.page(&name, "", Some(&format!("fragment_site={}", site_cookie(api, &owner_session, &name)?)))?;
     s.ok("the new fragment serves its template to its owner", r.status == 200 && r.text.contains("<title>Todo"), &r);
-    let r = post_form(api, "/auth/new", &format!("label={}&template=todo", url_enc(&label)), &owner_session, &api.base)?;
-    s.ok("a label already taken says so", r.status == 400 && r.text.contains("already exists"), &r);
+    let r = make(api.base.clone())?;
+    s.ok("a label already taken says so", r.status == 409 && r.code() == Some(ErrorCode::AlreadyExists), &r);
     let st = api.status(&owner, &name)?;
     s.ok("(a todo made there opens to anyone with its link, as before)", st.body["visibility"] == "link", &st);
     Ok(())
