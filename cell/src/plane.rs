@@ -58,9 +58,8 @@ pub(crate) struct TreeRow {
     pub last_commit: String,
 }
 
-/// What the installed code declares, as its tables hold it: written with
-/// the code row in one step (no await between), and read by key.
-/// A live commit's code as read: `app.mjs`, its `applib/` modules by path, and its identity.
+/// A live commit's code as read: `app.mjs`, its `applib/` modules by path,
+/// and its identity.
 type LiveCode = (String, BTreeMap<String, String>, String);
 
 /// Where a live commit's app code comes from: the blessed template's
@@ -70,6 +69,8 @@ enum Code {
     Live,
 }
 
+/// What the installed code declares, as its tables hold it: written with
+/// the code row in one step (no await between), and read by key.
 struct Installed<'a> {
     operations: &'a BTreeMap<String, OpDecl>,
     channels: &'a BTreeMap<String, ChannelDecl>,
