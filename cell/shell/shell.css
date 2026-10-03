@@ -335,3 +335,5 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .settings-warning { color: var(--danger-text); font-size: 14px; }
 .settings-section .row { width: 100%; }
 .sheet iframe { display: block; width: min(92vw, 460px); height: 600px; border: 0; }
+.picture { gap: 10px; cursor: pointer; }
+.picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }

@@ -91,6 +91,7 @@ const LANES: &[Lane] = &[
     addon::addon,
     shell::shell_platform,
     computers::computers,
+    shell::shell_ui,
     hermes::hermes,
     sync::folder_sync,
     restart::restart,

@@ -595,7 +595,29 @@ async function openSettings() {
   renderChats();
   leaveSidebar();
   const [ledger, linked] = await Promise.all([api("GET", "/api/ledger").catch(() => null), api("GET", "/api/connections").catch(() => null)]);
-  const account = section("Account", line("Username", `@${state.me.username}`), line("Signed in as", state.me.email ?? "—"));
+  const email = state.me.subjects?.find((x) => x.email)?.email ?? "—";
+  const account = section("Account", line("Username", `@${state.me.username}`), line("Signed in as", email));
+  // a picture: PNG, JPEG, WebP or GIF, at most 256 KiB (PUT /api/identities/me/picture)
+  const picture = el("label", "quiet picture");
+  const shown = el("img");
+  shown.alt = "";
+  shown.hidden = !state.me.picture;
+  if (state.me.picture) shown.src = state.me.picture;
+  const file = el("input");
+  file.type = "file";
+  file.accept = "image/png,image/jpeg,image/webp,image/gif";
+  file.hidden = true;
+  picture.append(shown, el("span", null, state.me.picture ? "Change your picture" : "Add a picture"), file);
+  file.onchange = async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    const r = await fetch("/api/identities/me/picture", { method: "PUT", headers: { "x-fragment-shell": "1", "content-type": f.type }, body: f, credentials: "same-origin" });
+    if (r.ok) {
+      state.me = await api("GET", "/api/identities/me");
+      openSettings();
+    } else picture.querySelector("span").textContent = (await r.json().catch(() => ({}))).message || "That picture was not taken";
+  };
+  account.append(picture);
   const signout = el("form");
   signout.method = "post";
   signout.action = "/auth/logout";

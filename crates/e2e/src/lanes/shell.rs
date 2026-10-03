@@ -147,3 +147,98 @@ fn shell_site(_s: &Suite, api: &Api, session: &str, name: &str, path: &str) -> R
     let token = super::signin::site_cookie(api, session, name)?;
     api.call(Call { method: "GET", url: api.site_url(name, path), cookie: Some(format!("fragment_site={token}")), ..Call::default() })
 }
+
+/// Sets a field of the page's and fires its input, as typing would.
+fn fill(selector: &str, value: &str) -> String {
+    format!(
+        "(() => {{ const e = document.querySelector({selector:?}); if (!e) return false; e.value = {value:?}; e.dispatchEvent(new Event('input', {{ bubbles: true }})); return true; }})()"
+    )
+}
+
+/// The shell in a browser (phase 5's exit, at desktop and phone sizes):
+/// first run (a username, the first agent), the agent's chat framed and
+/// signed in on its own origin with the agent's answer in it, a second
+/// agent, an app's window, settings, and the phone's layout. The agents
+/// run on the stub image (Docker), as the computers section's do.
+pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("shell-ui") {
+        return Ok(());
+    }
+    let Some(mut b) = s.browser()? else {
+        s.ok("Chrome is installed for the shell's lane (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let shots = s.dir("shell-ui");
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let session = api.sign_in(&format!("shell-ui-{}@e2e.test", crate::api::now_s()))?;
+    b.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let page = b.open(&format!("{}/", api.base))?;
+    b.viewport(&page, 1280, 800, false)?;
+
+    // first run: a username, then the first agent
+    let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
+    s.ok("signed in with no username, the shell asks for one", asked, "");
+    let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
+    b.eval(&page, &fill("#first-run-card input[name=username]", &username))?;
+    b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
+    let first = b.until(&page, "document.querySelector('#first-run-card textarea[name=job]')", wait);
+    s.ok("then: what should your first agent do?", first, "");
+    let _ = b.screenshot(&page, &shots.join("first-agent.png"));
+    b.eval(&page, &fill("#first-run-card textarea[name=job]", "hello there, please help me water the garden"))?;
+    b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
+    let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
+    let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
+    s.ok("the agent is made, named, and its chat opens in the shell", opened && row.as_str().is_some_and(|t| !t.is_empty()), &row);
+    let title = row.as_str().unwrap_or("").to_string();
+    let chat = format!("{}-chat.{username}", title.to_lowercase());
+    let host = fragment_proto::flat_name(&chat).unwrap_or_default();
+    let signed = b.until(&page, &format!("[...document.querySelectorAll('#frames iframe')].some(f => !f.classList.contains('refused'))"), wait);
+    let answered = {
+        let t0 = std::time::Instant::now();
+        let mut seen = false;
+        while t0.elapsed() < agent_wait && !seen {
+            seen = b.eval_in_frame(&page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("water the garden") && t.contains("echo:"))).unwrap_or(false);
+            if !seen {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        seen
+    };
+    s.ok("its chat is framed, signed in on the chat's own origin, and the agent answers the job in it", signed && answered, &host);
+    let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));
+
+    // a second agent, from the sidebar
+    b.click(&page, "#new-agent")?;
+    b.eval(&page, &fill("#new-agent-job", "keep my reading list"))?;
+    b.eval(&page, &fill("#new-agent-name", "Reader"))?;
+    b.eval(&page, "document.getElementById('new-agent-form').requestSubmit()")?;
+    let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2", agent_wait);
+    s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
+
+    // an app's window
+    b.click(&page, "#add-app")?;
+    b.until(&page, "document.querySelector('.catalog form')", wait);
+    b.eval(&page, "document.querySelector('.catalog form').requestSubmit()")?;
+    let window = b.until(&page, "document.querySelectorAll('#apps .row[data-key]').length === 1 && document.querySelector('.viewer iframe')", wait);
+    s.ok("an app from the catalog opens in a window beside the chat", window, "");
+    let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+
+    // settings
+    b.click(&page, "#settings")?;
+    let settings = b.until(&page, "['Account', 'Credit', 'Computer', 'Connections'].every(h => document.getElementById('settings-page').innerText.toUpperCase().includes(h.toUpperCase()))", wait);
+    s.ok("settings: the account, credit, computer and connections", settings, b.eval(&page, "document.getElementById('settings-page').innerText.slice(0, 300)")?);
+    b.color_scheme(&page, "dark")?;
+    let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
+
+    // the phone: the list, then a chat
+    b.color_scheme(&page, "light")?;
+    b.viewport(&page, 375, 812, true)?;
+    b.reload(&page)?;
+    let phone = b.until(&page, "!document.getElementById('layout').hidden && document.querySelector('#frames iframe')", wait);
+    let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth + 1")?;
+    s.ok("on a phone it fits its width, a chat open", phone && fits == true, &fits);
+    let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
+    println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
