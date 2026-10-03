@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{manifest, npub, site, webhook};
 use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_templates::blessed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -328,6 +329,7 @@ impl FragmentCell {
             clear_installed(&self.sql())?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
+            self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
             self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
@@ -344,6 +346,15 @@ impl FragmentCell {
                 }
             }
         };
+        // a blessed template's fragment runs the release's manifest, with its own face
+        let blessed = manifest.template.clone();
+        let manifest = match &blessed {
+            None => manifest,
+            Some(t) => match blessed::manifest(t).and_then(|b| manifest::on_template(&manifest, &b)) {
+                Ok(m) => m,
+                Err(why) => return self.code_refused(sha, &format!("fragment.json: {why}")),
+            },
+        };
         // its agent's instructions are read here, so one that cannot be is refused with the rest
         let agent = match &manifest.agent {
             None => None,
@@ -357,7 +368,13 @@ impl FragmentCell {
             None => self.del_meta(MetaKey::MetaLive)?,
         }
         self.set_agent_live(agent.as_ref())?;
-        if self.tree_row("live", "app.mjs")?.is_none() {
+        match &blessed {
+            Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
+            None => self.del_meta(MetaKey::Blessed)?,
+        }
+        self.face_is(manifest.kind(), manifest.title())?;
+        // a blessed template's fragment runs no code of its own (forking makes it its own)
+        if blessed.is_some() || self.tree_row("live", "app.mjs")?.is_none() {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
             store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
@@ -457,6 +474,19 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// A blessed fragment installed from an older release of its template
+    /// (the platform deployed since) installs live again, from the release
+    /// it now serves: one deploy of the platform updates every chat.
+    pub(crate) async fn blessed_current(&self, live: Option<&str>) -> CellResult<()> {
+        let Some(installed) = self.meta(MetaKey::Blessed)? else { return Ok(()) };
+        let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
+        if blessed::release(t).as_deref() == Some(release) {
+            return Ok(());
+        }
+        let _held = self.plane.lock().await;
+        self.install_code(live).await
+    }
+
     /// Refreshes pins; a move of main notifies the change feed and starts
     /// the runs its file triggers name, and the agent a new live declares
     /// joins with its deploy (the alarm retries one that fails).
@@ -513,7 +543,7 @@ impl FragmentCell {
         }
         self.set_meta(MetaKey::PinsCheckedAt, &js::now_ms().to_string())?;
         facts.pins_checked = true;
-        Ok(())
+        self.blessed_current(facts.pin_live.as_deref()).await
     }
 
     fn broadcast_change(&self, sha: Option<&str>, paths: &[String]) {
@@ -527,6 +557,10 @@ impl FragmentCell {
     pub(crate) async fn poll(&self) {
         if let Err(e) = self.interpret(&REFS).await {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
+        }
+        let live = self.meta(MetaKey::PinLive).ok().flatten();
+        if let Err(e) = self.blessed_current(live.as_deref()).await {
+            self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
         }
     }
 

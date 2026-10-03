@@ -321,6 +321,11 @@ dependencies = [
 [[package]]
 name = "fragment-templates"
 version = "0.1.0"
+dependencies = [
+ "fragment-core",
+ "hex",
+ "sha2",
+]
 
 [[package]]
 name = "futures-channel"

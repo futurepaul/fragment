@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_name, valid_repo_path, ChannelDecl, OpDecl, OpKind, Role, TriggerDecl, TriggerOn, BUILTIN_CHANNELS,
-    RESERVED_OP_NAMES,
+    limits, valid_channel_name, valid_op_name, valid_repo_path, valid_template_name, ChannelDecl, FragmentKind, OpDecl, OpKind, Role, TriggerDecl,
+    TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
 };
 use serde_json::Value;
 
@@ -29,8 +29,69 @@ pub struct Manifest {
     pub notify_urls: Vec<String>,
     /// The agent people talk to through one of its channels (`agent`).
     pub agent: Option<AgentDecl>,
+    /// What it is (`kind`; `None`: an app, or its template's kind).
+    pub kind: Option<FragmentKind>,
+    /// The blessed template whose code it runs (`template`, decision 40):
+    /// the platform's release serves it, and the fragment's own manifest
+    /// names only its face (`on_template`).
+    pub template: Option<String>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
+}
+
+impl Manifest {
+    /// What it is: its own `kind`, else an app.
+    pub fn kind(&self) -> FragmentKind {
+        self.kind.unwrap_or_default()
+    }
+
+    /// Its title, if its `meta` names one.
+    pub fn title(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.title.as_deref())
+    }
+}
+
+/// A fragment on a blessed template (`own`, its own `fragment.json`, which
+/// names `template`) as it runs: the template's manifest (`blessed`, from
+/// the platform's release), with the fragment's own face, its `meta`, over
+/// the template's. Its own manifest declares nothing else: code it changes
+/// is its own, so it forks (decision 40) rather than overriding.
+pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, String> {
+    let name = own.template.as_deref().ok_or("on_template is for a fragment that names a template")?;
+    let declared: Vec<&str> = [
+        ("operations", !own.operations.is_empty()),
+        ("channels", !own.channels.is_empty()),
+        ("triggers", !own.triggers.is_empty()),
+        ("notifyUrls", !own.notify_urls.is_empty()),
+        ("agent", own.agent.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(k, set)| set.then_some(k))
+    .collect();
+    if !declared.is_empty() {
+        return Err(format!("a fragment on the {name} template declares only its meta, not {}: fork it to change its code", declared.join(", ")));
+    }
+    if blessed.template.is_some() {
+        return Err(format!("the {name} template names a template itself"));
+    }
+    if let Some(k) = own.kind {
+        if k != blessed.kind() {
+            return Err(format!("the {name} template's fragments are of kind {}, not {}", blessed.kind().as_str(), k.as_str()));
+        }
+    }
+    let mut m = blessed.clone();
+    m.template = own.template.clone();
+    m.kind = Some(blessed.kind());
+    m.ignored = own.ignored.clone();
+    if let Some(mine) = &own.meta {
+        let theirs = blessed.meta.clone().unwrap_or_default();
+        m.meta = Some(Meta {
+            title: mine.title.clone().or(theirs.title),
+            description: mine.description.clone().or(theirs.description),
+            image: mine.image.clone().or(theirs.image),
+        });
+    }
+    Ok(m)
 }
 
 /// `agent`: the fragment's own agent, with instructions from a file of
@@ -294,12 +355,42 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(decl) => m.agent = Some(agent(decl, &m)?),
     }
+    match obj.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(k)) => m.kind = Some(FragmentKind::parse(k).ok_or_else(|| format!("kind is app, chat, agent or brain, not {k:?}"))?),
+        Some(_) => return Err("kind must be a string".into()),
+    }
+    match obj.get("template") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(t)) if valid_template_name(t) => m.template = Some(t.clone()),
+        Some(_) => return Err("template names a blessed template (^[a-z][a-z0-9-]{0,31}$)".into()),
+    }
     Ok(m)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kinds_and_templates() {
+        assert_eq!(parse(b"{}").unwrap().kind(), FragmentKind::App);
+        assert_eq!(parse(br#"{"kind":"brain"}"#).unwrap().kind(), FragmentKind::Brain);
+        assert!(parse(br#"{"kind":"bot"}"#).is_err());
+        assert!(parse(br#"{"template":"Chat"}"#).is_err());
+        let blessed = parse(br#"{"kind":"chat","meta":{"title":"Chat","description":"d"},"channels":{"chat":{"read":"public","post":"viewer"}}}"#).unwrap();
+        let own = parse(br#"{"template":"chat","meta":{"title":"Garden"}}"#).unwrap();
+        let m = on_template(&own, &blessed).unwrap();
+        assert_eq!((m.kind(), m.title(), m.template.as_deref()), (FragmentKind::Chat, Some("Garden"), Some("chat")));
+        assert_eq!(m.meta.as_ref().and_then(|x| x.description.as_deref()), Some("d"), "the template's face fills what the fragment's leaves out");
+        assert!(m.channels.contains_key("chat"), "the template's channels run");
+        // its own code is a fork's, not an override
+        let declares = parse(br#"{"template":"chat","channels":{"x":{"read":"viewer","post":"editor"}}}"#).unwrap();
+        assert!(on_template(&declares, &blessed).unwrap_err().contains("fork it"));
+        let wrong = parse(br#"{"template":"chat","kind":"agent"}"#).unwrap();
+        assert!(on_template(&wrong, &blessed).is_err());
+        assert!(on_template(&parse(b"{}").unwrap(), &blessed).is_err(), "only a fragment that names a template");
+    }
 
     #[test]
     fn operations_and_defaults() {

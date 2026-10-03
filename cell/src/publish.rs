@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{ErrorCode, Role};
-use fragment_templates::{Template, BLANK, CALORIES, INBOX, TODO};
+use fragment_templates::{blessed, Template, BLANK, CALORIES, INBOX, TODO};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -67,15 +67,27 @@ impl FragmentCell {
     /// can retry one that failed without committing twice.
     pub(crate) async fn seed(&self) -> CellResult<()> {
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
-        let t = template(&which).ok_or_else(|| CellError::host(format!("no template {which}")))?;
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
-        let files = stamped(t, &name);
+        let files = match (template(&which), blessed::template(&which)) {
+            (Some(t), _) => stamped(t, &name),
+            // a blessed template is named, not copied: the release serves it
+            (None, Some(_)) => {
+                let mut manifest = json!({ "template": which });
+                if let Some(title) = self.meta(MetaKey::TemplateTitle)? {
+                    manifest["meta"] = json!({ "title": title });
+                }
+                let bytes = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
+                vec![FileWrite { path: "fragment.json".into(), bytes: Some(bytes) }]
+            }
+            (None, None) => return Err(CellError::host(format!("no template {which}"))),
+        };
         if let Wrote::Conflict(why) = self.commit(&key, &files, &BTreeMap::new(), &format!("start from the {which} template"), &owner, 0).await? {
             return Err(CellError::host(why));
         }
         self.go_live(&owner, &format!("deploy {name}")).await?;
         self.event("template", &format!("{name} starts from the {which} template"), json!({ "template": which }));
+        self.del_meta(MetaKey::TemplateTitle)?;
         self.del_meta(MetaKey::TemplatePending)
     }
 

@@ -24,6 +24,7 @@
 use fragment_core::access;
 use fragment_core::npub;
 use fragment_proto::{
+    FragmentKind,
     limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
     Sharing, Visibility,
 };
@@ -97,6 +98,26 @@ impl FragmentCell {
         )
     }
 
+    /// What its members' lists show of it, at each install of live: its
+    /// kind and title. A change is sent to every member's list (at most
+    /// `MEMBERS_MAX`) and its owner's.
+    pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
+        let face = json!({ "kind": kind, "title": title }).to_string();
+        if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::Face, &face)?;
+        let owner = self.must(MetaKey::Owner)?;
+        self.index_change(&owner, Some(Role::Owner))?;
+        for r in self.rows("SELECT principal, role FROM members", vec![])? {
+            let (Some(p), Some(role)) = (r["principal"].as_str(), r["role"].as_str().and_then(Role::parse)) else { continue };
+            if p != owner {
+                self.index_change(p, Some(role))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Who is in, or who may open it, changed: the owner's row in their
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
@@ -131,6 +152,12 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
+            // every row a role names: the fragment's face, as it is now
+            if row["role"].is_string() {
+                if let Ok(Some(face)) = self.meta(MetaKey::Face) {
+                    body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
+                }
+            }
             // the owner's row: the sharing now, which no later change undoes
             // (a later one sends a newer version, made after it)
             if principal == owner && row["role"].is_string() {

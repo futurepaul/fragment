@@ -23,6 +23,7 @@ mod plane;
 mod posts;
 mod restart;
 mod share;
+mod shell;
 mod signin;
 mod site;
 mod sync;
@@ -88,6 +89,7 @@ const LANES: &[Lane] = &[
     ledger::ledger_lane,
     agents::agents,
     addon::addon,
+    shell::shell_platform,
     computers::computers,
     hermes::hermes,
     sync::folder_sync,

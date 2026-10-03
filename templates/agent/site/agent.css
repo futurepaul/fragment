@@ -1,0 +1,25 @@
+/* The agent's page: Finite.Computer's look (Skyler's handoff, 2026-10-02). */
+:root {
+  --bg: #212121; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69;
+  --border: rgba(255,255,255,.085);
+  --font-sans: "Funnel Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f7f6f3; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+}
+:root[data-theme="light"] { --bg: #f7f6f3; --text-primary: #171717; --text-secondary: #66615b; --text-tertiary: #918a82; --border: rgba(20,20,20,.105); color-scheme: light; }
+:root[data-theme="dark"] { --bg: #212121; --text-primary: #ececec; --text-secondary: #a6a19d; --text-tertiary: #706d69; --border: rgba(255,255,255,.085); color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text-primary); }
+body { font: 15px/1.5 var(--font-sans); -webkit-font-smoothing: antialiased; }
+.agent { max-width: 640px; margin: 0 auto; padding: 40px 20px 64px; }
+.agent-avatar { --agent-color: #a88bea; display: inline-block; width: 70px; height: 70px; border-radius: 50%; background: var(--agent-color); margin-bottom: 18px; }
+h1 { font-size: 24px; line-height: 1.25; font-weight: 600; margin: 0 0 4px; }
+h2 { font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-tertiary); margin: 32px 0 8px; }
+.tier { margin: 0; color: var(--text-secondary); font-size: 13px; }
+.soul { white-space: pre-wrap; overflow-wrap: anywhere; }
+.soul p { margin: 0 0 .75em; }
+.skills { list-style: none; padding: 0; margin: 0; }
+.skills li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.muted { color: var(--text-tertiary); }

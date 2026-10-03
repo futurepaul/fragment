@@ -59,6 +59,7 @@ use fragment_proto::{
     limits, valid_fragment_name, CodeStatus, Counts, CreateFragment, Created, ErrorCode, FragmentStatus, IdentityKind, Pins, Role, Urls,
     Visibility,
 };
+use fragment_templates::blessed;
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
@@ -356,6 +357,8 @@ pub(crate) enum MetaKey {
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
+    /// The title a blessed template's fragment starts with (`TemplatePending`'s).
+    TemplateTitle,
     /// What live's `agent` block declares, still to make so (agents.rs
     /// `sync_agent`): a new value each time live declares one.
     AgentPending,
@@ -380,6 +383,11 @@ pub(crate) enum MetaKey {
     ManifestMain,
     /// The live manifest's `meta`, as JSON text: a page's Open Graph tags.
     MetaLive,
+    /// The blessed template live runs and its release (`<name>@<release>`,
+    /// blessed.rs in crates/templates), when it names one.
+    Blessed,
+    /// What its members' lists show of it (`{kind, title}`), as last sent.
+    Face,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -441,6 +449,7 @@ impl MetaKey {
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
+            MetaKey::TemplateTitle => "template_title",
             MetaKey::AgentPending => "agent_pending",
             MetaKey::AgentLive => "agent_live",
             MetaKey::AgentJoined => "agent_joined",
@@ -452,6 +461,8 @@ impl MetaKey {
             MetaKey::LiveReadAt => "live_read_at",
             MetaKey::ManifestMain => "manifest_main",
             MetaKey::MetaLive => "meta_live",
+            MetaKey::Blessed => "blessed",
+            MetaKey::Face => "face",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -1049,9 +1060,17 @@ impl FragmentCell {
         if !valid_fragment_name(&body.name) {
             return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
         }
-        if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none()) {
-            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
+        if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
+            let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));
+        }
+        if let Some(title) = &body.title {
+            if body.template.as_deref().and_then(blessed::template).is_none() {
+                return Err(CellError::invalid("a title is a blessed template's fragment's (template chat or agent); others say theirs in fragment.json"));
+            }
+            if title.trim().is_empty() || title.chars().count() > 120 {
+                return Err(CellError::invalid("a title is 1 to 120 characters"));
+            }
         }
         let cs_cfg = self.cfg.codestorage()?;
         // Claim the name before the first await: a concurrent create for the
@@ -1116,6 +1135,9 @@ impl FragmentCell {
         self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
+            if let Some(title) = &body.title {
+                self.set_meta(MetaKey::TemplateTitle, title.trim())?;
+            }
         }
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;

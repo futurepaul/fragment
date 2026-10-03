@@ -7,7 +7,7 @@
 //! platform's page reads this one cell and wakes no fragment.
 //! Which keys an identity holds is the registry's (registry.rs).
 
-use fragment_proto::{FragmentList, ListedFragment, Role, Sharing};
+use fragment_proto::{FragmentKind, FragmentList, ListedFragment, Role, Sharing};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -36,6 +36,18 @@ struct IndexChange {
     version: i64,
     #[serde(default)]
     sharing: Option<Sharing>,
+    /// What it is and its title, on every row a role names.
+    #[serde(default)]
+    face: Option<Face>,
+}
+
+/// What a person's list shows of a fragment.
+#[derive(serde::Serialize, Deserialize)]
+struct Face {
+    #[serde(default)]
+    kind: FragmentKind,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// A `memberships` row as `/list` reads it.
@@ -44,6 +56,7 @@ struct Listed {
     name: String,
     role: Role,
     sharing: Option<String>,
+    face: Option<String>,
 }
 
 impl DurableObject for PrincipalCell {
@@ -54,6 +67,9 @@ impl DurableObject for PrincipalCell {
         let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None).and_then(|c| c.to_array()).unwrap_or_default();
         if !cols.iter().any(|c| c["name"] == "sharing") {
             sql.exec("ALTER TABLE memberships ADD COLUMN sharing TEXT", None).expect("the memberships table migrates");
+        }
+        if !cols.iter().any(|c| c["name"] == "face") {
+            sql.exec("ALTER TABLE memberships ADD COLUMN face TEXT", None).expect("the memberships table migrates");
         }
         PrincipalCell { state }
     }
@@ -89,18 +105,24 @@ impl PrincipalCell {
                         Some(s) => serde_json::to_string(s).map_err(|e| CellError::host(format!("sharing: {e}")))?.into(),
                         None => SqlStorageValue::Null,
                     };
+                    let face = match &c.face {
+                        Some(f) => serde_json::to_string(f).map_err(|e| CellError::host(format!("face: {e}")))?.into(),
+                        None => SqlStorageValue::Null,
+                    };
+                    // a change that carries no face (a fragment from before faces)
+                    // keeps the one the row has
                     self.rows(
-                        "INSERT INTO memberships (fragment, role, incarnation, version, sharing) VALUES (?, ?, ?, ?, ?)
+                        "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face) VALUES (?, ?, ?, ?, ?, ?)
                          ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version,
-                           sharing = excluded.sharing",
-                        vec![c.fragment.as_str().into(), role, SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version), sharing],
+                           sharing = excluded.sharing, face = COALESCE(excluded.face, memberships.face)",
+                        vec![c.fragment.as_str().into(), role, SqlStorageValue::Integer(c.incarnation), SqlStorageValue::Integer(c.version), sharing, face],
                     )?;
                 }
                 Ok(Response::from_json(&json!({ "ok": true, "applied": newer }))?)
             }
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
-                let q = "SELECT fragment AS name, role, sharing FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
+                let q = "SELECT fragment AS name, role, sharing, face FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
                 let rows: Vec<Listed> = self.state.storage().sql().exec(q, None)?.to_array()?;
                 let fragments = rows
                     .into_iter()
@@ -113,7 +135,9 @@ impl PrincipalCell {
                             Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
                             None => None,
                         };
-                        Ok(ListedFragment { name: r.name, role: r.role, sharing })
+                        let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
+                        let (kind, title) = face.map_or((FragmentKind::App, None), |f| (f.kind, f.title));
+                        Ok(ListedFragment { name: r.name, role: r.role, kind, title, sharing })
                     })
                     .collect::<CellResult<Vec<_>>>()?;
                 Ok(Response::from_json(&FragmentList { fragments })?)

@@ -126,6 +126,52 @@ pub(crate) async fn read_body(req: &mut Request, max: usize) -> CellResult<Vec<u
     Ok(body.finish())
 }
 
+/// The header the shell's own requests carry: a request from another
+/// origin cannot send it without a preflight the platform never answers.
+pub const SHELL_HEADER: &str = "x-fragment-shell";
+
+/// Who asks an API request, unresolved: the key that signed it (NIP-98),
+/// or, from the platform's own page (the shell), the person's platform
+/// session.
+enum Caller {
+    Key(String),
+    Session(String),
+}
+
+/// A request's caller: its signature when it has one; else the platform
+/// session, only for the shell's own requests (`shell_session`); else the
+/// unsigned request's 401.
+fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
+    if req.headers().get("authorization")?.is_none() {
+        if let Some(token) = shell_session(Config::from_env(env), req, url)? {
+            return Ok(Caller::Session(token));
+        }
+    }
+    authenticate(req, url, payload).map(Caller::Key)
+}
+
+/// The platform session of a request from the shell: on the platform's
+/// host, `Sec-Fetch-Site: same-origin` (a fragment's page is one site with
+/// the platform where they share a zone, and its fetch carries the Lax
+/// cookie; only the fetch metadata tells them apart), the shell's header,
+/// and for a write the platform's exact Origin.
+fn shell_session(cfg: &Config, req: &Request, url: &Url) -> CellResult<Option<String>> {
+    let host = url.host_str().unwrap_or_default();
+    if !cfg.is_platform_host(host) || req.headers().get(SHELL_HEADER)?.as_deref() != Some("1") {
+        return Ok(None);
+    }
+    if req.headers().get("sec-fetch-site")?.as_deref() != Some("same-origin") {
+        return Ok(None);
+    }
+    if !matches!(req.method(), Method::Get | Method::Head) {
+        let platform = cfg.platform(url);
+        if req.headers().get("origin")?.is_none_or(|o| o.trim_end_matches('/') != platform) {
+            return Ok(None);
+        }
+    }
+    auth::platform_session_token(req, url)
+}
+
 /// The key that signed the request (NIP-98), not yet resolved.
 fn authenticate(req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<String> {
     let header = req.headers().get("authorization")?;
@@ -204,13 +250,16 @@ pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8])
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it: a person acts as themselves.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
-    let key = authenticate(req, url, payload)?;
     let acting_for = acting_for(url)?;
-    let identity = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
+    let (identity, key) = match caller(env, req, url, payload)? {
+        Caller::Key(key) => (ask_registry(env, &calls::Resolve { key: key.clone() }).await?, Some(key)),
+        // the shell's: a person, signed in on the platform
+        Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
+    };
     if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
         return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
     }
-    Ok(Signed { identity, key: Some(key), acting_for })
+    Ok(Signed { identity, key, acting_for })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -547,8 +596,16 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             }
         };
     }
-    let signer_key = authenticate(&req, url, Payload::Read(&body))?;
-    let by = || calls::By::Key(signer_key.clone());
+    let caller = caller(env, &req, url, Payload::Read(&body))?;
+    let by = || match &caller {
+        Caller::Key(k) => calls::By::Key(k.clone()),
+        Caller::Session(t) => calls::By::Session(t.clone()),
+    };
+    // a key's proof names the key that signed the request: the shell signs none
+    let signer_key = || match &caller {
+        Caller::Key(k) => Ok(k.clone()),
+        Caller::Session(_) => Err(CellError::new(ErrorCode::Unauthenticated, "adding a key is signed by a key you hold (`fragment login`)")),
+    };
     match (method, rest) {
         (Method::Put, ["me", "username"]) => {
             /// `PUT /api/identities/me/username`'s body.
@@ -566,7 +623,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let mime = picture_type(&body).ok_or_else(|| CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF"))?;
             // Two round trips, on purpose: the bytes land in BLOBS before the
             // registry names them, so no one it does not know stores any.
-            ask_registry(env, &calls::Resolve { key: signer_key.clone() }).await?;
+            ask_registry(env, &calls::View { identity: None, by: by() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
             js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
             json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
@@ -578,7 +635,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
         (Method::Post, [id, "keys"]) => {
             let identity = named_identity(id)?;
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let key = proven_key(&add.proof, &req, url, &signer_key)?;
+            let key = proven_key(&add.proof, &req, url, &signer_key()?)?;
             json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: by() })).await?)
         }
         (Method::Put, [id, "held"]) => {

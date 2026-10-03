@@ -7,3 +7,6 @@ description = "The templates under templates/, embedded: the CLI scaffolds them 
 build = "build.rs"
 
 [dependencies]
+fragment-core = { path = "../core" }
+sha2 = "0.10"
+hex = "0.4"

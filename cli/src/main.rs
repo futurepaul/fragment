@@ -879,7 +879,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None };
+            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None, title: None };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)

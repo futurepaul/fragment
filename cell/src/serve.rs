@@ -20,6 +20,7 @@
 use fragment_core::access::Purpose;
 use fragment_core::{npub, site};
 use fragment_proto::{valid_repo_path, ErrorCode, OpCall, Role, Visibility};
+use fragment_templates::blessed;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -390,6 +391,15 @@ impl FragmentCell {
         if !path.is_empty() && !valid_repo_path(path.trim_end_matches('/')) {
             return Err(CellError::new(ErrorCode::NotFound, "no such page"));
         }
+        // a blessed template's fragment: its site is the platform release's (decision 40)
+        if let Some(installed) = self.meta(MetaKey::Blessed)? {
+            let (t, release) = installed.split_once('@').unwrap_or((installed.as_str(), ""));
+            for candidate in site::site_candidates(path) {
+                if let Some(bytes) = blessed::site_file(t, &candidate) {
+                    return self.blessed_page(req, caller, facts, &candidate, bytes, release, public).await;
+                }
+            }
+        }
         let mut found = None;
         for candidate in site::site_candidates(path) {
             if let Some(row) = self.tree_row("live", &candidate)? {
@@ -448,6 +458,44 @@ impl FragmentCell {
             }
         }
         with_etag(self.stream_git(facts, "live", &row.path).await?)
+    }
+}
+
+impl FragmentCell {
+    /// A file of a blessed template's site, from the release: a page gets
+    /// the fragment's own Open Graph tags, as a site's page does.
+    #[allow(clippy::too_many_arguments)]
+    async fn blessed_page(&self, req: &Request, caller: &Caller, facts: &Facts, path: &str, bytes: &'static [u8], release: &str, public: bool) -> CellResult<Response> {
+        let mime = site::mime_for_path(path);
+        let cache = site::cache_control(path, public);
+        let page = mime.starts_with("text/html");
+        let og: Option<fragment_core::manifest::Meta> = match page.then(|| self.meta(MetaKey::MetaLive)).transpose()?.flatten() {
+            Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
+            None => None,
+        };
+        let live = facts.pin_live.as_deref().unwrap_or("");
+        let etag = match og {
+            Some(_) => format!("\"b-{release}-{}\"", &live[..live.len().min(12)]),
+            None => format!("\"b-{release}\""),
+        };
+        if let Some(resp) = not_modified(req, &etag, cache)? {
+            return Ok(resp);
+        }
+        let h = Headers::new();
+        h.set("content-type", mime)?;
+        h.set("cache-control", cache)?;
+        h.set("etag", &etag)?;
+        h.set("x-fragment-ref", live)?;
+        if req.method() == Method::Head {
+            h.set("content-length", &bytes.len().to_string())?;
+            return Ok(Response::empty()?.with_headers(h));
+        }
+        if let Some(meta) = og {
+            let html = String::from_utf8_lossy(bytes);
+            let image = format!("{}__preview.svg", self.cfg.canonical(&caller.url, &facts.name));
+            return Ok(Response::from_html(site::inject_og(&html, &facts.name, &meta, &image))?.with_headers(h));
+        }
+        Ok(Response::from_bytes(bytes.to_vec())?.with_headers(h))
     }
 }
 

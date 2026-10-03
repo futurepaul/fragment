@@ -410,6 +410,45 @@ impl Role {
     }
 }
 
+/// What a fragment is to the people who use it (`fragment.json`'s `kind`,
+/// decision 6): the shell lists each kind in its own place. An app unless
+/// it says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentKind {
+    #[default]
+    App,
+    Chat,
+    Agent,
+    Brain,
+}
+
+impl FragmentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FragmentKind::App => "app",
+            FragmentKind::Chat => "chat",
+            FragmentKind::Agent => "agent",
+            FragmentKind::Brain => "brain",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<FragmentKind> {
+        match s {
+            "app" => Some(FragmentKind::App),
+            "chat" => Some(FragmentKind::Chat),
+            "agent" => Some(FragmentKind::Agent),
+            "brain" => Some(FragmentKind::Brain),
+            _ => None,
+        }
+    }
+}
+
+/// A blessed template's name (`fragment.json`'s `template`, decision 40).
+pub fn valid_template_name(s: &str) -> bool {
+    (1..=32).contains(&s.len()) && s.as_bytes()[0].is_ascii_lowercase() && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Who can see a fragment: everyone, holders of its share link, or members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -447,9 +486,15 @@ pub struct CreateFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visibility: Option<Visibility>,
     /// Starts the fragment from one of the platform's templates (`todo`,
-    /// `blank`, …): its files are the first commit, and live.
+    /// `blank`, …): its files are the first commit, and live. A blessed
+    /// template (`chat`, `agent`: decision 40) is named, not copied: the
+    /// first commit is a `fragment.json` that names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// A blessed template's fragment's title (its `meta.title`; at most
+    /// 120 characters).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// The answer to a create: the only time the webhook secret is shown
@@ -527,6 +572,12 @@ pub struct FragmentStatus {
 pub struct ListedFragment {
     pub name: String,
     pub role: Role,
+    /// What it is, and its title, as its live `fragment.json` last said
+    /// (an app with no title until it has).
+    #[serde(default)]
+    pub kind: FragmentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has: a fragment from before sends it once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
