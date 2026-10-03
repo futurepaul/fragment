@@ -43,10 +43,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
+      # no setup-node: xtask fetches the pinned Node into target/tools
+      # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
+      # runs its own npm ci; the runner's node is never used
       - uses: actions/cache@v4
         with:
           path: |
@@ -55,12 +54,25 @@ jobs:
             ~/.cargo/bin/worker-build
             ~/.cache/worker-build
             target
+            !target/tools
+            !target/cache
             cell/target
             agent/target
           key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: e2e-${{ runner.os }}-
+      # the pinned Node, unpacked: a new pin is a new key
+      - uses: actions/cache@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
+      # what the JavaScript caches (target/cache): npm's tarballs, wrangler's
+      # own, and the Chrome for Testing Browser Rendering downloads, which
+      # the lockfile's miniflare names
+      - uses: actions/cache@v4
+        with:
+          path: target/cache
+          key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
       - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
-      - run: npm ci
       # one run's scratch (each node boot's log, the lanes' screenshots) is
       # kept when a check fails: uploaded below
       - run: cargo xtask e2e

@@ -3,9 +3,15 @@ name = "fragment-devstack"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "Starts and stops the local fragment stack (`wrangler dev` for cell/ and agent/) for xtask and the e2e."
+description = "Starts and stops the local fragment stack (`wrangler dev` for cell/ and agent/) for xtask and the e2e, on a pinned Node it fetches."
 
 [dependencies]
 anyhow = "1"
 fragment-core = { path = "../core" }
 serde_json = "1"
+# the pinned Node (src/node.rs): fetched over HTTPS, checked by its
+# SHA-256, unpacked from its .tar.gz
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
