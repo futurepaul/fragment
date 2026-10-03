@@ -1,0 +1,29 @@
+[package]
+name = "fragment-bridge"
+version = "0.1.0"
+description = "The bridge a computer image runs: an agent runtime on one side, the fragment API on the other (docs/computers.md)"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fragment-bridge"
+path = "src/main.rs"
+
+[dependencies]
+base64.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hmac.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]

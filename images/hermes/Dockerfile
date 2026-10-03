@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1.7
+# Our Hermes computer image (docs/computers.md; decisions 15, 18, 21; spike
+# S3b's boot list). Everything Hermes-specific lives here, never in the
+# platform: Hermes v0.21.5's desktop image, the bridge as its Relay
+# connector, hermes-boot around it, Litestream, sandbox-shim, the screen.
+# The image holds no secret.
+#
+# Build from images/: docker build --platform linux/amd64 -f hermes/Dockerfile .
+
+ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
+
+# The bridge and hermes-boot, static (Alpine's Rust targets musl).
+FROM rust:1.99-alpine AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY bridge bridge
+COPY hermes/boot hermes/boot
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --locked -p fragment-bridge -p hermes-boot \
+ && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
+
+# noVNC, the screen page's RFB client (pinned by hash).
+FROM alpine:3.20 AS novnc
+ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6 https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz /novnc.tgz
+RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
+
+FROM ${HERMES} AS hermes
+COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
+RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
+COPY --from=build /out/ /opt/fragment/bin/
+COPY hermes/preload.py /opt/fragment/preload.py
+COPY hermes/screen /opt/fragment/screen
+COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
+COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
+
+# Hermes' home is under /data, the only directory a computer keeps. Its
+# setup reads $HERMES_HOME; three of its scripts name /opt/data outright.
+RUN sed -i 's#/opt/data#/data/hermes#g' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run \
+ && ! grep -q '/opt/data' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run
+
+# Setup gated on stamps (S3b, cut d): the config migration and the bundled
+# skills sync run once per (Hermes revision, their input). The build fails
+# if upstream's script no longer reads as patched.
+RUN sed -i \
+      -e 's#^    s6-setuidgid hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/scripts/docker_config_migrate.py" \\$#    /opt/fragment/bin/hermes-boot stamped migrate "$HERMES_HOME/config.yaml" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \\#' \
+      -e 's#^    as_hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/tools/skills_sync.py" \\$#    /opt/fragment/bin/hermes-boot stamped skills "$HERMES_HOME/skills/.bundled_manifest" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \\#' \
+      /opt/hermes/docker/stage2-hook.sh \
+ && test "$(grep -c 'hermes-boot stamped' /opt/hermes/docker/stage2-hook.sh)" = 2
+
+# The gateway is hermes-boot's main program (preloaded): no per-profile s6
+# gateway services, which would start a second gateway (S3b, cut b).
+RUN printf '#!/bin/sh\n# hermes-boot runs the one gateway itself (images/hermes).\nexit 0\n' > /etc/cont-init.d/02-reconcile-profiles
+
+# Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
+# sealed, so nothing can make a .pyc stale.
+# A few vendored files are not Python 3 (compileall exits 1 for them); the
+# count proves the rest compiled.
+RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchecked-hash /opt/hermes > /dev/null || true; \
+    test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
+
+# What the boot reads instead of finding it each time: the lean plugin list,
+# Hermes' revision, the browser's path; and the files the gateway loads,
+# read ahead on the second CPU while /data is restored (S3b, cut h).
+RUN /opt/fragment/bin/hermes-boot build-info \
+ && mkdir -p /tmp/rh \
+ && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
+ && rm -rf /tmp/rh \
+ && mkdir -p /data /run/computer /var/lib/fragment-run
+
+# One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
+# restated, without upstream's VOLUME.
+FROM scratch
+COPY --from=hermes / /
+ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright \
+    npm_config_install_links=false \
+    HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
+    HERMES_TUI_DIR=/opt/hermes/ui-tui \
+    HERMES_HOME=/data/hermes \
+    HERMES_WRITE_SAFE_ROOT=/data/hermes \
+    HERMES_DISABLE_LAZY_INSTALLS=1 \
+    HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
+    XDG_RUNTIME_DIR=/tmp/hermes-runtime \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    S6_CMD_RECEIVE_SIGNALS=1 \
+    S6_SERVICES_GRACETIME=1000 \
+    S6_KILL_GRACETIME=1000 \
+    FRAGMENT_API=http://api.fragment.internal \
+    FRAGMENT_MODEL=http://model.fragment.internal
+WORKDIR /opt/hermes
+EXPOSE 6080
+ENTRYPOINT ["/opt/fragment/bin/hermes-boot", "pre-init"]

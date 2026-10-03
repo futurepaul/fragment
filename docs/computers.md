@@ -110,11 +110,33 @@ holds. Other internet traffic goes out as it is (decision 43).
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record; the agent must be a member who may read
-  the channel. Only a computer's egress can ask for one. Nothing is pushed into the guest: on
-  waking, the guest reads each channel after its last sequence number
+  the channel. Only a computer's egress can ask for one. Nothing is
+  pushed into the guest: on waking, the guest reads each channel after its last sequence number
   (`GET …/channels/{channel}?after=`) and follows it live on `__live`.
   A record's `(fragment, channel, seq)` is the id of whatever it starts,
   so a catch-up never starts something twice (lesson 2).
+  - It is its principal's: each agent subscribes for itself, once per
+    channel. `GET …/subscriptions` lists the agent's own with `wake: true`
+    (`{id, principal, channel, wake}`), and the guest makes one only when
+    that list has none, so a repeated `POST` need not be idempotent. A
+    member's wake subscriptions go with its membership.
+  - A record wakes the computer whoever posted it, the agent's own
+    included; the guest ignores its own.
+- What a guest follows, by convention (docs/chat-records.md): for each
+  agent, `chat` of every fragment it is a member of whose channels
+  include a postable `chat` (a chat), and `tasks` of the agent's own
+  fragment (its routines, and `joined` when it is added to a fragment).
+  The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
+  as the agent, read again every 5 minutes and on `joined`; the agents
+  themselves from `GET /api/computer`, read again every minute. So a new
+  chat reaches a sleeping computer only through `joined`: whatever adds
+  an agent to a fragment (the shell, the chat template) posts
+  `{kind: "joined", fragment}` to the agent's `tasks` after. An agent
+  newly assigned to a computer is followed within a minute while it is
+  awake; to a sleeping one, wake it (`POST /api/computers/{id}/wake`).
+- What was said before an agent joined a chat is not for it: the guest
+  skips a record whose `at` is before the agent's membership's `addedAt`
+  (`GET /api/f/{name}/members`).
 
 ### Models
 
@@ -128,6 +150,13 @@ holds. Other internet traffic goes out as it is (decision 43).
   Anthropic's shape for the high tier, passed through as it is.
 - An owner at zero credit, or a fragment past its cap, gets 402 with the
   reason, and no call is made.
+- Any other path is 404, unmetered. Hermes probes `GET /api/show`
+  (Ollama's model metadata) with no `x-fragment-agent`; it falls back to
+  its configured context length.
+- A call without `x-fragment-agent` is refused (no one to bill). Our
+  Hermes image sets it on every call of an agent's profile (its
+  `model.default_headers`), the main model's and the auxiliary ones'
+  (titles, the smart-approval guardian).
 
 ### Storage
 
@@ -160,7 +189,30 @@ which that origin redeems into a session cookie of its own; a signed
 request (the CLI's) needs none. A WebSocket on a port is bridged through
 the Computer DO and holds it awake while open. Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
-(decision 11).
+(decision 11). The page is served at the
+port's root and reaches its sockets by relative URLs (our images':
+`websockify?viewer=` and `control?viewer=`), so it works under the
+port's prefix (`/p/6080/`).
+
+## Our images
+
+Each is under `images/` (docs/bridge.md has the bridge's routes,
+settings and state):
+
+- `images/bridge`: the process both images run between an agent runtime
+  and the fragment API, with the chat records of docs/chat-records.md.
+  Its core names no runtime; `relay` (Hermes' Relay) and `script` (a
+  deterministic agent) are its two runtimes.
+- `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
+  local start follows its chats in 0.3 s. The platform's own lanes run
+  against it.
+- `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
+  bridge as Hermes' Relay connector, Litestream, the screen. One Hermes
+  profile per agent (`juniper.paul` is `juniper-paul`), its agent
+  fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
+  committed back. An agent fragment's optional `agent.json`
+  (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
+  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
 ## Billing
 
@@ -176,3 +228,11 @@ agent's owner. At zero credit no wake starts (decision 27).
   against `images/stub/` under `wrangler dev` with Docker.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list).
+- The images' own (`images/`, its own workspace: `cargo test` and
+  `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
+  pure; the bridge against an in-process fake fragment API, with the
+  `script` runtime and with the `relay` runtime against a scripted
+  Hermes gateway; and, with Docker, both images built and run against
+  the fake API and a scripted model on the host
+  (`cargo test -p fragment-bridge --test docker -- --ignored`), real
+  Hermes included. These are lower rung: fakes at the platform's edge.

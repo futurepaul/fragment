@@ -1,0 +1,32 @@
+# The computer images' Rust (docs/computers.md): the bridge every image runs,
+# and the Hermes image's boot tool. Its own workspace and lock, apart from the
+# repo's root workspace, so an image's build context is `images/` alone and
+# its dependencies are only these (no TLS, no async runtime but tokio).
+[workspace]
+resolver = "2"
+members = ["bridge", "hermes/boot"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+base64 = "0.22"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio", "server"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "fs", "io-util", "process"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+
+[profile.release]
+strip = true
+# Assertions stay on in release (docs/engineering-style.md, "Wear the
+# seatbelt on the racetrack").
+debug-assertions = false
+overflow-checks = true

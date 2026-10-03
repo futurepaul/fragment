@@ -532,3 +532,92 @@ fragment.club until cutover (decisions 34–35).
 - **First proof:** already present.
 - **Delete when:** the hosted lane checks the 413 itself, or miniflare
   passes the early answer through.
+||||||| 3490a8c
+- **Observed:** the cut (2026-10-02). `cell/wrangler.jsonc` keeps the
+  `v5` and `v6` migrations that made the `Computer` and `Hermes` classes;
+  neither is bound or exported any more. celld takes
+  `new_sqlite_classes` alone and stops a deployment that deletes a class,
+  so the `deleted_classes` migration waits.
+- **Risk:** a deploy to a real Workers account with those migrations and
+  no class carries two dead classes' objects (and refuses, if Cloudflare
+  checks the export); a reader takes the tags for live classes.
+- **First proof:** the first `wrangler deploy` of the cell.
+- **Delete when:** phase 2 moves the cell to wrangler and adds
+  `{"tag": "v7", "deleted_classes": ["Computer", "Hermes"]}` (or starts
+  the migrations over, since nothing on fragment.club migrates), proven
+  by a deploy to a preview.
+
+## The Hermes image patches Hermes' own boot
+
+- **Observed:** phase 4 (`images/hermes/Dockerfile`, `preload.py`).
+  Spike S3b's cuts need upstream changes Hermes v0.21.5 does not have,
+  so the image makes them: a `sed` gates stage2's config migration and
+  skills sync on `hermes-boot stamped` (the build fails unless both
+  lines patch), `02-reconcile-profiles` is replaced with a no-op (the
+  preloaded gateway is the main program), and `preload.py` replaces
+  `tools.skills_sync.sync_skills` and `_sync_bundled_skills_quietly`
+  when the skills stamp matches.
+- **Risk:** a Hermes release moves those lines or names: the build
+  fails on the stage2 patch (loudly), but the preload's replacement
+  stops applying (silently, about 0.5 s slower), or applies to a changed
+  function.
+- **First proof:** the first Hermes upgrade after v0.21.5.
+- **Delete when:** upstream keys its setup and bundled-skills syncs on
+  the image revision and ships a preloadable, unsupervised gateway main
+  program (S3b's "Upstream Hermes" list), proven by the real-Hermes lane
+  on an unpatched image at the same READY time.
+
+## A Hermes turn's end is read from its reactions
+
+- **Observed:** phase 4, against the real image. Relay has no
+  turn-level end; the bridge reads `👀` off then `✅`/`❌`, and Hermes'
+  multiplexed gateway brackets a message twice (an empty dispatch
+  bracket, then the turn's). The relay runtime ends a turn at `✅` only
+  once it said something, and an empty one only after 20 s with no new
+  `👀` (`EMPTY_SETTLE_MS`).
+- **Risk:** a turn that answers nothing holds the keepalive 20 s longer;
+  a Hermes release that brackets differently ends turns early (their
+  replies then post as turns of their own) or late.
+- **First proof:** a turn that says nothing, or a reply posted under a
+  `said` turn rather than its message's.
+- **Delete when:** Hermes' Relay sends a turn's end (or brackets once),
+  proven by the real-Hermes lane with `EMPTY_SETTLE_MS` gone.
+
+## Hermes' tool steps are its progress text
+
+- **Observed:** phase 4. v0.21.5 sends `task_card` only for Slack chats,
+  so a Relay turn's steps are the lines of its progress message: a tool's
+  name and its preview, `ok` always true, no excerpt of its result.
+- **Risk:** a step card cannot say a tool failed or what it returned; a
+  change to the progress lines' format changes the cards.
+- **First proof:** phase 5's chat template showing a failed tool as ok.
+- **Delete when:** Hermes sends structured tool events (task cards, or
+  their like) to Relay connectors other than Slack's, and the relay
+  runtime maps them, proven by the real-Hermes lane's step assertions.
+
+## The screen's Take over is the image's, not Hermes'
+
+- **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen
+  proxies raw RFB from Hermes' desktop socket and passes input only from
+  the viewer holding control. Hermes' own take-over lease (its
+  dashboard's ticketed display socket) is not used, so the agent's
+  computer-use tools do not know a person holds the screen.
+- **Risk:** a person and the agent move the pointer at once.
+- **First proof:** a person taking over while a computer-use turn runs.
+- **Delete when:** the screen goes through Hermes' lease (its ticketed
+  `/api/display/ws`, or a lease the image can set), proven by a turn
+  that waits while a person holds control.
+
+## Each agent's Hermes profile config is rewritten at every boot
+
+- **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
+  its model block (tier, the model intercept, `x-fragment-agent`),
+  written whole at each boot; anything Hermes or the agent wrote there
+  is lost.
+- **Risk:** an agent's own `hermes config set` lasts until the computer
+  sleeps.
+- **First proof:** an agent that changes its own Hermes settings.
+- **Delete when:** an agent's settings live in its fragment (its
+  `agent.json`, phase 5's agent template) and the boot merges them into
+  the profile's config rather than replacing it, proven by a setting
+  that survives a wake.

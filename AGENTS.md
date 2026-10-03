@@ -124,6 +124,14 @@ prebuilt bundle is in the debt ledger).
   `crates/templates` (`templates/`, embedded),
   `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
   `crates/devstack`, `crates/e2e`.
+- `images/` (the computer images: the bridge, the stub, our Hermes image;
+  docs/bridge.md) is its own workspace: `cargo test --workspace` and
+  `cargo clippy --workspace --all-targets -- -D warnings` there (CI:
+  `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
+  docker -- --ignored` builds both images and runs them in Docker
+  (linux/amd64) against a fake API and a scripted model, real Hermes
+  included. The e2e's computer sections run the stub image under
+  `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check` and `e2e` on Linux.
   `release.yml` builds the CLI for macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
