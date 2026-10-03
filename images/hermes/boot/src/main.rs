@@ -6,15 +6,19 @@
 //!                          restore gate, then exec s6's /init with `main`
 //! hermes-boot main         /init's main program: config, profiles from the
 //!                          computer's agents and their repos, the bridge,
-//!                          the gateway, Litestream; until SIGTERM
+//!                          the gateway, Litestream; then, until SIGTERM, the
+//!                          agents followed as they change (agents.rs)
 //! hermes-boot stamped <name> <input> -- <cmd…>
 //!                          a setup step, skipped when this image already ran
 //!                          it on this exact input
 //! hermes-boot readahead    warm the page cache with the gateway's files
+//! hermes-boot screen-start (the bridge's, when a viewer finds the screen
+//!                          down) the first agent's desktop
 //! hermes-boot build-info   (at image build) the lean plugin list, Hermes'
 //!                          revision, the browser's path
 //! ```
 
+mod agents;
 mod hermes;
 mod sync;
 
@@ -54,6 +58,25 @@ const STOP_MS_MAX: u64 = 2_500;
 const BRIDGE_RESTARTS_MAX: u32 = 10;
 /// Readahead reads at most this many files.
 const READAHEAD_FILES_MAX: usize = 5_000;
+/// The computer's agents are read again this often while awake: one
+/// assigned meanwhile has its profile, and is run, within about this
+/// (docs/computers.md). One `GET /api/computer`, answered by the Computer
+/// DO itself.
+const AGENTS_EVERY_MS: u64 = 3_000;
+/// The gateway's answer to a control verb is waited for this long (its
+/// rescan waits up to 5 s on its own loop before answering `pending`).
+const CONTROL_WAIT_MS: u64 = 8_000;
+/// Litestream is given this long to stop before it is started again.
+const LITESTREAM_STOP_MS: u64 = 2_000;
+const LITESTREAM: &str = "/usr/local/bin/litestream";
+/// Under `RUN`: the bridge's ready file (the agents whose profiles are
+/// written: its `ready.rs`), the screen's socket (a link to the first
+/// agent's display), and that agent's name (what `screen-start` starts).
+const READY_FILE: &str = "agents.json";
+const SCREEN_SOCKET: &str = "screen.sock";
+const SCREEN_AGENT: &str = "screen-agent";
+
+const _: () = assert!(AGENTS_EVERY_MS >= 1_000 && AGENTS_EVERY_MS < SYNC_EVERY_MS, "agents are read often, and at most once a tick");
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -75,8 +98,9 @@ fn main() {
         Some("main") => tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime").block_on(boot_main()),
         Some("stamped") => stamped(&args[2..]),
         Some("readahead") => readahead(),
+        Some("screen-start") => screen_start(),
         Some("build-info") => build_info(),
-        _ => fail("hermes-boot pre-init | main | stamped | readahead | build-info"),
+        _ => fail("hermes-boot pre-init | main | stamped | readahead | screen-start | build-info"),
     }
 }
 
@@ -194,6 +218,25 @@ fn readahead() -> ! {
     std::process::exit(0);
 }
 
+/// The first agent's desktop, as a viewer that finds the screen down asks
+/// for it (the bridge runs this at most once a minute while it stays
+/// down): the agent `point_screen` named last.
+fn screen_start() -> ! {
+    let agent = std::fs::read_to_string(format!("{RUN}/{SCREEN_AGENT}")).map(|s| s.trim().to_string()).unwrap_or_default();
+    if agent.is_empty() {
+        fail("no agent's desktop to start: this computer runs no agent yet");
+    }
+    let home = home();
+    let profile = wire::profile(&agent);
+    ev!("screen.start", { "agent": agent, "profile": profile });
+    let err = Command::new("/command/s6-setuidgid")
+        .args(["hermes", "/opt/hermes/.venv/bin/hermes", "-p", &profile, "computer-use", "screen", "start"])
+        .env("HOME", &home)
+        .env("HERMES_HOME", &home)
+        .exec();
+    fail(&format!("exec hermes computer-use: {err}"));
+}
+
 /// At image build: what the boot reads instead of finding it each time.
 fn build_info() -> ! {
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
@@ -284,40 +327,58 @@ fn trust_ca() {
     });
 }
 
-/// Each agent's profile: its directories, its config, its repo pulled.
+/// Writes `text` to `path` whole, Hermes' (a temporary file renamed over
+/// it): a gateway that reads it as it changes (a profile written while
+/// Hermes runs) never sees half.
+fn write_whole(path: &Path, text: &str, ids: Option<(u32, u32)>) {
+    let tmp = path.with_extension("fragment-tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        chown(&tmp, ids);
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// One agent's profile: its directories, its config, its repo pulled. At a
+/// boot for each agent, and while awake for each one assigned since
+/// (`follow_agents`); Hermes reads it at the agent's first turn either way.
+/// The config is written before `.env`, so the directory is a profile to
+/// Hermes (an identity file) only once its config is whole.
+async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, model: &str) {
+    let t = Instant::now();
+    let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
+    let own = move |p: &Path| chown(p, ids);
+    let dir = hermes::profile_dir(home, &a.fragment);
+    let fresh = !dir.exists();
+    for sub in hermes::PROFILE_DIRS {
+        let _ = std::fs::create_dir_all(dir.join(sub));
+        chown(&dir.join(sub), ids);
+    }
+    chown(&dir, ids);
+    // Which agent this profile is: what retiring it later reads.
+    let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
+    let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
+    let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
+    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model), ids);
+    let env_file = dir.join(".env");
+    if !env_file.exists() {
+        write_whole(&env_file, &format!("# The profile of {}; the computer holds no credential.\n", a.fragment), ids);
+    }
+    match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
+        Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
+    }
+}
+
+/// Each agent's profile at a boot, and the profiles of agents that left
+/// this computer retired: moved aside, never deleted. Only a boot retires
+/// one: no Hermes runs yet that could be winding down a turn in it.
 async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
-    let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
-    let own = move |p: &Path| chown(p, ids);
     for a in agents {
-        let dir = hermes::profile_dir(home, &a.fragment);
-        let fresh = !dir.exists();
-        for sub in hermes::PROFILE_DIRS {
-            let _ = std::fs::create_dir_all(dir.join(sub));
-            chown(&dir.join(sub), ids);
-        }
-        chown(&dir, ids);
-        // Which agent this profile is: what retiring it later reads.
-        let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-        let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
-        let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
-        let cfg = dir.join("config.yaml");
-        let _ = std::fs::write(&cfg, hermes::profile_config(a, tier, model));
-        chown(&cfg, ids);
-        let env_file = dir.join(".env");
-        if !env_file.exists() {
-            let _ = std::fs::write(&env_file, format!("# The profile of {}; the computer holds no credential.\n", a.fragment));
-            chown(&env_file, ids);
-        }
-        let t = Instant::now();
-        match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
-            Ok(d) => ev!("boot.profile", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
-            Err(e) => ev!("boot.profile", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string() }),
-        }
+        write_profile(api, a, home, ids, model).await;
     }
-    // A profile whose agent left this computer is moved aside, never deleted.
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
             let marker = std::fs::read_to_string(e.path().join(".fragment-agent")).unwrap_or_default();
@@ -331,7 +392,10 @@ async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u3
     }
 }
 
-fn spawn_bridge(agents: &[Agent], home: &Path) -> Option<Child> {
+/// The bridge, which runs the agents the ready file names (its `ready.rs`)
+/// and shows the screen's socket, whichever agents come and go: nothing
+/// it is started with changes with them.
+fn spawn_bridge() -> Option<Child> {
     let mut c = Command::new(format!("{OPT}/bin/fragment-bridge"));
     c.arg("run")
         .env("BRIDGE_RUNTIME", "relay")
@@ -340,17 +404,14 @@ fn spawn_bridge(agents: &[Agent], home: &Path) -> Option<Child> {
         .env("GATEWAY_RELAY_ID", GATEWAY_ID)
         .env("BRIDGE_STATE_DIR", "/data/bridge")
         .env("BRIDGE_PROMPT_TTL_MS", (hermes::APPROVAL_TIMEOUT_S * 1000).to_string())
+        .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
+        // The screen is the first agent's desktop, started at its first viewer.
+        .env("BRIDGE_SCREEN_RFB", format!("unix:{RUN}/{SCREEN_SOCKET}"))
+        .env("BRIDGE_SCREEN_START", format!("{OPT}/bin/hermes-boot screen-start"))
         // The restore already happened: the bridge reads /data at once.
         .env_remove("RESTORE_PENDING");
-    // The screen is the first agent's desktop, started at its first viewer.
-    if let Some(first) = agents.first() {
-        let p = wire::profile(&first.fragment);
-        let profile_home = hermes::profile_dir(home, &first.fragment);
-        c.env("BRIDGE_SCREEN_RFB", format!("unix:{}", profile_home.join("bot-desktop/rfb.sock").display()));
-        c.env("BRIDGE_SCREEN_START", format!("/usr/bin/env HOME={h} HERMES_HOME={h} /command/s6-setuidgid hermes /opt/hermes/.venv/bin/hermes -p {p} computer-use screen start", h = home.display()));
-    }
     match c.spawn() {
         Ok(child) => Some(child),
         Err(e) => {
@@ -358,6 +419,96 @@ fn spawn_bridge(agents: &[Agent], home: &Path) -> Option<Child> {
             None
         }
     }
+}
+
+/// The bridge's ready file: every agent whose profile is written.
+fn write_ready(agents: &[Agent]) {
+    write_whole(Path::new(&format!("{RUN}/{READY_FILE}")), &agents::ready_file(agents), None);
+}
+
+/// Points the screen at `first`'s desktop: the screen's socket is a link to
+/// its profile's display socket, and `screen-start` starts its display. A
+/// computer with no agent shows no desktop.
+fn point_screen(first: Option<&Agent>, home: &Path) {
+    let link = PathBuf::from(format!("{RUN}/{SCREEN_SOCKET}"));
+    let agent_file = PathBuf::from(format!("{RUN}/{SCREEN_AGENT}"));
+    match first {
+        Some(a) => {
+            let target = hermes::profile_dir(home, &a.fragment).join("bot-desktop/rfb.sock");
+            let tmp = link.with_extension("sock-tmp");
+            let _ = std::fs::remove_file(&tmp);
+            let linked = std::os::unix::fs::symlink(&target, &tmp).and_then(|()| std::fs::rename(&tmp, &link));
+            write_whole(&agent_file, &a.fragment, None);
+            ev!("screen.agent", { "agent": a.fragment, "ok": linked.is_ok() });
+        }
+        None => {
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_file(&agent_file);
+            ev!("screen.agent", { "agent": null });
+        }
+    }
+}
+
+/// The control socket of the gateway serving `home`, if it has one.
+fn control_socket(home: &Path) -> Option<PathBuf> {
+    let direct = home.join(hermes::CONTROL_SOCKET);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let pointed = std::fs::read_to_string(home.join(hermes::CONTROL_POINTER)).ok().map(|p| PathBuf::from(p.trim()))?;
+    pointed.exists().then_some(pointed)
+}
+
+/// Asks the gateway one control verb (Hermes' `gateway/control_socket.py`):
+/// its result, within `CONTROL_WAIT_MS`.
+async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let path = control_socket(home).ok_or_else(|| "the gateway has no control socket yet".to_string())?;
+    let ask = async {
+        let mut s = tokio::net::UnixStream::connect(&path).await.map_err(|e| format!("{}: {e}", path.display()))?;
+        s.write_all(hermes::control_request(verb).as_bytes()).await.map_err(|e| e.to_string())?;
+        let mut answer = Vec::new();
+        let mut chunk = [0u8; 8192];
+        // bounded by CONTROL_ANSWER_MAX_BYTES (and the timeout around it)
+        while !answer.contains(&b'\n') && answer.len() <= hermes::CONTROL_ANSWER_MAX_BYTES {
+            let n = s.read(&mut chunk).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            answer.extend_from_slice(&chunk[..n]);
+        }
+        hermes::control_answer(answer.split(|b| *b == b'\n').next().unwrap_or_default())
+    };
+    tokio::time::timeout(Duration::from_millis(CONTROL_WAIT_MS), ask).await.map_err(|_| format!("no answer to {verb} within {CONTROL_WAIT_MS} ms"))?
+}
+
+/// A change of the computer's agents while it is awake (agents.rs), carried
+/// out with nothing restarted: each new agent's profile is written, the
+/// gateway is asked to serve it (`rescan-profiles`, as Hermes' own `profile
+/// create` asks), and then the ready file names it, so the bridge hands it
+/// no turn before its profile is whole. A removed agent leaves the ready
+/// file, so the bridge stops at once; its profile waits for the next boot.
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str) {
+    let t = Instant::now();
+    let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
+    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "screen": change.screen, "agents": now.len() });
+    for a in &change.added {
+        write_profile(api, a, home, ids, model).await;
+    }
+    if !change.added.is_empty() {
+        let asked = Instant::now();
+        match ask_gateway(home, "rescan-profiles").await {
+            Ok(answer) => ev!("agents.served", { "added": answer["added"], "pending": answer["pending"], "unserved": agents::unserved(&change.added, &answer), "ms": asked.elapsed().as_millis() as u64 }),
+            // every relayed turn resolves its profile as it arrives, and Hermes
+            // rescans every 30 s: the agent is run either way
+            Err(e) => ev!("agents.serve_unasked", { "error": e, "ms": asked.elapsed().as_millis() as u64 }),
+        }
+    }
+    if change.screen {
+        point_screen(now.first(), home);
+    }
+    write_ready(now);
+    ev!("agents.ready", { "agents": now.len(), "ms": t.elapsed().as_millis() as u64 });
 }
 
 /// The gateway: the preloaded one is told to go; without one, it is
@@ -438,25 +589,28 @@ for p in sys.argv[1:]:
     }
 }
 
-/// Litestream, once the profiles' databases exist (Hermes makes them as its
-/// gateway starts), off the wake path.
-fn start_litestream(agents: &[Agent], home: &Path) -> Option<Child> {
-    let storage = env("FRAGMENT_STORAGE")?;
-    if !Path::new("/usr/local/bin/litestream").exists() {
-        return None;
-    }
-    let mut dbs: Vec<(String, PathBuf)> = vec![("default".into(), home.join("state.db"))];
-    for a in agents {
-        dbs.push((wire::profile(&a.fragment), hermes::profile_dir(home, &a.fragment).join("state.db")));
-    }
-    dbs.retain(|(_, p)| p.exists());
+/// Litestream over `dbs` (those that exist: Hermes makes a profile's as
+/// it first runs it), off the wake path.
+fn start_litestream(dbs: &[(String, PathBuf)], storage: &str) -> Option<Child> {
     if dbs.is_empty() {
         return None;
     }
     let cfg = format!("{RUN}/litestream.yml");
-    std::fs::write(&cfg, hermes::litestream_config(&dbs, &storage)).ok()?;
-    ev!("boot.litestream", { "dbs": dbs.len() });
-    Command::new("/usr/local/bin/litestream").args(["replicate", "-config", &cfg]).spawn().ok()
+    std::fs::write(&cfg, hermes::litestream_config(dbs, storage)).ok()?;
+    ev!("litestream.started", { "dbs": dbs.len() });
+    Command::new(LITESTREAM).args(["replicate", "-config", &cfg]).spawn().ok()
+}
+
+/// Stops Litestream (SIGTERM, its last sync), at most `LITESTREAM_STOP_MS`.
+async fn stop_litestream(mut child: Child) {
+    signal(child.id(), libc::SIGTERM);
+    let t = Instant::now();
+    // bounded by LITESTREAM_STOP_MS
+    while matches!(child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_millis(LITESTREAM_STOP_MS) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 async fn boot_main() {
@@ -481,7 +635,8 @@ async fn boot_main() {
             Err(e) => fail(&format!("GET /api/computer: {e}")),
         }
     };
-    let agents = computer.agents.clone();
+    // What the boot runs: the agents read at its start, then as they change.
+    let mut agents = computer.agents.clone();
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
@@ -497,15 +652,23 @@ async fn boot_main() {
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     end_previous_life(&agents, &home);
-    let mut bridge = spawn_bridge(&agents, &home);
+    point_screen(agents.first(), &home);
+    write_ready(&agents);
+    let mut bridge = spawn_bridge();
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });
 
+    // Litestream streams the databases that exist, and starts again when
+    // that set changes (an agent's first turn makes its profile's).
+    let storage = env("FRAGMENT_STORAGE").filter(|_| Path::new(LITESTREAM).exists());
     let mut litestream: Option<Child> = None;
+    let mut streamed: Option<Vec<(String, PathBuf)>> = None;
     let mut restarts = 0u32;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut last_sync = Instant::now();
+    let mut last_agents = Instant::now();
+    let mut agents_unread = false;
     // HERMES_BOOT_SYNC_MS: the operator's (a test's) cadence, at least 1 s.
     let sync_every = env("HERMES_BOOT_SYNC_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SYNC_EVERY_MS, |v| v.max(1_000));
     let own = move |p: &Path| chown(p, ids);
@@ -528,11 +691,38 @@ async fn boot_main() {
                     stop(gateway, None, litestream.as_mut()).await;
                     fail("the bridge keeps exiting");
                 }
-                bridge = spawn_bridge(&agents, &home);
+                bridge = spawn_bridge();
             }
         }
-        if litestream.is_none() && t0.elapsed() > Duration::from_secs(10) {
-            litestream = start_litestream(&agents, &home);
+        // The computer's agents may change while it runs (docs/computers.md).
+        if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
+            last_agents = Instant::now();
+            match api.computer().await {
+                Ok(c) => {
+                    agents_unread = false;
+                    let change = agents::diff(&agents, &c.agents);
+                    if !change.is_empty() {
+                        follow_agents(&api, &change, &c.agents, &home, ids, &model).await;
+                    }
+                    agents = c.agents;
+                }
+                // once per outage: the next read that answers ends it
+                Err(e) if !agents_unread => {
+                    agents_unread = true;
+                    ev!("agents.unread", { "error": e.to_string() });
+                }
+                Err(_) => {}
+            }
+        }
+        if let Some(storage) = storage.as_deref().filter(|_| t0.elapsed() > Duration::from_secs(10)) {
+            let dbs: Vec<(String, PathBuf)> = hermes::litestream_dbs(&agents, &home).into_iter().filter(|(_, p)| p.exists()).collect();
+            if streamed.as_ref() != Some(&dbs) {
+                if let Some(old) = litestream.take() {
+                    stop_litestream(old).await;
+                }
+                litestream = start_litestream(&dbs, storage);
+                streamed = Some(dbs);
+            }
         }
         if last_sync.elapsed() > Duration::from_millis(sync_every) {
             last_sync = Instant::now();

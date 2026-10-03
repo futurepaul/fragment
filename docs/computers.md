@@ -115,7 +115,13 @@ that names a PID from before a sleep can name a live process after it.
   them, never above them (decision 36).
 - Without the header only the computer's own routes answer:
   - `GET /api/computer` → `{computer, owner, image, agents: [{fragment,
-    identity, name, owner}]}`: the agents to run.
+    identity, name, owner}]}`: the agents to run. **They may change while
+    the computer runs** (its owner assigns or unassigns one): the guest
+    reads them again while awake and runs the new set, with nothing
+    restarted. The platform never restarts a computer for a change of its
+    agents, so an image must not rely on reading them once, at its start.
+    An agent unassigned signs nothing from that moment (the intercept
+    refuses it), whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
     computer stays awake. Hold it while busy; drop it while waiting on a
     person (decision 42).
@@ -142,7 +148,8 @@ that names a PID from before a sleep can name a live process after it.
   fragment (its routines, and `joined` when it is added to a fragment).
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`; the agents
-  themselves from `GET /api/computer`, read again every minute.
+  themselves from `GET /api/computer`, read again every minute (the
+  bridge), or every 3 s (our Hermes image, below).
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
   agents are woken eagerly, to hide a wake's latency). Whatever adds an
   agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
@@ -157,8 +164,10 @@ that names a PID from before a sleep can name a live process after it.
   agent joined keeps the notice in an outbox of its own until the
   computer has it (`agent.told` in its events); a role change, or the
   same member added again, is no new join. An agent newly assigned to a
-  computer is followed within a minute while it is awake; to a sleeping
-  one, wake it (`POST /api/computers/{id}/wake`).
+  computer is followed while it is awake, with nothing restarted: within
+  a minute on the stub, within seconds on our Hermes image. A sleeping
+  one reads it as it starts (wake it: `POST /api/computers/{id}/wake`, or
+  add the agent to a fragment).
 - What was said before an agent joined a chat is not for it: the guest
   skips a record whose `at` is before the agent's membership's `addedAt`
   (`GET /api/f/{name}/members`).
@@ -298,6 +307,32 @@ settings and state):
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
+  Its agents change while it runs (`images/hermes/boot/src/agents.rs`),
+  and nothing restarts for it: no container, gateway or bridge, so no
+  other agent's turn is cut or waits. `hermes-boot` reads `GET
+  /api/computer` every 3 s. For an agent assigned since, it writes the
+  agent's profile as a boot does (its directories, its config whole
+  before its `.env`, its repo pulled), then asks the gateway to serve it
+  (the `rescan-profiles` verb on its control socket, `gateway.sock`, as
+  Hermes' own `profile create` does: Hermes v0.21.5's multiplexed gateway
+  serves a profile made after it started, and a relayed turn resolves
+  its profile's directory as it arrives), and only then names it in the
+  bridge's ready file (`BRIDGE_AGENTS_FILE`, docs/bridge.md): the bridge
+  runs only the agents that file names, so no turn reaches a profile
+  that is not whole (the 401 of a turn run in Hermes' default profile,
+  which names no agent to bill). On the lower rung (`cargo test -p
+  fragment-bridge --test docker -- --ignored`) an agent assigned to a
+  running image answers its first message about a second after it is
+  assigned. An agent unassigned leaves the ready file at once, so the
+  bridge stops running it; its profile is retired at the next start, when
+  no Hermes could be winding down a turn in it. The screen is the first
+  agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
+  that moves with the first agent, started by `hermes-boot screen-start`;
+  Litestream starts again when the set of databases it streams changes
+  (a new profile's appears at its first turn). Events: `agents.changed`,
+  `profile.written`, `agents.served` (the gateway's answer and its
+  `ms`), `agents.ready` (the whole change's `ms`).
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
@@ -328,7 +363,8 @@ settings and state):
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
-  4's exit list).
+  4's exit list), a second agent assigned to the awake computer while the
+  first's turn runs included.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API, with the
