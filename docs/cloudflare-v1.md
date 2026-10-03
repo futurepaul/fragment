@@ -397,15 +397,33 @@ exit says.
    - A per-branch full deployment with wildcard hosts.
 
    Exit: a verdict and evidence for each spike.
-1. **Freeze and cut.** Tag `celld-final` (done 2026-10-02). Delete the
-   product half of decision 33. Keep the substrate (the celld fork,
-   native `KEYS`, the devstack) until phase 2 replaces it, so the
-   remaining e2e stays green on celld as the baseline. The fleet's
-   deploy path leaves master, so the cut can never reach fragment.club.
+1. **Freeze and cut. Done 2026-10-02.**
+   - `celld-final` was tagged and the `celld` branch pushed.
+   - The product half of decision 33 went: about 64k lines.
+   - The fleet's deploy path went with it: `fleets/`, `crates/node`,
+     `xtask deploy`, `fleet` and `e2e --fleet`. So the cut can't reach
+     fragment.club.
+   - The substrate stays until phase 2 replaces it: the celld fork,
+     native `KEYS` and the devstack.
+
+   Evidence: `cargo xtask check` green, and the full remaining
+   `cargo xtask e2e` at 1057 passed and 0 failed across 40 sections (1163
+   before; the difference is the deleted lanes).
+
+   Kept for later phases:
+   - **The frame-session redeem half** (the partitioned cookie,
+     `embedder`, `frame-ancestors`). Nothing mints a frame session now
+     (a ledger entry). Phase 5 adds a platform-origin mint and a frames
+     lane, or deletes it.
+   - **The channel drafts API** for decision 21's bridge. It lost its
+     e2e (a ledger entry), and phase 4's exit covers it.
+   - `/` and `/settings` as stand-ins for the shell until phase 5.
 2. **The cell on Cloudflare.** `KEYS` in the cell; R2; wrangler; the
    dev stack on `wrangler dev`; the e2e on workerd plus a hosted lane
-   on a preview. The celld fork, native `KEYS` and `crates/node` are
-   deleted here. Exit: core fragment sections green locally and on a
+   on a preview. The celld fork and native `KEYS` are deleted here. The
+   wrangler migrations restart from scratch, since nothing migrates:
+   celld refused `deleted_classes`, so the Computer and Hermes tags are
+   still listed. Exit: core fragment sections green locally and on a
    preview.
 3. **The ledger.** Meters, plans, guests, caps, the overdraft and
    read-only, and operator commands. Exit: metering matches the price
@@ -426,17 +444,23 @@ exit says.
      shared with that person as an editor; a people-only share refuses
      it; an agent held below its owner is refused;
    - a test that the platform has no Hermes code: the same lane passes
-     with a stub image whose bridge speaks the fragment API.
+     with a stub image whose bridge speaks the fragment API;
+   - drafts: the bridge streams through the channel drafts API, and a
+     page sees the draft live and then the final record.
 5. **The shell and the blessed templates.** The shell (onboarding,
    sidebar, tabs, profile, search, connections) and the chat and agent
-   templates on decision 40. Exit: the browser lane at desktop and phone
-   sizes, on a preview.
+   templates on decision 40. The shell's tabs sign in to their fragments
+   through a platform-origin frame-session mint, with a frames lane; the
+   shell replaces `/` and `/settings`. Exit: the browser lane at desktop
+   and phone sizes, on a preview.
 6. **Brains, skills, sites.** The brain and skills templates, Hermes'
    fragment skills, screenshots. Exit: from a chat, an agent builds,
    publishes and shares an app, ingests into a brain and searches it;
    the skills list matches the skills fragment.
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
-   blobs, secrets, AI steps. Exit: their e2e sections green.
+   blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
+   for the in-fragment agent's reply-operation answer path, which has
+   none today (a ledger entry).
 8. **Self-deploy.** An agent following `SETUP.md` deploys into a fresh
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.
