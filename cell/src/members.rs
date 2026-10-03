@@ -104,7 +104,7 @@ impl FragmentCell {
     /// kind and title. A change is sent to every member's list (at most
     /// `MEMBERS_MAX`) and its owner's.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
-        let face = json!({ "kind": kind, "title": title }).to_string();
+        let face = face(kind, title);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -617,4 +617,9 @@ impl FragmentCell {
         }
         json_response(&json!({ "ok": true, "removed": removed }))
     }
+}
+
+/// A fragment's face as its members' lists keep it (`MetaKey::Face`).
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>) -> String {
+    json!({ "kind": kind, "title": title }).to_string()
 }

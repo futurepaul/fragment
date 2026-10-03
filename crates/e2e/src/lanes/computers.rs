@@ -260,9 +260,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = allow(&owner, Value::Null)?;
     s.ok("null gives it every connection its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
+    // the tokens this computer asks for, after any the run's earlier sections did
+    let minted_before = s.workos.tokens(SWAP_CONNECTION).len();
+    let minted = |s: &Suite| s.workos.tokens(SWAP_CONNECTION).split_off(minted_before);
     let said = fetched(s, 16, &format!("fetch {gh}"))?;
     replies_so_far += 1;
-    let tokens = s.workos.tokens(SWAP_CONNECTION);
+    let tokens = minted(s);
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(
         "with the default, the provider gets the owner's token from Pipes in the placeholder's place",
@@ -272,7 +275,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
     let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
     replies_so_far += 1;
-    s.ok("a token is held until shortly before it expires", s.workos.tokens(SWAP_CONNECTION).len() == 1, json!(s.workos.tokens(SWAP_CONNECTION)));
+    s.ok("a token is held until shortly before it expires", minted(s).len() == 1, json!(minted(s)));
     s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
     let seen_before = s.upstream.seen().len();
     let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;

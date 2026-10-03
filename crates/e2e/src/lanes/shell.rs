@@ -189,7 +189,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
-    s.ok("the agent is made, named, and its chat opens in the shell", opened && row.as_str().is_some_and(|t| !t.is_empty()), &row);
+    if !opened {
+        let _ = b.screenshot(&page, &shots.join("first-agent-failed.png"));
+    }
+    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, error: document.querySelector('#first-run-card .form-error')?.textContent ?? null, apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
+    s.ok("the agent is made, named, and its chat opens in the shell", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     let title = row.as_str().unwrap_or("").to_string();
     let chat = format!("{}-chat.{username}", title.to_lowercase());
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();

@@ -15,7 +15,7 @@ use crate::Template;
 use sha2::{Digest, Sha256};
 
 /// The templates the platform serves from its release.
-pub const BLESSED: [&str; 1] = ["agent"];
+pub const BLESSED: [&str; 2] = ["agent", "chat"];
 
 /// A blessed template's files, when `name` is one.
 pub fn template(name: &str) -> Option<Template> {

@@ -1133,13 +1133,19 @@ impl FragmentCell {
                 caller.owner().map_or(SqlStorageValue::Null, |o| o.into()),
             ],
         )?;
-        self.index_change(&owner, Some(Role::Owner))?;
         if let Some(t) = &body.template {
             self.set_meta(MetaKey::TemplatePending, t)?;
             if let Some(title) = &body.title {
                 self.set_meta(MetaKey::TemplateTitle, title.trim())?;
             }
+            // a blessed template's face is known now: the owner's list says
+            // it is a chat or an agent from the start, not once it installs
+            if let Ok(m) = blessed::manifest(t) {
+                let title = body.title.as_deref().map(str::trim).or(m.title());
+                self.set_meta(MetaKey::Face, &crate::members::face(m.kind(), title))?;
+            }
         }
+        self.index_change(&owner, Some(Role::Owner))?;
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
         // a template that did not land, or an agent it declares that did

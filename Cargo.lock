@@ -532,7 +532,6 @@ dependencies = [
  "fragment-fakes",
  "fragment-nip98",
  "fragment-proto",
- "fragment-templates",
  "hex",
  "reqwest",
  "serde_json",
