@@ -379,11 +379,18 @@ impl Suite {
         self.cli_command(api, home, args).current_dir(cwd).output().expect("run the fragment CLI")
     }
 
-    fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
+    /// The CLI as a lane spawns it itself (a watcher, a piped input): its
+    /// config under the HOME the lane sets, on every system.
+    pub fn bare_cli(&self) -> Command {
         let mut c = Command::new(&self.cli);
-        // its config under this HOME on every system: a Linux runner's
-        // XDG_CONFIG_HOME would put every lane's key in one place
-        c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT").env_remove("XDG_CONFIG_HOME");
+        // a Linux runner's XDG_CONFIG_HOME would put every lane's key in one place
+        c.env_remove("XDG_CONFIG_HOME");
+        c
+    }
+
+    fn cli_command(&self, api: &Api, home: &Path, args: &[&str]) -> Command {
+        let mut c = self.bare_cli();
+        c.args(args).env("HOME", home).env("FRAGMENT_HOST", &api.base).env_remove("FRAGMENT_OUTPUT");
         c
     }
 

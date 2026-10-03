@@ -2,7 +2,7 @@
 //! that fill them, the live socket, custom routes, the CLI's call and
 //! channel, and the todo template driven in a real browser.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -702,7 +702,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let chars = 200 * 1024;
     std::fs::write(&big, json!({ "text": "x".repeat(chars) }).to_string())?;
     let from_file = s.cli_json(api, &home, &["call", &name, "measure", "--input", &format!("@{}", big.display()), "--json"])?;
-    let mut piped = Command::new(&s.cli)
+    let mut piped = s.bare_cli()
         .args(["call", &name, "measure", "--input", "-", "--json"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)
@@ -726,7 +726,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     // the follower has read the channel's one record before the next is
     // published, so the next can only reach it live
     let log = s.scratch.join(format!("follow-{name}.log"));
-    let mut follow = Command::new(&s.cli)
+    let mut follow = s.bare_cli()
         .args(["channel", &name, "room", "--follow"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)
@@ -747,7 +747,7 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     let listed = s.cli_json(api, &home, &["channel", &name, "--json"])?;
     let head = listed["channels"].as_array().and_then(|a| a.iter().find(|c| c["name"] == "room")).and_then(|c| c["seq"].as_i64()).unwrap_or(0);
     let log = s.scratch.join(format!("follow-all-{name}.log"));
-    let mut follow = Command::new(&s.cli)
+    let mut follow = s.bare_cli()
         .args(["channel", &name, "room", "--follow"])
         .env("HOME", &home)
         .env("FRAGMENT_HOST", &api.base)
