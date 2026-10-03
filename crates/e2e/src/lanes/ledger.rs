@@ -246,6 +246,15 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
+    // a guest pays for nothing, so a deploy of theirs is not shot (decision 31)
+    s.commit(&c, &[("notes/guest.md", Some(b"a guest deploys"))]);
+    s.deploy(&c);
+    let skipped = s.eventually(wait, || super::site::event_kinds(api, &guest, &guest_app).iter().any(|k| k == "card.skipped"));
+    s.ok(
+        "a guest's deploy gets no preview card: its ledger takes no shot",
+        skipped && super::site::cards(api, &guest_app)["cards"]["wanted"].is_null() && super::site::cards(api, &guest_app)["cards"]["flight"].is_null(),
+        json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app) }),
+    );
 
     // ---- an AI step: reserved, then settled from the usage it reported
     let name = s.named(api, &owner, "ledger")?;
@@ -573,8 +582,10 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let owner_id = api.identity(&owner)?;
     let name = s.named(api, &owner, "ledger-meters")?;
     let c = s.create(api, &owner, &name)?;
-    ship(s, &c, LEDGER_APP, LEDGER_JSON);
+    let live = ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
+    // the deploy's preview card, whose browser time is metered too
+    let card = super::site::card_showing(s, api, &owner, &name, &live);
     for _ in 0..5 {
         api.op(&owner, &name, "notes", "q", json!({}))?;
     }
@@ -596,6 +607,21 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         json!({ "sent": sent, "ledger": rows("req") }),
     );
     s.ok("its code version is one dynamic worker today, once however often it ran", rows("dw").len() == 1 && rows("dw")[0]["entry"]["charge"] == 3_000, json!(rows("dw")));
+    // its card's shot: the browser time it took, at the book's browser-hour price
+    let shot = |e: &Value| -> bool {
+        let usage: Option<Usage> = serde_json::from_value(e["entry"]["row"]["usage"].clone()).ok();
+        matches!(usage, Some(Usage::Browser { ms }) if ms > 0) && usage.as_ref().is_some_and(|u| e["entry"]["charge"] == charge(u)) && e["entry"]["row"]["fragment"] == name.as_str()
+    };
+    let shots = || rows("card");
+    let metered = s.eventually(wait, || {
+        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+        shots().iter().any(shot)
+    });
+    s.ok(
+        "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+        card.is_some() && metered && shots().iter().all(shot),
+        json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
+    );
     s.ok(
         "a storage sample bills its SQLite as byte-hours",
         rows("store").iter().any(|e| e["entry"]["row"]["usage"]["class"] == "sqlite" && e["entry"]["row"]["usage"]["byte_hours"].as_u64().is_some_and(|b| b > 0)),

@@ -104,6 +104,11 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its job and settings are files of its own, deployed", r.status == 200 && deploy.status == 200, format!("{r} {deploy}"));
     let soul = shell_site(s, api, &session, &agent, "__file?path=SOUL.md")?;
     s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), soul.status);
+    // an agent is no app: its deploys get no preview card (decision 31)
+    let events = || shell(api, &session, "GET", &format!("/api/f/{agent}/events?tail=200"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let skipped = s.eventually(super::site::CARD_WAIT, || events()["events"].as_array().is_some_and(|l| l.iter().any(|e| e["kind"] == "card.skipped" && e["data"]["why"] == "not_an_app")));
+    let card = shell(api, &session, "GET", &format!("/api/f/{agent}/card"), None, &[])?;
+    s.ok("an agent fragment is not shot for a card (it is no app): 404", skipped && card.status == 404, format!("{card} | {}", events()));
 
     // code of its own is a fork's, refused while it names the template
     let r = shell(
@@ -428,6 +433,25 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.eval(&page, "document.querySelector('.catalog form')?.requestSubmit()")?;
     let window = b.until(&page, "document.querySelectorAll('#apps .row[data-key]').length === 1 && document.querySelector('.viewer iframe')", wait);
     s.ok("an app from the catalog opens in a window beside the chat", window, "");
+    // its row shows its preview card once the platform has shot it: read with
+    // the shell's session, shown as a blob URL (the shell's CSP allows `img-src blob:`)
+    let carded = b.until(
+        &page,
+        "(() => { const i = document.querySelector('#apps .row[data-key] .app-card.shot img'); return !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 1280 && i.naturalHeight === 800; })()",
+        super::site::CARD_WAIT,
+    );
+    s.ok(
+        "the app's row in the sidebar shows its preview card, a blob URL of the 1280×800 shot",
+        carded,
+        b.eval(&page, "[...document.querySelectorAll('#apps .row')].map((r) => r.querySelector('.app-card')?.outerHTML.slice(0, 160))")?,
+    );
+    let peeked = b.eval(
+        &page,
+        "(() => { const r = document.querySelector('#apps .row.app-row'); r?.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' })); const p = document.querySelector('.card-peek'); return !!p && !p.hidden && p.querySelector('img').src.startsWith('blob:') && p.getBoundingClientRect().width === 320; })()",
+    )?;
+    s.ok("a pointer over the row shows the card larger, beside the sidebar", peeked == true, &peeked);
+    let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
+    b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
 
     // settings, at /settings: what a person needs of their account

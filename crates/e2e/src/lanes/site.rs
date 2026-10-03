@@ -1,12 +1,65 @@
 //! Serving: each fragment on its own host, gated by visibility; the
-//! machine-read plane; Open Graph pages; and the change feed.
+//! machine-read plane; Open Graph pages; preview cards; and the change feed.
+//!
+//! A preview card (docs/cloudflare-v1.md, decision 31) is shot by
+//! wrangler's local Browser Rendering: the binding's own local mode, a
+//! Chrome for Testing it runs on this machine (a lower rung than
+//! Cloudflare's browsers, which the hosted lane meets).
+
+use std::time::Duration;
 
 use anyhow::Result;
 use fragment_nip98::Keys;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::api::{self, Api, Call};
+use crate::api::{self, Api, Call, Reply};
 use crate::Suite;
+
+/// How long a card may take after its deploy: the alarm sends the shot,
+/// the delivery queue's consumer takes it (a browser started, the page
+/// loaded and let settle), then reports it.
+pub(super) const CARD_WAIT: Duration = Duration::from_secs(60);
+
+/// A fragment's preview card once it shows `live` (the commit live moved
+/// to), read as `keys`; `None` if it never did within `CARD_WAIT`.
+pub(super) fn card_showing(s: &Suite, api: &Api, keys: &Keys, name: &str, live: &str) -> Option<Reply> {
+    let mut got = None;
+    s.eventually(CARD_WAIT, || {
+        got = api.signed(keys, "GET", &format!("/api/f/{name}/card"), None).ok().filter(|r| r.status == 200 && r.header("x-fragment-ref") == live);
+        got.is_some()
+    });
+    got
+}
+
+/// Whether a card's answer is one: a JPEG of the viewport, 1280×800, tagged
+/// by its bytes' SHA-256, private to caches.
+pub(super) fn is_card(r: &Reply) -> bool {
+    let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&r.bytes));
+    r.status == 200
+        && r.header("content-type") == "image/jpeg"
+        && fragment_core::media::jpeg_size(&r.bytes) == Some((1280, 800))
+        && r.header("etag") == format!("\"{sha}\"")
+        && r.header("cache-control") == "private, no-cache"
+}
+
+/// A card's answer, for a failure's detail (its bytes left out).
+pub(super) fn card_detail(r: &Option<Reply>) -> Value {
+    match r {
+        Some(r) => json!({ "status": r.status, "type": r.header("content-type"), "etag": r.header("etag"), "ref": r.header("x-fragment-ref"), "bytes": r.bytes.len(), "size": fragment_core::media::jpeg_size(&r.bytes) }),
+        None => Value::Null,
+    }
+}
+
+/// The card and its schedule as the fragment keeps them (a test hook).
+pub(super) fn cards(api: &Api, name: &str) -> Value {
+    api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "cards" }))).map(|r| r.body).unwrap_or(Value::Null)
+}
+
+/// The kinds of a fragment's newest events, read as `keys`.
+pub(super) fn event_kinds(api: &Api, keys: &Keys, name: &str) -> Vec<String> {
+    let r = api.signed(keys, "GET", &format!("/api/f/{name}/events?tail=200"), None).map(|r| r.body).unwrap_or(Value::Null);
+    r["events"].as_array().into_iter().flatten().filter_map(|e| e["kind"].as_str().map(str::to_string)).collect()
+}
 
 pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("site") {
@@ -47,7 +100,7 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             ("fragment.json", Some(br#"{"meta":{"title":"Site <Test>","description":"d"}}"#)),
         ],
     );
-    s.deploy(&c);
+    let live = s.deploy(&c);
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
 
     // link (the default)
@@ -68,6 +121,16 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a signed member needs no link", r.status == 200, &r);
     let r = signed(&stranger)?;
     s.ok("a signed stranger without the link is 403", r.status == 403, &r);
+
+    // its preview card: shot as a link holder sees the page, for its members
+    let card = card_showing(s, api, &owner, &name, &live);
+    s.ok("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", card.as_ref().is_some_and(is_card), card_detail(&card));
+    let etag = card.as_ref().map(|r| r.header("etag")).unwrap_or_default();
+    let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/card"), None)?;
+    s.ok("a viewer gets the card", is_card(&r) && r.header("etag") == etag, card_detail(&Some(r)));
+    let r = api.signed(&stranger, "GET", &format!("/api/f/{name}/card"), None)?;
+    let anon = api.unsigned("GET", &format!("/api/f/{name}/card"), None)?;
+    s.ok("a stranger does not (403), nor anyone unsigned (401)", r.status == 403 && anon.status == 401 && r.bytes.len() < 1000, format!("{r} | {anon}"));
 
     // the page itself
     let r = api.page(&name, "", Some(&cookie))?;
@@ -226,6 +289,60 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
         ..Call::default()
     })?;
     s.ok("a path URL never takes writes when fragments have hosts", r.status == 404, &r);
+    preview_cards(s, api, &owner)
+}
+
+/// Preview cards beyond the first: who gets none, and a shot that fails.
+fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
+    let page: &[u8] = b"<!doctype html><title>card</title><h1 style=\"font:64px system-ui\">a card</h1>";
+    let lever = |name: &str, times: u64| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "fail-cards", "times": times })));
+
+    // a members-only fragment's page is a refusal to a visitor: it has no card
+    let name = s.named(api, owner, "site-members")?;
+    let c = s.create(api, owner, &name)?;
+    api.signed(owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    s.deploy(&c);
+    let skipped = s.eventually(CARD_WAIT, || event_kinds(api, owner, &name).iter().any(|k| k == "card.skipped"));
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/card"), None)?;
+    s.ok(
+        "a members-only fragment gets no card (a visitor without an account sees only its refusal): 404, saying none was made",
+        skipped && r.status == 404 && r.message().contains("no card yet") && cards(api, &name)["cards"]["wanted"].is_null(),
+        json!({ "card": r.status, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
+    );
+
+    // a shot that fails is tried again, with a wait between, and the card comes
+    let name = s.named(api, owner, "site-retry")?;
+    let c = s.create(api, owner, &name)?;
+    lever(&name, 2)?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    let live = s.deploy(&c);
+    let card = card_showing(s, api, owner, &name, &live);
+    let kept = cards(api, &name);
+    s.ok(
+        "a shot that fails is tried again: two failed tries, then the card, from the third",
+        card.as_ref().is_some_and(is_card) && kept["cards"]["card"]["attempt"] == 3 && kept["failCardsLeft"] == 0 && !event_kinds(api, owner, &name).iter().any(|k| k == "card.failed"),
+        json!({ "card": card_detail(&card), "cards": kept }),
+    );
+
+    // and one that keeps failing ends quietly: one event, no card, nothing else changed
+    let name = s.named(api, owner, "site-giveup")?;
+    let c = s.create(api, owner, &name)?;
+    let view = c["viewToken"].as_str().unwrap_or("").to_string();
+    lever(&name, 9)?;
+    s.commit(&c, &[("site/index.html", Some(page))]);
+    s.deploy(&c);
+    let ended = s.eventually(Duration::from_secs(120), || event_kinds(api, owner, &name).iter().any(|k| k == "card.failed"));
+    let kept = cards(api, &name);
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/card"), None)?;
+    let failed = event_kinds(api, owner, &name).iter().filter(|k| *k == "card.failed").count();
+    s.ok(
+        "a shot that keeps failing gives up after five tries: one card.failed event, no card, and no more tries",
+        ended && failed == 1 && r.status == 404 && kept["cards"]["wanted"].is_null() && kept["cards"]["flight"].is_null() && kept["failCardsLeft"] == 4,
+        json!({ "card": r.status, "cards": kept, "failed": failed }),
+    );
+    let site = api.page(&name, &format!("?view={view}"), None)?;
+    s.ok("and the fragment serves its page all the same", site.status == 200 && site.text.contains("a card"), &site);
     Ok(())
 }
 
