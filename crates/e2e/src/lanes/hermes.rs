@@ -287,8 +287,9 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // phase 6's exit: from its chat, the agent builds an app, publishes it and
-    // shares its link, then ingests a source into a brain and searches it,
-    // all with the `fragment` CLI in its terminal, acting for its owner
+    // shares it (its link, then public, then with a person), then ingests a
+    // source into a brain and searches it, all with the `fragment` CLI in its
+    // terminal, acting for its owner
     let run = |s: &Suite, n: u32, cmd: &str| -> Result<Option<String>> {
         let r = say(n, &format!("run: {cmd}"))?;
         let turn = turn_for(&r);
@@ -315,6 +316,25 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "and shares it: its share link, which an anonymous visitor opens",
         said(&live, &format!("link-view={token}")) && !token.is_empty(),
         json!({ "reply": live, "token": !token.is_empty() }),
+    );
+    // it shares as its owner would (Paul, 2026-10-04): it makes the app
+    // public, and adds another person to it as a viewer
+    let guest = api.person()?;
+    let guest_id = api.identity(&guest)?;
+    let public = run(s, 66, "fragment visibility groceries public --json | grep -c '\"ok\":true' | sed 's/^/public-/'")?;
+    let added = run(s, 67, &format!("fragment members add groceries {guest_id} --role viewer --json | grep -c '\"ok\":true' | sed 's/^/added-/'"))?;
+    let anonymous = api.call(Call { method: "GET", url: api.site_url(&app, "hello.html"), ..Call::default() })?;
+    let lists = api.signed(&guest, "GET", "/api/fragments", None)?;
+    let guest_role = lists.body["fragments"].as_array().into_iter().flatten().find(|f| f["name"] == app.as_str()).map(|f| f["role"].clone());
+    s.ok(
+        "it makes the app public, which an anonymous visitor opens with no link",
+        said(&public, "public-1") && anonymous.status == 200 && anonymous.text.contains("Picked by the agent"),
+        json!({ "reply": public, "page": anonymous.status }),
+    );
+    s.ok(
+        "and adds another person as a viewer, who sees it in their list as one",
+        said(&added, "added-1") && guest_role == Some(json!("viewer")),
+        json!({ "reply": added, "role": guest_role }),
     );
     let brain = run(s, 63, "fragment create garden --template brain --title 'Garden notes' --json | grep -c '\"ok\":true' | sed 's/^/brain-/'")?;
     let ingested = run(s, 64, "printf '# Tomatoes\\n\\nWater the tomatoes at dawn, before the heat.\\n' | fragment write garden garden/raw/tomatoes.md --from - --json | grep -c '\"ok\":true' | sed 's/^/ingested-/'")?;

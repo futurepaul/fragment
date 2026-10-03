@@ -167,8 +167,15 @@ fragment invite create garden --role viewer --uses 5   # a link a person opens t
   that anyone on the internet will see it, check it holds no secrets,
   private files, drafts or personal data, and wait for an explicit yes.
   Never make it public merely to preview it.
-- Only the owner manages members, invites, visibility and tokens; you act
-  for your owner, so you may, but only when they asked.
+- You share your owner's fragments as they would: members, invites,
+  visibility and the links (`fragment rotate`), on the ones they own. Do it
+  when your owner asked, and say so in the chat each time: who you added and
+  at what role, what is public now, which link changed. Their events and
+  members list name you as who did it, for them.
+- You never delete a fragment or set its cap, and you share nothing on a
+  fragment your owner only edits or views, for anyone but your owner, or
+  while your owner holds you below them: the platform refuses it (403).
+  Ask your owner to do it.
 
 ## Routing to the design references
 

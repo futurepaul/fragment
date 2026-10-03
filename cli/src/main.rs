@@ -230,7 +230,7 @@ enum Cmd {
     Unpause { name: String, op: String },
     /// Re-run a held or blocked run with its original input (after fixing the code)
     Replay { name: String, run: u64 },
-    /// Rotate a fragment's tokens (owner-only; default: the inbox token and the share link)
+    /// Rotate a fragment's tokens (the owner, or their agent for them; default: the inbox token and the share link)
     Rotate {
         name: String,
         /// rotate only the inbox token
@@ -446,7 +446,7 @@ enum BlobCmd {
 enum MembersCmd {
     /// List members and their roles
     List { name: String },
-    /// Add a member, or change their role (owner only)
+    /// Add a member, or change their role (the owner, or their agent for them)
     Add {
         name: String,
         /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
@@ -458,7 +458,7 @@ enum MembersCmd {
         #[arg(long)]
         people_only: bool,
     },
-    /// Remove a member (owner only)
+    /// Remove a member (the owner, or their agent for them)
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
@@ -466,7 +466,7 @@ enum MembersCmd {
 
 #[derive(Subcommand)]
 enum InviteCmd {
-    /// Make an invite (owner only); prints the token once
+    /// Make an invite (the owner, or their agent for them); prints the token once
     Create {
         name: String,
         /// viewer | editor
@@ -479,9 +479,9 @@ enum InviteCmd {
         #[arg(long)]
         ttl: Option<i64>,
     },
-    /// List open invites (owner only; tokens are never shown again)
+    /// List open invites (the owner, or their agent for them; tokens are never shown again)
     List { name: String },
-    /// Revoke an invite by id (owner only)
+    /// Revoke an invite by id (the owner, or their agent for them)
     Revoke { name: String, id: String },
 }
 
