@@ -907,7 +907,11 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked] = await Promise.all([api("GET", "/api/ledger").catch(() => null), api("GET", "/api/connections").catch(() => null)]);
+  const [ledger, linked, uses] = await Promise.all([
+    api("GET", "/api/ledger").catch(() => null),
+    api("GET", "/api/connections").catch(() => null),
+    state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+  ]);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
@@ -983,35 +987,7 @@ async function openSettings(push = true) {
     row.onclick = () => openApp(a.fragment);
     return row;
   }) : [el("p", "muted", "None yet.")]));
-  // connections (decision 22): the person's accounts their agents use,
-  // through WorkOS; connecting one opens its consent in a window
-  const connections = section("Connections");
-  const offered = linked?.connections ?? [];
-  connections.append(...(offered.length ? offered.map((c) => {
-    const row = el("p", "settings-line");
-    const name = c.provider.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
-    row.append(el("span", "settings-key", name));
-    if (c.status === "connected") row.append(el("span", "settings-value", "Connected"));
-    else {
-      const go = el("button", "quiet", c.status === "expired" ? "Connect again" : "Connect");
-      go.type = "button";
-      go.onclick = async () => {
-        go.disabled = true;
-        try {
-          const { url } = await api("POST", `/api/connections/${encodeURIComponent(c.provider)}/authorize`, {});
-          window.open(url, "_blank", "popup,width=520,height=720");
-          // back from the provider: the section says so
-          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
-        } catch (e) {
-          go.textContent = e.message;
-        } finally {
-          go.disabled = false;
-        }
-      };
-      row.append(go);
-    }
-    return row;
-  }) : [el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read.")]));
+  const connections = connectionsSection(linked, uses);
   const skills = await skillsSection();
   // pairing the CLI: `fragment login` opens this platform to approve its key
   const cli = section(
@@ -1022,6 +998,148 @@ async function openSettings(push = true) {
     el("pre", "command", SKILL),
   );
   page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- connections (decisions 22, 37 and 44): every provider the platform
+// offers, one row each: what it is, its state, which of the person's agents
+// may use it (all by default; a list narrows one agent), and this month's
+// calls by each agent, with an operator key's cost. Their agents use them
+// through the computer's swap, each with a placeholder of its own.
+const PROVIDER_KIND = { connection: "Your account", operator: "The platform's key", own: "Your key" };
+const PROVIDER_STATE = {
+  connected: "Connected",
+  needs_reauthorization: "Needs reauthorization",
+  not_connected: "Not connected",
+  offered: "Offered",
+  set: "Key set",
+  not_set: "No key yet",
+};
+// a provider's name for people: google-places is Google Places, xai xAI
+const PROVIDER_NAMES = { xai: "xAI", elevenlabs: "ElevenLabs" };
+const providerName = (p) => PROVIDER_NAMES[p] ?? p.replace(/(^|-)([a-z])/g, (_, d, l) => `${d ? " " : ""}${l.toUpperCase()}`);
+// micro-dollars, to a tenth of a cent when small
+const money = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: micros && micros < 10_000 ? 4 : 2 });
+function connectionsSection(linked, uses) {
+  const s = section("Connections");
+  s.id = "settings-connections";
+  const offered = linked?.providers ?? [];
+  if (!offered.length) {
+    s.append(el("p", "muted", linked ? "This platform offers none yet." : "Your connections could not be read."));
+    return s;
+  }
+  s.append(el("p", "muted", "Your agents use these through their computer, which adds each credential on the way out. None is ever on the computer."));
+  const agents = state.computer?.agents ?? [];
+  for (const p of offered) {
+    const row = el("div", "provider");
+    row.dataset.provider = p.provider;
+    row.dataset.kind = p.kind;
+    row.dataset.state = p.state;
+    const head = el("div", "provider-head");
+    head.append(el("span", "provider-name", providerName(p.provider)), el("span", "provider-kind", PROVIDER_KIND[p.kind] ?? p.kind));
+    const st = el("span", `provider-state ${p.state}`, PROVIDER_STATE[p.state] ?? p.state);
+    head.append(st);
+    row.append(head);
+    const actions = el("div", "settings-actions");
+    if (p.kind === "connection" && p.state !== "connected") {
+      const go = el("button", "quiet", p.state === "needs_reauthorization" ? "Connect again" : "Connect");
+      go.type = "button";
+      go.onclick = async () => {
+        go.disabled = true;
+        try {
+          const { url } = await api("POST", `/api/connections/${encodeURIComponent(p.provider)}/authorize`, {});
+          window.open(url, "_blank", "popup,width=520,height=720");
+          // back from the provider: the section says so
+          addEventListener("focus", () => openSettings(false).catch(() => {}), { once: true });
+        } catch (e) {
+          go.textContent = e.message;
+        } finally {
+          go.disabled = false;
+        }
+      };
+      actions.append(go);
+    }
+    if (p.kind === "own") {
+      const form = el("form", "provider-key");
+      const input = el("input");
+      input.type = "password";
+      input.autocomplete = "off";
+      input.placeholder = p.state === "set" ? "Replace your key" : `Your ${providerName(p.provider)} key`;
+      const save = el("button", "quiet", "Save");
+      save.type = "submit";
+      form.append(input, save);
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        save.disabled = true;
+        try {
+          await api("PUT", `/api/connections/${encodeURIComponent(p.provider)}/key`, { key: input.value });
+          await openSettings(false);
+        } catch (err) {
+          save.textContent = err.message;
+          save.disabled = false;
+        }
+      };
+      actions.append(form);
+      if (p.state === "set") {
+        const remove = el("button", "quiet", "Remove");
+        remove.type = "button";
+        remove.onclick = async () => {
+          remove.disabled = true;
+          await api("DELETE", `/api/connections/${encodeURIComponent(p.provider)}/key`).catch(() => {});
+          await openSettings(false);
+        };
+        actions.append(remove);
+      }
+    }
+    if (p.kind === "operator" && p.price) {
+      actions.append(el("span", "muted", `${money(p.price.micros / p.price.per)} a call at list, metered to your credit`));
+    }
+    if (actions.childElementCount) row.append(actions);
+    // which agents may use it: all by default; one narrowed to a list uses those
+    if (agents.length) {
+      const who = el("div", "provider-agents");
+      who.append(el("span", "settings-key", "Agents"));
+      for (const a of agents) {
+        const allowed = a.connections == null || a.connections.includes(p.provider);
+        const chip = el("button", "chip", titleOf(a.fragment));
+        chip.type = "button";
+        chip.dataset.agent = a.fragment;
+        chip.setAttribute("aria-pressed", String(allowed));
+        chip.title = allowed ? `${titleOf(a.fragment)} may use it: press to take it away` : `${titleOf(a.fragment)} may not use it: press to let it`;
+        chip.onclick = async () => {
+          chip.disabled = true;
+          const all = offered.map((x) => x.provider);
+          const now = a.connections ?? all;
+          const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
+          const list = all.every((x) => next.includes(x)) ? null : next;
+          try {
+            state.computer = await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list });
+            state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
+          } catch (e) {
+            notice("That was not changed", e.message);
+          }
+          await openSettings(false);
+        };
+        who.append(chip);
+      }
+      row.append(who);
+    }
+    // this month's calls through the swap, by agent, and an operator key's cost
+    const mine = (uses?.uses ?? []).filter((u) => u.provider === p.provider);
+    const used = el("div", "provider-uses");
+    used.append(el("span", "settings-key", uses?.month ? `In ${uses.month}` : "This month"));
+    if (!mine.length) used.append(el("span", "muted", "No calls yet"));
+    for (const u of mine) {
+      const calls = `${u.calls} ${u.calls === 1 ? "call" : "calls"}`;
+      const item = el("span", "use", `${titleOf(u.agent)}: ${p.kind === "operator" ? `${calls}, ${money(u.micros)}` : calls}`);
+      item.dataset.use = u.agent;
+      item.dataset.calls = String(u.calls);
+      item.dataset.micros = String(u.micros);
+      used.append(item);
+    }
+    row.append(used);
+    s.append(row);
+  }
+  return s;
 }
 
 // ---- skills (decision 17): the managed set, the person's skills fragment's
