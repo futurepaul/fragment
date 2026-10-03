@@ -52,7 +52,7 @@ macro_rules! username_join {
 pub(crate) mod calls;
 mod signin;
 use calls::{
-    Hold,
+    Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
     Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
@@ -652,6 +652,7 @@ impl RegistryCell {
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
+            SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),
             AddKey::PATH => reply::<AddKey>(self.add_key(body(&bytes)?)),
             RevokeKey::PATH => reply::<RevokeKey>(self.revoke(body(&bytes)?)),

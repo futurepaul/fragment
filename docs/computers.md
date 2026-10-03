@@ -171,16 +171,43 @@ intercept. It is for an image's own disaster recovery (Litestream).
 
 ### Connections and operator keys
 
-- A connection (Google, Notion, …) is used by sending its placeholder
-  to the provider's real HTTPS host: `Authorization: Bearer
-  fragment-connection:<provider>`, with `x-fragment-agent`. The
-  intercept swaps in a short-lived token from WorkOS Pipes when that
-  agent may use that connection, and refuses otherwise (decision 22).
+- A connection (Google, Notion, GitHub, …) is used by sending its
+  placeholder, `fragment-connection:<provider>`, in a header of a
+  request to one of the provider's own hosts, with `x-fragment-agent`:
+  `Authorization: Bearer fragment-connection:github` to
+  `api.github.com`. The intercept swaps in a short-lived token from
+  WorkOS Pipes for the agent's owner's account at that provider when
+  the owner allows that agent the connection (`PUT
+  /api/computers/{id}/agents/{fragment}/connections`, none by default),
+  and refuses otherwise (decision 22): 403 `forbidden` when the agent
+  is not allowed it, 403 `not_connected` when the owner has connected
+  no account there, or must authorize it again. The token is held until
+  a minute before it expires, at most ten minutes.
 - An operator key (a paid API that needs only a key) is
-  `fragment-key:<name>` in the provider's own auth header. The swap
-  meters the call to the agent's owner (decision 37).
+  `fragment-key:<name>` in whichever header the provider takes it in
+  (`x-api-key: fragment-key:search`). Any agent of the computer may use
+  it; the swap meters the call to the agent's owner (decision 37).
+- Which providers and keys a deployment offers, and each one's hosts,
+  are its configuration (`FRAGMENT_CONNECTIONS`,
+  `FRAGMENT_OPERATOR_KEYS`: `{"github": ["api.github.com"]}`; a key's
+  value is the secret `FRAGMENT_KEY_<NAME>`). Only those hosts are
+  intercepted; the rest of the internet is reached as it is (decision
+  43).
+- A placeholder sent to a host that is not its credential's is refused
+  (403), so a token never reaches a host it was not made for. Only
+  headers are swapped: a URL or a body is sent as it came, and at most
+  4 placeholders a request.
+- The intercept catches those hosts on HTTPS and on plain HTTP alike,
+  and always sends on over HTTPS. It strips `x-fragment-agent`, never
+  follows a redirect (the guest follows it, without the token), and
+  reads a request's body whole (at most 32 MiB). A request to such a
+  host with no placeholder goes on as it came.
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
+- Agents share a computer, so one agent's guest could send another's
+  `x-fragment-agent`: per-agent connections are a guardrail, not a wall
+  (decision 22). An agent that must not reach a connection runs on a
+  computer of its own.
 
 ### Ports
 

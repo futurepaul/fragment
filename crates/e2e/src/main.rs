@@ -27,7 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use fragment_devstack as devstack;
 use fragment_fakes::codestorage::{self as fake, CodeStorage};
 use fragment_nip98::Keys;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use api::Api;
 
@@ -65,6 +65,14 @@ pub const BUDGET_USD: &str = "0.4";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// What the fleet's computers may swap in (docs/computers.md): one
+/// connection and one operator key, each with a host of its own, and the
+/// key's (test) value.
+pub const SWAP_CONNECTION: &str = "github";
+pub const SWAP_CONNECTION_HOST: &str = "api.github.test";
+pub const SWAP_KEY: &str = "search";
+pub const SWAP_KEY_HOST: &str = "api.search.test";
+pub const SWAP_KEY_VALUE: &str = "sk-e2e-search-7f3a9c";
 
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
@@ -99,8 +107,11 @@ pub struct Suite {
     pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
-    /// Sign-in's stand-in: people sign in through it (`Api::person`).
+    /// Sign-in's stand-in: people sign in through it (`Api::person`), and
+    /// Pipes', which hands out connections' tokens.
     pub workos: fragment_fakes::workos::WorkOs,
+    /// The provider APIs a computer's swap sends to.
+    pub upstream: fragment_fakes::upstream::Upstream,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
@@ -271,6 +282,10 @@ impl Suite {
             test_hooks: true,
             computer_image: Some("stub".into()),
             computer_snapshots: false,
+            connections: Some(json!({ SWAP_CONNECTION: [SWAP_CONNECTION_HOST] }).to_string()),
+            operator_keys: Some(json!({ SWAP_KEY: [SWAP_KEY_HOST] }).to_string()),
+            operator_key_values: vec![(SWAP_KEY.into(), SWAP_KEY_VALUE.into())],
+            swap_upstream: Some(self.upstream.url.clone()),
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
@@ -528,6 +543,7 @@ fn main() -> Result<()> {
         org_key,
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
+        upstream: fragment_fakes::upstream::Upstream::start()?,
         operator: Keys::generate(),
         cli,
         scratch,

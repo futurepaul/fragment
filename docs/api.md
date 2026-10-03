@@ -162,6 +162,7 @@ the new key and meant it for this signer.
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
+| `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that everywhere, for whomever it acts; `null` lets it go; anyone else 403, `owner` or `public` 400 |
 | `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
@@ -390,7 +391,7 @@ and styles only inline and images only from the platform
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
@@ -1064,6 +1065,39 @@ gives nothing more; never a person's agent, nor another fragment; the answer goe
 turn}` and the steps to `work` when the fragment declares it postable,
 a chat's records (below). Its model calls are its owner's to
 pay.
+
+## Computers (docs/computers.md, phase 4)
+
+A person's computer runs an image (pinned per computer) and the agent
+fragments assigned to it; the Computer Durable Object (`cell/src/computer.rs`)
+is the only thing that talks to its container. What a guest may rely on
+is docs/computers.md; the routes here are its owner's.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner) |
+| `GET /api/computers` | a person | → `{computers: [ComputerView]}` |
+| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); anyone else 404 |
+| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
+| `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: `/data` saved, the guest signalled, the container gone |
+| `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here |
+| `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider]}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once; none by default. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400 |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform; a signed request needs none |
+
+A computer is woken by a record on a channel one of its agents
+subscribed to with `{channel, wake: true}` (only its egress asks for
+one: from anywhere else it names no URL, 400), by a page opening such a
+fragment (a pre-wake, at most every 30 s), by a request to one of its
+ports, and by its owner. Records its own agents post wake nothing.
+
+A guest's request to a connection's or an operator key's host has the
+placeholders in its headers swapped (docs/computers.md). The swap's
+refusals reach the guest as the platform's: 403 `forbidden` (an agent
+not allowed that connection, or a placeholder sent to a host that is
+not its credential's), 403 `not_connected` (its owner has not connected
+that provider, or must connect it again), 401 (no `x-fragment-agent`).
 
 ### A chat's records (phase 7, slice C)
 

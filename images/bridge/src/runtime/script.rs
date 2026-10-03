@@ -12,6 +12,11 @@
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
 //! - `draw`: the reply carries a file (`drawing.txt`);
+//! - `fetch <http url> with <placeholder> [in <header>]`: the guest's own
+//!   request, as the agent, with a credential's placeholder in a header
+//!   (`authorization: Bearer …` unless named): the reply is the answer's
+//!   status and its first 300 characters (the computer's swap, decisions
+//!   22 and 37);
 //! - a message with attachments: the reply names them;
 //! - `@<name>` of another agent in the reply's text hands off to it, as
 //!   any reply's does (the bridge reads mentions, not this runtime).
@@ -90,6 +95,37 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
     }
 }
 
+/// `fetch <url> with <placeholder> [in <header>]`, sent as `agent`: the
+/// answer's status and body.
+async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
+    use http_body_util::{BodyExt, Empty, Limited};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let (url, placeholder, header) = match words.as_slice() {
+        [_, url, "with", p] => (*url, *p, "authorization"),
+        [_, url, "with", p, "in", h] => (*url, *p, *h),
+        _ => return Err("say `fetch <http url> with <placeholder> [in <header>]`".into()),
+    };
+    let value = if header == "authorization" { format!("Bearer {placeholder}") } else { placeholder.to_string() };
+    let base = crate::net::Base::parse(url)?;
+    let req = hyper::Request::get(url)
+        .header("host", base.authority())
+        .header("x-fragment-agent", agent)
+        .header(header, value)
+        .body(Empty::<bytes::Bytes>::new())
+        .map_err(|e| e.to_string())?;
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let call = async {
+        let res = client.request(req).await.map_err(|e| e.to_string())?;
+        let status = res.status().as_u16();
+        let body = Limited::new(res.into_body(), 64 * 1024).collect().await.map_err(|e| e.to_string())?.to_bytes();
+        Ok::<_, String>((status, String::from_utf8_lossy(&body).into_owned()))
+    };
+    tokio::time::timeout(Duration::from_millis(crate::limits::HTTP_TIMEOUT_MS), call).await.map_err(|_| format!("{url}: no answer"))?
+}
+
 /// Waits `pace`, hearing a Stop meanwhile (true).
 async fn pause(pace: Duration, rx: &mut mpsc::Receiver<Heard>) -> bool {
     tokio::select! {
@@ -117,6 +153,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         return;
     }
     let mut reply = format!("echo: [{}] {}", ts.asker_name, ts.text);
+    if text.starts_with("fetch ") {
+        reply = match fetch(&ts.agent.fragment, &ts.text).await {
+            Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
+            Err(e) => format!("fetch failed: {e}"),
+        };
+    }
     if text.contains("tool") {
         let step = Step { tool: "search".into(), args: format!("{{\"q\":\"{}\"}}", ts.text.chars().take(40).collect::<String>()), ok: true, excerpt: "3 results".into(), text: "Let me look.".into() };
         emit(Event::Step { turn: id.clone(), step }).await;

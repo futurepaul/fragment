@@ -607,3 +607,45 @@ fragment.club until cutover (decisions 34–35).
   `agent.json`, phase 5's agent template) and the boot merges them into
   the profile's config rather than replacing it, proven by a setting
   that survives a wake.
+
+## The swap is proven on plain HTTP; HTTPS only by the real-Hermes lane
+
+- **Observed:** phase 4 (`cell/src/computer.rs` `egress_swap`). The
+  computers lane drives the swap from the stub's scripted agent over
+  plain HTTP, which the intercept catches the same way; the stub has no
+  TLS client. The swap's HTTPS half (Cloudflare's CA in the guest's
+  trust store, `interceptOutboundHttps`) is untested until the
+  real-Hermes lane sends one call through it, and the e2e's provider is
+  `FRAGMENT_SWAP_UPSTREAM`, not a real host.
+- **Risk:** a guest whose HTTPS call to a connection's host fails the
+  TLS handshake (the CA missing or untrusted), so connections work only
+  for tools that speak plain HTTP to the host.
+- **First proof:** the real-Hermes lane's `curl https://<host>` with a
+  placeholder, or the first hosted computer using a connection.
+- **Delete when:** that call passes in the real-Hermes lane and on a
+  preview deployment against a real provider.
+
+## The swap reads a request's body whole
+
+- **Observed:** phase 4. `egress_swap` reads the guest's body (at most
+  32 MiB) before it sends it on, as `egress_api` does, rather than
+  streaming it.
+- **Risk:** an upload to a connection (Drive, a large attachment) over
+  32 MiB is refused, and a large one holds the isolate's memory while it
+  goes.
+- **First proof:** an agent uploading a large file through a
+  connection.
+- **Delete when:** the swap streams the body (its length passed on),
+  proven by an upload larger than the cap.
+
+## Operator keys' calls are not metered yet
+
+- **Observed:** phase 4. Decision 37 meters every operator-key call to
+  the agent's owner at cost plus the margin; the swap logs each call
+  (`{egress: "swap", credentials}`) but charges nothing until the
+  ledger's meters reach computers.
+- **Risk:** an agent spends the operator's paid API without limit.
+- **First proof:** any deployment offering an operator key.
+- **Delete when:** each key has a price in the price book and the swap
+  meters its calls to the owner (refusing at zero credit), proven by the
+  computers lane's key call moving the owner's balance.

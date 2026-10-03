@@ -5,6 +5,11 @@
 //! first time); without one, a browser gets a one-field form (dev), and a
 //! test sets who comes next. Levers: change a user's email, fail the next
 //! authorize, the codes and sessions it handed out.
+//!
+//! And Pipes' access tokens (https://workos.com/docs/reference/pipes/access-token):
+//! a user's account at a provider is connected by the test (`connect`), as
+//! the Pipes widget would, and may come to need authorizing again; each
+//! token asked for is new, and lasts an hour.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,6 +33,10 @@ struct State {
     ended: Vec<String>,
     next_error: Option<String>,
     counter: u64,
+    /// (user id, provider) → whether the account is still authorized.
+    pipes: HashMap<(String, String), bool>,
+    /// Tokens handed out, by provider.
+    tokens: HashMap<String, Vec<String>>,
 }
 
 impl State {
@@ -168,6 +177,29 @@ impl WorkOs {
                         r => redirect(&r),
                     }
                 }
+                ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
+                    if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
+                        return problem(401, "unauthorized", "the API key is wrong");
+                    }
+                    let provider = p["/data-integrations/".len()..p.len() - "/token".len()].to_string();
+                    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+                    let Some(user) = body["user_id"].as_str().filter(|u| s.users.iter().any(|x| x.id == *u)).map(str::to_string) else {
+                        return problem(404, "not_found", "no such user");
+                    };
+                    match s.pipes.get(&(user.clone(), provider.clone())).copied() {
+                        None => Response::json(200, &json!({ "active": false, "error": "not_installed" })),
+                        Some(false) => Response::json(200, &json!({ "active": false, "error": "needs_reauthorization" })),
+                        Some(true) => {
+                            let token = s.next(&format!("pipes_{provider}"));
+                            s.tokens.entry(provider).or_default().push(token.clone());
+                            let expires = crate::codestorage::iso(crate::codestorage::now_ms() + 3_600_000);
+                            Response::json(
+                                200,
+                                &json!({ "active": true, "access_token": { "object": "access_token", "access_token": token, "expires_at": expires, "scopes": [], "missing_scopes": [] } }),
+                            )
+                        }
+                    }
+                }
                 _ => problem(404, "not_found", "no such route"),
             }
         });
@@ -191,6 +223,19 @@ impl WorkOs {
     /// The next authorize redirects back with this error.
     pub fn fail_next(&self, error: &str) {
         self.state.lock().expect("workos state").next_error = Some(error.to_string());
+    }
+
+    /// `email`'s account at `provider` is connected (`true`), or comes to
+    /// need authorizing again (`false`).
+    pub fn connect(&self, email: &str, provider: &str, authorized: bool) {
+        let mut s = self.state.lock().expect("workos state");
+        let user = s.user_for(email);
+        s.pipes.insert((user.id, provider.to_string()), authorized);
+    }
+
+    /// The access tokens handed out for `provider`, oldest first.
+    pub fn tokens(&self, provider: &str) -> Vec<String> {
+        self.state.lock().expect("workos state").tokens.get(provider).cloned().unwrap_or_default()
     }
 
     /// Sessions ended through the logout URL.

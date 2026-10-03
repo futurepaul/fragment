@@ -140,6 +140,10 @@ fn dev(args: &[String]) -> Result<()> {
         test_hooks: false,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
+        connections: None,
+        operator_keys: None,
+        operator_key_values: vec![],
+        swap_upstream: None,
     }
     .configure(&devstack::cell_dir())?;
     // the agents' Worker runs beside it, as a deployment runs it

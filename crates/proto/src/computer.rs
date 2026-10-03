@@ -49,6 +49,18 @@ pub struct ComputerAgent {
     pub name: String,
     /// Its owner, a person.
     pub owner: String,
+    /// The connections (WorkOS Pipes providers) its owner lets it use
+    /// through the computer's swap (decision 22); none by default.
+    #[serde(default)]
+    pub connections: Vec<String>,
+}
+
+/// `PUT /api/computers/{id}/agents/{fragment}/connections`: the
+/// connections an agent may use, all of them named at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentConnections {
+    pub connections: Vec<String>,
 }
 
 /// `GET /api/computers/{id}` (its owner), `POST /api/computers` (made, or

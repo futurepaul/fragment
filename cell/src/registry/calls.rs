@@ -106,6 +106,25 @@ impl Call for Hold {
     type Answer = IdentityView;
 }
 
+/// `POST /subject`: the subject a person first signed in as with
+/// `issuer` (their WorkOS user, whose connections a computer swaps in), or
+/// none.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SubjectOf {
+    pub identity: String,
+    pub issuer: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SubjectAnswer {
+    pub subject: Option<String>,
+}
+
+impl Call for SubjectOf {
+    const PATH: &'static str = "/subject";
+    type Answer = SubjectAnswer;
+}
+
 /// A key changed on an identity (`None`: the asker's own) by `by` (its
 /// proof checked by the router).
 #[derive(Serialize, Deserialize)]

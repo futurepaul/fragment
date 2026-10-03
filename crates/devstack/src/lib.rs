@@ -97,7 +97,20 @@ fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let mut config = read_config(from)?;
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
-    // a container image's Dockerfile and build context name paths beside the source
+    absolute_images(&mut config, from)?;
+    fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
+    for f in files {
+        fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
+    }
+    let _ = fs::remove_dir_all(dir.join("build"));
+    copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
+    Ok(dir.to_path_buf())
+}
+
+/// A wrangler config's container images with their Dockerfiles and build
+/// contexts as absolute paths (they name paths beside `from`, the config's
+/// own directory), so the config works from anywhere.
+pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()> {
     if let Some(containers) = config.get_mut("containers").and_then(|c| c.as_array_mut()) {
         for c in containers {
             let Some(images) = c.get_mut("images").and_then(|i| i.as_object_mut()) else { continue };
@@ -111,13 +124,7 @@ fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
             }
         }
     }
-    fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    for f in files {
-        fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
-    }
-    let _ = fs::remove_dir_all(dir.join("build"));
-    copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
-    Ok(dir.to_path_buf())
+    Ok(())
 }
 
 /// A copy of the built agent project at `dir`.
@@ -218,6 +225,14 @@ pub struct Fleet {
     /// `containers` images), and whether they sleep with a snapshot.
     pub computer_image: Option<String>,
     pub computer_snapshots: bool,
+    /// What a computer's swap offers (`swap::parse_hosts`' JSON): the WorkOS
+    /// Pipes providers and the operator's keys, each with its hosts, and
+    /// the keys' values. `swap_upstream` (tests only) takes every swapped
+    /// request in place of its host.
+    pub connections: Option<String>,
+    pub operator_keys: Option<String>,
+    pub operator_key_values: Vec<(String, String)>,
+    pub swap_upstream: Option<String>,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -294,6 +309,19 @@ impl Fleet {
         }
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
+        }
+        if let Some(c) = &self.connections {
+            vars.push(("FRAGMENT_CONNECTIONS", c.as_str()));
+        }
+        if let Some(k) = &self.operator_keys {
+            vars.push(("FRAGMENT_OPERATOR_KEYS", k.as_str()));
+        }
+        let key_names: Vec<String> = self.operator_key_values.iter().map(|(name, _)| fragment_core::swap::key_secret_name(name)).collect();
+        for ((_, value), name) in self.operator_key_values.iter().zip(&key_names) {
+            vars.push((name.as_str(), value.as_str()));
+        }
+        if let Some(u) = &self.swap_upstream {
+            vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
         write_dev_vars(project, &vars)
     }

@@ -5,6 +5,7 @@
 //! code.storage key, the WorkOS API key, and the OpenRouter management key
 //! live in the node's environment, used through `KEYS` (keys.rs).
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use fragment_proto::{flat_name, from_flat_name, ErrorCode};
@@ -101,10 +102,27 @@ pub struct Config {
     /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
     /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
     pub deploy_id: String,
+    /// `FRAGMENT_CONNECTIONS`: the WorkOS Pipes providers a computer's guest
+    /// may use and each one's hosts (`{"github": ["api.github.com"]}`,
+    /// `fragment_core::swap`; none by default).
+    pub connections: BTreeMap<String, Vec<String>>,
+    /// `FRAGMENT_OPERATOR_KEYS`: the operator's keys and each one's hosts,
+    /// each key the secret `swap::key_secret_name` names.
+    pub operator_keys: BTreeMap<String, Vec<String>>,
+    /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
+    /// its host in `x-fragment-upstream-host`, instead of to its host.
+    pub swap_upstream: Option<String>,
 }
 
 fn var(env: &Env, name: &str) -> Option<String> {
     env.var(name).ok().map(|v| v.to_string().trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// A credentials-to-hosts variable (`swap::parse_hosts`): a deployment
+/// whose is malformed is refused at its first request (the deploy checks
+/// it first).
+fn hosts(env: &Env, name: &str) -> BTreeMap<String, Vec<String>> {
+    var(env, name).map(|v| fragment_core::swap::parse_hosts(&v).unwrap_or_else(|e| panic!("{name}: {e}"))).unwrap_or_default()
 }
 
 /// `FRAGMENT_DEPLOY_ID`, or `dev` where a fleet names none.
@@ -186,6 +204,9 @@ impl Config {
                 .unwrap_or(fragment_proto::limits::SIGNINS_PENDING_MAX_DEFAULT),
             test_hooks: var(env, "FRAGMENT_TEST_HOOKS").as_deref() == Some("allow"),
             deploy_id: deploy_id(env),
+            connections: hosts(env, "FRAGMENT_CONNECTIONS"),
+            operator_keys: hosts(env, "FRAGMENT_OPERATOR_KEYS"),
+            swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
 

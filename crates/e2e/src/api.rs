@@ -274,11 +274,16 @@ impl Api {
     /// with a new CLI key they approved.
     pub fn person(&self) -> Result<Keys> {
         let keys = Keys::generate();
-        let email = format!("p-{}@e2e.test", &keys.pubkey_hex()[..12]);
-        let session = self.sign_in(&email)?;
+        let session = self.sign_in(&Api::email_of(&keys))?;
         let me = self.approve(&session, &keys)?;
         anyhow::ensure!(me.status == 200 && me.body["id"].is_string(), "an approved key works: {me}");
         Ok(keys)
+    }
+
+    /// The email `person` signs in with: a lane connects that WorkOS
+    /// user's accounts (Pipes) by it.
+    pub fn email_of(keys: &Keys) -> String {
+        format!("p-{}@e2e.test", &keys.pubkey_hex()[..12])
     }
 
     /// The identity `keys` belongs to.

@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
-use crate::Suite;
+use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_HOST, SWAP_KEY, SWAP_KEY_HOST, SWAP_KEY_VALUE};
 
 const CHAT_JSON: &[u8] = br#"{ "channels": { "chat": { "read": "public", "post": "viewer" }, "work": { "read": "viewer", "post": "editor" } } }"#;
 const AGENT_JSON: &[u8] = br#"{ "channels": { "tasks": { "read": "editor", "post": "editor" } } }"#;
@@ -186,6 +186,66 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a reply carries a file, uploaded as the chat's blob", drew && blob.status == 200 && blob.text.contains("a drawing for"), format!("{file} {}", blob.status));
     replies_so_far += 1;
     s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+
+    // the swap: the guest's request to a connection's host, with its placeholder
+    let fetched = |s: &Suite, n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let reply = || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+        s.eventually(WAKE, || reply().is_some());
+        Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let gh = format!("http://{SWAP_CONNECTION_HOST}/user with fragment-connection:{SWAP_CONNECTION}");
+    let seen_before = s.upstream.seen().len();
+    let said = fetched(s, 14, &format!("fetch {gh}"))?;
+    replies_so_far += 1;
+    s.ok("an agent its owner has not allowed a connection is refused it", said.starts_with("fetched 403") && said.contains("may not use the github connection"), &said);
+    s.ok("and nothing reaches the provider", s.upstream.seen().len() == seen_before, json!(s.upstream.seen()));
+    let allow = |who: &crate::Keys, list: Value| api.signed(who, "PUT", &format!("/api/computers/{id}/agents/{agent_name}/connections"), Some(&json!({ "connections": list })));
+    let r = allow(&stranger, json!([SWAP_CONNECTION]))?;
+    s.ok("no one else allows its agents connections", r.status == 404, &r);
+    let r = allow(&owner, json!(["notion"]))?;
+    s.ok("a connection the deployment does not offer is refused", r.status == 400, &r);
+    let r = allow(&owner, json!([SWAP_CONNECTION]))?;
+    s.ok("its owner allows the agent the connection", r.status == 200 && r.body["agents"][0]["connections"] == json!([SWAP_CONNECTION]), &r);
+    let said = fetched(s, 15, &format!("fetch {gh}"))?;
+    replies_so_far += 1;
+    s.ok("allowed, but its owner connected no account: refused, saying so", said.starts_with("fetched 403") && said.contains("not_connected") && said.contains("connect github first"), &said);
+    s.workos.connect(&Api::email_of(&owner), SWAP_CONNECTION, true);
+    let said = fetched(s, 16, &format!("fetch {gh}"))?;
+    replies_so_far += 1;
+    let tokens = s.workos.tokens(SWAP_CONNECTION);
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    s.ok(
+        "connected, the provider gets the owner's token from Pipes in the placeholder's place",
+        said.starts_with("fetched 200") && tokens.len() == 1 && seen["host"] == SWAP_CONNECTION_HOST && seen["auth"]["authorization"] == format!("Bearer {}", tokens[0]),
+        json!({ "said": said, "seen": seen, "tokens": tokens }),
+    );
+    s.ok("and never the agent's header", seen["agent"].is_null(), &seen);
+    let said = fetched(s, 17, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with fragment-connection:{SWAP_CONNECTION}"))?;
+    replies_so_far += 1;
+    s.ok("a token is held until shortly before it expires", s.workos.tokens(SWAP_CONNECTION).len() == 1, json!(s.workos.tokens(SWAP_CONNECTION)));
+    s.ok("a provider's redirect is the guest's to follow, never followed with the token", said.starts_with("fetched 302"), &said);
+    let seen_before = s.upstream.seen().len();
+    let said = fetched(s, 18, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-connection:{SWAP_CONNECTION}"))?;
+    replies_so_far += 1;
+    s.ok(
+        "a placeholder sent to a host that is not its credential's is refused",
+        said.starts_with("fetched 403") && said.contains("is for api.github.test") && s.upstream.seen().len() == seen_before,
+        &said,
+    );
+    let said = fetched(s, 19, &format!("fetch http://{SWAP_KEY_HOST}/q with fragment-key:{SWAP_KEY} in x-api-key"))?;
+    replies_so_far += 1;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    s.ok(
+        "an operator key is swapped into the header that named it",
+        said.starts_with("fetched 200") && seen["host"] == SWAP_KEY_HOST && seen["auth"]["x-api-key"] == SWAP_KEY_VALUE,
+        json!({ "said": said, "seen": seen }),
+    );
+    let said = fetched(s, 22, &format!("fetch http://{SWAP_KEY_HOST}/plain with nothing-swapped"))?;
+    replies_so_far += 1;
+    let seen = s.upstream.seen().last().cloned().unwrap_or_default();
+    s.ok("a request with no placeholder goes on as it came", said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
 
     // asleep, a record wakes it, restored, and nothing is answered twice
     std::thread::sleep(QUEUE_DRAIN);

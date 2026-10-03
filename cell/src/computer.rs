@@ -16,10 +16,18 @@
 //! - **Its guest** reaches the platform only through the intercepts
 //!   (`ComputerEgress`): the API as its agents (each request signed by the
 //!   agent fragment it names, which checks it runs here), its own view,
-//!   and the keepalive socket that holds it awake.
+//!   and the keepalive socket that holds it awake. A request to a
+//!   connection's or an operator key's host has its placeholders swapped
+//!   for the credential (`egress_swap`, decisions 22 and 37), which this
+//!   cell resolves: only for an agent allowed it, and a connection's token
+//!   from WorkOS Pipes, held until shortly before it expires.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Socket, Step, Wake};
-use fragment_proto::computer::{valid_computer_id, ComputerAgent, ComputerPhase, ComputerView, PortTicket};
+use fragment_core::swap::{self, Credential};
+use fragment_proto::computer::{valid_computer_id, AgentConnections, ComputerAgent, ComputerPhase, ComputerView, PortTicket};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,7 +56,7 @@ const SESSION_COOKIE: &str = "fragment_computer";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT '[]');
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
@@ -76,6 +84,13 @@ const EXIT_WAIT_MS: i64 = 5_000;
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
+/// A connection's token is used until this long before it expires, and
+/// for at most `TOKEN_HOLD_MAX_MS` (WorkOS refreshes it; asking again is
+/// cheap, so a revoked connection stops within minutes).
+const TOKEN_MARGIN_MS: i64 = 60_000;
+const TOKEN_HOLD_MAX_MS: i64 = 10 * 60_000;
+/// Tokens held at once (all go when it is full: there are few owners).
+const TOKENS_MAX: usize = 64;
 
 #[derive(Clone, Copy)]
 enum MetaKey {
@@ -120,9 +135,13 @@ pub struct ComputerCell {
     state: State,
     raw: JsValue,
     cfg: &'static Config,
+    env: Env,
     /// Whether this isolate has looked for a container an earlier one left
     /// running (lesson 6: `adopt`).
     adopted: std::cell::Cell<bool>,
+    /// Connections' tokens by (owner, provider): the token and until when
+    /// it is used. In memory only: a new isolate asks WorkOS again.
+    tokens: RefCell<BTreeMap<(String, String), (String, i64)>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -131,7 +150,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, adopted: std::cell::Cell::new(false) }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -195,6 +214,20 @@ struct Assign {
 #[derive(Deserialize)]
 struct Unassign {
     fragment: String,
+}
+
+#[derive(Deserialize)]
+struct SetConnections {
+    fragment: String,
+    connections: Vec<String>,
+}
+
+/// `computer/credential`'s body: what `agent` asked to have swapped in.
+#[derive(Deserialize)]
+struct CredentialAsk {
+    agent: String,
+    connection: Option<String>,
+    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -320,7 +353,7 @@ impl ComputerCell {
             return Ok(Some(Event::Exited { generation }));
         }
         let id = self.must(MetaKey::Id)?;
-        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)]).await?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         Ok(None)
     }
 
@@ -350,6 +383,11 @@ impl ComputerCell {
     }
 
     /// The environment every image may rely on (docs/computers.md).
+    /// The hosts the swap intercepts: every connection's and operator key's.
+    fn swap_hosts(&self) -> JsValue {
+        js::to_js(&json!(swap::all_hosts([&self.cfg.connections, &self.cfg.operator_keys])))
+    }
+
     fn guest_env(&self, id: &str, image: &str, restoring: bool) -> Value {
         let mut env = json!({
             "FRAGMENT_COMPUTER": id,
@@ -394,7 +432,7 @@ impl ComputerCell {
         let env = js::to_js(&self.guest_env(&id, &image, backup.is_some()));
         let snapshot_js = snapshot.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
         self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, JsValue::NULL]).await?;
-        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)]).await?;
+        let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")));
         }
@@ -461,7 +499,7 @@ impl ComputerCell {
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
         Ok(self
-            .rows("SELECT fragment, identity, owner FROM agents ORDER BY added_at", vec![])?
+            .rows("SELECT fragment, identity, owner, connections FROM agents ORDER BY added_at", vec![])?
             .into_iter()
             .map(|r| {
                 let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
@@ -471,6 +509,7 @@ impl ComputerCell {
                     owner: r["owner"].as_str().unwrap_or_default().to_string(),
                     fragment,
                     name,
+                    connections: serde_json::from_str(r["connections"].as_str().unwrap_or("[]")).unwrap_or_default(),
                 }
             })
             .collect())
@@ -573,6 +612,25 @@ impl ComputerCell {
                 self.exec("DELETE FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?;
                 json_response(&self.view()?)
             }
+            "computer/connections" => {
+                let mut b: SetConnections = body_json(&mut req).await?;
+                b.connections.sort();
+                b.connections.dedup();
+                if let Some(c) = b.connections.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
+                    let offered: Vec<&String> = self.cfg.connections.keys().collect();
+                    return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                }
+                if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
+                    return Err(CellError::new(ErrorCode::NotFound, format!("{} does not run on this computer", b.fragment)));
+                }
+                let list = serde_json::to_string(&b.connections).map_err(|e| CellError::host(e.to_string()))?;
+                self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![list.into(), b.fragment.as_str().into()])?;
+                json_response(&self.view()?)
+            }
+            "computer/credential" => {
+                let b: CredentialAsk = body_json(&mut req).await?;
+                json_response(&json!({ "secret": self.credential(b).await? }))
+            }
             "computer/ticket" => {
                 let b: TicketAsk = body_json(&mut req).await?;
                 if b.identity != self.must(MetaKey::Owner)? {
@@ -618,6 +676,72 @@ impl ComputerCell {
             }
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
+    }
+
+    /// The secret to swap in for `b`'s placeholder, when its agent runs here
+    /// and may use it.
+    async fn credential(&self, b: CredentialAsk) -> CellResult<String> {
+        let rows = self.rows("SELECT owner, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
+        let agent = rows.first().ok_or_else(|| CellError::new(ErrorCode::Forbidden, format!("{} does not run on this computer", b.agent)))?;
+        let owner = agent["owner"].as_str().unwrap_or_default().to_string();
+        match (b.connection, b.key) {
+            (Some(provider), None) => {
+                let allowed: Vec<String> = serde_json::from_str(agent["connections"].as_str().unwrap_or("[]")).unwrap_or_default();
+                if !allowed.contains(&provider) {
+                    return Err(CellError::new(
+                        ErrorCode::Forbidden,
+                        format!("{} may not use the {provider} connection: its owner allows it on their computer", b.agent),
+                    ));
+                }
+                self.connection_token(&owner, &provider).await
+            }
+            (None, Some(name)) => {
+                if !self.cfg.operator_keys.contains_key(&name) {
+                    return Err(CellError::invalid(format!("no operator key {name:?} on this deployment")));
+                }
+                crate::keys::operator_key(&self.env, &name).ok_or_else(|| CellError::host(format!("{} is not set", swap::key_secret_name(&name))))
+            }
+            _ => Err(CellError::invalid("ask for one connection or one key")),
+        }
+    }
+
+    /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
+    /// the WorkOS user `owner` signed in as.
+    async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
+        let now = js::now_ms();
+        let held = (owner.to_string(), provider.to_string());
+        if let Some((token, until)) = self.tokens.borrow().get(&held) {
+            if *until > now {
+                return Ok(token.clone());
+            }
+        }
+        let workos = self.cfg.workos()?;
+        let call = crate::registry::calls::SubjectOf { identity: owner.into(), issuer: workos.issuer() };
+        let user = crate::ask_registry(&self.env, &call)
+            .await?
+            .subject
+            .ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &workos.api, provider, &user).await?;
+        if status != 200 {
+            let why = answer["message"].as_str().unwrap_or("no reason given");
+            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
+        }
+        if answer["active"] != true {
+            let why = match answer["error"].as_str() {
+                Some("needs_reauthorization") => format!("connect {provider} again: its account needs authorizing again"),
+                _ => format!("connect {provider} first: no account is connected"),
+            };
+            return Err(CellError::new(ErrorCode::NotConnected, why));
+        }
+        let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
+        let expires = answer["access_token"]["expires_at"].as_str().map(js_sys::Date::parse).filter(|t| t.is_finite()).map(|t| t as i64);
+        let until = expires.map_or(now + TOKEN_HOLD_MAX_MS, |e| (e - TOKEN_MARGIN_MS).min(now + TOKEN_HOLD_MAX_MS));
+        let mut tokens = self.tokens.borrow_mut();
+        if tokens.len() >= TOKENS_MAX {
+            tokens.clear();
+        }
+        tokens.insert(held, (token.to_string(), until));
+        Ok(token.to_string())
     }
 
     /// Keeps the newest `max` rows of `table` (by expiry).
@@ -748,6 +872,15 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
             let body = json!({ "fragment": fragment, "identity": identity, "owner": who });
             json_response(&view_of(ask(env, id, "computer/assign", &body).await?)?)
         }
+        (Method::Put, [id, "agents", fragment, "connections"]) => {
+            owned(env, who, id).await?;
+            let b: AgentConnections = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if b.connections.len() > swap::CREDENTIALS_MAX || b.connections.iter().any(|c| !swap::valid_name(c)) {
+                return Err(CellError::invalid(format!("connections are at most {} provider names", swap::CREDENTIALS_MAX)));
+            }
+            let set = json!({ "fragment": fragment, "connections": b.connections });
+            json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
+        }
         (Method::Delete, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
             crate::fragment::ask(env, fragment, "computer/unassign", &json!({ "computer": id, "owner": who })).await?;
@@ -820,9 +953,9 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
     Ok(env.durable_object("COMPUTER")?.get_by_name(id)?.fetch_with_request(inner).await?)
 }
 
-/// Every request a computer's guest sends to `api.fragment.internal` or
-/// `model.fragment.internal` (entry.mjs's `ComputerEgress`, whose props
-/// name the computer and the route). A class with a static method, as
+/// Every request a computer's guest sends to `api.fragment.internal`,
+/// `model.fragment.internal`, or a host the swap catches (entry.mjs's
+/// `ComputerEgress`, whose props name the computer and the route). A class with a static method, as
 /// `InternalRoute` is: worker-build exports classes by name.
 #[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
 pub struct ComputerEgress;
@@ -835,6 +968,7 @@ impl ComputerEgress {
         let answered = match route.as_str() {
             "api" => egress_api(req, &env, &computer).await,
             "model" => Err(CellError::new(ErrorCode::HostFailed, "the model route arrives with the ledger (phase 3)")),
+            "swap" => egress_swap(req, &env, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -952,6 +1086,100 @@ async fn egress_api(mut req: Request, env: &Env, computer: &str) -> CellResult<R
     }
     let out = Request::new_with_init(&target, &init)?;
     crate::route(out, env).await
+}
+
+/// Headers a hop answers for itself, never sent on.
+const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host"];
+
+/// A guest's request to a connection's or an operator key's host
+/// (decisions 22 and 37): each placeholder in its headers is swapped for
+/// the credential when the request goes to one of that credential's own
+/// hosts, for the agent `x-fragment-agent` names, and it goes on over
+/// HTTPS. A request with no placeholder goes on as it is (decision 43).
+/// Only headers carry placeholders; a body or a URL is sent as it came.
+async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<Response> {
+    let cfg = Config::from_env(env);
+    let url = req.url()?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let agent = req.headers().get(AGENT_HEADER)?;
+    let mut found: Vec<(String, String, Vec<Credential>)> = vec![];
+    let mut wanted: Vec<Credential> = vec![];
+    for (name, value) in req.headers().entries() {
+        if HOP_HEADERS.contains(&name.as_str()) || name == AGENT_HEADER {
+            continue;
+        }
+        let creds = swap::placeholders(&value).map_err(CellError::invalid)?;
+        for c in &creds {
+            let (map, what) = match c {
+                Credential::Connection(p) => (&cfg.connections, p),
+                Credential::Key(k) => (&cfg.operator_keys, k),
+            };
+            let hosts = map.get(what).ok_or_else(|| CellError::invalid(format!("{} names nothing on this deployment", c.placeholder())))?;
+            if !hosts.contains(&host) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {host}", c.placeholder(), hosts.join(", "))));
+            }
+            if !wanted.contains(c) {
+                wanted.push(c.clone());
+            }
+        }
+        found.push((name, value, creds));
+    }
+    if wanted.len() > swap::PLACEHOLDERS_MAX {
+        return Err(CellError::invalid(format!("at most {} placeholders a request", swap::PLACEHOLDERS_MAX)));
+    }
+    let mut resolved = BTreeMap::new();
+    if !wanted.is_empty() {
+        let agent = agent.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "name the agent this acts as (x-fragment-agent)"))?;
+        if !fragment_proto::valid_fragment_name(&agent) {
+            return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>.<username>)"));
+        }
+        for c in &wanted {
+            let ask_body = match c {
+                Credential::Connection(p) => json!({ "agent": agent, "connection": p }),
+                Credential::Key(k) => json!({ "agent": agent, "key": k }),
+            };
+            let answer = ask(env, computer, "computer/credential", &ask_body).await?;
+            let secret = answer["secret"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::host("the computer resolved no credential"))?;
+            resolved.insert(c.clone(), secret.to_string());
+        }
+    }
+    let headers = Headers::new();
+    for (name, value, creds) in &found {
+        headers.set(name, &if creds.is_empty() { value.clone() } else { swap::swapped(value, &resolved) })?;
+    }
+    let method = req.method();
+    let body = match method {
+        Method::Get | Method::Head => vec![],
+        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
+    };
+    if !body.is_empty() {
+        headers.set("content-length", &body.len().to_string())?;
+    }
+    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let target = match &cfg.swap_upstream {
+        Some(upstream) => {
+            headers.set("x-fragment-upstream-host", &host)?;
+            format!("{upstream}{}{query}", url.path())
+        }
+        None => format!("https://{host}{}{query}", url.path()),
+    };
+    let mut init = RequestInit::new();
+    // a redirect is the guest's to follow: followed here, it would carry
+    // the swapped credential to wherever it points
+    init.with_method(method.clone()).with_headers(headers).with_redirect(RequestRedirect::Manual);
+    if !body.is_empty() {
+        init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
+    }
+    let out = Fetch::Request(Request::new_with_init(&target, &init)?)
+        .send()
+        .await
+        .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")))?;
+    // one line per swap (lesson 14), naming the credentials, never their values
+    if !wanted.is_empty() {
+        let names: Vec<String> = wanted.iter().map(Credential::placeholder).collect();
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": out.status_code() }));
+    }
+    Ok(out)
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

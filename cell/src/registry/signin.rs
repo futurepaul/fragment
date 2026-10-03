@@ -39,7 +39,7 @@ use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, Consent, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem,
-    Redeemed, Session, SigninCounts, SigninsHook,
+    Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer,
 };
 use super::*;
 
@@ -601,6 +601,19 @@ impl RegistryCell {
     /// Whether a person signs in (and so may hold no key).
     pub(super) fn signs_in(&self, id: &str) -> CellResult<bool> {
         Ok(self.count("SELECT COUNT(*) AS n FROM subjects WHERE identity = ?", vec![id.into()])? > 0)
+    }
+
+    /// The subject `identity` first signed in as with `issuer`.
+    pub(super) fn subject_of(&self, b: SubjectOf) -> CellResult<SubjectAnswer> {
+        #[derive(Deserialize)]
+        struct Row {
+            subject: String,
+        }
+        let row = self.row::<Row>(
+            "SELECT subject FROM subjects WHERE identity = ? AND issuer = ? ORDER BY linked_at LIMIT 1",
+            vec![b.identity.as_str().into(), b.issuer.as_str().into()],
+        )?;
+        Ok(SubjectAnswer { subject: row.map(|r| r.subject) })
     }
 
     /// A person's sign-ins (at most `SUBJECTS_MAX`), read straight into

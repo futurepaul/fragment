@@ -517,6 +517,7 @@ name = "fragment-devstack"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fragment-core",
  "serde_json",
 ]
 
@@ -2435,6 +2436,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fragment-core",
  "fragment-devstack",
  "fragment-fakes",
  "serde",

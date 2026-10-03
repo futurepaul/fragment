@@ -17,6 +17,7 @@
 //! and certificate cover them all). Its repos are named `b--…` in the
 //! code.storage org, so it never touches another deployment's.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -53,6 +54,45 @@ struct Deployment {
     openrouter_management_key_file: Option<PathBuf>,
     /// Each person's monthly budget in dollars.
     budget_usd: Option<String>,
+    /// Computers (docs/computers.md): the images they run, and the one a
+    /// new computer is pinned to. Without it, the deployment makes none.
+    computers: Option<Computers>,
+    /// The WorkOS Pipes providers a computer's swap offers, each with its
+    /// hosts (`{"github": ["api.github.com"]}`; decision 22).
+    #[serde(default)]
+    connections: BTreeMap<String, Vec<String>>,
+    /// The operator's keys a computer's swap offers (decision 37).
+    #[serde(default)]
+    operator_keys: BTreeMap<String, OperatorKey>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Computers {
+    /// The image a new computer is pinned to (one of `images`).
+    default_image: String,
+    /// By name: each image's Dockerfile and build context, relative to the
+    /// repo (`images/hermes/Dockerfile`, `images`), and its build variables.
+    images: BTreeMap<String, Image>,
+    /// The container's instance type (default: Cloudflare's).
+    instance_type: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Image {
+    dockerfile: String,
+    build_context: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    build_vars: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorKey {
+    hosts: Vec<String>,
+    /// The file holding the key.
+    key_file: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -153,7 +193,22 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
 
 fn load(config: &Path) -> Result<Deployment> {
     let text = fs::read_to_string(config).with_context(|| format!("read {}", config.display()))?;
-    serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))
+    let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))?;
+    checked(d).with_context(|| format!("check {}", config.display()))
+}
+
+/// What the cell would refuse at its first request, refused before a
+/// deploy: the swap's names and hosts, and a default image it has.
+fn checked(d: Deployment) -> Result<Deployment> {
+    fragment_core::swap::parse_hosts(&serde_json::to_string(&d.connections)?).map_err(|e| anyhow::anyhow!("connections: {e}"))?;
+    let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
+    fragment_core::swap::parse_hosts(&serde_json::to_string(&hosts)?).map_err(|e| anyhow::anyhow!("operator_keys: {e}"))?;
+    if let Some(c) = &d.computers {
+        if !c.images.contains_key(&c.default_image) {
+            bail!("computers: the default image {:?} is not one of its images", c.default_image);
+        }
+    }
+    Ok(d)
 }
 
 fn args(rest: &[String]) -> Result<(PathBuf, Option<String>)> {
@@ -223,6 +278,8 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
     let openrouter = d.openrouter_management_key_file.as_deref().map(read_secret).transpose()?;
+    let operator_keys: Vec<(String, String)> =
+        d.operator_keys.iter().map(|(name, k)| Ok((fragment_core::swap::key_secret_name(name), read_secret(&k.key_file)?))).collect::<Result<_>>()?;
     let tools = devstack::Tools::locate()?;
     crate::build()?;
     let deploy_id = git_head()?;
@@ -258,6 +315,26 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     queues["consumers"][0]["dead_letter_queue"] = json!(n.dead);
     queues["consumers"][1]["queue"] = json!(n.dead);
     c.insert("services".into(), json!([{ "binding": "AGENTS", "service": n.agent }]));
+    // the deployment's own images in place of the e2e's stubs, or none
+    match &d.computers {
+        Some(computers) => {
+            let container = &mut c["containers"][0];
+            let mut images = serde_json::Map::new();
+            for (name, image) in &computers.images {
+                let mut i = json!(image);
+                i["dockerfile"] = json!(root.join(&image.dockerfile));
+                i["build_context"] = json!(root.join(&image.build_context));
+                images.insert(name.clone(), i);
+            }
+            container["images"] = Value::Object(images);
+            if let Some(t) = &computers.instance_type {
+                container["instance_type"] = json!(t);
+            }
+        }
+        None => {
+            c.remove("containers");
+        }
+    }
     let mut vars = json!({
         "FRAGMENT_DEPLOY_ID": deploy_id,
         "FRAGMENT_HOST_SUFFIX": n.suffix,
@@ -281,6 +358,16 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if let Some(b) = &d.budget_usd {
         v.insert("FRAGMENT_BUDGET_USD".into(), json!(b));
     }
+    if let Some(computers) = &d.computers {
+        v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
+    }
+    if !d.connections.is_empty() {
+        v.insert("FRAGMENT_CONNECTIONS".into(), Value::String(serde_json::to_string(&d.connections)?));
+    }
+    if !d.operator_keys.is_empty() {
+        let hosts: BTreeMap<&String, &Vec<String>> = d.operator_keys.iter().map(|(name, k)| (name, &k.hosts)).collect();
+        v.insert("FRAGMENT_OPERATOR_KEYS".into(), Value::String(serde_json::to_string(&hosts)?));
+    }
     c.insert("vars".into(), vars);
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
@@ -300,6 +387,9 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     });
     if let Some(k) = openrouter {
         secrets["OPENROUTER_MANAGEMENT_KEY"] = json!(k);
+    }
+    for (name, key) in operator_keys {
+        secrets[name] = json!(key);
     }
     let cell_secrets = SecretFile::write(dir.join("cell-secrets.json"), &secrets)?;
     crate::run(wrangler(&tools, &d.account_id).arg("deploy").arg("-c").arg(&cell_config).arg("--secrets-file").arg(&cell_secrets.0))?;
@@ -348,6 +438,9 @@ mod tests {
             operators: vec![],
             openrouter_management_key_file: None,
             budget_usd: None,
+            computers: None,
+            connections: BTreeMap::new(),
+            operator_keys: BTreeMap::new(),
         }
     }
 
@@ -381,5 +474,23 @@ mod tests {
         let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
         let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         assert!(names(&d, Some("dev")).is_ok());
+        let d = checked(d).unwrap();
+        assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"));
+    }
+
+    /// A swap's names and hosts, and a default image, are checked before
+    /// anything deploys.
+    #[test]
+    fn a_bad_swap_or_image_is_refused_before_a_deploy() {
+        let mut d = deployment(None, None);
+        d.connections.insert("GitHub".into(), vec!["api.github.com".into()]);
+        assert!(checked(d).is_err());
+        let mut d = deployment(None, None);
+        d.operator_keys.insert("search".into(), OperatorKey { hosts: vec!["localhost".into()], key_file: "k".into() });
+        assert!(checked(d).is_err());
+        let mut d = deployment(None, None);
+        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), instance_type: None });
+        assert!(checked(d).is_err());
+        assert!(checked(deployment(None, None)).is_ok());
     }
 }

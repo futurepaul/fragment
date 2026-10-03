@@ -7,4 +7,5 @@ description = "Starts and stops the local fragment stack (`wrangler dev` for cel
 
 [dependencies]
 anyhow = "1"
+fragment-core = { path = "../core" }
 serde_json = "1"

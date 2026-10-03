@@ -1,6 +1,7 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
-//! WorkOS's API key, and OpenRouter's management key. Only the platform
+//! WorkOS's API key, OpenRouter's management key, and the operator's keys
+//! a computer's swap sends (`FRAGMENT_KEY_<NAME>`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
 //! Worker Loader, with an env the platform builds (`js::app_env`), so no
 //! author code can name one. A value sealed here names the Durable Object
@@ -138,6 +139,22 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
         o.remove("refresh_token");
     }
     Ok((status, answer))
+}
+
+/// A WorkOS Pipes access token for `user`'s account at `provider`
+/// (`POST /data-integrations/{provider}/token`): (status, WorkOS's answer,
+/// `{active, access_token: {access_token, expires_at, …}}` or `{active:
+/// false, error}`).
+pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
+    assert!(fragment_core::swap::valid_name(provider), "a provider is checked before WorkOS is asked");
+    let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
+    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+}
+
+/// The operator's key `name` (`swap::key_secret_name`), when the
+/// deployment holds it.
+pub fn operator_key(env: &Env, name: &str) -> Option<String> {
+    secret(env, &fragment_core::swap::key_secret_name(name))
 }
 
 /// OpenRouter's key API with the management key: (status, OpenRouter's

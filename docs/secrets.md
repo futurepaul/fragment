@@ -25,8 +25,9 @@ the cell stores.
 |---|---|
 | A person's model credential (their OpenRouter key, minted by the platform with their budget as its limit), their GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env |
+| The deployment's host secret, the code.storage org key, the OpenRouter management key, the WorkOS API key, the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
+| A person's connections (Google, GitHub, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
 Never in git, a log, a command line, or a channel record. Rotating a secret means changing it in its home; everything that

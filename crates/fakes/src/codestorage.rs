@@ -177,7 +177,7 @@ pub struct CodeStorage {
     _server: Server,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_millis() as i64
 }
 
@@ -194,7 +194,7 @@ fn fresh_sha(counter: &mut u64, tag: &str) -> String {
 }
 
 /// RFC 3339 UTC, seconds precision.
-fn iso(ms: i64) -> String {
+pub(crate) fn iso(ms: i64) -> String {
     let secs = ms.div_euclid(1000);
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // civil-from-days (Howard Hinnant)
