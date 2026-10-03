@@ -237,15 +237,18 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
         r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
     };
+    // the oldest go as the fragment trims, a moment after the post that passed them
+    let trimmed = s.eventually(Duration::from_secs(10), || first(api) == Some(appended - kept + 1));
     s.ok(
         &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
-        failed.is_none() && newest() == Some(appended) && first(api) == Some(appended - kept + 1),
+        failed.is_none() && newest() == Some(appended) && trimmed,
         format!("{failed:?}; newest {:?}, oldest kept {:?}", newest(), first(api)),
     );
     let r = post(api, owner, &name, "wall", "last", json!({ "text": "one more" }))?;
+    let trimmed = s.eventually(Duration::from_secs(10), || first(api) == Some(appended - kept + 2));
     s.ok(
         "a post past them drops one more of the oldest",
-        r.status == 200 && r.body["record"]["seq"] == appended + 1 && first(api) == Some(appended - kept + 2),
+        r.status == 200 && r.body["record"]["seq"] == appended + 1 && trimmed,
         format!("{} oldest kept {:?}", r.status, first(api)),
     );
     Ok(())

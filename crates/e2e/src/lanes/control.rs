@@ -33,11 +33,25 @@ fn unfinished_chunked(api: &Api, path: &str, total: usize, wait: Duration) -> Re
         }
         sent += chunk.len();
     }
-    let mut head = [0u8; 512];
-    match sock.read(&mut head) {
-        Ok(n) if n > 0 => Ok(Some(String::from_utf8_lossy(&head[..n]).into_owned())),
-        _ => Ok(None),
+    // the status line and what of the body follows it within the wait (an
+    // answer may arrive in more than one packet)
+    let mut answer = Vec::new();
+    let mut buf = [0u8; 1024];
+    while answer.len() < 2048 {
+        match sock.read(&mut buf) {
+            Ok(n) if n > 0 => answer.extend_from_slice(&buf[..n]),
+            _ => break,
+        }
+        let text = String::from_utf8_lossy(&answer);
+        // headers and a body as long as they declare: the whole answer
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let declared = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok()));
+            if declared.is_none_or(|n| body.len() >= n) {
+                break;
+            }
+        }
     }
+    Ok((!answer.is_empty()).then(|| String::from_utf8_lossy(&answer).into_owned()))
 }
 
 /// Whether an answer to an unfinished chunked body refused it as it
