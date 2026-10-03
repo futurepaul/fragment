@@ -82,8 +82,8 @@ pub struct Config {
     pub signins_pending_max: u64,
     /// `FRAGMENT_TEST_HOOKS=allow`: dev and e2e fleets only.
     pub test_hooks: bool,
-    /// `FRAGMENT_DEPLOY_ID`: which deployment this is (`cargo xtask deploy`
-    /// sets it; `/healthz` answers it in `x-fragment-deploy`).
+    /// `FRAGMENT_DEPLOY_ID`: which deployment this is (the deploy sets it;
+    /// `/healthz` answers it in `x-fragment-deploy`; default `dev`).
     pub deploy_id: String,
 }
 
