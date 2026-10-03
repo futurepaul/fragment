@@ -13,22 +13,18 @@ belongs in a template instead.
 | Path | What | Why the platform |
 |---|---|---|
 | `__fragment.js` | The browser API: calls, live queries, channels, presence, push | One version for every fragment; it speaks the platform's wire protocol |
-| `__chat.js`, `__chat.css` | The chat's page (phase 7, C): messages, each turn's steps grouped above its answer, the working line, a composer, Stop for a turn's starter; the chat template's `index.html` is a shell that mounts it | It renders the records agents write (`work`, docs/api.md), so it ships with the platform rather than frozen into each chat |
 | `__signin`, `__signout` | A fragment origin's own session, through a single-use redemption from the platform; `__signin` only as a navigation of a page, `__signout` a POST from the fragment's own page | Sessions are the platform's; a fragment's code must not mint them, and another page must not set them off |
-| `__frame` | A frame of this page, signed in on one of its owner's fragments: the platform mints a frame redemption from this origin's session and sends the frame on to that fragment's `__signin`, which sets a partitioned cookie for this page only (docs/api.md, Frames) | Only for a page whose `fragment.json` asks for `frame` and whose owner allows it (below); the page's code never holds the redemption |
-| `__share` | A frame of this page showing the share sheet of one of its owner's own fragments, signed in: the platform mints a redemption for that one sheet and sends the frame on to the sheet's `embed`, which sets a partitioned cookie on that sheet's path, for this page only (docs/api.md, The share sheet in a frame) | As `__frame`; the sheet is the platform's page, and this page can neither read nor script it |
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
 | `__files`, `__file`, `__tree` | The fragment's files, read through the platform; `__files` is a viewer (`__files.js`, `__files.css`): a tree beside a reader for markdown, text, and pictures | Reads git with the platform's token; the viewer renders any file on the fragment's origin, so a file's text becomes DOM as text only |
-| `__fragments` | The signed-in owner's fragments (with each one's share sheet, and the visibility and member and guest counts their list carries, for the desktop's Share item and badges), whether this page may show them inside it (`frame`), and making one | Owner-only, and only for a fragment that declares the `fragments` capability (the desktop) |
 | `__sw.js`, `__preview.svg` | The push service worker, the link preview image | Platform assets |
 
 ## Served on the platform's origin
 
 | Path | What |
 |---|---|
-| `/`, `/auth/*`, `/cli` | Sign-in, choosing a username, the home (your fragments, a new one, pairing your CLI), approving the CLI's key or pairing a computer |
-| `/share/<name>` | The share sheet, in a dialog on the home, in a dialog in its owner's desktop (`__share`), and in a window the desktop opens when it may not frame: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, copies and renews the link, and allows `frame` (below; never inside a desktop). Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
+| `/`, `/settings`, `/auth/*`, `/cli` | Sign-in, choosing a username, the settings page (your fragments, a new one, pairing your CLI), approving the CLI's key |
+| `/share/<name>` | The share sheet, in a dialog on the settings page, or on a page of its own: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, and copies and renews the link. Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
 | `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
@@ -36,7 +32,7 @@ belongs in a template instead.
 No page on another origin may frame a platform page: every one answers
 `frame-ancestors 'none'` (PR `platform-no-framing`) but the share sheet,
 which answers `frame-ancestors 'self'` (and `X-Frame-Options:
-SAMEORIGIN`) so the home can show it in a dialog. `'self'` is the
+SAMEORIGIN`) so the settings page can show it in a dialog. `'self'` is the
 platform's origin alone, and nothing but the platform's own pages is
 served there: every fragment is on an origin of its own (a fleet without
 a hostname suffix, where fragments share the platform's origin, is the
@@ -51,43 +47,6 @@ fragment's page cannot script the window it opened on one. The sharing
 pages' forms also carry a token bound to the session and arm after a
 moment (docs/api.md, Sharing).
 
-The share sheet has one more framer: its owner's own page that frames
-their fragments (the desktop), through `__share`, for one of their own
-fragments' sheets at a time. The platform's session never reaches that
-frame, so `__share` hands it an embed session instead: minted from the
-page's own session, for its owner, while its `frame` grant holds, for
-that one sheet, bound to the page's origin. Under it, and only on a
-request that carries no platform session, the sheet is the owner's on
-that sheet alone, answers `frame-ancestors` naming that page's origin
-alone, tells its height and Done to that origin alone, and leaves out
-the frame grant (so a page never allows itself). The embed cookie is
-partitioned, on the sheet's path, and counts only in a frame's
-navigation or from the sheet's own page; no other platform page, no
-other sheet, and no API takes it. This is the trust the `frame` grant
-already asks for (below): whoever changes the page's code could lay its
-own buttons over the sheet, as over the fragments it frames.
-
-## Capabilities a fragment declares, and who grants them
-
-`fragment.json`'s `capabilities` asks for platform powers; each is
-honored only for the fragment's owner viewing its page.
-
-- `fragments` (`__fragments`): the owner's list, and making fragments.
-  Declaring it is enough.
-- `frame` (`__frame`, and `__share` for their own fragments' share
-  sheets): showing the owner's fragments inside the page,
-  signed in as them. The desktop is the first user; a chat showing an app
-  inline is the next. Declaring it is not enough: the owner allows it in
-  the fragment's share sheet ("Your fragments inside it"; `PUT
-  /api/f/<name>/grants/frame`, owner-only, never an agent), because a
-  page that frames a fragment signed in could lay its own buttons over
-  it. The grant stays with the fragment until the owner stops it. A
-  framed fragment's pages answer `frame-ancestors` naming only the page
-  that framed it through `__frame`, so no other page shows it signed in.
-  The platform's new-fragment form is the other place to allow it: for a
-  template that asks for `frame` (the desktop), it says so plainly, and
-  its submit records the same grant (`auth.rs`, `/auth/new`).
-
 ## An agent a fragment declares
 
 `fragment.json`'s `agent` block (docs/api.md, A fragment's agent) is a
@@ -97,23 +56,8 @@ code cannot: its deploy makes the agent (named as the fragment, its
 owner's, an editor of that fragment alone, listening to the declared
 channel) or removes it, offers it only the operations the block names,
 runs its turns for the fragment's jobs (`job.agent`), and pays for its
-model calls from the owner's budget. The chat template
-has its owner's own agent answer by the same block (`"personal": true`),
-so no platform code names a template (`cell/src/agents.rs`,
+model calls from the owner's budget (`cell/src/agents.rs`,
 `sync_agent`).
-
-## Resources a fragment declares
-
-- `computer` (`"computer": {}`, docs/computers.md): a Sprite of its own,
-  made on the deploy that declares it and paired as a computer its owner
-  owns, an editor of the fragment. Declaring is enough (Paul,
-  2026-09-26: resources are declarative, and the owner pays for what the
-  fragment spends); it is awake while a page is open or a job's command
-  (`job.computer.exec`) runs there, and destroyed only by `fragment
-  computers rm`. The platform keeps the fragment's live files on it and
-  runs the block's `start` from them as a service (docs/api.md, Apps).
-  The platform holds the Sprites token in the node (`KEYS`); each
-  `Computer` cell reaches only its own Sprite.
 
 ## Behavior no fragment declares
 
@@ -126,31 +70,11 @@ so no platform code names a template (`cell/src/agents.rs`,
   Opening a fragment by its URL). An app's own answers pass as they are.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
-- **An agent removes a hand-off's throwaway** (docs/api.md, Agents,
-  Hand-offs; confirmed by Paul, 2026-09-27): only a fragment the platform
-  recorded, at its create, as made by that agent as a throwaway (`POST
-  /api/fragments {throwaway: true}`, an agent's alone, for its owner).
-  `DELETE /api/f/<name>` signed by that agent, for its owner or no one,
-  removes the fragment's computer (its Sprite destroyed) and then the
-  fragment, as its owner. The name (`handoff-<12 hex>`) is for people and
-  crash cleanup, never the check: a fragment the owner made, whatever its
-  name, is never an agent's to delete. The one owner-only action an agent
-  takes: deleting stays its owner's everywhere else (decision 17).
-- **A person's memory** (docs/agent-computer.md, slice 3; docs/api.md,
-  `/api/memory`): the platform makes one private fragment per person on
-  first need (members only, theirs: `memory.<username>`, or the next
-  free `memory-<n>`), records it in the registry, and finds it by that
-  record, never by name, so a fragment of theirs called `memory` is never
-  taken over. It makes every computer of theirs an editor there: as each
-  pairs, all of them when it makes the memory, and a fragment's own
-  computer again at each sync (so the owner cannot take a computer out
-  of their memory but by removing it). Their agent, in their turns,
-  reads its facts and keeps one (`platform__remember`, one commit).
 - **An agent in a chat posts its work** (phase 7, C): a turn a chat
   started posts its start, each tool call, and its end to the chat's
   `work` channel, and its answer to `chat` naming the turn, when the chat
   declares them postable; a stop the turn's starter posts on `chat` stops
-  it. The records' shape is docs/api.md's (the chat template).
+  it. The records' shape is docs/api.md's (A chat's records).
 - **Postable channels keep their newest 10,000 records**
   (`limits::POSTED_KEPT`), the oldest dropped with their posts' keys, as
   `events` and `ops` keep theirs: not declarable yet.
