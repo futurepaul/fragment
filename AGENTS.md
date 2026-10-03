@@ -60,7 +60,12 @@ prebuilt bundle is in the debt ledger).
   for wasm32 (Apple's does not: `brew install llvm`, or Nix, which xtask
   finds; or name one with `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`), Node 22 or later, and `npm ci` at the repo
-  root (the pinned wrangler; `WRANGLER_BIN` names another).
+  root (the pinned wrangler; `WRANGLER_BIN` names another). Preview cards
+  are shot by `wrangler dev`'s local Browser Rendering, which downloads
+  Chrome for Testing 126 (about 145 MB) into wrangler's cache
+  (`$XDG_CACHE_HOME/.wrangler/chrome`, else the system's cache) on its
+  first shot; a Node whose unzip of it hangs (a v26 alpha did) leaves
+  every shot failing, quietly.
 - `cargo xtask build`: the cell and the agents for wasm32.
 - `cargo xtask check`: host tests and clippy (host and wasm), warnings
   denied.

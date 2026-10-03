@@ -430,8 +430,9 @@ impl FragmentCell {
                 }
                 json!({ "aged": ms })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects" | "fail-meter-acks" | "fail-after-paid")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
                 let key = match lever {
+                    "fail-cards" => MetaKey::TestFailCards,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
@@ -443,6 +444,11 @@ impl FragmentCell {
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
                 self.set_meta(key, &times.to_string())?;
                 json!({ "ok": true })
+            }
+            Some("cards") => {
+                // the card and its schedule (card.rs), and the shots the lever still fails
+                let left: u64 = self.meta(MetaKey::TestFailCards)?.and_then(|n| n.parse().ok()).unwrap_or(0);
+                json!({ "cards": self.cards()?, "failCardsLeft": left })
             }
             Some("forget-live") => {
                 self.live_forget();

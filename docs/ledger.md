@@ -90,7 +90,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
 | `requests` | requests | $0.45 per million | Workers Standard $0.30 plus the Durable Object request $0.15 |
 | `dynamic_workers` | unique dynamic workers per UTC day | $0.002 each | Dynamic Workers pricing |
-| `browser` | ms of Browser Rendering | $0.09 an hour | Browser Rendering pricing |
+| `browser` | ms of Browser Rendering | $0.09 an hour | Browser Run pricing (developers.cloudflare.com/browser-run/pricing, updated 2026-04-21): $0.09 per browser hour past the 10 a month Workers Paid includes |
 | `images` | unique transformations | $0.50 per thousand | Cloudflare Images pricing |
 | `key` | the key's own unit | set per key (`micros` per `per` units) | the operator; none by default |
 
@@ -291,8 +291,15 @@ applies it and tells the fragment, which forgets it, and one not
 acknowledged within five minutes is sent again. A guest's ledger refuses
 the batch, so a guest's fragments are billed nothing.
 
-- **Screenshots and images** (the deploy path): `browser` and `images`
-  rows to the fragment's owner.
+- **Preview cards** (decision 31; docs/api.md, Cards): each try at a
+  deploy's card is a `browser` row in the fragment's outbox
+  (`card:<fragment>@<incarnation>:<live, 12 hex>:<wanted at>:<try>`),
+  its session's time from acquire to close (a close that was lost adds
+  the session's 10 s inactivity timeout), to the fragment's owner. A
+  stale shot and a failed one are billed too: their browser time was
+  spent. A guest's or a read-only owner's deploys are not shot.
+- **Images** (the deploy path): `images` rows to the fragment's owner,
+  when a transformation is made.
 
 ## Where Stripe plugs in
 
@@ -319,3 +326,9 @@ the batch, so a guest's fragments are billed nothing.
 - An abandoned hold is charged its worst case after 6 hours.
 - The default instance rate assumes a 12 GB disk and 5% CPU; git storage
   is priced at R2's until code.storage's price is known.
+- A card's shot is a Browser Session, which Cloudflare also bills by
+  concurrent browsers ($2.00 a month for each past 10, the month's
+  average of each day's peak). That is a deployment-wide charge no one
+  shot causes, so it is not metered per person; the margin carries it
+  (each fragment has at most one shot out, and a consumer batch takes its
+  shots one at a time).

@@ -28,7 +28,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
-| `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
+| `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour), and before a preview card's failed shot is (doubling: Cards, below) |
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
 | `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
@@ -39,7 +39,7 @@ the deployment's secrets are Worker secrets (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), and `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, and `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails |
 
 Worker secrets (`cargo xtask deploy` uploads them from the files the
 deployment's config names; `.dev.vars` in dev), read only by
@@ -62,9 +62,13 @@ Workflow that runs jobs), `BLOBS` (the deployment's R2 bucket: the bytes
 of large files), `DELIVERIES` (the `fragment-deliveries` queue, and its
 dead-letter queue `fragment-deliveries-dead`), `METERS` (the
 `fragment-ledger` queue: each fragment's meter batches, consumed by the
-cell), and `AI` (Workers AI, through `AI_GATEWAY_ID`). A local node runs
+cell), `AI` (Workers AI, through `AI_GATEWAY_ID`), and `BROWSER`
+(Browser Rendering: preview cards, Cards below). A local node runs
 without `AI`, which `wrangler dev` would only reach remotely: dev and the
-e2e set `FRAGMENT_AI_URL`.
+e2e set `FRAGMENT_AI_URL`. `BROWSER` runs locally under `wrangler dev`
+(its own local mode: a Chrome for Testing it downloads into its cache,
+`$XDG_CACHE_HOME/.wrangler/chrome` or the system's, on the first shot), a
+lower rung than Cloudflare's browsers.
 
 
 ## Principals and access
@@ -458,6 +462,7 @@ and styles only inline and images only from the platform
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media (Blobs, below) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges answer 206) |
 | `GET /api/f/{name}/file/stat?path=` | viewer | → `{stat: {path, size, blobSha, lastCommitSha, present}, ref}` |
+| `GET /api/f/{name}/card` | viewer | → the fragment's preview card (Cards, below): a 1280×800 JPEG, `ETag` its blob's SHA-256, `Cache-Control: private, no-cache`, `X-Fragment-Ref` the live commit it shows; `If-None-Match` naming the tag is 304. Before the first is made, 404 `not_found` |
 | `GET /api/f/{name}/events?since=` or `?tail=` | viewer | → `{events: [{id, at, kind, summary, data}]}`, oldest first: the page after `since`, or the newest `tail` (1-500; 400 otherwise, or with `since`) (500 a page; 10 000 kept, as for `ops`: `limits::AUDIT_KEPT`) |
 | `POST /api/f/{name}/ops/{op}` | the operation's role | `{id, input}` → `{result, replayed}`; for a job, `result` is `{run, status}` (the same id answers the same run) |
 | `GET /api/f/{name}/runs?status=&op=&limit=` | viewer | → `{runs: [{id, op, via, trigger, principal, status, attempt, depth, createdAt, finishedAt, error}], counts: {<status>: n}, paused}` newest first (30, at most 200) |
@@ -656,6 +661,56 @@ __blob/<sha256>`, `fragment.blob(file)`): a chat's attachments
 
 CLI: `fragment blob put <name> <file>` uploads a file as a blob, typed
 by its extension, and prints its sha256.
+
+### Cards (docs/cloudflare-v1.md, decision 31)
+
+Every move of `live` (a deploy, a rollback, a push to `live`, a
+template's first deploy) wants a **preview card**: a screenshot of the
+fragment's page, which the shell's Apps list shows. The schedule and its
+rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
+
+- **Never in the deploy's request.** The move records the card it wants;
+  the fragment's alarm sends the shot as a message on the delivery queue
+  (`fragment-deliveries`), whose consumer takes it with the `BROWSER`
+  binding: a Browser Rendering session, CDP over its socket, the page at
+  1280×800 and a device scale of 1, its load waited for (at most 15 s),
+  then 1 s for its scripts, a JPEG at quality 70 (40 if that is over 512
+  KiB; over the cap at both, the deploy gets no card), and the session
+  closed whatever happens. It reports to the fragment, which stores the
+  image as one of its blobs (`image/jpeg`, kept while it is the card) and
+  makes it the card.
+- **Bounded per fragment: one shot out at a time, the newest live wins.**
+  A deploy while a shot is out is shot next; the shot out lands stale and
+  is dropped. Two deploys before a shot are one shot, of the second.
+- **Retried with backoff, then quiet.** A failed try (no browser, a page
+  that does not open, a socket that fails, a shot lost: no report within
+  3 minutes) is tried again after `FRAGMENT_DELIVERY_RETRY_S`, doubling to
+  `FRAGMENT_DELIVERY_RETRY_MAX_S`, at most 5 tries in all. Then the live is
+  given up: one `card.failed` event, and the card before stays.
+- **As a visitor without an account sees it.** The renderer has no
+  session of anyone's: a `public` fragment is shot as anyone sees it, a
+  `link` fragment as anyone holding its share link sees it (the page's
+  URL carries `?view=`, as a link holder's does; the card goes only to
+  members, who already see that page), and a `members` fragment is not
+  shot at all (`card.skipped`): a visitor would see only its refusal.
+- **Apps only.** A chat or an agent fragment is not an app (the shell
+  lists it elsewhere): its deploys are not shot (`card.skipped`). A
+  brain is an app.
+- **Metered to the owner.** Each try's browser time (acquire to close; a
+  close that was lost adds the session's 10 s inactivity timeout) is a
+  `browser` row in the fragment's meter outbox,
+  `card:<fragment>@<incarnation>:<live, 12 hex>:<wanted at>:<try>`, billed
+  to its owner at Browser Rendering's browser-hour price
+  (docs/ledger.md). Before each shot the owner's ledger is asked as a
+  create is: a guest pays for nothing and a read-only owner makes nothing
+  new, so neither's deploys are shot (`card.skipped`); a ledger that does
+  not answer refuses none.
+- **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
+  (`{live, why: not_an_app | members_only | no_address | owner_pays}`),
+  `card.failed` (`{failures}`). A retry and a stale shot say nothing.
+  A deployment that serves fragments by path (no `FRAGMENT_HOST_SUFFIX`)
+  has no page for a visitor to open: no cards. A page's Open Graph image
+  stays `__preview.svg`: the card is its members'.
 
 ### Deliveries: web push and notifyUrls
 
@@ -1281,6 +1336,10 @@ needs a key.
 
 Its sidebar is the person's list: chats (kind `chat`), then apps, less
 the ones they archived (`PUT /api/fragments/{name}/archived`, above).
+Each app's row shows its preview card (`GET /api/f/{name}/card`, Cards
+above, read with the session and shown as a blob URL), or its icon until
+the first is made: an app without one is asked again, from 2 s apart to
+a minute.
 A chat with two agents or more is a **group** (decision 8): "New group
 chat" makes a chat fragment on the `chat` template, titled by the name
 given or else its agents' names, and adds the agents picked as editors

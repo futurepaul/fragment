@@ -6,6 +6,7 @@ pub mod access;
 pub mod backoff;
 pub mod blob;
 pub mod body;
+pub mod card;
 pub mod codestorage;
 pub mod computer;
 pub mod cron;

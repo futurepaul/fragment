@@ -298,6 +298,7 @@ speaking Cloudflare's APIs) returns once this product works.
     brain. There is no encryption.
 31. **Sites are fragment apps.** Every deploy takes a screenshot with
     Browser Rendering for the app's preview card.
+    Status, 2026-10-03 (branch `claude/screenshots`): built, on the delivery queue after live moves, as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
 32. **SimpleX on $200 seats only.** The `simplex-chat` daemon runs on
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram

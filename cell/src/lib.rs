@@ -33,6 +33,7 @@ mod agents;
 mod ai;
 mod auth;
 mod blobs;
+mod card;
 mod config;
 mod connections;
 mod channels;

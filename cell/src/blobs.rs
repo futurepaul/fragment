@@ -12,7 +12,9 @@
 //!
 //! A page reads one of its fragment's blobs by hash at `__blob/<sha>` (a
 //! step's screenshot, a chat's attachment), typed as its upload declared,
-//! and an editor's page uploads one there (`PUT`, as the API's).
+//! and an editor's page uploads one there (`PUT`, as the API's). The
+//! fragment's preview card is one of its blobs too (card.rs), kept while
+//! it is the card.
 
 use fragment_core::{blob, site};
 use fragment_proto::{ErrorCode, Role};
@@ -124,12 +126,19 @@ impl FragmentCell {
 
     /// Stores bytes the platform made (generated media) as a blob.
     pub(crate) async fn put_blob_bytes(&self, sha: &str, bytes: Vec<u8>) -> CellResult<()> {
+        self.put_blob_typed(sha, bytes, None).await
+    }
+
+    /// Stores bytes the platform made as a blob served as `mime` (a card's
+    /// JPEG: card.rs), which must be passive media.
+    pub(crate) async fn put_blob_typed(&self, sha: &str, bytes: Vec<u8>, mime: Option<&str>) -> CellResult<()> {
+        assert!(mime.is_none_or(|m| blob::served_type(m) == Some(m)), "a blob is typed as passive media, not {mime:?}");
         let key = self.blob_key(sha)?;
         let size = bytes.len() as u64;
         if js::blob_head(self.env.as_ref(), &key).await?.is_none() {
             js::blob_put_bytes(self.env.as_ref(), &key, &bytes).await?;
         }
-        self.record_blob(sha, size, None)
+        self.record_blob(sha, size, mime)
     }
 
     /// `GET|HEAD /api/f/<name>/blobs/<sha256>` (viewer)
@@ -221,8 +230,12 @@ impl FragmentCell {
             "UPDATE blobs SET seen_at = ? WHERE sha IN (
                SELECT json_extract(a.value, '$.sha256') FROM records r, json_each(r.body, '$.attachments') a
                WHERE json_valid(r.body) AND json_type(r.body, '$.attachments') = 'array' AND a.type = 'object')",
-            vec![now_v],
+            vec![now_v.clone()],
         )?;
+        // the preview card is named by the fragment itself (card.rs)
+        if let Some(card) = self.cards()?.card {
+            self.exec("UPDATE blobs SET seen_at = ? WHERE sha = ?", vec![now_v, card.blob.as_str().into()])?;
+        }
         let count = self.drop_blobs("SELECT sha FROM blobs WHERE seen_at < ? LIMIT 1000", now - self.cfg.blob_grace_ms).await?;
         if count > 0 {
             self.event("blobs.collected", &format!("{count} blob(s) no branch has named for the grace period"), json!({ "count": count }));
