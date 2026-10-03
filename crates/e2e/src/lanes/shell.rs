@@ -83,7 +83,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{} / anonymous {}", owner_page.status, page.status),
     );
     let script = shell_site(s, api, &session, &agent, "agent.js")?;
-    s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), &script.status);
+    s.ok("and its script, from the release", script.status == 200 && script.text.contains("SOUL.md"), script.status);
     let channels = shell(api, &session, "GET", &format!("/api/f/{agent}/channels"), None, &[])?;
     s.ok(
         "the template's channels run on it",
@@ -102,7 +102,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let deploy = shell(api, &session, "POST", &format!("/api/f/{agent}/deploy"), Some(&json!({})), &[])?;
     s.ok("its job and settings are files of its own, deployed", r.status == 200 && deploy.status == 200, format!("{r} {deploy}"));
     let soul = shell_site(s, api, &session, &agent, "__file?path=SOUL.md")?;
-    s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), &soul.status);
+    s.ok("which its page reads", soul.status == 200 && soul.text.contains("tomatoes"), soul.status);
 
     // code of its own is a fork's, refused while it names the template
     let r = shell(
