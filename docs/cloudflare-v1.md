@@ -162,7 +162,18 @@ speaking Cloudflare's APIs) returns once this product works.
     `fal-image-editing` moves to Cloudflare's own inference (Paul,
     2026-10-02: agents can do anything they could do in Finite).
 18. **Backups are a computer feature.** `/data` is saved with
-    `DirectoryBackup` at sleep and every few minutes while written. The
+    `DirectoryBackup` every few minutes while written. A sleep is driven
+    by the Computer DO, in this order:
+    1. it saves `/data`;
+    2. it signals the guest;
+    3. it waits for the guest to exit;
+    4. it destroys the container.
+
+    The inactivity timeout is only a safety net. An idle stop gives the
+    guest about 5 seconds of SIGTERM, and the DO can't exec during it.
+    A wake starts the container with `RESTORE_PENDING=1`, restores
+    `/data`, and touches `/run/computer/restored`. The image waits for
+    that file before its own init runs. The
     platform gives every computer an S3 endpoint scoped to its own R2
     prefix through an intercept, so the guest holds no credential. The
     Hermes image uses it for Litestream, streaming Hermes' SQLite
@@ -324,11 +335,21 @@ speaking Cloudflare's APIs) returns once this product works.
 
 ### The generic pieces that make the rule work (Paul, 2026-10-02)
 
-39. **A subscription wakes a computer.** A computer subscribes to
-    fragment channels (its bridge does, through the API). A record on a
-    subscribed channel wakes a sleeping computer, and the bridge catches
-    up from its last sequence number. Chats, routines, webhooks and
-    anything else reach agents this way.
+39. **A subscription wakes a computer, and the guest says when it is
+    busy.** A computer subscribes to fragment channels (its bridge does,
+    through the API). A record on a subscribed channel wakes a sleeping
+    computer, and the bridge catches up from its last sequence number.
+    Chats, routines, webhooks and anything else reach agents this way.
+
+    It stays awake while it has:
+    - an open port tab;
+    - or a keepalive socket that the guest holds to the Computer DO
+      itself.
+
+    Twenty minutes after neither has been true, it sleeps. Spike S3
+    found that traffic from the container, even a socket to another DO,
+    doesn't count as activity; only a socket the Computer DO accepts
+    does.
 40. **Blessed templates run the platform's current version.** A chat,
     agent, brain or skills fragment names its template, and it serves
     that template's code from the current platform release. One deploy
@@ -397,6 +418,14 @@ exit says.
    - A per-branch full deployment with wildcard hosts.
 
    Exit: a verdict and evidence for each spike.
+
+   Status, 2026-10-02:
+   - Done (see "Spike results"): Loader and Facets (S1), and Hermes on
+     Containers (S3).
+   - Folded into phase 2's first step: the cell on real Workers, and a
+     per-branch deployment on `finite.place`.
+   - Still open: AI Gateway (Unified Billing and ZDR need credits on the
+     account), and WorkOS Pipes (staging's shared credentials).
 1. **Freeze and cut. Done 2026-10-02.**
    - `celld-final` was tagged and the `celld` branch pushed.
    - The product half of decision 33 went: about 64k lines.
@@ -526,6 +555,52 @@ What the port must add:
   That also gives the billing unit: $0.002 per fragment per version per
   day, past 1,000 a month.
 
+**S3, computers on Containers and Hermes on them (2026-10-02,
+deployed; evidence in `spikes/s3-computer/RESULTS.md`; about $0.15).**
+All ten items work.
+
+The generic computer:
+- A cold start of a small image is 2–3 s at p50. The first start of a
+  new image at a location pays the pull: 10–11 s.
+- Nothing on disk survives a stop, and neither do intercepts, so they
+  are registered again at every start. A hostname costs 2 of the 128
+  entries, or 4 for HTTP and HTTPS together.
+- Placeholder swaps work over HTTP and HTTPS. HTTPS needs the image to
+  wait for Cloudflare's CA, which appears shortly after boot.
+- SSE streams through. A WebSocket from the guest to a DO works for
+  both `ws://` and `wss://` (68–318 ms to connect, about 5 ms per round
+  trip), and drops at a deploy (the guest reconnects in about 1 s).
+- Ports work over HTTP, WebSockets and raw TCP from the DO, at the
+  client's line rate.
+- `DirectoryBackup` saved 52 MB in 3.3 s and restored it in 1.3 s.
+- Litestream works through a 170-line S3 gateway over the R2 binding, so
+  no R2 token is needed (a restore took 4.6 s).
+- A running container keeps its image across a deploy; the next start
+  takes the new one.
+
+Hermes:
+- Its `-desktop` image is 1.37 GB compressed.
+- Start to ready takes 26–32 s on a fresh disk, 21 s for a wake with
+  restore, and 42–82 s for a first start or a new image version. Most
+  of that is Hermes' own boot.
+- A turn through the model intercept to GLM-5.3 Flash works: about 27K
+  input tokens and $0.004 for a simple turn with 23 tools. Flash takes a
+  1M-token context.
+- Multiplexed profiles work. `API_SERVER_KEY` needs at least 16
+  characters, and Hermes' own cron must be turned off (decision 38).
+- Memory survived a sleep and a wake.
+- Hermes' screen is an Xvnc on a Unix socket, with no viewer of its own.
+  So the image ships its own viewer page and TCP bridge, and keeps Take
+  over / Give back in that page.
+
+What it changes:
+- decision 18 (sleep is driven by the DO; the wake contract);
+- decision 39 (staying awake);
+- the image's boot script: wait for the CA, write config files instead
+  of running CLI calls, wait for the restore marker, list each profile's
+  `state.db` for Litestream, and keep the screen's lease;
+- a risk: cold wakes are slow.
+
 ## Bugs the port must fix
 
 Found 2026-10-02 building `avatar-lab` on fragment.club (`celld-final`).
@@ -567,8 +642,13 @@ Each one needs a test in the phase that ports its feature.
     gateway until raised;
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
-- **Model context.** GLM-5.3 lists a 64K context window, which may be
-  tight for long Hermes runs.
+- **Model context.** GLM-5.3, the medium tier, lists a 64K context
+  window, which may be tight for long Hermes runs. GLM-5.3 Flash takes
+  1M; spike S3 sent it 257K.
+- **Slow cold wakes.** Hermes takes about 21 s to wake with a restore,
+  and 42–82 s on a new image. The chat must show the computer waking.
+  The idle window and the $200 always-on seat hide it. Hermes' boot
+  (bytecode, skipped setup, the restored `/opt/data`) is where to cut.
 - **Unproven paths:**
   - a bridge's long-lived connection to a fragment through the egress
     swap;
