@@ -459,6 +459,8 @@ async fn boot_main() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut last_sync = Instant::now();
+    // HERMES_BOOT_SYNC_MS: the operator's (a test's) cadence, at least 1 s.
+    let sync_every = env("HERMES_BOOT_SYNC_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SYNC_EVERY_MS, |v| v.max(1_000));
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
     loop {
@@ -485,7 +487,7 @@ async fn boot_main() {
         if litestream.is_none() && t0.elapsed() > Duration::from_secs(10) {
             litestream = start_litestream(&agents, &home);
         }
-        if last_sync.elapsed() > Duration::from_millis(SYNC_EVERY_MS) {
+        if last_sync.elapsed() > Duration::from_millis(sync_every) {
             last_sync = Instant::now();
             for a in &agents {
                 let dir = hermes::profile_dir(&home, &a.fragment);

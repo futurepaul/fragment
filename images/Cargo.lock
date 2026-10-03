@@ -168,6 +168,8 @@ dependencies = [
  "base64",
  "bytes",
  "fragment-bridge",
+ "http-body-util",
+ "hyper",
  "libc",
  "serde",
  "serde_json",

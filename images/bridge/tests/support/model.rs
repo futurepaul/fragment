@@ -3,8 +3,11 @@
 //!
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran`); once a
-//!   tool result is in the transcript, the answer names it.
+//!   yet, is answered with a `terminal` tool call (`echo tool-ran`), and one
+//!   saying `risky` with one Hermes flags (`rm -rf …`); once a tool result is
+//!   in the transcript, the answer names it;
+//! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
+//!   asked.
 //!
 //! It records each request's `model` and `x-fragment-agent`.
 
@@ -69,8 +72,19 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
         return (format!("scripted: {ran}"), None);
     }
-    if last_user.contains("use the terminal") && has_terminal {
-        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": "echo tool-ran" }).to_string() } });
+    // Hermes' smart-approval guardian asks for one word: a person decides.
+    if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
+        return ("ESCALATE".into(), None);
+    }
+    let command = if last_user.contains("risky") {
+        Some("rm -rf /tmp/fragment-risky && echo tool-ran")
+    } else if last_user.contains("use the terminal") {
+        Some("echo tool-ran")
+    } else {
+        None
+    };
+    if let (Some(command), true) = (command, has_terminal) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
         return (String::new(), Some(call));
     }
     // The first line of what the user said: Hermes appends its own notes

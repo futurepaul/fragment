@@ -5,7 +5,7 @@
 //! no credential.
 //!
 //! Every route the bridge calls is a method here, so the platform side can
-//! match them one for one (images/README.md lists them).
+//! match them one for one (docs/bridge.md lists them).
 
 use std::collections::BTreeMap;
 use std::time::Duration;

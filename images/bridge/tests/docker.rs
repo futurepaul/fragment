@@ -74,7 +74,12 @@ impl Container {
     }
 
     fn exec(&self, cmd: &[&str]) -> bool {
-        Command::new(docker()).arg("exec").arg(&self.id).args(cmd).status().is_ok_and(|s| s.success())
+        Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().is_ok_and(|o| o.status.success())
+    }
+
+    fn exec_out(&self, cmd: &[&str]) -> String {
+        let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     fn logs(&self) -> String {
@@ -86,7 +91,7 @@ impl Container {
     /// gone, and its exit code.
     fn sigterm(&self) -> (Duration, i64) {
         let t = Instant::now();
-        assert!(Command::new(docker()).args(["kill", "--signal", "TERM", &self.id]).status().expect("docker runs").success());
+        assert!(Command::new(docker()).args(["kill", "--signal", "TERM", &self.id]).output().expect("docker runs").status.success());
         let out = Command::new(docker()).args(["wait", &self.id]).output().expect("docker runs");
         (t.elapsed(), String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(-1))
     }
@@ -114,6 +119,8 @@ async fn the_stub_image() {
     fake.until(20_000, "the stub's reply", |w| w.bodies(&chat, "chat", "reply").len() == 1).await;
     eprintln!("stub: message to reply: {} ms", asked.elapsed().as_millis());
     fake.with(|w| assert_eq!(w.bodies(&chat, "chat", "reply")[0]["text"], "echo: [paul] hello stub"));
+    // Its screen port serves its page.
+    assert!(c.exec_out(&["wget", "-qO-", "http://127.0.0.1:6080/"]).contains("This computer has no screen"));
     let (took, code) = c.sigterm();
     eprintln!("stub: SIGTERM to exit: {} ms (code {code})", took.as_millis());
     assert!(took < Duration::from_secs(5), "{took:?}\n{}", c.logs());
@@ -150,7 +157,7 @@ async fn the_hermes_image() {
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
@@ -190,8 +197,17 @@ async fn the_hermes_image() {
         assert!(calls.iter().all(|c| c.agent.as_deref() == Some("juniper.paul")), "every model call names its agent: {calls:?}");
         assert!(calls.iter().any(|c| c.model == "cheap"), "the agent's tier from agent.json: {calls:?}");
     }
+    // The screen: its viewer page, noVNC, and the socket's refusal of a
+    // viewer that names no id (the display itself starts at a viewer).
+    assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
+    assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
+    assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
     assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper-paul/SOUL.md"]), "the agent's repo is in its profile");
     assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper-paul/SOUL.md"]));
+    // What Hermes writes in its profile is committed back to the agent's
+    // fragment, as the agent.
+    assert!(c.exec(&["sh", "-c", "printf 'Paul likes tomatoes.\\nAnd basil.\\n' > /data/hermes/profiles/juniper-paul/memories/MEMORY.md"]));
+    fake.until(30_000, "the memory committed back", |w| w.fragments["juniper.paul"].files.get("memories/MEMORY.md").is_some_and(|b| b.as_ref() == b"Paul likes tomatoes.\nAnd basil.\n")).await;
 
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));
@@ -199,6 +215,29 @@ async fn the_hermes_image() {
     let warm = Instant::now();
     fake.until(120_000, "the second reply", |w| answered(w, &t2).is_some()).await;
     eprintln!("hermes: warm message to reply: {} ms", warm.elapsed().as_millis());
+
+    // A tool call: Hermes' progress line is a step, then its answer.
+    let third = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal" }));
+    let t3 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", third["seq"].as_u64().unwrap());
+    fake.until(120_000, "the tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t3)).await;
+    fake.with(|w| {
+        let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t3).collect();
+        assert!(steps.iter().any(|s| s["tool"] == "terminal"), "a terminal step: {steps:?}");
+        assert!(answered(w, &t3).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t3));
+    });
+
+    // An approval: Hermes flags `rm -rf`, its guardian escalates, the card
+    // is the owner's, the owner's answer runs it.
+    let fourth = fake.say(&chat, &person("paul"), json!({ "text": "do the risky thing" }));
+    let t4 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", fourth["seq"].as_u64().unwrap());
+    fake.until(120_000, "Hermes' approval card", |w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == t4)).await;
+    let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t4).unwrap());
+    eprintln!("hermes: approval card options {}", card["options"]);
+    assert_eq!(card["asks"], "id:paul");
+    fake.until(30_000, "the keepalive dropped while it waits", |w| w.keepalive_open == 0).await;
+    fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "once" }));
+    fake.until(120_000, "the approved turn's answer", |w| answered(w, &t4).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran"))).await;
+    fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").into_iter().find(|p| p["turn"] == t4).unwrap()["outcome"], "answered"));
 
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());

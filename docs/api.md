@@ -1073,6 +1073,10 @@ pay.
 
 ### A chat's records (phase 7, slice C)
 
+docs/chat-records.md extends this for computers' agents (phase 4: turns,
+drafts, prompts, attachments, Stop, hand-offs, routines) and wins where
+they differ.
+
 A chat is two channels and no app code (no worker), and an agent
 answering it (one that listens there, or the fragment's own: the `agent`
 block, above):

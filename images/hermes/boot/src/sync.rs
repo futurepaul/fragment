@@ -379,6 +379,144 @@ mod tests {
         assert_eq!(resolve(Some(&k("", "h5")), Some(&l("x", "h5")), "h5"), Resolution::Same);
     }
 
+    /// A files route as the platform's (`GET files`, `GET file?path=`,
+    /// `POST files`), each change a new commit of the files it names.
+    mod fake {
+        use std::collections::BTreeMap;
+        use std::net::SocketAddr;
+        use std::sync::{Arc, Mutex};
+
+        use base64::Engine;
+        use fragment_bridge::net;
+        use http_body_util::BodyExt;
+        use hyper::{Method, StatusCode};
+        use serde_json::{json, Value};
+
+        #[derive(Default)]
+        pub struct Repo {
+            pub files: BTreeMap<String, (String, Vec<u8>)>,
+            pub commits: u32,
+            pub keys: Vec<String>,
+        }
+
+        impl Repo {
+            pub fn put(&mut self, path: &str, body: &str) {
+                self.commits += 1;
+                self.files.insert(path.into(), (format!("c{}", self.commits), body.as_bytes().to_vec()));
+            }
+        }
+
+        pub async fn start(repo: Arc<Mutex<Repo>>) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (stop, rx) = tokio::sync::watch::channel(false);
+            let handler = move |req: hyper::Request<hyper::body::Incoming>, _: SocketAddr| {
+                let repo = repo.clone();
+                async move {
+                    assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper.paul"), "as the agent");
+                    let (method, path, q) = (req.method().clone(), req.uri().path().to_string(), req.uri().query().unwrap_or("").to_string());
+                    let body = req.into_body().collect().await.unwrap().to_bytes();
+                    let mut r = repo.lock().unwrap();
+                    match (method, path.as_str()) {
+                        (Method::GET, "/api/f/juniper.paul/files") => {
+                            let list: Vec<Value> = r.files.iter().map(|(p, (c, b))| json!({ "path": p, "size": b.len(), "lastCommitSha": c })).collect();
+                            net::json_answer(StatusCode::OK, &json!({ "files": list }))
+                        }
+                        (Method::GET, "/api/f/juniper.paul/file") => {
+                            let p = q.strip_prefix("path=").unwrap_or("").replace("%2F", "/");
+                            match r.files.get(&p) {
+                                Some((_, b)) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
+                                None => net::refusal(StatusCode::NOT_FOUND, "not_found", "no such file"),
+                            }
+                        }
+                        (Method::POST, "/api/f/juniper.paul/files") => {
+                            let v: Value = serde_json::from_slice(&body).unwrap();
+                            r.keys.push(v["key"].as_str().unwrap().to_string());
+                            r.commits += 1;
+                            let c = format!("c{}", r.commits);
+                            for f in v["files"].as_array().unwrap() {
+                                let p = f["path"].as_str().unwrap().to_string();
+                                if f["delete"] == json!(true) {
+                                    r.files.remove(&p);
+                                } else if let Some(t) = f["text"].as_str() {
+                                    r.files.insert(p, (c.clone(), t.as_bytes().to_vec()));
+                                } else {
+                                    let b = base64::engine::general_purpose::STANDARD.decode(f["base64"].as_str().unwrap()).unwrap();
+                                    r.files.insert(p, (c.clone(), b));
+                                }
+                            }
+                            net::json_answer(StatusCode::OK, &json!({ "commit": c }))
+                        }
+                        _ => net::refusal(StatusCode::NOT_FOUND, "not_found", &path),
+                    }
+                }
+            };
+            tokio::spawn(net::serve(listener, handler, rx));
+            (addr, stop)
+        }
+    }
+
+    /// Goal: a round brings main's files into the profile, then commits the
+    /// profile's changes back as the agent; a file both sides changed keeps
+    /// main's, with the profile's beside it; a settled round does nothing.
+    #[tokio::test]
+    async fn a_round_against_the_files_route() {
+        fragment_bridge::log::set_quiet(true);
+        let repo = std::sync::Arc::new(std::sync::Mutex::new(fake::Repo::default()));
+        {
+            let mut r = repo.lock().unwrap();
+            r.put("SOUL.md", "You are Juniper.");
+            r.put("memories/MEMORY.md", "Paul likes tomatoes.");
+            r.put("site/index.html", "not the agent's to keep");
+        }
+        let (addr, _stop) = fake::start(repo.clone()).await;
+        let api = Api::new(&format!("http://{addr}")).unwrap();
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into() };
+        let root = std::env::temp_dir().join(format!("hermes-boot-round-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (profile, state) = (root.join("profile"), root.join("sync"));
+        let own = |_: &Path| {};
+
+        let d = round(&api, &agent, &profile, &state, &own).await.unwrap();
+        assert_eq!((d.pulled, d.pushed), (2, 0));
+        assert_eq!(std::fs::read_to_string(profile.join("SOUL.md")).unwrap(), "You are Juniper.");
+        assert!(!profile.join("site").exists(), "only the agent's own files");
+        assert_eq!(round(&api, &agent, &profile, &state, &own).await.unwrap(), Done::default(), "replay: settled");
+
+        // Hermes writes a memory and a skill: committed back, once
+        std::fs::write(profile.join("memories/MEMORY.md"), "Paul likes tomatoes. And basil.").unwrap();
+        std::fs::create_dir_all(profile.join("skills/pesto")).unwrap();
+        std::fs::write(profile.join("skills/pesto/SKILL.md"), "# Pesto").unwrap();
+        let d = round(&api, &agent, &profile, &state, &own).await.unwrap();
+        assert_eq!(d.pushed, 2);
+        {
+            let r = repo.lock().unwrap();
+            assert_eq!(r.files["memories/MEMORY.md"].1, b"Paul likes tomatoes. And basil.");
+            assert!(r.files.contains_key("skills/pesto/SKILL.md"));
+            assert_eq!(r.keys.len(), 1, "one commit");
+        }
+        // the next round reads main's new commit of them and finds them the same
+        assert_eq!(round(&api, &agent, &profile, &state, &own).await.unwrap(), Done::default());
+
+        // the owner edits SOUL.md while Hermes edits it too: main's wins, the profile's is kept
+        repo.lock().unwrap().put("SOUL.md", "You are Juniper, a gardener.");
+        std::fs::write(profile.join("SOUL.md"), "You are Juniper, a cook.").unwrap();
+        let d = round(&api, &agent, &profile, &state, &own).await.unwrap();
+        assert_eq!(d.conflicts, 1);
+        assert_eq!(std::fs::read_to_string(profile.join("SOUL.md")).unwrap(), "You are Juniper, a gardener.");
+        let kept: Vec<_> = std::fs::read_dir(&profile).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with("SOUL.md.local-")).collect();
+        assert_eq!(kept.len(), 1, "the profile's version beside it");
+        // the kept copy is never pushed
+        assert_eq!(round(&api, &agent, &profile, &state, &own).await.unwrap(), Done::default());
+
+        // deleted on main: deleted here (it was unchanged here)
+        repo.lock().unwrap().files.remove("skills/pesto/SKILL.md");
+        let d = round(&api, &agent, &profile, &state, &own).await.unwrap();
+        assert_eq!(d.deleted, 1);
+        assert!(!profile.join("skills/pesto/SKILL.md").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn scan_leaves_out_bundled_skills() {
         let d = std::env::temp_dir().join(format!("hermes-boot-scan-{}", std::process::id()));
