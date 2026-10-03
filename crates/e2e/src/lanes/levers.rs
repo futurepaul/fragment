@@ -76,9 +76,20 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
         again.status == 200 && again.body["identity"] == identity.as_str() && again.body["created"] == false && again_session != session && who(api, &session)?["id"] == identity.as_str() && who(api, &again_session)?["id"] == identity.as_str(),
         &again,
     );
-    let listed = api.unsigned("POST", "/api/test/people", Some(&json!({})))?;
-    let found = listed.body["people"].as_array().into_iter().flatten().any(|p| p["identity"] == identity.as_str() && p["email"] == email.as_str());
-    s.ok("the sweep's list finds them, by identity and email", listed.status == 200 && found, &listed);
+    // a preview may hold many e2e people: their pages, until this one's
+    let (mut found, mut after, mut pages) = (false, Value::Null, 0);
+    // bounded: a hundred people a page, at most a hundred pages
+    while !found && pages < 100 {
+        let listed = api.unsigned("POST", "/api/test/people", Some(&json!({ "after": after })))?;
+        anyhow::ensure!(listed.status == 200, "the e2e people: {listed}");
+        found = listed.body["people"].as_array().into_iter().flatten().any(|p| p["identity"] == identity.as_str() && p["email"] == email.as_str());
+        after = listed.body["next"].clone();
+        pages += 1;
+        if after.is_null() {
+            break;
+        }
+    }
+    s.ok("the sweep's list finds them, by identity and email", found, format!("{pages} pages"));
     // invalid
     let refused: Vec<(String, u16)> = [
         signin("paul@example.com", json!(0))?,
