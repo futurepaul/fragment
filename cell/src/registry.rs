@@ -26,7 +26,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use fragment_core::{blob, npub, registry};
-use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView};
+use fragment_proto::{limits, ErrorCode, Identity, IdentityKind, IdentityView, KeyView, Role};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,6 +52,7 @@ macro_rules! username_join {
 pub(crate) mod calls;
 mod signin;
 use calls::{
+    Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
     Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
@@ -63,7 +64,7 @@ pub const NAME: &str = "registry";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS identities (
-  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL);
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT, created_at INTEGER NOT NULL, held TEXT);
 CREATE INDEX IF NOT EXISTS identities_owner ON identities (owner) WHERE owner IS NOT NULL;
 CREATE TABLE IF NOT EXISTS keys (
   key TEXT PRIMARY KEY, identity TEXT NOT NULL, added_at INTEGER NOT NULL, added_by TEXT NOT NULL, revoked_at INTEGER);
@@ -132,6 +133,7 @@ struct IdentityRow {
     kind: IdentityKind,
     owner: Option<String>,
     username: Option<String>,
+    held: Option<Role>,
 }
 
 #[derive(Deserialize)]
@@ -149,14 +151,15 @@ struct KeyHolderRow {
     kind: Option<IdentityKind>,
     owner: Option<String>,
     username: Option<String>,
+    held: Option<Role>,
 }
 
 /// The identity a joined row names (a key's holder, a session's): its
 /// `identities` columns missing, the rows contradict each other, a host
 /// fault.
-fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, username: Option<String>, named_by: &str) -> CellResult<Identity> {
+fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, username: Option<String>, held: Option<Role>, named_by: &str) -> CellResult<Identity> {
     match kind {
-        Some(kind) => Ok(Identity { id, kind, owner, username }),
+        Some(kind) => Ok(Identity { id, kind, owner, username, held }),
         None => Err(CellError::host(format!("{named_by} names a missing identity {id}"))),
     }
 }
@@ -256,9 +259,9 @@ impl RegistryCell {
 
     /// An identity with its username, in one statement.
     fn identity(&self, id: &str) -> CellResult<Option<Identity>> {
-        const Q: &str = concat!("SELECT i.kind, i.owner, u.username FROM identities i ", username_join!(), " WHERE i.id = ?");
+        const Q: &str = concat!("SELECT i.kind, i.owner, i.held, u.username FROM identities i ", username_join!(), " WHERE i.id = ?");
         let row = self.row::<IdentityRow>(Q, vec![id.into()])?;
-        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, username: r.username }))
+        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, username: r.username, held: r.held }))
     }
 
     /// An identity a request names: missing, it is 404.
@@ -367,7 +370,7 @@ impl RegistryCell {
     /// with its holder and the holder's username.
     fn key_holder(&self, key: &str) -> CellResult<Identity> {
         const Q: &str = concat!(
-            "SELECT k.identity, k.revoked_at, i.kind, i.owner, u.username FROM keys k LEFT JOIN identities i ON i.id = k.identity ",
+            "SELECT k.identity, k.revoked_at, i.kind, i.owner, i.held, u.username FROM keys k LEFT JOIN identities i ON i.id = k.identity ",
             username_join!(),
             " WHERE k.key = ?"
         );
@@ -378,7 +381,7 @@ impl RegistryCell {
                 npub::encode(key)
             ))),
             Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, &format!("the key {key}")),
+            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, row.held, &format!("the key {key}")),
         }
     }
 
@@ -461,7 +464,7 @@ impl RegistryCell {
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
         let username = owner.map(|o| self.username_of(o)).transpose()?.flatten();
-        Ok(Identity { id, kind, owner: owner.map(str::to_string), username })
+        Ok(Identity { id, kind, owner: owner.map(str::to_string), username, held: None })
     }
 
     fn register_agent(&self, b: RegisterAgent) -> CellResult<IdentityView> {
@@ -489,6 +492,23 @@ impl RegistryCell {
                 self.view(&agent, Some(true))
             }
         }
+    }
+
+    /// Holds an agent below its owner (`held`: the most it acts with), or
+    /// lets it go; only its owner does, and never above editor (an agent
+    /// never acts as an owner).
+    fn hold(&self, b: Hold) -> CellResult<IdentityView> {
+        let by = self.by(&b.by)?;
+        let agent = self.named_identity(&b.agent)?;
+        if agent.kind != IdentityKind::Agent || agent.owner.as_deref() != Some(by.id.as_str()) {
+            return Err(CellError::new(ErrorCode::Forbidden, "only an agent's owner holds it"));
+        }
+        if b.held.is_some_and(|r| r == Role::Public || r > fragment_core::access::AGENT_ROLE_MAX) {
+            return Err(CellError::invalid("an agent is held at viewer or editor"));
+        }
+        let held = b.held.map_or(SqlStorageValue::Null, |r| r.as_str().into());
+        self.exec("UPDATE identities SET held = ? WHERE id = ?", vec![held, agent.id.as_str().into()])?;
+        self.view(&self.named_identity(&agent.id)?, Some(false))
     }
 
     /// The identity a call names (`None`: the asker's own).
@@ -631,6 +651,8 @@ impl RegistryCell {
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
+            Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
+            SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),
             Profiles::PATH => reply::<Profiles>(self.profiles(body(&bytes)?)),
             AddKey::PATH => reply::<AddKey>(self.add_key(body(&bytes)?)),
             RevokeKey::PATH => reply::<RevokeKey>(self.revoke(body(&bytes)?)),

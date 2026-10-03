@@ -26,8 +26,11 @@ use fragment_core::npub;
 use fragment_core::steps::AgentTurn;
 use fragment_proto::{limits, split_fragment_name, valid_fragment_name, valid_label, ErrorCode, FragmentList, IdentityKind, ListedFragment, Role};
 
+use fragment_core::ledger::Spend;
+
 use crate::error::{CellError, CellResult};
 use crate::fragment::{Caller, FragmentCell, MetaKey};
+use crate::ledger::MaySpend;
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::registry::calls;
 use crate::routed::Signed;
@@ -149,7 +152,8 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .fragments
         .into_iter()
         .filter_map(|f| {
-            let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied() };
+            // a people-only share is the fragment's to know: a call decides again
+            let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
             listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, sharing: None })
         })
         .collect();
@@ -256,7 +260,7 @@ impl FragmentCell {
         let (live, joined): (Option<AgentLive>, Option<Joined>) = (stored(live, "agent block")?, stored(joined, "agent joined")?);
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let (_, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
-        let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()) };
+        let identity = fragment_proto::Identity { id: owner.clone(), kind: IdentityKind::Person, owner: None, username: Some(username.to_string()), held: None };
         let signed = Signed::new(identity, None);
         let wanted = match &live {
             None => None,
@@ -279,7 +283,7 @@ impl FragmentCell {
             return settled();
         };
         if self.member_role(&wanted.agent)?.is_none() {
-            self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor }).await?;
+            self.set_member(&as_owner, &wanted.agent, fragment_proto::SetRole { role: Role::Editor, people_only: false }).await?;
         }
         let listen = json!({ "fragment": name, "channel": wanted.channel });
         let listening = ask_json(&self.env, Method::Post, &format!("/api/a/{}/listen", wanted.name), &owner, &listen).await?;
@@ -362,6 +366,15 @@ impl FragmentCell {
             }
         }
         let asker = if npub::is_identity(&run.principal) { run.principal.clone() } else { joined.agent.clone() };
+        // a turn its owner's ledger would refuse never starts (decision 27):
+        // stopped agents, no credit, or this fragment's cap for anyone but its
+        // owner (the fragment's own agent acting as itself is the owner's)
+        let by_owner = asker == owner || asker == joined.agent;
+        let may = MaySpend { spend: Spend::AgentTurn, fragment: Some(self.name().map_err(|e| StepFail::Retry(e.message))?), by_owner };
+        crate::ledger::ask(&self.env, &owner, &may).await.map_err(|e| match e.refused {
+            Some(_) => permanent(e.message),
+            None => StepFail::Retry(format!("the owner's ledger: {}", e.message)),
+        })?;
         let id = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(self.step_ref(run, index)?.as_bytes()));
         let body = json!({
             "id": id,

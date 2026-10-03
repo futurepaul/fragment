@@ -16,6 +16,11 @@ use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
 
+/// Chrome starts tried before a lane gives up on it, and how long each may
+/// take to answer on its DevTools port.
+const CHROME_STARTS_MAX: u32 = 2;
+const CHROME_START_WAIT: Duration = Duration::from_secs(30);
+
 pub struct Browser {
     child: Child,
     ws: WebSocket<MaybeTlsStream<TcpStream>>,
@@ -127,13 +132,36 @@ impl Browser {
     /// `preferences` (Chrome's own settings file) in its profile first.
     pub fn launch_with(scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<Option<Browser>> {
         let Some(bin) = chrome() else { return Ok(None) };
+        // a start that never comes up (a slow runner, a port taken between
+        // free_port and Chrome's bind) is tried once more, on a fresh port
+        let mut tries = 0;
+        let (child, url, profile) = loop {
+            tries += 1;
+            match Browser::start(&bin, scratch, args, preferences) {
+                Ok(started) => break started,
+                Err(e) if tries < CHROME_STARTS_MAX => eprintln!("      (Chrome did not come up, trying again: {e:#})"),
+                Err(e) => return Err(e),
+            }
+        };
+        let (ws, _) = tungstenite::connect(url.as_str())?;
+        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
+            s.set_read_timeout(Some(Duration::from_secs(30)))?;
+        }
+        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile }))
+    }
+
+    /// One Chrome, up: its process, its DevTools socket's URL, and its
+    /// profile, whose `chrome.log` keeps what it said (a start that fails
+    /// says why).
+    fn start(bin: &Path, scratch: &Path, args: &[&str], preferences: Option<&Value>) -> Result<(Child, String, PathBuf)> {
         let port = fragment_devstack::free_port()?;
         let profile = scratch.join(format!("chrome-{port}"));
         std::fs::create_dir_all(profile.join("Default"))?;
         if let Some(p) = preferences {
             std::fs::write(profile.join("Default/Preferences"), p.to_string())?;
         }
-        let child = Command::new(bin)
+        let log = std::fs::File::create(profile.join("chrome.log"))?;
+        let mut child = Command::new(bin)
             .args(args)
             .args([
                 "--headless=new",
@@ -153,28 +181,29 @@ impl Browser {
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .context("start Chrome")?;
         let t0 = Instant::now();
-        let url = loop {
+        let said = || std::fs::read_to_string(profile.join("chrome.log")).unwrap_or_default().lines().rev().take(5).collect::<Vec<_>>().join(" | ");
+        loop {
             let found = reqwest::blocking::get(format!("http://127.0.0.1:{port}/json/version"))
                 .ok()
                 .and_then(|r| r.json::<Value>().ok())
                 .and_then(|v| v["webSocketDebuggerUrl"].as_str().map(str::to_string));
             if let Some(u) = found {
-                break u;
+                return Ok((child, u, profile));
             }
-            if t0.elapsed() > Duration::from_secs(20) {
-                bail!("Chrome's DevTools endpoint did not come up on :{port}");
+            if let Ok(Some(status)) = child.try_wait() {
+                bail!("Chrome exited ({status}) before its DevTools endpoint came up on :{port}: {}", said());
+            }
+            if t0.elapsed() > CHROME_START_WAIT {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Chrome's DevTools endpoint did not come up on :{port} in {CHROME_START_WAIT:?}: {}", said());
             }
             std::thread::sleep(Duration::from_millis(100));
-        };
-        let (ws, _) = tungstenite::connect(url.as_str())?;
-        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
-            s.set_read_timeout(Some(Duration::from_secs(30)))?;
         }
-        Ok(Some(Browser { child, ws, next: 0, context: None, others: vec![], profile }))
     }
 
     /// Pages open in a new browser context from here on.

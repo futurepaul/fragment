@@ -30,15 +30,17 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
-| `OPENROUTER_API_URL` | where AI calls go (default https://openrouter.ai) |
-| `FRAGMENT_BUDGET_USD` | each person's monthly budget (default 20) |
-| `FRAGMENT_OPERATORS` | identities and keys that may top up budgets (as `FRAGMENT_CREATORS` once read them) |
+| `OPENROUTER_API_URL` | where image and video steps go (default https://openrouter.ai), until phase 7 |
+| `AI_GATEWAY_ID` | the AI Gateway the model route calls through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models are off |
+| `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
+| `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
+| `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
-| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, and `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older |
+| `FRAGMENT_TEST_HOOKS` | `allow` on dev and e2e fleets only: `POST /api/test/registry {down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it); `POST /api/test/keys {fragment, op, plaintext\|sealed}` seals or opens as that fragment; `POST /api/test/fragment {fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, and `forget-standing` forgets what it heard of its owner's standing (meter.rs) |
 
 Worker secrets (`cargo xtask deploy` uploads them from the files the
 deployment's config names; `.dev.vars` in dev), read only by
@@ -51,16 +53,21 @@ no author code can name one:
 | `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
 | `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
 | `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
-| `OPENROUTER_MANAGEMENT_KEY` | mints each billing org's own OpenRouter key, its limit the org's monthly allowance; unset, only a fragment's own `OPENROUTER_API_KEY` pays for AI (until phase 3 moves models to AI Gateway) |
+| `OPENROUTER_API_KEY` | the deployment's OpenRouter key, which pays for image and video steps until phase 7 (each is metered on its payer's ledger); unset, those steps are off |
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
 on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
 
-Bindings (`cell/wrangler.jsonc`): `FRAGMENT` and `PRINCIPAL` (Durable
-Objects), `LOADER` (the Worker Loader), `JOBS` (the Workflow that runs
-jobs), `BLOBS` (the deployment's R2 bucket: the bytes of large files),
-`DELIVERIES` (the `fragment-deliveries` queue, and its dead-letter queue
-`fragment-deliveries-dead`, both consumed by the cell).
+Bindings (`cell/wrangler.jsonc`): `FRAGMENT`, `PRINCIPAL`, `REGISTRY` and
+`LEDGER` (Durable Objects), `LOADER` (the Worker Loader), `JOBS` (the
+Workflow that runs jobs), `BLOBS` (the deployment's R2 bucket: the bytes
+of large files), `DELIVERIES` (the `fragment-deliveries` queue, and its
+dead-letter queue `fragment-deliveries-dead`), `METERS` (the
+`fragment-ledger` queue: each fragment's meter batches, consumed by the
+cell), and `AI` (Workers AI, through `AI_GATEWAY_ID`). A local node runs
+without `AI`, which `wrangler dev` would only reach remotely: dev and the
+e2e set `FRAGMENT_AI_URL`.
+
 
 ## Principals and access
 
@@ -162,6 +169,7 @@ the new key and meant it for this signer.
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
+| `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that everywhere, for whomever it acts; `null` lets it go; anyone else 403, `owner` or `public` 400 |
 | `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
@@ -195,7 +203,7 @@ random bytes, the registry keeps their SHA-256).
 | method & path (platform origin) | what |
 | --- | --- |
 | `GET /` | Signed out: a link to sign in. Signed in without a username: choosing one. Then: 302 to `/settings` |
-| `GET /settings` | (signed out: to sign in; without a username: to `/`) who is signed in, what is left of this month's AI budget, their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`, in a dialog: a frame of the sheet, whose Done closes it, and the page reloads), the "new fragment" form (blank, todo, inbox, calories), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
+| `GET /settings` | (signed out: to sign in; without a username: to `/`) who is signed in, their credit this month and what their standing stops (Ledger), their fragments (each one's link; theirs or shared with them, as what; on their own, who may open it; its share sheet, `/share/<name>`, in a dialog: a frame of the sheet, whose Done closes it, and the page reloads), the "new fragment" form (blank, todo, inbox, calories), pairing a CLI (the one-line install, `fragment login`, and `fragment skill` for a coding agent), their picture, signing out, and linking another sign-in |
 | `POST /auth/new` | the form (`label`, `template`): makes `<label>.<username>` from the template, then → `/auth/fragment?name=…&return=/` (signed in on its origin, and there); a refusal is a 400 page saying why; another origin 403 |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
@@ -384,13 +392,14 @@ and styles only inline and images only from the platform
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/fragments` | a person with a username; an agent for its owner (the fragment is the owner's, under their username, on their budget, with its maker an editor) | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/fragments` | a person with a username; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `notes` is the CLI's only (`fragment new --template notes`). |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
-| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor}` → the member; a key names the identity holding it (404 when no one registered it) |
+| `PUT /api/f/{name}/members/{id\|npub}` | owner | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own |
 | `DELETE /api/f/{name}/members/{id\|npub\|me}` | owner, or the member | → `{ok, removed}`; closes that member's change feeds (and its owner's, when an agent's membership was their only view) |
 | `POST /api/f/{name}/invites` | owner | `{role, uses? (1), ttlS? (7 days, at most 30), invitee? (id:…)}` → `{id, role, usesLeft, expiresAt, createdBy, invitee?, token}`; the token is shown once. With `invitee`, only that identity may accept it (the share sheet's invite by username); without, whoever holds the token |
 | `GET /api/f/{name}/invites` | owner | → `{invites: [...]}` without tokens |
@@ -617,28 +626,48 @@ reported (`delivery.failed`).
 
 ### AI
 
-A job calls OpenRouter as its steps. Who pays: a fragment with its own
-`OPENROUTER_API_KEY` secret pays with it, unmetered. Otherwise its owner
-does, from their monthly budget (Budgets, below): each paid step reserves
-its worst case in the owner's ledger before it runs (text $0.20, an
-image $0.10, a video $0.10 a second), runs on the owner's own OpenRouter
-key, and settles to the cost OpenRouter reports (`usage.cost`). An
-answer that reports no cost is charged the step's reservation
-(`ai.cost-missing`), never nothing. A video that fails, is cancelled, or
-expires is charged nothing unless a cost is reported
-(`ai.video-undelivered`), and a run held while its video still waits for
-its cost gives that reservation back (`ai.video-released`). A step
-the month cannot cover fails with `budget used up` (uncaught, the run is
-held; replay it after a top-up or in a new month). A step the ledger
-already settled answers its stored result, so a replayed run is not paid
-twice. The key is added at the egress point and never reaches the app.
-The steps:
+A job's AI steps bill the fragment's owner, on their ledger (Ledger,
+below), capped when the run's principal is neither the owner nor an
+agent of theirs (a run does not record whom an agent asked for). Text
+goes through the platform's model route (Models, below) by tier; images
+and videos go to OpenRouter with the deployment's own key
+(`OPENROUTER_API_KEY`) until phase 7, metered as what OpenRouter reports
+they cost (`usage.cost`) with the margin on top. The key is added at the
+egress point and never reaches the app.
 
-- `job.ai.text({model, prompt | messages, max_tokens, reasoning})` →
-  `{text, model, usage}` (chat completions). `reasoning` is OpenRouter's
-  (`{effort: "low"}`, `{enabled: false}`, `{max_tokens}`), passed as
-  given: a reasoning model can spend a small `max_tokens` thinking and
-  answer nothing.
+Each paid step reserves its worst case on the owner's ledger before its
+call (text: its request's bytes as tokens in and its tier's capped
+`max_tokens` out; an image $0.10; a video $0.10 a second), under the
+step's reference, `step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
+It keeps what the call bought beside the step (by
+`<fragment>@<incarnation>/run/<run>/step/<index>`, the same in every
+attempt), then settles from the usage the call reported (one that
+reported none is charged its reservation, `ai.cost-missing`, never
+nothing). So:
+
+- a step tried again after its call answered reuses what it kept and
+  never calls again: a settle that did not land lands, and an image whose
+  commit failed commits from its kept bytes (bug 2). A replayed run
+  reuses what its earlier attempts paid for, and pays only for the rest;
+- a step that fails for good before its call used anything (a refusal
+  from the vendor, the high tier) releases its reservation, and so does a
+  step whose retries ran out, and any hold of a run that ended (bug 3,
+  `ai.released`);
+- a step the owner's ledger refuses (no credit, a guest, the fragment's
+  cap) fails with the ledger's reason, 402 `budget_used_up` in its words
+  (uncaught, the run is held; replay it after a top-up or next month).
+
+A video's cost comes with the poll that sees it end: completed, it
+settles at what OpenRouter reports (its reservation when none is); one
+that fails, is cancelled, or expires is charged what is reported, or
+nothing (`ai.video-undelivered`), and a run held while its video still
+waits gives the reservation back. The steps:
+
+- `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?})`
+  → `{text, model, tier, usage}`: `model` is a tier, `cheap` (the default)
+  or `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
+  `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
+  else is `low`, since GLM takes an unknown one as `max`).
 - `job.ai.image({prompt, path, model?, aspect_ratio?})` (default
   `google/gemini-3.1-flash-lite-image`) → `{path, size, sha256,
   mediaType}`: the image is written to `main` at `path` (a blob when 1 MiB
@@ -651,36 +680,100 @@ The steps:
   of final statuses (completed, failed, cancelled, expired), and a video
   that ended any way but completed throws.
 
-An OpenRouter 429 or 5xx is retried; 402 (out of credits, or past the
-key's limit) and other refusals fail the step with OpenRouter's message.
-A run answers `costMicros`: what its paid steps cost the owner's budget.
+A model's or OpenRouter's 429 or 5xx is retried; other refusals fail the
+step with the vendor's message. A run answers `costMicros`: what its
+paid steps were charged.
 
-### Budgets (phase 4 slice C)
+### Models (docs/cloudflare-v1.md, decision 23)
 
-Every person has a monthly budget (`FRAGMENT_BUDGET_USD`, $20) in their
-own billing org, `org:` + their identity's hex (finite.computer's
-personal org; FIN-10). A month is a UTC calendar month; the allowance is
-the budget plus that month's top-ups; money is in micro-dollars. The
-org's own OpenRouter key, minted with the fleet's management key, carries
-the allowance as its monthly limit, so OpenRouter itself stops the org
-there. Running out stops only paid steps, never sites or mutations.
+One OpenAI-shaped chat completion on a tier's model, metered on its
+payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
+`@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
+both on Workers AI through the deployment's AI Gateway (Unified Billing,
+its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
+payer's and the agent's identities). `high` (Opus) is refused, 400,
+saying why, until Cloudflare raises Unified Billing's Opus limit; a model
+id is never a tier.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/budget` | a person (an agent: its owner's) | → `{billingOrg, period, budgetMicros, toppedUpMicros, allowanceMicros, spentMicros, reservedMicros, remainingMicros, warn, usage}`: `warn` at 80% of the allowance; the newest 20 usage rows |
-| `GET /api/budget/usage?period=YYYY-MM` | the same | → the same with every usage row of the month |
-| `POST /api/budget/{id}/top-up` | the fleet's operators | `{usd}` → the month: the allowance rises, and the org's key limit with it |
-| `POST /api/budget/reserve` | an agent (its owner's month) | `{ref, model, fragment, asker}` → `{key}`: one model call's worst case ($0.20) held, and the org's key to make it with; `{key, settled: true}` when that call settled before (made again after a crash, it is not charged again); 402 `budget_used_up` when the month cannot cover it |
-| `POST /api/budget/settle` | the same | `{ref, cost}` (dollars, as OpenRouter reported; none: charged the reservation) → `{cost}` in micro-dollars; `{ref, release: true}` gives the reservation back when nothing was billed |
+| `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 
-A usage row is FIN-10's report shape: `{sourceRef, agent?, billingOrg,
-period, unit: "usd_micro", quantity, state (reserved, settled), kind,
-model, fragment, principal, at}`, one per paid step
-(`sourceRef` is `<fragment>@<incarnation>/run/<run>/step/<index>`), or
-per agent model call (kind `agent.text`, `sourceRef` `agent:<agent
-id>/<turn>/<messages stored in the turn so far>`, `fragment` where it was
-asked: a chat, a fragment, or the agent itself for its owner's own
-conversation; `principal` who asked), recorded once.
+What the model is sent is the body bounded: no `model` (the tier's),
+`max_tokens` at most 16384, `reasoning_effort` clamped (above), usage
+asked for when it streams, and none of the client's headers. The payer
+is the agent's owner (decision 36); `fragment`, one the agent is a
+member of (403 otherwise), is where the turn is: when its owner pays,
+the call counts in its month and is under its cap for anyone but the
+owner (or the owner's agent acting for them); when another person owns
+it, that owner's ledger is asked first whether it is still open
+(decision 26). Each call reserves its worst case (the body's bytes as
+tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
+then settles from its last, cumulative usage, input less what was cached
+(Workers AI puts a per-chunk delta on every chunk and the whole call's
+on a line of its own at the end: only that is metered). A call the model
+refuses is released and its answer passed through as it came; one whose
+stream broke before its usage is charged its worst case; a streamed
+call settles after its answer whether or not the client read to its end.
+Nothing of the request or its answer is kept: only the usage, on the
+ledger. A refusal of the payer's ledger is its own (402
+`budget_used_up`, 403 for a guest), with its message.
+
+The same call, as a Rust function the cell's other parts make
+(`models::complete`: the payer, the agent, the fragment, the tier, the
+body, and whether it streams), is the computer's model intercept from
+phase 4.
+
+### Ledger (docs/ledger.md)
+
+Every person has a usage ledger: one `Ledger` Durable Object, named by
+their identity, running `fragment_core::ledger` (plans, credit, holds,
+caps, meters). Money is integer micro-dollars; a month is a UTC calendar
+month. Plans (decision 25): `guest` (no agents, no AI, billed nothing),
+`seat` ($50 of included credit a month) and `seat_always_on` ($100); a
+new person's is `FRAGMENT_DEFAULT_PLAN`. Included credit expires at the
+month's end; purchased credit (grants) stays; a charge draws included
+credit first. What happened is always charged, past zero.
+
+- **At zero** (decision 27) agents stop: no turns, no AI steps; the
+  refusal says why. Fragments keep serving and taking writes.
+- **Past the overdraft** ($2, an operator's to change) the person's
+  fragments are read-only until a top-up brings the balance above zero:
+  their mutations and jobs, channel posts, file writes, deploys, storage
+  tokens, blob uploads and inbox deliveries are refused, 402
+  `budget_used_up`, saying why; reads keep serving. A fragment asks its
+  owner's ledger at most once a minute (`STANDING_CACHE_MS`), so a
+  change reaches it within a minute; a ledger that does not answer
+  refuses no write.
+- **Caps** (decision 26): each fragment has a monthly cap on its owner's
+  ledger, $5 until the owner sets one. Past it, AI steps and agent turns
+  there stop for everyone but its owner and the owner's agents acting
+  for them, until next month. Caps never stop writes.
+- **Meters** (decision 24): each fragment's hosting bills its owner: its
+  requests (a row per minute), each code version that runs on a UTC day
+  (a dynamic worker), and a daily sample of its SQLite (its own and its
+  app's) and its blobs' bytes, as byte-hours. Each row waits in the
+  fragment's outbox and travels in a batch through the `fragment-ledger`
+  queue; a batch is sent again until it is acknowledged, and the ledger
+  charges each row once by its reference.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first) |
+| `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
+| `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
+| `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}` |
+| `POST /api/ledger/{person}/seat` | the same | `SetSeat {id, seat: active \| past_due \| canceled, seq}` → `{}`: a change older (by `seq`) than the last applied changes nothing |
+| `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}`: at most $1,000; read-only is decided afresh |
+
+`{person}` is a username, an identity (`id:…`), or `me`. Commands are
+idempotent by their `id`, kept on the ledger as `<kind>:<id>` (a grant's
+`g1` is not a plan's): the same id again changes nothing, the same id
+with another body is 409 `conflicting_body`, and a body that breaks a
+rule (an amount past its limit, a field misspelt) is 400 and remembered
+by nothing, so it may be sent again. Test fleets add `POST
+/api/test/ledger {identity, op: clock {offsetMs} | sweep | entries
+{prefix} | totals}`.
 
 ### Jobs and triggers
 
@@ -921,12 +1014,12 @@ signing with their own keys. An agent's name is `<label>.<username>`,
 its owner's (a bare label is one of the signer's own); making one also
 registers it as its maker's, in the same request. Owner routes check the
 caller is the agent's registered owner. Each agent's key is made in its
-cell and kept sealed for it. Its turns spend its owner's month: each
-model call reserves its worst case there first, with the owner's org key
-that answers, and settles to the cost reported after (`POST
-/api/budget/reserve` and `/settle`, signed by the agent; Budgets). Its
-variables: `FRAGMENT_API`
-(the platform it acts on), `OPENROUTER_API_URL` (its model service),
+cell and kept sealed for it. It holds no model key: its model calls are
+the platform's model route's (`POST /api/models/v1/chat/completions`,
+signed by the agent, for the turn's asker, naming the turn's fragment:
+Models, above), metered on its owner's ledger, and a turn its owner's
+ledger refuses (no credit, a guest, a fragment's cap) fails saying why.
+Its variables: `FRAGMENT_API` (the platform it acts on, and its models),
 `AGENT_URL` (the base of the inboxes it hands out: the platform's),
 `AGENT_TEST_HOOKS=allow` (dev and e2e only). The script reads a request
 body of at most 64 KiB, measured as it arrives (413 before anything
@@ -934,7 +1027,7 @@ else).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/agents` | a person with a username | `{name, model? ("z-ai/glm-5.3-flashx"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403 |
+| `POST /api/agents` | a person with a username | `{name, model? (a tier: "cheap", the default, or "medium"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403; another model is 400 |
 | `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
 | `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
 | `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
@@ -955,8 +1048,8 @@ steer the turn ended before reading (unless it was stopped). The driver
 that ends a turn starts the next one waiting in the same step. A turn
 records who started it (the owner, or the identity whose record it was),
 and every call it makes on the platform acts for them (`for`, above);
-the agent's own calls (listening, its model calls' budget, a chat's
-answer) name no one.
+the agent's own calls (listening, a chat's answer) name no one; its model
+calls name the asker too, and its owner pays.
 
 A turn's tools, read as it starts, are of two kinds. Per-operation
 tools, for the turn's chat and the other fragments the agent is a member
@@ -997,12 +1090,12 @@ An agent made with a default instruction of any age (they all open
 alike) is told today's.
 
 A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
-100 s, under the node's 120 s fetch timeout (`CELLD_FETCH_TIMEOUT_S`,
-which counts to the answer's last byte, so streaming does not stretch
-it); its answer is read whole before the turn sees it. A call past its
+100 s, counted to the answer's last byte, so streaming does not stretch
+it; its answer is read whole before the turn sees it. A call past its
 deadline, one that fails, or one that answers nothing (no text and no
 tool call: reasoning alone is nothing) is made once more, told why when
-that helps; a refused key or budget (401, 402, 403) is not. Nothing twice,
+that helps; one the platform refuses for good (401, 402 for its owner's
+ledger, 403 for a guest) is not, and the turn says why. Nothing twice,
 after tool calls that worked in the turn, is answered with what those
 calls did ("Done. Here is what I did: …"). A call in a reply cut off at
 its limit (`finish_reason: length`) is refused, saying so (goose's
@@ -1018,14 +1111,14 @@ A fragment may declare an agent people talk to through one of its
 channels, in `fragment.json` (checked at deploy like the rest of it):
 
 ```json
-"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "z-ai/glm-5.3-flashx" }
+"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "cheap" }
 ```
 
 `channel` is a channel it declares with a `post` role; `instructions` a
 file of its repo, read at live (at most 8 KiB: one missing, empty, or
 larger is refused as an invalid manifest is, live's code not installed
 and `code.error` saying why); `tools` operations it declares, none
-owner-only; `model` is optional.
+owner-only; `model` is optional, a tier (`cheap`, the default, or `medium`).
 
 A deploy whose live manifest declares one makes it so as it lands (the
 refresh, webhook, or deploy that moved live answers once the agent has
@@ -1065,7 +1158,44 @@ turn}` and the steps to `work` when the fragment declares it postable,
 a chat's records (below). Its model calls are its owner's to
 pay.
 
+## Computers (docs/computers.md, phase 4)
+
+A person's computer runs an image (pinned per computer) and the agent
+fragments assigned to it; the Computer Durable Object (`cell/src/computer.rs`)
+is the only thing that talks to its container. What a guest may rely on
+is docs/computers.md; the routes here are its owner's.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner) |
+| `GET /api/computers` | a person | → `{computers: [ComputerView]}` |
+| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); anyone else 404 |
+| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
+| `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: `/data` saved, the guest signalled, the container gone |
+| `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here |
+| `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider]}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once; none by default. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400 |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform; a signed request needs none |
+
+A computer is woken by a record on a channel one of its agents
+subscribed to with `{channel, wake: true}` (only its egress asks for
+one: from anywhere else it names no URL, 400), by a page opening such a
+fragment (a pre-wake, at most every 30 s), by a request to one of its
+ports, and by its owner. Records its own agents post wake nothing.
+
+A guest's request to a connection's or an operator key's host has the
+placeholders in its headers swapped (docs/computers.md). The swap's
+refusals reach the guest as the platform's: 403 `forbidden` (an agent
+not allowed that connection, or a placeholder sent to a host that is
+not its credential's), 403 `not_connected` (its owner has not connected
+that provider, or must connect it again), 401 (no `x-fragment-agent`).
+
 ### A chat's records (phase 7, slice C)
+
+docs/chat-records.md extends this for computers' agents (phase 4: turns,
+drafts, prompts, attachments, Stop, hand-offs, routines) and wins where
+they differ.
 
 A chat is two channels and no app code (no worker), and an agent
 answering it (one that listens there, or the fragment's own: the `agent`

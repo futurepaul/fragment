@@ -27,7 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use fragment_devstack as devstack;
 use fragment_fakes::codestorage::{self as fake, CodeStorage};
 use fragment_nip98::Keys;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use api::Api;
 
@@ -51,20 +51,30 @@ enum Shape {
 const ORG: &str = "fragment-e2e";
 /// The poll backstop runs this often here (5 minutes in production).
 pub const POLL_S: u32 = 2;
-/// The key the OpenRouter fake takes (a fragment's OPENROUTER_API_KEY secret here).
+/// The deployment's OpenRouter key (its `OPENROUTER_API_KEY` Worker
+/// secret), which the OpenRouter fake takes: it pays for image and video steps.
 pub const OPENROUTER_KEY: &str = "sk-or-e2e-7c1d";
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
-/// The OpenRouter fake's management key, and each person's monthly budget
-/// here (small, so a few steps use it up).
-pub const OPENROUTER_MANAGEMENT: &str = "sk-or-v1-management-e2e";
-pub const BUDGET_USD: &str = "0.4";
+/// A new person's plan here: a seat, so each starts the month with its
+/// included credit (production's is `guest`).
+pub const DEFAULT_PLAN: &str = "seat";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// What the fleet's computers may swap in (docs/computers.md): one
+/// connection and one operator key, each with a host of its own, and the
+/// key's (test) value.
+pub const SWAP_CONNECTION: &str = "github";
+pub const SWAP_CONNECTION_HOST: &str = "api.github.test";
+pub const SWAP_KEY: &str = "search";
+pub const SWAP_KEY_HOST: &str = "api.search.test";
+pub const SWAP_KEY_VALUE: &str = "sk-e2e-search-7f3a9c";
+/// What one call of the key costs at list price: half a cent.
+pub const SWAP_KEY_MICROS: i64 = 5_000;
 
 pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
@@ -95,12 +105,18 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: CodeStorage,
+    /// Images and videos (until phase 7).
     pub openrouter: fragment_fakes::openrouter::OpenRouter,
+    /// The model route's vendor boundary: Workers AI, scripted.
+    pub ai: fragment_fakes::workers_ai::WorkersAi,
     pub push: fragment_fakes::push::PushService,
     org_key: String,
     host_secret: String,
-    /// Sign-in's stand-in: people sign in through it (`Api::person`).
+    /// Sign-in's stand-in: people sign in through it (`Api::person`), and
+    /// Pipes', which hands out connections' tokens.
     pub workos: fragment_fakes::workos::WorkOs,
+    /// The provider APIs a computer's swap sends to.
+    pub upstream: fragment_fakes::upstream::Upstream,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
@@ -123,8 +139,21 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
-            ("OpenRouter management key", OPENROUTER_MANAGEMENT.into()),
+            ("OpenRouter key", OPENROUTER_KEY.into()),
         ]
+    }
+
+    /// A heavy section runs only when `--only` names it (the real-Hermes
+    /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
+    pub fn section_by_name(&mut self, name: &str, why: &str) -> bool {
+        if self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name)) {
+            return self.section(name);
+        }
+        self.asked.push(name.to_string());
+        if self.runs(name) {
+            self.skip(&format!("the {name} section"), &format!("{why}: run it by name, cargo xtask e2e --only {name}"));
+        }
+        false
     }
 
     /// Whether the section `name` runs in this suite (`--only` names it,
@@ -191,7 +220,7 @@ impl Suite {
     /// platform on 127.0.0.1, no extra settings, and no model answers left
     /// scripted.
     fn recover(&mut self) -> Result<()> {
-        self.openrouter.clear_script();
+        self.ai.clear_script();
         self.shape = Shape::Plain;
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
@@ -254,6 +283,11 @@ impl Suite {
             job_retry_delay_s: 1,
             blob_grace_s: Some(BLOB_GRACE_S),
             openrouter_url: Some(self.openrouter.url.clone()),
+            openrouter_key: Some(OPENROUTER_KEY.into()),
+            // the lower rung: the model route's calls go to the Workers AI fake
+            ai_url: Some(self.ai.url.clone()),
+            ai_gateway: None,
+            default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
                 client_id: self.workos.client_id.clone(),
@@ -264,11 +298,16 @@ impl Suite {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
             }),
-            openrouter_management: Some(OPENROUTER_MANAGEMENT.into()),
-            budget_usd: Some(BUDGET_USD.into()),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             test_hooks: true,
+            computer_image: Some("stub".into()),
+            computer_snapshots: false,
+            connections: Some(json!({ SWAP_CONNECTION: [SWAP_CONNECTION_HOST] }).to_string()),
+            operator_keys: Some(json!({ SWAP_KEY: [SWAP_KEY_HOST] }).to_string()),
+            operator_key_values: vec![(SWAP_KEY.into(), SWAP_KEY_VALUE.into())],
+            key_prices: Some(json!([{ "key": SWAP_KEY, "micros": SWAP_KEY_MICROS, "per": 1 }]).to_string()),
+            swap_upstream: Some(self.upstream.url.clone()),
         }
         .configure(&self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
@@ -277,7 +316,6 @@ impl Suite {
             host_secret: self.host_secret.clone(),
             fragment_api: format!("http://127.0.0.1:{}", self.port),
             agent_url: format!("http://127.0.0.1:{}", self.port),
-            openrouter_url: Some(self.openrouter.url.clone()),
             test_hooks: true,
         }
         .configure(&self.agents_project)?;
@@ -503,6 +541,9 @@ fn main() -> Result<()> {
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
+    if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
+        lanes::hermes::stage_images(&project)?;
+    }
     let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let mut s = Suite {
         only,
@@ -521,11 +562,14 @@ fn main() -> Result<()> {
         port: devstack::free_port()?,
         run,
         fake,
-        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY, OPENROUTER_MANAGEMENT)?,
+        openrouter: fragment_fakes::openrouter::OpenRouter::start(OPENROUTER_KEY)?,
+        ai: fragment_fakes::workers_ai::WorkersAi::start(0)?,
+
         push: fragment_fakes::push::PushService::start()?,
         org_key,
         host_secret: devstack::random_hex(32),
         workos: fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?,
+        upstream: fragment_fakes::upstream::Upstream::start()?,
         operator: Keys::generate(),
         cli,
         scratch,

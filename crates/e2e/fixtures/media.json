@@ -4,6 +4,7 @@
     "headline": { "kind": "mutation" },
     "announce": { "kind": "job" },
     "summarize": { "kind": "job" },
+    "summarize_high": { "kind": "job" },
     "draw": { "kind": "job" },
     "film": { "kind": "job" }
   },

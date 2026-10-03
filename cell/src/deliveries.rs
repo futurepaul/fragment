@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use fragment_core::webpush::Tokens;
-use fragment_proto::limits;
+use fragment_proto::{limits, ErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -319,8 +319,24 @@ async fn report(env: &Env, d: &Delivery, outcome: Outcome, status: u16, error: &
 }
 
 /// Sends one delivery: `Ok(None)` done, `Ok(Some(why))` worth retrying.
+/// A computer's wake subscription (`computer:<id>`) is a wake, not a POST:
+/// its guest reads the record itself (runs_on.rs).
 async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
     use base64::Engine;
+    if let Some(hex) = d.url.strip_prefix("computer:") {
+        let computer = format!("computer:{hex}");
+        let record: serde_json::Value = base64::engine::general_purpose::STANDARD.decode(&d.body).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        console_log!("{}", serde_json::json!({ "wake": computer, "fragment": d.fragment, "channel": record["channel"], "seq": record["record"]["seq"] }));
+        return Ok(match crate::computer::ask(env, &computer, "computer/wake", &serde_json::json!({ "why": "record" })).await {
+            Ok(_) => None,
+            // one that won't wake, or whose owner cannot pay, is not worth retrying
+            Err(e) if matches!(e.code, ErrorCode::WontWake | ErrorCode::BudgetUsedUp | ErrorCode::NotFound) => {
+                report(env, d, Outcome::Failed, 0, &e.message).await?;
+                None
+            }
+            Err(e) => Some(e.message),
+        });
+    }
     let body = base64::engine::general_purpose::STANDARD.decode(&d.body).unwrap_or_default();
     let headers = Headers::new();
     for (k, v) in &d.headers {
@@ -353,10 +369,11 @@ async fn send(env: &Env, d: &Delivery) -> Result<Option<String>> {
 /// its own: one slow receiver holds up only its own delivery, never the
 /// rest of the batch (other fragments' included). The queue's
 /// `max_batch_size` (wrangler.jsonc) bounds how many are in flight.
-pub async fn consume(batch: MessageBatch<Delivery>, env: Env) -> Result<()> {
+pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
     let cfg = Config::from_env(&env);
-    let dead = batch.queue() == DEAD_QUEUE;
-    let messages = batch.messages()?;
+    // a branch deployment's queue is named for its branch after this
+    let dead = batch.queue().starts_with(DEAD_QUEUE);
+    let messages: Vec<Message<Delivery>> = batch.raw_iter().map(Message::try_from).collect::<Result<_>>()?;
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
     futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, cfg, dead))).await;
     Ok(())

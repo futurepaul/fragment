@@ -6,13 +6,16 @@ mod app;
 mod appfiles;
 mod blobs;
 mod author;
-mod budget;
+mod computers;
 mod control;
+mod delegation;
 mod deliver;
+pub mod hermes;
 mod identities;
 mod isolation;
 pub(crate) mod jobs;
 mod keys;
+mod ledger;
 mod limits;
 mod members;
 mod notes;
@@ -46,6 +49,7 @@ const LANES: &[Lane] = &[
     identities::identities,
     signin::signin,
     members::secrets,
+    delegation::delegation,
     plane::files,
     plane::deploy,
     templates::templates,
@@ -81,9 +85,11 @@ const LANES: &[Lane] = &[
     notes::notes,
     deliver::push,
     deliver::ai,
-    budget::budget,
+    ledger::ledger_lane,
     agents::agents,
     addon::addon,
+    computers::computers,
+    hermes::hermes,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,

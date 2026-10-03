@@ -9,6 +9,11 @@
   // forwards to Rust, which workers-rs does not wrap for these.
   "main": "entry.mjs",
   "compatibility_date": "2026-01-01",
+  // the Sandbox SDK's DirectoryBackup (entry.mjs) imports Node's modules;
+  // a computer's container has a PID namespace of its own, its entrypoint
+  // PID 1 as on Containers (without it, `wrangler dev` shares the host's,
+  // and Hermes' s6-overlay refuses to start)
+  "compatibility_flags": ["nodejs_compat", "containers_pid_namespace"],
   "build": { "command": "worker-build --release", "watch_dir": ["src", "../crates"] },
   "worker_loaders": [{ "binding": "LOADER" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).
@@ -16,27 +21,53 @@
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs).
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
   // Deliveries: web push and notifyUrls, sent outside any request (deliveries.rs).
+  // Meters: each fragment's batches of usage rows to its owner's ledger (meter.rs).
   "queues": {
-    "producers": [{ "binding": "DELIVERIES", "queue": "fragment-deliveries" }],
+    "producers": [
+      { "binding": "DELIVERIES", "queue": "fragment-deliveries" },
+      { "binding": "METERS", "queue": "fragment-ledger" }
+    ],
     "consumers": [
       { "queue": "fragment-deliveries", "max_batch_size": 20, "max_batch_timeout": 1, "max_retries": 5, "dead_letter_queue": "fragment-deliveries-dead" },
-      { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 }
+      { "queue": "fragment-deliveries-dead", "max_batch_timeout": 1 },
+      // a fragment sends a batch again until it is acknowledged: no dead letters
+      { "queue": "fragment-ledger", "max_batch_size": 20, "max_batch_timeout": 1, "max_retries": 100 }
     ]
   },
+  // The model route (models.rs): Workers AI through the deployment's AI Gateway.
+  "ai": { "binding": "AI" },
   // AGENTS is the agents' Worker (agent/): it has no route of its own, and
   // the router hands it /api/agents and /api/a/*.
   "services": [{ "binding": "AGENTS", "service": "fragment-agent" }],
+  // Computers (docs/computers.md): one container per Computer Durable
+  // Object, placed beside it (the `durable_object` policy, which snapshots
+  // need), from a named image each computer is pinned to. Dev and the e2e
+  // run the stub image under Docker; a deployment's config names its own
+  // (the Hermes image).
+  "containers": [
+    {
+      "class_name": "Computer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "stub": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images" },
+        // the next build of the same image: the e2e's upgrade and rollback
+        "stub-next": { "dockerfile": "../images/stub/Dockerfile", "build_context": "../images", "build_vars": { "STUB_VERSION": "2" } }
+      }
+    }
+  ],
   "durable_objects": {
     "bindings": [
+      // One per computer (computer.rs).
+      { "name": "COMPUTER", "class_name": "Computer" },
       { "name": "FRAGMENT", "class_name": "Fragment" },
       { "name": "PRINCIPAL", "class_name": "Principal" },
       // The identity registry: one object for the deployment (registry.rs).
       { "name": "REGISTRY", "class_name": "Registry" },
-      // A billing org's budget and usage: one object per org (ledger.rs).
+      // A person's usage ledger: one object per person (ledger.rs).
       { "name": "LEDGER", "class_name": "Ledger" }
     ]
   },
   // Restarted at the move to Cloudflare: nothing on celld migrates
   // (docs/cloudflare-v1.md, decision 33).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Fragment", "Principal", "Registry", "Ledger", "Computer"] }]
 }

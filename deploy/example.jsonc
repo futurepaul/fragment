@@ -27,6 +27,39 @@
     "client_id_file": "~/.config/fragment/secrets/workos-client-id",
     "api_key_file": "~/.config/fragment/secrets/workos-api-key"
   },
-  // npubs that may top up budgets and release usernames.
-  "operators": []
+  // The AI Gateway the model route calls through: one of your own, named
+  // (never "default", which makes one that logs), with Unified Billing,
+  // zero data retention on and its logs off. Without it, models are off.
+  // "ai_gateway": "fragment",
+  // A new person's plan: guest (the default), seat, or seat_always_on.
+  // "default_plan": "guest",
+  // OpenRouter, for image and video steps until they move onto Cloudflare.
+  // Without it, they are off.
+  // "openrouter_api_key_file": "~/.config/fragment/secrets/openrouter-api-key",
+  // npubs that grant credit, set plans, seats and overdrafts, and release
+  // usernames.
+  "operators": [],
+  // Computers (docs/computers.md): the images they run, by name, relative
+  // to the repo, and the one a new computer is pinned to. Without this
+  // the deployment makes no computers.
+  "computers": {
+    "default_image": "hermes",
+    "images": {
+      "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "images" }
+    },
+    "instance_type": "standard-2"
+  },
+  // What a computer's swap offers: WorkOS Pipes providers (each enabled in
+  // the WorkOS environment above) and the operator's keys, each with the
+  // hosts it is for. A key's value is a file, as every secret.
+  "connections": {
+    "github": ["api.github.com"],
+    "google-calendar": ["www.googleapis.com"]
+  },
+  "operator_keys": {
+    // its price: micro-dollars per `per` calls, at list (the margin is added)
+    "perplexity": { "hosts": ["api.perplexity.ai"], "key_file": "~/.config/fragment/secrets/perplexity-key", "price": { "micros": 5000, "per": 1 } }
+  },
+  // Raise with every change to a key's price, or ledgers keep their book.
+  "price_book_version": 1
 }

@@ -908,7 +908,9 @@ impl Ledger {
         }
     }
 
-    fn assert_valid(&self) {
+    /// The head's invariants. Every mutation checks them as it ends; the
+    /// Durable Object checks them again after reading the head back.
+    pub fn assert_valid(&self) {
         self.money.assert_valid();
         assert!(self.holds.len() <= HOLDS_MAX, "at most HOLDS_MAX holds");
         for hold in self.holds.values() {

@@ -35,6 +35,7 @@ mod auth;
 mod blobs;
 mod config;
 mod channels;
+mod computer;
 mod deliveries;
 mod cs;
 mod error;
@@ -46,6 +47,8 @@ mod keys;
 mod ledger;
 mod live;
 mod members;
+mod meter;
+mod models;
 mod ops;
 mod plane;
 mod principal;
@@ -53,6 +56,7 @@ mod publish;
 mod push;
 mod registry;
 mod routed;
+mod runs_on;
 mod serve;
 mod share;
 mod subscriptions;
@@ -71,6 +75,7 @@ use error::{CellError, CellResult};
 use registry::calls::{self, Call};
 use routed::{Credential, Mode, Routed, Signed};
 
+pub use computer::{ComputerCell, ComputerEgress};
 pub use fragment::FragmentCell;
 pub use principal::PrincipalCell;
 pub use ledger::LedgerCell;
@@ -86,13 +91,17 @@ const PASSED_HEADERS: [&str; 9] =
 const WEBSOCKET_HEADERS: [&str; 4] = ["sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol", "sec-websocket-extensions"];
 
 #[event(queue)]
-async fn queue(batch: MessageBatch<deliveries::Delivery>, env: Env, _ctx: Context) -> Result<()> {
+async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
+    // a branch deployment's queue is named for its branch after this
+    if batch.queue().starts_with(meter::QUEUE) {
+        return meter::consume(batch, env).await;
+    }
     deliveries::consume(batch, env).await
 }
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    match route(req, &env).await {
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    match route(req, &env, &ctx).await {
         Ok(resp) => Ok(resp),
         Err(e) => e.response(),
     }
@@ -187,7 +196,7 @@ pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> 
 
 /// `signer`, honoring `for`: an agent's request acts for the identity it
 /// names, capped (the fragment decides: `fragment_core::access`).
-async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
+pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
     signer_of(env, req, url, Payload::Read(body)).await
 }
 
@@ -336,14 +345,14 @@ async fn release_username(env: &Env, username: &str) -> CellResult<Response> {
 
 /// Makes a fragment for a person, under their username: the API's create
 /// and the platform's "new" page. An agent makes one for its owner: the
-/// owner's (on their budget, in their list), under their username, with
+/// owner's (billed to them, in their list), under their username, with
 /// the agent an editor of it.
 pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut create: CreateFragment, principal: Signed) -> CellResult<Response> {
     let (maker, agent) = match principal.kind {
         IdentityKind::Person => (principal, None),
         IdentityKind::Agent => {
             let owner = principal.owner.clone().ok_or_else(|| CellError::host(format!("{} {} has no owner", principal.kind.as_str(), principal.id)))?;
-            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone() };
+            let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: principal.username.clone(), held: None };
             (Signed::new(identity, None), Some(principal.identity.id))
         }
     };
@@ -438,86 +447,79 @@ fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
-/// Whose budget a signer sees: a person's own org; an agent's owner's.
-fn billing_org(who: &Signed) -> CellResult<String> {
-    let person = match who.kind {
-        IdentityKind::Person => who.id.as_str(),
-        IdentityKind::Agent => who.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?,
-    };
-    ledger::org_of(person).ok_or_else(|| CellError::host("no billing org"))
+/// Whose ledger a signer reads: a person's own; an agent's owner's.
+fn payer_of(who: &Signed) -> CellResult<String> {
+    match who.kind {
+        IdentityKind::Person => Ok(who.id.clone()),
+        IdentityKind::Agent => who.owner.clone().ok_or_else(|| CellError::host("an agent without an owner")),
+    }
 }
 
-/// An agent's model call, paid on its owner's month as a job's `ai.text`
-/// step is (agent/src/model.rs `Spend`): `reserve {ref, model, fragment,
-/// asker}` holds its worst case and answers the org's key, whose limit is
-/// the allowance (`settled` too when the call settled before: made again,
-/// it is not charged again); `settle {ref, cost}` charges the reported cost
-/// (none: its reservation), and `{ref, release: true}` gives it back when
-/// nothing was billed.
-async fn agent_spend(env: &Env, who: &Signed, step: &str, body: &[u8]) -> CellResult<Value> {
-    if who.kind != IdentityKind::Agent {
-        return Err(CellError::new(ErrorCode::Forbidden, "only an agent pays for its model calls here"));
+/// An operator's command id, kept apart from every other kind's on the
+/// person's ledger (`<kind>:<id>`): a grant's `g1` is not a plan's.
+fn commanded(kind: &str, id: &str) -> CellResult<String> {
+    if !fragment_core::price::printable(id, LEDGER_ID_MAX_BYTES) {
+        return Err(CellError::invalid(format!("a command's id is 1-{LEDGER_ID_MAX_BYTES} printable ASCII characters, no spaces")));
     }
-    let org = billing_org(who)?;
-    let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    let local = v["ref"].as_str().filter(|r| (1..=128).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b)));
-    let local = local.ok_or_else(|| CellError::invalid("ref is 1-128 of [A-Za-z0-9/._-]"))?;
-    // namespaced by the agent: no agent's call is another's, nor a job's step
-    let reference = format!("agent:{}/{local}", who.id);
-    let text = |k: &str| v[k].as_str().map(str::to_string);
-    if step == "reserve" {
-        let reserve = ledger::Reserve {
-            reference,
-            kind: "agent.text".into(),
-            model: text("model"),
-            amount: fragment_core::budget::TEXT_RESERVE,
-            fragment: text("fragment").unwrap_or_default(),
-            run: 0,
-            principal: text("asker").filter(|a| npub::is_identity(a)).unwrap_or_else(|| who.id.clone()),
-            agent: Some(who.id.clone()),
-        };
-        return Ok(match ledger::ask(env, &org, &reserve).await? {
-            ledger::Reserved::Held { key } => json!({ "key": key }),
-            ledger::Reserved::Replay { .. } => json!({ "key": ledger::ask(env, &org, &ledger::Key {}).await?.key, "settled": true }),
-        });
-    }
-    if v["release"] == true {
-        ledger::ask(env, &org, &ledger::Release { reference }).await?;
-        return Ok(json!({ "released": true }));
-    }
-    let cost = fragment_core::budget::charge(v["cost"].as_f64(), None);
-    let settled = ledger::ask(env, &org, &ledger::Settle { reference, cost, result: Value::Null, video: None }).await?;
-    Ok(json!({ "cost": settled.charged() }))
+    Ok(format!("{kind}:{id}"))
 }
 
-/// `/api/budget…`: a billing org's month (ledger.rs).
-async fn budget_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
+/// A command's id as an operator names it (`commanded` prefixes it).
+const LEDGER_ID_MAX_BYTES: usize = 128;
+
+/// An operator command's body, as proto's type for it (unknown fields refused).
+fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> CellResult<T> {
+    serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{what}: {e}")))
+}
+
+/// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
+/// signer's (an agent's: its owner's); the deployment's operators grant
+/// credit and set a person's plan, seat and overdraft, the person named by
+/// username or identity.
+async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
-    match (req.method(), rest) {
-        (Method::Get, []) => json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Status {}).await?),
-        (Method::Get, ["usage"]) => {
-            let period = url.query_pairs().find(|(k, _)| k == "period").map(|(_, v)| v.into_owned());
-            let period = match period {
-                Some(p) if p.len() == 7 && p.as_bytes()[4] == b'-' && p.bytes().enumerate().all(|(i, b)| i == 4 || b.is_ascii_digit()) => Some(p),
-                Some(_) => return Err(CellError::invalid("period is YYYY-MM")),
-                None => None,
-            };
-            json_answer(&ledger::ask(env, &billing_org(&who)?, &ledger::Usage { period }).await?)
-        }
-        (Method::Post, [step @ ("reserve" | "settle")]) => json_answer(&agent_spend(env, &who, step, &body).await?),
-        (Method::Post, [id, "top-up"]) => {
-            if !cfg.is_operator(who.key.as_deref(), &who.id)? {
-                return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators top up budgets"));
+    if let (Method::Get, []) = (req.method(), rest) {
+        return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
+    }
+    let (Method::Post, [person, command]) = (req.method(), rest) else {
+        return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));
+    };
+    if !cfg.is_operator(who.key.as_deref(), &who.id)? {
+        return Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators grant credit or set plans, seats and overdrafts"));
+    }
+    let person = match *person {
+        "me" => who.id.clone(),
+        id if npub::is_identity(id) => id.to_string(),
+        username if fragment_proto::valid_username(username) => ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?.identity.id,
+        other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (id:…), or `me`"))),
+    };
+    match *command {
+        "grant" => {
+            let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
+            // who granted it is who signs
+            if g.by != who.id {
+                return Err(CellError::invalid(format!("a grant's `by` is the operator who signs it ({})", who.id)));
             }
-            let id = named_identity(id)?.unwrap_or_else(|| who.id.clone());
-            let org = ledger::org_of(&id).ok_or_else(|| CellError::invalid("name a person"))?;
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let usd = v["usd"].as_f64().filter(|u| u.is_finite() && *u > 0.0).ok_or_else(|| CellError::invalid("usd is a positive number of dollars"))?;
-            let micros = fragment_core::budget::micros(usd);
-            json_answer(&ledger::ask(env, &org, &ledger::TopUp { micros, by: who.id.clone() }).await?)
+            g.id = commanded("grant", &g.id)?;
+            json_answer(&ledger::ask(env, &person, &g).await?)
         }
-        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
+        "plan" => {
+            let mut c: fragment_proto::ledger::SetPlan = command_body(&body, "plan")?;
+            c.id = commanded("plan", &c.id)?;
+            json_answer(&ledger::ask(env, &person, &c).await?)
+        }
+        "seat" => {
+            let mut c: fragment_proto::ledger::SetSeat = command_body(&body, "seat")?;
+            c.id = commanded("seat", &c.id)?;
+            json_answer(&ledger::ask(env, &person, &c).await?)
+        }
+        "overdraft" => {
+            let mut c: fragment_proto::ledger::SetOverdraft = command_body(&body, "overdraft")?;
+            c.id = commanded("overdraft", &c.id)?;
+            json_answer(&ledger::ask(env, &person, &c).await?)
+        }
+        other => Err(CellError::new(ErrorCode::NotFound, format!("no ledger command {other:?}: grant, plan, seat, or overdraft"))),
     }
 }
 
@@ -578,6 +580,16 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             let add: fragment_proto::AddKey = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let key = proven_key(&add.proof, &req, url, &signer_key)?;
             json_answer(&ask_registry(env, &calls::AddKey(calls::KeyChange { identity, key, by: by() })).await?)
+        }
+        (Method::Put, [id, "held"]) => {
+            /// `PUT /api/identities/{agent}/held`'s body.
+            #[derive(Deserialize)]
+            struct Held {
+                held: Option<fragment_proto::Role>,
+            }
+            let agent = named_identity(id)?.ok_or_else(|| CellError::invalid("name the agent"))?;
+            let b: Held = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_answer(&ask_registry(env, &calls::Hold { agent, held: b.held, by: by() }).await?)
         }
         (Method::Delete, [id, "keys", k]) => {
             let identity = named_identity(id)?;
@@ -747,7 +759,7 @@ fn moved(to: &str) -> CellResult<Response> {
     Ok(resp)
 }
 
-async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
+pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     // as its client named it: signatures, links, and cookies name the https URL
     let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
@@ -759,6 +771,14 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
+    }
+    // a computer's own origin: its ports, for its owner (computer.rs)
+    if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
+        let signer = match req.headers().get("authorization")? {
+            Some(_) => Some(signer(env, &req, &url, &[]).await?.identity.id),
+            None => None,
+        };
+        return computer::serve_host(req, env, &url, &id, signer).await;
     }
     // the suffix's own name, with the platform elsewhere, is the platform's
     if host.is_some_and(|h| cfg.is_suffix(h)) {
@@ -816,17 +836,27 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
         }
-        (_, ["api", "budget", rest @ ..]) => {
+        (_, ["api", "ledger", rest @ ..]) => {
             let rest = rest.to_vec();
-            budget_route(req, env, cfg, &url, &rest).await
+            ledger_route(req, env, cfg, &url, &rest).await
         }
+        (Method::Post, ["api", "models", "v1", "chat", "completions"]) => models::route(req, env, &url, ctx).await,
         (Method::Post, ["api", "test", "ledger"]) if cfg.test_hooks => {
+            /// `POST /api/test/ledger {identity, …}`: a lever on that person's ledger (ledger.rs `TestHook`).
+            #[derive(Deserialize)]
+            struct TestLedger {
+                identity: String,
+                #[serde(flatten)]
+                hook: ledger::TestHook,
+            }
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let org = v["identity"].as_str().and_then(ledger::org_of).ok_or_else(|| CellError::invalid("name an identity"))?;
-            let offset_ms = v["offsetMs"].as_i64().ok_or_else(|| CellError::invalid("offsetMs"))?;
-            json_answer(&ledger::ask(env, &org, &ledger::SetClock { offset_ms }).await?)
+            let t: TestLedger = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !npub::is_identity(&t.identity) {
+                return Err(CellError::invalid("name an identity"));
+            }
+            json_answer(&ledger::ask(env, &t.identity, &t.hook).await?)
         }
+
         (Method::Get, ["api", "users", rest @ ..]) => {
             let rest = rest.to_vec();
             users(env, &rest).await
@@ -837,6 +867,12 @@ async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
                 return Err(CellError::new(ErrorCode::Forbidden, "only the fleet's operators release a username"));
             }
             release_username(env, username).await
+        }
+        (method, ["api", "computers", rest @ ..]) => {
+            let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+            let who = signer(env, &req, &url, &body).await?;
+            let rest = rest.to_vec();
+            computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
         }
         (_, ["api", "identities", rest @ ..]) => {
             let rest = rest.to_vec();

@@ -1,6 +1,8 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
-//! WorkOS's API key, and OpenRouter's management key. Only the platform
+//! WorkOS's API key, the OpenRouter key that pays for media steps until
+//! phase 7, and the operator's keys a computer's swap sends
+//! (`FRAGMENT_KEY_<NAME>`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
 //! Worker Loader, with an env the platform builds (`js::app_env`), so no
 //! author code can name one. A value sealed here names the Durable Object
@@ -24,7 +26,7 @@ pub const HOST_SECRET: &str = "FRAGMENT_HOST_SECRET";
 pub const HOST_SECRET_PREVIOUS: &str = "FRAGMENT_HOST_SECRET_PREVIOUS";
 pub const CODESTORAGE_PRIVATE_KEY: &str = "CODESTORAGE_PRIVATE_KEY";
 pub const WORKOS_API_KEY: &str = "WORKOS_API_KEY";
-pub const OPENROUTER_MANAGEMENT_KEY: &str = "OPENROUTER_MANAGEMENT_KEY";
+pub const OPENROUTER_API_KEY: &str = "OPENROUTER_API_KEY";
 
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
@@ -140,17 +142,26 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
     Ok((status, answer))
 }
 
-/// OpenRouter's key API with the management key: (status, OpenRouter's
-/// answer), or `None` when no management key is set (the deployment pays
-/// for no AI).
-pub async fn openrouter_keys(env: &Env, api: &str, method: Method, hash: Option<&str>, body: Option<&Value>) -> CellResult<Option<(u16, Value)>> {
-    let Some(key) = secret(env, OPENROUTER_MANAGEMENT_KEY) else { return Ok(None) };
-    let path = match hash {
-        None => "keys".to_string(),
-        Some(h) => {
-            assert!(!h.is_empty() && h.len() <= 128 && h.bytes().all(|b| b.is_ascii_alphanumeric()), "a key's hash is letters and digits");
-            format!("keys/{h}")
-        }
-    };
-    post_json(&format!("{api}/api/v1/{path}"), method, Some(&key), body, "OpenRouter").await.map(Some)
+/// A WorkOS Pipes access token for `user`'s account at `provider`
+/// (`POST /data-integrations/{provider}/token`): (status, WorkOS's answer,
+/// `{active, access_token: {access_token, expires_at, …}}` or `{active:
+/// false, error}`).
+pub async fn pipes_token(env: &Env, api: &str, provider: &str, user: &str) -> CellResult<(u16, Value)> {
+    assert!(fragment_core::swap::valid_name(provider), "a provider is checked before WorkOS is asked");
+    let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
+    post_json(&format!("{api}/data-integrations/{provider}/token"), Method::Post, Some(&key), Some(&json!({ "user_id": user })), "WorkOS").await
+}
+
+/// The operator's key `name` (`swap::key_secret_name`), when the
+/// deployment holds it.
+pub fn operator_key(env: &Env, name: &str) -> Option<String> {
+    secret(env, &fragment_core::swap::key_secret_name(name))
+}
+
+/// The deployment's own OpenRouter key, which pays for image and video
+/// steps until phase 7 (ai.rs; the debt ledger), or `None` when it has
+/// none (those steps are off). It is added at the egress point only; the
+/// payer's ledger meters what each call cost.
+pub fn openrouter_key(env: &Env) -> Option<String> {
+    secret(env, OPENROUTER_API_KEY)
 }

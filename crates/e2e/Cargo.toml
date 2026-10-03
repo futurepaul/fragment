@@ -10,6 +10,8 @@ description = "The end-to-end suite: a real celld node, the real cell, the code.
 anyhow = "1"
 serde_json = "1"
 base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tungstenite = "=0.29.0"
 fragment-proto = { path = "../proto" }

@@ -578,10 +578,41 @@ exit says.
    2026-10-03, leaving only `check`, so phase 2 adds the workerd e2e on
    Linux and the hosted lane on a branch preview. Exit: core fragment
    sections green locally, in CI, and on a preview.
+
+   Status, 2026-10-03 (futurepaul/fragment#115, merged):
+   - Built: the cell on workerd (wrangler 4.145.0, pinned); keys in the
+     cell (`crates/core/src/seal.rs`: AES-256-GCM, sealed per Durable
+     Object); blobs in R2; the dev stack and the e2e on `wrangler dev`;
+     `cargo xtask deploy` and `teardown` from a deployment's config file
+     (`deploy/example.jsonc`; a branch at `<b>.<zone>`); the e2e job on
+     Linux in CI. The celld fork and native `KEYS` are gone, and the
+     migrations restart at `v1`.
+   - Evidence: the full e2e on workerd, locally (1076 passed, 0 failed
+     with phase 3) and in CI on Linux (green on `8618a79`, after two
+     fixes to the retention check's wait on the slower runner).
+   - Waiting on Paul: the hosted lane on a preview needs the
+     `*.finite.place` wildcard record and a choice of sign-in for
+     previews (escalations).
 3. **The ledger.** Meters, plans, guests, caps, the overdraft and
    read-only, and operator commands. Exit: metering matches the price
    book, and caps and zero behave; valid, invalid and replay tests for
    each mutation.
+
+   Status, 2026-10-03 (branch `claude/phase-3-ledger`; docs/ledger.md):
+   - Built: the `Ledger` Durable Object on the pure core; the model
+     route (`cheap` and `medium` on Workers AI through the gateway,
+     `high` refused) for the agents' Worker and, from phase 4, the
+     computer's intercept (`models::complete`); AI steps on it (images
+     and videos on OpenRouter with the deployment's key until phase 7,
+     metered as `Usage::Billed`; bugs 2 and 3 fixed); the gates (at
+     zero, agents and AI stop; past the overdraft, a fragment refuses
+     writes); each fragment's meters (requests, dynamic workers,
+     storage) through the `fragment-ledger` queue; `fragment ledger` and
+     `fragment cap`. The OpenRouter-key ledger and `budget.rs` went (a
+     hard cut).
+   - Evidence: the e2e's `ledger` section on workerd, with the Workers
+     AI fake behind the model route (a lower rung). The binding itself,
+     the gateway's metadata and its logs-off rows are the hosted lane's.
 4. **Computers.** The generic Computer DO (lifecycle, wake on
    subscription, intercepts, ports, backups, pins), then our Hermes
    image (bridge, boot script, Litestream). Exit: the real-Hermes lane
@@ -600,6 +631,29 @@ exit says.
      with a stub image whose bridge speaks the fragment API;
    - drafts: the bridge streams through the channel drafts API, and a
      page sees the draft live and then the final record.
+
+   Status, 2026-10-03 (branch `claude/phases-3-4`; docs/computers.md):
+   - Built: the Computer DO (its lifecycle a pure state machine; wakes
+     on a subscription, a page, a port and its owner; adoption after a
+     platform crash; `/data` saved and restored, snapshots by image;
+     image pins); ports on the computer's own origin behind one-time
+     tickets; the intercepts (the API signed as the agent, models through
+     the platform's model route, storage over R2, and the swap:
+     connections through WorkOS Pipes per agent, operator keys priced and
+     metered); wakes gated on the owner's credit and awake time metered;
+     delegation (decision 36: people-only shares, agents held below their
+     owner); the images (`images/`: the bridge, the stub, our Hermes).
+   - Evidence, all on workerd under `wrangler dev` with Docker, the
+     vendors faked at their boundaries (a lower rung):
+     - the `computers` section on the stub image: the platform holds no
+       Hermes code;
+     - the `delegation` section;
+     - the `hermes` section on our Hermes image, the exit list above
+       in full (`cargo xtask e2e --only hermes`: it builds a 3.8 GB
+       image, so it runs by name and not in CI). A wake follows its
+       chats in 2.5 s and answers a first message in about 5 s.
+   - Not yet: any of it on Containers. That is the hosted lane's, after
+     phase 2's preview.
 5. **The shell and the blessed templates.** The shell (onboarding,
    sidebar, tabs, profile, search, connections) and the chat and agent
    templates on decision 40. The shell's tabs sign in to their fragments

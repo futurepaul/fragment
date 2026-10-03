@@ -1,619 +1,729 @@
-//! The `Ledger` cell: one per billing org, fragment's stand-in for
-//! finite.computer's Core billing (FIN-10; docs/finite-integration.md).
-//! For now every billing org is a person's own personal org, named
-//! `org:` + the hex of their identity (a fragment's owner pays for what
-//! it spends, whoever started the run: ROADMAP decision 14).
+//! The `Ledger` cell (docs/ledger.md): one Durable Object per person,
+//! named by their identity (`id:<hex>`), running the usage ledger's state
+//! machine (`fragment_core::ledger`) over its own SQLite. The caller
+//! decides who pays a row and asks that person's ledger, which keys on
+//! nothing else (docs/cloudflare-v1.md, decision 36).
 //!
-//! A paid step reserves its worst case here before it runs and settles to
-//! the reported cost after, so a month's spend stays within its allowance
-//! (the budget plus that month's top-ups); a step that does not fit is
-//! refused with `budget_used_up`. Each step is one usage row, keyed by its
-//! source reference, so a retried or replayed step is never paid twice: a
-//! settled one answers its stored result. The org's own OpenRouter key,
-//! minted with the fleet's management key, carries the allowance as its
-//! limit: OpenRouter itself stops the org at it.
+//! The head (plan, seat, balance, holds, price book) is kept whole as one
+//! JSON row, small and bounded; what grows with use (references, batches,
+//! commands, each fragment's spend by month, caps) is in tables, read and
+//! written through `SqlStore`. Each route is one `transactionSync` over
+//! both: the core decides before it writes, so a refusal changes nothing
+//! but the month it rolled to, and a store that failed rolls the whole
+//! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
 //!
-//! Inner routes (fragments and the router reach them through `ask`): each
-//! is a POST of a `Route`'s request type, answered with its `Route::Answer`,
-//! so both ends are the same Rust types.
+//! Inner routes (platform code only, through `ask`): each is a POST of a
+//! `Route`'s request (the core's types, or proto's), answered with its
+//! `Route::Answer`; a refusal is `ErrorBody` with the typed `Refused`
+//! beside it, so a caller can tell a read-only owner from a guest.
 
-use fragment_core::budget::{self, Month};
-use fragment_core::npub;
-use fragment_proto::{BudgetView, ErrorCode, UsageRow, UsageState, UsageUnit};
+use std::cell::Cell;
+
+use fragment_core::ledger::{self as core, BatchRecord, CommandRecord, Entry, Ledger, Month, Refused, Spend, Store};
+use fragment_core::price::PriceBook;
+use fragment_proto::ledger::{GrantCredit, LedgerStatus, Plan, SetFragmentCap, SetOverdraft, SetPlan, SetSeat};
+use fragment_proto::ErrorCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::{js, keys};
+use crate::js;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS topups (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, period TEXT NOT NULL, micros INTEGER NOT NULL, by_whom TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS usage (
-  ref TEXT PRIMARY KEY, period TEXT NOT NULL, kind TEXT NOT NULL, model TEXT, fragment TEXT NOT NULL, run INTEGER,
-  principal TEXT NOT NULL, agent TEXT, video TEXT, reserved INTEGER NOT NULL, cost INTEGER, state TEXT NOT NULL,
-  result TEXT, created_at INTEGER NOT NULL, settled_at INTEGER);
-CREATE INDEX IF NOT EXISTS usage_period ON usage (period, state);
-CREATE INDEX IF NOT EXISTS usage_video ON usage (video) WHERE video IS NOT NULL;
+CREATE TABLE IF NOT EXISTS head (id INTEGER PRIMARY KEY CHECK (id = 1), ledger TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS entries (ref TEXT PRIMARY KEY, at_ms INTEGER NOT NULL, held INTEGER NOT NULL, entry TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS entries_at ON entries (at_ms);
+CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, digest TEXT NOT NULL, answer TEXT NOT NULL, at_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS batches_at ON batches (at_ms);
+CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, command TEXT NOT NULL, at_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment));
+CREATE TABLE IF NOT EXISTS caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL);
 ";
-/// A top-up at a time, and a month's usage rows listed at most (in
-/// `/usage`; `/status` lists the newest few).
-const TOPUP_MAX: i64 = 1_000 * budget::USD;
-const USAGE_PAGE: i64 = 1_000;
-const STATUS_USAGE: i64 = 20;
 
-/// A person's personal billing org.
-pub fn org_of(identity: &str) -> Option<String> {
-    npub::is_identity(identity).then(|| format!("org:{}", &identity[npub::ID_PREFIX.len()..]))
-}
+/// The person a ledger call is for; only platform code sets it, and the
+/// ledger keeps the first it is told and refuses another.
+pub const PAYER_HEADER: &str = "x-fragment-payer";
+/// The configured default plan's command id: applied once, as a new
+/// person's ledger is made.
+const DEFAULT_PLAN_ID: &str = "plan:default";
+/// Test fleets: references a test hook lists at most.
+const TEST_ENTRIES_MAX: i64 = 500;
 
-pub fn valid_org(org: &str) -> bool {
-    org.strip_prefix("org:").is_some_and(|h| npub::is_identity(&format!("{}{h}", npub::ID_PREFIX)))
+/// The price book the deployment charges with: the core's defaults, and
+/// the operator keys' prices and the book's version from the deployment's
+/// configuration (decision 4: pricing lives there). Each ledger takes it
+/// at its next call when its version is newer (`take_book`).
+pub fn configured_book(cfg: &Config) -> PriceBook {
+    let mut book = PriceBook::defaults();
+    book.keys = cfg.key_prices.clone();
+    book.version = book.version.max(cfg.price_book_version);
+    book
 }
 
 #[durable_object]
 pub struct LedgerCell {
     state: State,
-    env: Env,
+    raw: JsValue,
     /// The isolate's settings (config.rs: built once per isolate).
     cfg: &'static Config,
-    /// One mint (or limit change) of the org's key at a time.
-    keying: futures_util::lock::Mutex<()>,
+    /// When this activation last set the alarm for (the ledger's clock):
+    /// a call that needs it no later leaves it.
+    armed: Cell<Option<i64>>,
 }
 
 impl DurableObject for LedgerCell {
     fn new(state: State, env: Env) -> Self {
+        let raw: JsValue = state._inner().into();
+        let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Ledger schema applies");
         let cfg = Config::from_env(&env);
-        LedgerCell { state, env, cfg, keying: futures_util::lock::Mutex::new(()) }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         match self.route(req).await {
-            Ok(v) => Response::from_json(&v),
-            Err(e) => e.response(),
+            Ok(answer) => Response::from_json(&answer),
+            Err(Failed::Refused(why)) => refusal(why),
+            Err(Failed::Cell(e)) => e.response(),
         }
+    }
+
+    async fn alarm(&self) -> Result<Response> {
+        if let Err(e) = self.swept().await {
+            console_error!("{}", json!({ "event": "ledger.sweep-failed", "message": e.message }));
+            // tried again within the minute, never spinning
+            let at = js::now_ms() + 60_000;
+            self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
+        }
+        Response::ok("")
+    }
+}
+
+/// A refusal as its caller reads it: the platform's error body, and the
+/// core's typed reason beside it.
+fn refusal(why: Refused) -> Result<Response> {
+    let body = json!({ "error": why.code(), "message": why.message(), "refused": why });
+    Ok(Response::from_json(&body)?.with_status(why.code().status()))
+}
+
+/// How a route failed: the ledger refused (typed), or the cell did.
+enum Failed {
+    Refused(Refused),
+    Cell(CellError),
+}
+
+impl From<CellError> for Failed {
+    fn from(e: CellError) -> Failed {
+        Failed::Cell(e)
+    }
+}
+
+impl From<worker::Error> for Failed {
+    fn from(e: worker::Error) -> Failed {
+        Failed::Cell(e.into())
     }
 }
 
 /// One of the ledger's routes: the request a caller sends and the answer
-/// it gets back.
+/// it gets back. Both ends compile against the same types.
 pub trait Route: Serialize + DeserializeOwned {
     const PATH: &'static str;
     type Answer: Serialize + DeserializeOwned;
 }
 
-/// A paid step's worst case, held before the step runs.
-#[derive(Serialize, Deserialize)]
+/// An answer that says only that it was done (or allowed): `{}`.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Reserve {
-    /// The step's source reference (ai.rs, `step_ref`).
-    #[serde(rename = "ref")]
-    pub reference: String,
-    /// The step's kind (`ai.text`, …).
-    pub kind: String,
-    pub model: Option<String>,
-    pub amount: i64,
+pub struct Done {}
+
+/// May this spend start (docs/ledger.md, `may_spend`)? The whole question
+/// when the payer owns the fragment (or there is none); when another
+/// person owns it, that owner's ledger answers `FragmentOpen` too.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MaySpend {
+    pub spend: Spend,
+    pub fragment: Option<String>,
+    pub by_owner: bool,
+}
+
+/// Is a fragment this ledger's person owns open to spenders other than
+/// its owner (under its cap) this month?
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FragmentOpen {
     pub fragment: String,
-    pub run: i64,
-    /// Who started the run (it may be a visitor; the owner pays).
-    pub principal: String,
-    /// The principal, when it is an agent member.
-    pub agent: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "answer", rename_all = "snake_case")]
-pub enum Reserved {
-    /// Held (now, or by this step's earlier try): run it with the org's key.
-    Held { key: String },
-    /// The step settled before (a retry or a replay): its stored result,
-    /// not a second charge.
-    Replay { result: Value },
-}
-
-impl Route for Reserve {
-    const PATH: &'static str = "/reserve";
-    type Answer = Reserved;
-}
-
-/// The org's OpenRouter key, for a step that costs nothing (a video's polls).
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Key {}
-
-#[derive(Serialize, Deserialize)]
-pub struct KeyAnswer {
-    pub key: String,
-}
-
-impl Route for Key {
-    const PATH: &'static str = "/key";
-    type Answer = KeyAnswer;
-}
-
-/// A paid step's end: its cost (`None`: charged its reservation) and result.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Settle {
-    #[serde(rename = "ref")]
-    pub reference: String,
-    pub cost: Option<i64>,
-    pub result: Value,
-    /// A video's OpenRouter id: its cost comes with its last poll (`SettleVideo`).
-    pub video: Option<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Settlement {
-    Now { cost: i64 },
-    /// A retry of a step that settled: the cost it settled at.
-    Before { cost: i64 },
-    /// A video, still holding its reservation until its cost comes.
-    Waiting { video: String },
-}
-
-impl Settlement {
-    /// What the step has been charged so far.
-    pub fn charged(&self) -> i64 {
-        match self {
-            Settlement::Now { cost } | Settlement::Before { cost } => *cost,
-            Settlement::Waiting { .. } => 0,
-        }
-    }
-}
-
-impl Route for Settle {
-    const PATH: &'static str = "/settle";
-    type Answer = Settlement;
-}
-
-/// A video's cost, from its last poll (`None`: charged its reservation).
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SettleVideo {
-    pub video: String,
-    pub cost: Option<i64>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum VideoSettlement {
-    Now { cost: i64 },
-    /// A poll step run again: the cost it settled at.
-    Before { cost: i64 },
-    /// Nothing holds for this video (its held run gave the reservation back).
-    NoReservation,
-}
-
-impl Route for SettleVideo {
-    const PATH: &'static str = "/settle-video";
-    type Answer = VideoSettlement;
-}
-
-/// A reservation a step no longer needs.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Release {
-    #[serde(rename = "ref")]
-    pub reference: String,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum ReleaseAnswer {
-    Released,
-    /// It settled meanwhile: its cost stands.
-    Settled { cost: i64 },
-    /// Nothing is reserved under it (released before, or never reserved).
-    Gone,
-}
-
-impl Route for Release {
-    const PATH: &'static str = "/release";
-    type Answer = ReleaseAnswer;
-}
-
-/// This month, with its newest usage.
-#[derive(Serialize, Deserialize)]
+/// The ledger now.
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {}
 
+/// Test fleets only (`FRAGMENT_TEST_HOOKS=allow`): move this ledger's
+/// clock (`clock {offsetMs}`), run its sweep now (`sweep`), list the
+/// references under a prefix (`entries {prefix}`), or read what moved its
+/// balance (`totals`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "kebab-case")]
+pub enum TestHook {
+    #[serde(rename_all = "camelCase")]
+    Clock { offset_ms: i64 },
+    Sweep,
+    Entries { prefix: String },
+    Totals,
+}
+
+impl Route for core::Reserve {
+    const PATH: &'static str = "/reserve";
+    type Answer = core::Reserved;
+}
+
+impl Route for core::Settle {
+    const PATH: &'static str = "/settle";
+    type Answer = core::Settled;
+}
+
+impl Route for core::Release {
+    const PATH: &'static str = "/release";
+    type Answer = core::Released;
+}
+
+impl Route for core::Meter {
+    const PATH: &'static str = "/meter";
+    type Answer = core::Metered;
+}
+
+impl Route for MaySpend {
+    const PATH: &'static str = "/may-spend";
+    type Answer = Done;
+}
+
+impl Route for FragmentOpen {
+    const PATH: &'static str = "/fragment-open";
+    type Answer = Done;
+}
+
+impl Route for GrantCredit {
+    const PATH: &'static str = "/grant";
+    type Answer = Done;
+}
+
+impl Route for SetPlan {
+    const PATH: &'static str = "/plan";
+    type Answer = Done;
+}
+
+impl Route for SetSeat {
+    const PATH: &'static str = "/seat";
+    type Answer = Done;
+}
+
+impl Route for SetOverdraft {
+    const PATH: &'static str = "/overdraft";
+    type Answer = Done;
+}
+
+impl Route for SetFragmentCap {
+    const PATH: &'static str = "/cap";
+    type Answer = Done;
+}
+
 impl Route for Status {
     const PATH: &'static str = "/status";
-    type Answer = BudgetView;
+    type Answer = LedgerStatus;
 }
 
-/// A month (`YYYY-MM`, the router checks it; default this one) with every usage row.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Usage {
-    pub period: Option<String>,
-}
-
-impl Route for Usage {
-    const PATH: &'static str = "/usage";
-    type Answer = BudgetView;
-}
-
-/// More allowance this month, by one of the fleet's operators.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TopUp {
-    pub micros: i64,
-    /// The operator's identity.
-    pub by: String,
-}
-
-impl Route for TopUp {
-    const PATH: &'static str = "/top-up";
-    type Answer = BudgetView;
-}
-
-/// Dev fleets only: move this ledger's clock (to cross a month).
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct SetClock {
-    pub offset_ms: i64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Clock {
-    pub offset_ms: i64,
-    pub period: String,
-}
-
-impl Route for SetClock {
+impl Route for TestHook {
     const PATH: &'static str = "/test";
-    type Answer = Clock;
+    type Answer = Value;
 }
 
 fn decode<R: Route>(body: &[u8]) -> CellResult<R> {
     serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("{}: {e}", R::PATH)))
 }
 
-/// A route's answer, typed by its route.
-fn reply<R: Route>(answer: CellResult<R::Answer>) -> CellResult<Value> {
-    serde_json::to_value(answer?).map_err(|e| CellError::host(e.to_string()))
+/// What grows with use, in this cell's tables (`fragment_core::ledger::Store`).
+/// The trait answers values, not results, so a statement that fails marks
+/// the store at fault: the route sees it before anything commits and rolls
+/// the whole transaction back. A row that does not read as the core wrote
+/// it is corruption, a fault too.
+struct SqlStore {
+    sql: SqlStorage,
+    fault: std::cell::RefCell<Option<String>>,
 }
 
-impl LedgerCell {
-    fn rows(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<Vec<Value>> {
-        Ok(self.state.storage().sql().exec(q, binds)?.to_array::<Value>()?)
+impl SqlStore {
+    fn new(sql: SqlStorage) -> SqlStore {
+        SqlStore { sql, fault: std::cell::RefCell::new(None) }
     }
 
-    fn exec(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
-        self.state.storage().sql().exec(q, binds)?;
-        Ok(())
-    }
-
-    fn meta(&self, k: &str) -> CellResult<Option<String>> {
-        Ok(self.rows("SELECT value FROM meta WHERE key = ?", vec![k.into()])?.first().and_then(|r| r["value"].as_str().map(str::to_string)))
-    }
-
-    fn set_meta(&self, k: &str, v: &str) -> CellResult<()> {
-        self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![k.into(), v.into()])
-    }
-
-    fn org(&self) -> CellResult<String> {
-        self.meta("org")?.ok_or_else(|| CellError::host("the ledger does not know its org"))
-    }
-
-    /// Now, as this ledger sees it (a dev fleet may move its clock).
-    fn now(&self) -> CellResult<i64> {
-        let offset: i64 = self.meta("clock_offset")?.and_then(|v| v.parse().ok()).unwrap_or(0);
-        Ok(js::now_ms() + offset)
-    }
-
-    /// A month's allowance, spent, and reserved, in one statement (each sum
-    /// an index range of its own table).
-    fn month(&self, period: &str) -> CellResult<Month> {
-        let rows = self.rows(
-            "SELECT (SELECT COALESCE(SUM(micros), 0) FROM topups WHERE period = ?) AS topped,
-                    (SELECT COALESCE(SUM(cost), 0) FROM usage WHERE period = ? AND state = 'settled') AS spent,
-                    (SELECT COALESCE(SUM(reserved), 0) FROM usage WHERE period = ? AND state = 'reserved') AS reserved",
-            vec![period.into(), period.into(), period.into()],
-        )?;
-        let row = rows.first().expect("a SELECT of sums answers one row");
-        let sum = |k: &str| row[k].as_i64().unwrap_or_else(|| panic!("a COALESCE(SUM(…), 0) answers an integer ({k})"));
-        Ok(Month { allowance: self.cfg.budget_micros + sum("topped"), spent: sum("spent"), reserved: sum("reserved") })
-    }
-
-    /// Holds a step's reservation; answers the stored result instead when
-    /// the step settled before.
-    async fn reserve(&self, b: Reserve) -> CellResult<Reserved> {
-        if b.amount <= 0 || b.reference.is_empty() || b.reference.len() > 512 {
-            return Err(CellError::invalid("a reservation names its step and a positive amount"));
+    fn fail(&self, why: String) {
+        let mut fault = self.fault.borrow_mut();
+        if fault.is_none() {
+            *fault = Some(why);
         }
-        let prior = self.rows("SELECT state, result FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
-        match prior.first().map(|row| (row, row["state"].as_str().and_then(UsageState::parse).expect("usage.state is one the ledger wrote"))) {
-            // the same step again: its result, not another charge
-            Some((row, UsageState::Settled)) => {
-                let result = row["result"].as_str().map_or(Value::Null, |r| serde_json::from_str(r).expect("usage.result is JSON the ledger stored"));
-                return Ok(Reserved::Replay { result });
-            }
-            // a retry of a step still holding its reservation
-            Some((_, UsageState::Reserved)) => {}
-            None => self.hold(&b)?,
+    }
+
+    /// The first fault, as the route's failure.
+    fn checked(&self) -> CellResult<()> {
+        match self.fault.borrow().as_ref() {
+            None => Ok(()),
+            Some(why) => Err(CellError::host(format!("the ledger's store: {why}"))),
         }
-        match self.key().await {
-            Ok(key) => Ok(Reserved::Held { key }),
+    }
+
+    fn rows<T: DeserializeOwned>(&self, q: &str, binds: Vec<SqlStorageValue>) -> Vec<T> {
+        match self.sql.exec(q, binds).and_then(|c| c.to_array::<T>()) {
+            Ok(rows) => rows,
             Err(e) => {
-                // no key, no step: the reservation goes back
-                self.exec("DELETE FROM usage WHERE ref = ? AND state = 'reserved'", vec![b.reference.as_str().into()])?;
-                Err(e)
+                self.fail(format!("{q}: {e}"));
+                Vec::new()
             }
         }
     }
 
-    /// A new reservation, if the month can cover it.
-    fn hold(&self, b: &Reserve) -> CellResult<()> {
-        let now = self.now()?;
-        let period = budget::period_of(now);
-        let month = self.month(&period)?;
-        if !month.fits(b.amount) {
-            return Err(CellError::new(
-                ErrorCode::BudgetUsedUp,
-                format!(
-                    "budget used up: {} of {} spent in {period} ({} left; this step reserves up to {})",
-                    budget::dollars(month.spent + month.reserved),
-                    budget::dollars(month.allowance),
-                    budget::dollars(month.remaining().max(0)),
-                    budget::dollars(b.amount)
-                ),
-            ));
-        }
-        let opt = |v: &Option<String>| v.as_deref().map_or(SqlStorageValue::Null, |s| s.into());
-        self.exec(
-            "INSERT INTO usage (ref, period, kind, model, fragment, run, principal, agent, reserved, state, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
-            vec![
-                b.reference.as_str().into(),
-                period.into(),
-                b.kind.as_str().into(),
-                opt(&b.model),
-                b.fragment.as_str().into(),
-                SqlStorageValue::Integer(b.run),
-                b.principal.as_str().into(),
-                opt(&b.agent),
-                SqlStorageValue::Integer(b.amount),
-                SqlStorageValue::Integer(now),
-            ],
-        )
-    }
-
-    /// A settled row's cost: every settle writes one.
-    fn settled_cost(row: &Value) -> i64 {
-        row["cost"].as_i64().expect("a settled usage row has its cost")
-    }
-
-    /// The org's OpenRouter key, minted the first time with the month's
-    /// allowance as its monthly limit, and its limit kept to the allowance.
-    async fn key(&self) -> CellResult<String> {
-        // the management key is the node's: KEYS makes these calls for a Ledger only
-        let no_ai = || {
-            CellError::invalid("set the fragment's OPENROUTER_API_KEY secret to use OpenRouter (`fragment secret set`): this fleet pays for no AI")
-        };
-        let _one = self.keying.lock().await;
-        let org = self.org()?;
-        // Read under the lock, not handed in by a reservation: one that
-        // waited here behind a top-up's key change would set its limit back.
-        let period = budget::period_of(self.now()?);
-        let allowance = self.month(&period)?.allowance;
-        let usd = allowance as f64 / budget::USD as f64;
-        if let (Some(sealed), Some(hash)) = (self.meta("or_key")?, self.meta("or_hash")?) {
-            let set = format!("{period}:{allowance}");
-            if self.meta("or_limit")?.as_deref() != Some(set.as_str()) {
-                let (status, answer) = keys::openrouter_keys(&self.env, &self.cfg.openrouter_url, Method::Patch, Some(&hash), Some(&json!({ "limit": usd }))).await?.ok_or_else(no_ai)?;
-                if status != 200 {
-                    return Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter would not change the key's limit ({status}): {answer}")));
-                }
-                self.set_meta("or_limit", &set)?;
-            }
-            let opened = keys::open(&self.env, &keys::scope("Ledger", &self.state), &sealed).map_err(|e| CellError::host(format!("the org's key: {}", e.message)))?;
-            if let Some(fresh) = opened.resealed {
-                self.set_meta("or_key", &fresh)?;
-            }
-            return String::from_utf8(opened.plaintext).map_err(|_| CellError::host("the org's key is not text"));
-        }
-        let body = json!({ "name": format!("fragment {org}"), "limit": usd, "limit_reset": "monthly", "include_byok_in_limit": false });
-        let (status, answer) = keys::openrouter_keys(&self.env, &self.cfg.openrouter_url, Method::Post, None, Some(&body)).await?.ok_or_else(no_ai)?;
-        let (Some(key), Some(hash)) = (answer["key"].as_str(), answer["data"]["hash"].as_str()) else {
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("OpenRouter would not mint a key ({status})")));
-        };
-        let sealed = keys::seal(&self.env, &keys::scope("Ledger", &self.state), key.as_bytes())?;
-        self.set_meta("or_key", &sealed)?;
-        self.set_meta("or_hash", hash)?;
-        self.set_meta("or_limit", &format!("{period}:{allowance}"))?;
-        Ok(key.to_string())
-    }
-
-    fn settle(&self, b: Settle) -> CellResult<Settlement> {
-        let rows = self.rows("SELECT state, reserved, cost FROM usage WHERE ref = ?", vec![b.reference.as_str().into()])?;
-        let Some(row) = rows.first() else { return Err(CellError::new(ErrorCode::NotFound, "no such reservation")) };
-        if row["state"].as_str().and_then(UsageState::parse).expect("usage.state is one the ledger wrote") == UsageState::Settled {
-            return Ok(Settlement::Before { cost: Self::settled_cost(row) });
-        }
-        let reserved = row["reserved"].as_i64().expect("usage.reserved is INTEGER");
-        let result = SqlStorageValue::from(b.result.to_string());
-        match (b.cost, b.video) {
-            // a video's cost comes with its last poll
-            (None, Some(video)) => {
-                self.exec("UPDATE usage SET video = ?, result = ? WHERE ref = ?", vec![video.as_str().into(), result, b.reference.as_str().into()])?;
-                Ok(Settlement::Waiting { video })
-            }
-            (cost, _) => {
-                // a step whose answer named no cost is charged its worst
-                // case: the money path fails closed, never at zero
-                let cost = cost.map_or(reserved, |c| c.max(0));
-                self.exec(
-                    "UPDATE usage SET state = 'settled', cost = ?, result = ?, settled_at = ? WHERE ref = ? AND state = 'reserved'",
-                    vec![SqlStorageValue::Integer(cost), result, SqlStorageValue::Integer(self.now()?), b.reference.as_str().into()],
-                )?;
-                Ok(Settlement::Now { cost })
-            }
+    fn exec(&self, q: &str, binds: Vec<SqlStorageValue>) {
+        if let Err(e) = self.sql.exec(q, binds) {
+            self.fail(format!("{q}: {e}"));
         }
     }
 
-    fn settle_video(&self, b: SettleVideo) -> CellResult<VideoSettlement> {
-        // without a cost, the video is charged its reservation (it fails closed)
-        let cost = b.cost.map_or(SqlStorageValue::Null, |c| SqlStorageValue::Integer(c.max(0)));
-        let settled = self.rows(
-            "UPDATE usage SET state = 'settled', cost = COALESCE(?, reserved), settled_at = ? WHERE video = ? AND state = 'reserved' RETURNING cost",
-            vec![cost, SqlStorageValue::Integer(self.now()?), b.video.as_str().into()],
-        )?;
-        if let Some(row) = settled.first() {
-            return Ok(VideoSettlement::Now { cost: Self::settled_cost(row) });
+    fn count(&self, q: &str, binds: Vec<SqlStorageValue>) -> u64 {
+        #[derive(Deserialize)]
+        struct N {
+            n: i64,
         }
-        // settled before (a poll step run again): the cost it settled at
-        let before = self.rows("SELECT cost FROM usage WHERE video = ? AND state = 'settled'", vec![b.video.as_str().into()])?;
-        Ok(before.first().map_or(VideoSettlement::NoReservation, |r| VideoSettlement::Before { cost: Self::settled_cost(r) }))
-    }
-
-    fn release(&self, b: Release) -> CellResult<ReleaseAnswer> {
-        let released = self.rows("DELETE FROM usage WHERE ref = ? AND state = 'reserved' RETURNING ref", vec![b.reference.as_str().into()])?;
-        if !released.is_empty() {
-            return Ok(ReleaseAnswer::Released);
-        }
-        let settled = self.rows("SELECT cost FROM usage WHERE ref = ? AND state = 'settled'", vec![b.reference.as_str().into()])?;
-        Ok(settled.first().map_or(ReleaseAnswer::Gone, |r| ReleaseAnswer::Settled { cost: Self::settled_cost(r) }))
-    }
-
-    async fn top_up(&self, t: TopUp) -> CellResult<BudgetView> {
-        if !(1..=TOPUP_MAX).contains(&t.micros) {
-            return Err(CellError::invalid(format!("a top-up is 1 to {TOPUP_MAX} micro-dollars")));
-        }
-        let now = self.now()?;
-        self.exec(
-            "INSERT INTO topups (period, micros, by_whom, at) VALUES (?, ?, ?, ?)",
-            vec![budget::period_of(now).into(), SqlStorageValue::Integer(t.micros), t.by.as_str().into(), SqlStorageValue::Integer(now)],
-        )?;
-        // the key's limit follows (now if there is one, else when it is minted)
-        if self.meta("or_key")?.is_some() {
-            self.key().await?;
-        }
-        self.view(&budget::period_of(now), STATUS_USAGE)
-    }
-
-    fn view(&self, period: &str, limit: i64) -> CellResult<BudgetView> {
-        let cfg = self.cfg;
-        let org = self.org()?;
-        let month = self.month(period)?;
-        let usage = self
-            .rows(
-                "SELECT * FROM usage WHERE period = ? ORDER BY created_at DESC, ref LIMIT ?",
-                vec![period.into(), SqlStorageValue::Integer(limit)],
-            )?
-            .iter()
-            .map(|r| {
-                // only the ledger writes usage: a NOT NULL column that is missing is corruption
-                let text = |k: &str| r[k].as_str().unwrap_or_else(|| panic!("usage.{k} is TEXT NOT NULL")).to_string();
-                let state = r["state"].as_str().and_then(UsageState::parse).expect("usage.state is one the ledger wrote");
-                let quantity = match state {
-                    UsageState::Settled => r["cost"].as_i64().expect("a settled usage row has its cost"),
-                    UsageState::Reserved => r["reserved"].as_i64().expect("usage.reserved is INTEGER"),
-                };
-                UsageRow {
-                    source_ref: text("ref"),
-                    agent: r["agent"].as_str().map(str::to_string),
-                    billing_org: org.clone(),
-                    period: text("period"),
-                    unit: UsageUnit::UsdMicro,
-                    quantity,
-                    state,
-                    kind: text("kind"),
-                    model: r["model"].as_str().map(str::to_string),
-                    fragment: text("fragment"),
-                    principal: text("principal"),
-                    at: r["created_at"].as_i64().expect("usage.created_at is INTEGER NOT NULL"),
-                }
-            })
-            .collect();
-        Ok(BudgetView {
-            billing_org: org,
-            period: period.to_string(),
-            budget_micros: cfg.budget_micros,
-            topped_up_micros: month.allowance - cfg.budget_micros,
-            allowance_micros: month.allowance,
-            spent_micros: month.spent,
-            reserved_micros: month.reserved,
-            remaining_micros: month.remaining(),
-            warn: month.warn(),
-            usage,
+        let n = self.rows::<N>(q, binds).first().map_or(0, |r| r.n);
+        u64::try_from(n).unwrap_or_else(|_| {
+            self.fail(format!("{q}: a negative count"));
+            0
         })
     }
 
-    async fn route(&self, mut req: Request) -> CellResult<Value> {
-        let org = req.headers().get(ORG_HEADER)?.filter(|o| valid_org(o)).ok_or_else(|| CellError::host("a ledger call names its org"))?;
-        match self.meta("org")? {
-            None => self.set_meta("org", &org)?,
-            Some(o) if o != org => return Err(CellError::host("this ledger is another org's")),
+    /// A JSON column as the core's type: one that does not read is corruption.
+    fn read<T: DeserializeOwned>(&self, what: &str, text: &str) -> Option<T> {
+        match serde_json::from_str(text) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.fail(format!("{what} does not read as the ledger wrote it: {e}"));
+                None
+            }
+        }
+    }
+
+    fn text<T: Serialize>(value: &T) -> String {
+        serde_json::to_string(value).expect("the ledger's types serialize")
+    }
+}
+
+#[derive(Deserialize)]
+struct Json {
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct SpendRow {
+    fragment: String,
+    micros: i64,
+}
+
+impl Store for SqlStore {
+    fn entry(&self, reference: &str) -> Option<Entry> {
+        let rows: Vec<Json> = self.rows("SELECT entry AS value FROM entries WHERE ref = ?", vec![reference.into()]);
+        let entry = self.read::<Entry>("an entry", &rows.into_iter().next()?.value)?;
+        if let Entry::Reservation { reserve, .. } = &entry {
+            assert_eq!(reserve.reference, reference, "an entry is kept under its own reference");
+        }
+        Some(entry)
+    }
+
+    fn put_entry(&mut self, reference: &str, entry: Entry) {
+        let held = i64::from(entry.held());
+        self.exec(
+            "INSERT INTO entries (ref, at_ms, held, entry) VALUES (?, ?, ?, ?)
+             ON CONFLICT (ref) DO UPDATE SET at_ms = excluded.at_ms, held = excluded.held, entry = excluded.entry",
+            vec![reference.into(), SqlStorageValue::Integer(entry.at_ms()), SqlStorageValue::Integer(held), SqlStore::text(&entry).into()],
+        );
+    }
+
+    fn batch(&self, id: &str) -> Option<BatchRecord> {
+        #[derive(Deserialize)]
+        struct Row {
+            digest: String,
+            answer: String,
+            at_ms: i64,
+        }
+        let row = self.rows::<Row>("SELECT digest, answer, at_ms FROM batches WHERE id = ?", vec![id.into()]).into_iter().next()?;
+        Some(BatchRecord { digest: row.digest, answer: self.read("a batch's answer", &row.answer)?, at_ms: row.at_ms })
+    }
+
+    fn put_batch(&mut self, id: &str, record: BatchRecord) {
+        self.exec(
+            "INSERT INTO batches (id, digest, answer, at_ms) VALUES (?, ?, ?, ?)",
+            vec![id.into(), record.digest.as_str().into(), SqlStore::text(&record.answer).into(), SqlStorageValue::Integer(record.at_ms)],
+        );
+    }
+
+    fn command(&self, id: &str) -> Option<CommandRecord> {
+        #[derive(Deserialize)]
+        struct Row {
+            command: String,
+            at_ms: i64,
+        }
+        let row = self.rows::<Row>("SELECT command, at_ms FROM commands WHERE id = ?", vec![id.into()]).into_iter().next()?;
+        Some(CommandRecord { command: self.read("a command", &row.command)?, at_ms: row.at_ms })
+    }
+
+    fn put_command(&mut self, id: &str, record: CommandRecord) {
+        self.exec(
+            "INSERT INTO commands (id, command, at_ms) VALUES (?, ?, ?)",
+            vec![id.into(), SqlStore::text(&record.command).into(), SqlStorageValue::Integer(record.at_ms)],
+        );
+    }
+
+    fn spent(&self, month: Month, fragment: &str) -> i64 {
+        let rows: Vec<SpendRow> = self.rows("SELECT fragment, micros FROM spend WHERE month = ? AND fragment = ?", vec![SqlStorageValue::Integer(month.0.into()), fragment.into()]);
+        rows.first().map_or(0, |r| r.micros)
+    }
+
+    fn add_spent(&mut self, month: Month, fragment: &str, micros: i64) {
+        assert!(micros > 0, "only a charge adds to a fragment's spend");
+        self.exec(
+            "INSERT INTO spend (month, fragment, micros) VALUES (?, ?, ?)
+             ON CONFLICT (month, fragment) DO UPDATE SET micros = micros + excluded.micros",
+            vec![SqlStorageValue::Integer(month.0.into()), fragment.into(), SqlStorageValue::Integer(micros)],
+        );
+    }
+
+    fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)> {
+        let rows: Vec<SpendRow> = self.rows(
+            "SELECT fragment, micros FROM spend WHERE month = ? ORDER BY micros DESC, fragment LIMIT ?",
+            vec![SqlStorageValue::Integer(month.0.into()), SqlStorageValue::Integer(limit as i64)],
+        );
+        rows.into_iter().map(|r| (r.fragment, r.micros)).collect()
+    }
+
+    fn cap(&self, fragment: &str) -> Option<i64> {
+        #[derive(Deserialize)]
+        struct Row {
+            micros: i64,
+        }
+        self.rows::<Row>("SELECT micros FROM caps WHERE fragment = ?", vec![fragment.into()]).first().map(|r| r.micros)
+    }
+
+    fn set_cap(&mut self, fragment: &str, micros: Option<i64>) {
+        match micros {
+            Some(m) => self.exec(
+                "INSERT INTO caps (fragment, micros) VALUES (?, ?) ON CONFLICT (fragment) DO UPDATE SET micros = excluded.micros",
+                vec![fragment.into(), SqlStorageValue::Integer(m)],
+            ),
+            None => self.exec("DELETE FROM caps WHERE fragment = ?", vec![fragment.into()]),
+        }
+    }
+
+    fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
+        let before = SqlStorageValue::Integer(before_ms);
+        // the sweep expired every hold past HOLD_MAX_MS first: one older
+        // than the horizon would be a charge forgotten
+        if self.count("SELECT COUNT(*) AS n FROM entries WHERE at_ms < ? AND held = 1", vec![before.clone()]) != 0 {
+            self.fail("a held reservation is older than what the ledger remembers".into());
+            return 0;
+        }
+        let forgotten = self.count(
+            "SELECT (SELECT COUNT(*) FROM entries WHERE at_ms < ?) + (SELECT COUNT(*) FROM batches WHERE at_ms < ?) AS n",
+            vec![before.clone(), before.clone()],
+        );
+        self.exec("DELETE FROM entries WHERE at_ms < ?", vec![before.clone()]);
+        self.exec("DELETE FROM batches WHERE at_ms < ?", vec![before]);
+        self.exec("DELETE FROM spend WHERE month < ?", vec![SqlStorageValue::Integer(before_month.0.into())]);
+        forgotten
+    }
+}
+
+/// The head as this cell keeps it, or a new person's: a guest with no
+/// credit (`Ledger::new`), then the deployment's default plan for new
+/// people (decision 25: `FRAGMENT_DEFAULT_PLAN`).
+fn head(store: &mut SqlStore, cfg: &Config, now_ms: i64) -> CellResult<Ledger> {
+    let rows: Vec<Json> = store.rows("SELECT ledger AS value FROM head WHERE id = 1", vec![]);
+    store.checked()?;
+    if let Some(row) = rows.into_iter().next() {
+        let ledger: Ledger = serde_json::from_str(&row.value).map_err(|e| CellError::host(format!("the ledger's head does not read as it was written: {e}")))?;
+        ledger.assert_valid();
+        return Ok(ledger);
+    }
+    let mut ledger = Ledger::new(now_ms, configured_book(cfg));
+    if cfg.default_plan != Plan::Guest {
+        let set = SetPlan { id: DEFAULT_PLAN_ID.into(), plan: cfg.default_plan };
+        ledger.set_plan(store, &set, now_ms).map_err(|why| CellError::host(format!("a new ledger refused its default plan: {}", why.message())))?;
+    }
+    Ok(ledger)
+}
+
+/// The configured book, taken when it is newer than the ledger's (under
+/// its version's id, once). A configuration that changed a book's prices
+/// without a new version is refused as another body, and the ledger keeps
+/// charging with the one it has, saying so.
+fn take_book(ledger: &mut Ledger, store: &mut SqlStore, cfg: &Config, now_ms: i64) {
+    let book = configured_book(cfg);
+    if book.version <= ledger.book().version {
+        return;
+    }
+    let set = core::SetPriceBook { id: format!("book:{}", book.version), book };
+    if let Err(why) = ledger.set_book(store, &set, now_ms) {
+        console_error!("{}", json!({ "event": "ledger.book-refused", "id": set.id, "message": why.message() }));
+    }
+}
+
+fn save(store: &SqlStore, ledger: &Ledger) {
+    store.exec(
+        "INSERT INTO head (id, ledger) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ledger = excluded.ledger",
+        vec![SqlStore::text(ledger).into()],
+    );
+}
+
+impl LedgerCell {
+    fn sql(&self) -> SqlStorage {
+        self.state.storage().sql()
+    }
+
+    fn meta(&self, key: &str) -> CellResult<Option<String>> {
+        let rows: Vec<Json> = self.sql().exec("SELECT value FROM meta WHERE key = ?", vec![key.into()])?.to_array()?;
+        Ok(rows.into_iter().next().map(|r| r.value))
+    }
+
+    fn set_meta(&self, key: &str, value: &str) -> CellResult<()> {
+        self.sql().exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![key.into(), value.into()])?;
+        Ok(())
+    }
+
+    /// The clock's offset a test fleet set (`TestHook::Clock`); none elsewhere.
+    fn offset_ms(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(0);
+        }
+        Ok(self.meta("clock_offset")?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Runs `op` on the head and the store in one transaction, at the
+    /// ledger's now: the head is written back whatever `op` answers (a
+    /// refusal changed nothing but the month it rolled to, and a newer
+    /// book), and a store that failed rolls everything back. Answers `op`'s
+    /// answer and when the next sweep is due (the ledger's clock).
+    fn transact<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> CellResult<(Result<T, Refused>, i64)> {
+        let now = js::now_ms() + self.offset_ms()?;
+        let (sql, cfg) = (self.sql(), self.cfg);
+        js::transaction_sync(&self.raw, move || {
+            let mut store = SqlStore::new(sql);
+            let mut ledger = head(&mut store, cfg, now)?;
+            take_book(&mut ledger, &mut store, cfg, now);
+            let answer = op(&mut ledger, &mut store, now);
+            save(&store, &ledger);
+            store.checked()?;
+            Ok((answer, ledger.next_sweep_ms(now)))
+        })
+    }
+
+    /// `transact`, then the alarm set for the next sweep when it is due
+    /// sooner than this activation last set it.
+    async fn mutate<T: 'static>(&self, op: impl FnOnce(&mut Ledger, &mut SqlStore, i64) -> Result<T, Refused> + 'static) -> Result<T, Failed> {
+        let (answer, next) = self.transact(op)?;
+        if self.armed.get().is_none_or(|armed| next < armed) {
+            self.arm(next).await?;
+        }
+        answer.map_err(Failed::Refused)
+    }
+
+    /// Sets the alarm for `at` on the ledger's clock.
+    async fn arm(&self, at: i64) -> CellResult<()> {
+        let real = at - self.offset_ms()?;
+        self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(real.max(js::now_ms() + 1_000) as f64)))).await?;
+        self.armed.set(Some(at));
+        Ok(())
+    }
+
+    /// The alarm's work: the sweep, then the next.
+    async fn swept(&self) -> CellResult<core::Swept> {
+        if self.meta("payer")?.is_none() {
+            // a ledger no one has called has nothing to sweep
+            return Ok(core::Swept { expired: Vec::new(), forgotten: 0 });
+        }
+        let (swept, next) = self.transact(|ledger, store, now| Ok(ledger.sweep(store, now)))?;
+        let swept = swept.expect("a sweep refuses nothing");
+        if !swept.expired.is_empty() {
+            console_log!("{}", json!({ "event": "ledger.holds-expired", "expired": swept.expired }));
+        }
+        self.arm(next).await?;
+        Ok(swept)
+    }
+
+    async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+        let payer = req.headers().get(PAYER_HEADER)?.filter(|p| fragment_core::npub::is_identity(p)).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
+        match self.meta("payer")? {
+            None => self.set_meta("payer", &payer)?,
+            Some(p) if p != payer => return Err(CellError::host(format!("this ledger is {p}'s, not {payer}'s")).into()),
             Some(_) => {}
         }
-        let path = req.path();
         if req.method() != Method::Post {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref())));
+            return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), req.path())).into());
         }
+        let path = req.path();
         let body = req.bytes().await?;
+        fn reply<T: Serialize>(answer: T) -> Result<Value, Failed> {
+            Ok(serde_json::to_value(answer).expect("the ledger's answers serialize"))
+        }
+        fn done(answer: ()) -> Done {
+            let () = answer;
+            Done {}
+        }
         match path.as_str() {
-            Reserve::PATH => reply::<Reserve>(self.reserve(decode(&body)?).await),
-            Key::PATH => {
-                let Key {} = decode(&body)?;
-                reply::<Key>(self.key().await.map(|key| KeyAnswer { key }))
+            <core::Reserve as Route>::PATH => {
+                let r: core::Reserve = decode(&body)?;
+                reply(self.mutate(move |l, s, now| l.reserve(s, &r, now)).await?)
             }
-            Settle::PATH => reply::<Settle>(self.settle(decode(&body)?)),
-            SettleVideo::PATH => reply::<SettleVideo>(self.settle_video(decode(&body)?)),
-            Release::PATH => reply::<Release>(self.release(decode(&body)?)),
+            <core::Settle as Route>::PATH => {
+                let r: core::Settle = decode(&body)?;
+                reply(self.mutate(move |l, s, now| l.settle(s, &r, now)).await?)
+            }
+            <core::Release as Route>::PATH => {
+                let r: core::Release = decode(&body)?;
+                reply(self.mutate(move |l, s, now| l.release(s, &r, now)).await?)
+            }
+            <core::Meter as Route>::PATH => {
+                let m: core::Meter = decode(&body)?;
+                reply(self.mutate(move |l, s, now| l.meter(s, &m, now)).await?)
+            }
+            MaySpend::PATH => {
+                let q: MaySpend = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.may_spend(s, q.spend, q.fragment.as_deref(), q.by_owner, now)).await?))
+            }
+            FragmentOpen::PATH => {
+                let q: FragmentOpen = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.fragment_open(s, &q.fragment, now)).await?))
+            }
+            <GrantCredit as Route>::PATH => {
+                let c: GrantCredit = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.grant(s, &c, now)).await?))
+            }
+            <SetPlan as Route>::PATH => {
+                let c: SetPlan = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_plan(s, &c, now)).await?))
+            }
+            <SetSeat as Route>::PATH => {
+                let c: SetSeat = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_seat(s, &c, now)).await?))
+            }
+            <SetOverdraft as Route>::PATH => {
+                let c: SetOverdraft = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_overdraft(s, &c, now)).await?))
+            }
+            <SetFragmentCap as Route>::PATH => {
+                let c: SetFragmentCap = decode(&body)?;
+                reply(done(self.mutate(move |l, s, now| l.set_cap(s, &c, now)).await?))
+            }
             Status::PATH => {
                 let Status {} = decode(&body)?;
-                reply::<Status>(self.view(&budget::period_of(self.now()?), STATUS_USAGE))
+                reply(self.mutate(|l, s, now| Ok(l.status(s, now))).await?)
             }
-            Usage::PATH => {
-                let usage: Usage = decode(&body)?;
-                let period = match usage.period {
-                    Some(p) => p,
-                    None => budget::period_of(self.now()?),
-                };
-                reply::<Usage>(self.view(&period, USAGE_PAGE))
+            TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
+            p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
+        }
+    }
+
+    async fn test_hook(&self, hook: TestHook) -> Result<Value, Failed> {
+        assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
+        match hook {
+            TestHook::Clock { offset_ms } => {
+                self.set_meta("clock_offset", &offset_ms.to_string())?;
+                let status = self.mutate(|l, s, now| Ok(l.status(s, now))).await?;
+                // the alarm follows the clock
+                self.armed.set(None);
+                Ok(json!({ "offsetMs": offset_ms, "month": status.month }))
             }
-            TopUp::PATH => reply::<TopUp>(self.top_up(decode(&body)?).await),
-            SetClock::PATH if self.cfg.test_hooks => {
-                let clock: SetClock = decode(&body)?;
-                self.set_meta("clock_offset", &clock.offset_ms.to_string())?;
-                reply::<SetClock>(Ok(Clock { offset_ms: clock.offset_ms, period: budget::period_of(self.now()?) }))
+            TestHook::Sweep => Ok(serde_json::to_value(self.swept().await?).expect("a sweep serializes")),
+            TestHook::Entries { prefix } => {
+                #[derive(Deserialize)]
+                struct Row {
+                    r#ref: String,
+                    entry: String,
+                }
+                // a prefix compared whole: a Durable Object's SQLite refuses LIKE patterns past a few dozen bytes
+                let binds = vec![SqlStorageValue::Integer(prefix.len() as i64), prefix.as_str().into(), SqlStorageValue::Integer(TEST_ENTRIES_MAX)];
+                let rows: Vec<Row> = self.sql().exec("SELECT ref, entry FROM entries WHERE substr(ref, 1, ?) = ? ORDER BY ref LIMIT ?", binds)?.to_array()?;
+                let entries: Vec<Value> = rows
+                    .into_iter()
+                    .map(|r| {
+                        let entry: Value = serde_json::from_str(&r.entry).expect("an entry is JSON the ledger wrote");
+                        json!({ "ref": r.r#ref, "entry": entry })
+                    })
+                    .collect();
+                Ok(json!({ "entries": entries }))
             }
-            p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
+            TestHook::Totals => Ok(serde_json::to_value(self.mutate(|l, _, _| Ok(l.totals())).await?).expect("totals serialize")),
         }
     }
 }
 
-/// The org a ledger call is for; only platform code sets it.
-pub const ORG_HEADER: &str = "x-fragment-org";
+/// A ledger's refusal as its caller reads it: the platform's code and
+/// message, and the core's typed reason when the ledger gave one (a cell
+/// failure has none).
+#[derive(Debug)]
+pub struct LedgerError {
+    pub code: ErrorCode,
+    pub message: String,
+    pub refused: Option<Refused>,
+}
 
-/// Asks an org's ledger (from a fragment or the router). Its refusals pass
-/// through; not reaching it is a failure for now (5xx).
-pub async fn ask<R: Route>(env: &Env, org: &str, request: &R) -> CellResult<R::Answer> {
+impl From<LedgerError> for CellError {
+    fn from(e: LedgerError) -> CellError {
+        CellError::new(e.code, e.message)
+    }
+}
+
+impl From<CellError> for LedgerError {
+    fn from(e: CellError) -> LedgerError {
+        LedgerError { code: e.code, message: e.message, refused: None }
+    }
+}
+
+impl From<worker::Error> for LedgerError {
+    fn from(e: worker::Error) -> LedgerError {
+        CellError::from(e).into()
+    }
+}
+
+/// Asks `payer`'s ledger one of its routes (from a fragment, the router,
+/// or the queue's consumer). Not reaching it is `ledger_unavailable`'s
+/// stand-in, a host failure (5xx), which callers treat as passing.
+pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
+    assert!(fragment_core::npub::is_identity(payer), "a ledger is a person's, named by their identity");
     let headers = Headers::new();
-    headers.set(ORG_HEADER, org)?;
+    headers.set(PAYER_HEADER, payer)?;
     headers.set("content-type", "application/json")?;
-    let body = serde_json::to_string(request).map_err(|e| CellError::host(format!("a ledger request: {e}")))?;
+    let body = serde_json::to_string(request).expect("a ledger request serializes");
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
     let req = Request::new_with_init(&format!("https://ledger.internal{}", R::PATH), &init)?;
-    let mut resp = env.durable_object("LEDGER")?.get_by_name(org)?.fetch_with_request(req).await?;
+    let mut resp = env.durable_object("LEDGER")?.get_by_name(payer)?.fetch_with_request(req).await?;
     let status = resp.status_code();
     let bytes = resp.bytes().await?;
     if status == 200 {
-        return serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)));
+        return serde_json::from_slice(&bytes).map_err(|e| CellError::host(format!("the ledger's answer to {}: {e}", R::PATH)).into());
     }
-    match serde_json::from_slice::<fragment_proto::ErrorBody>(&bytes) {
-        Ok(e) => Err(CellError::new(e.error, e.message)),
-        Err(_) => Err(CellError::host(format!("the ledger answered {status}"))),
+    /// A refusal's body: `ErrorBody` and, from the ledger, its reason.
+    #[derive(Deserialize)]
+    struct Refusal {
+        error: ErrorCode,
+        message: String,
+        refused: Option<Refused>,
+    }
+    match serde_json::from_slice::<Refusal>(&bytes) {
+        Ok(r) => Err(LedgerError { code: r.error, message: r.message, refused: r.refused }),
+        Err(_) => Err(CellError::host(format!("the ledger answered {status}")).into()),
     }
 }

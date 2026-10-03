@@ -69,11 +69,14 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, secrets,
-  files, deploy, templates, share, isolation, ops, public, effects,
-  facet-cap, app-lockdown, site, watch, schemas, channels, live, routes,
-  cli, browser, jobs, triggers, appfiles, blobs, notes, push, ai,
-  budget, agents, addon, sync, restart, pathmode;
-  `crates/e2e/src/lanes/mod.rs`). A check local workerd cannot make (its
+  delegation, files, deploy, templates, share, isolation, ops, public,
+  effects, facet-cap, app-lockdown, site, watch, schemas, channels,
+  live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
+  push, ai, ledger, agents, addon, computers, hermes, sync, restart,
+  pathmode; `crates/e2e/src/lanes/mod.rs`). `computers` runs the stub
+  image (`images/stub`) in Docker; `hermes`, the real-Hermes lane, builds
+  and runs our Hermes image (3.8 GB), so it runs only by name
+  (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
@@ -92,9 +95,11 @@ prebuilt bundle is in the debt ledger).
   `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change,
   agents (`agent/`, goose's loop) beside it in the same process (the router
-  hands them `/api/agents` and `/api/a/*`), whose turns spend their
-  owner's budget (a per-person OpenRouter key, minted with the management
-  key `OPENROUTER_MANAGEMENT_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  hands them `/api/agents` and `/api/a/*`), whose model calls go through
+  the model route to the Workers AI fake on :8796 (echoes; dev never calls
+  a real model) and spend their owner's ledger (dev people are seats, with
+  the month's included credit; images and videos only with the key
+  `OPENROUTER_API_KEY_FILE` names), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -122,8 +127,17 @@ prebuilt bundle is in the debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, OpenRouter, WorkOS, a push service),
+
   `crates/devstack`, `crates/e2e`.
+- `images/` (the computer images: the bridge, the stub, our Hermes image;
+  docs/bridge.md) is its own workspace: `cargo test --workspace` and
+  `cargo clippy --workspace --all-targets -- -D warnings` there (CI:
+  `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
+  docker -- --ignored` builds both images and runs them in Docker
+  (linux/amd64) against a fake API and a scripted model, real Hermes
+  included. The e2e's computer sections run the stub image under
+  `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check` and `e2e` on Linux.
   `release.yml` builds the CLI for macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev

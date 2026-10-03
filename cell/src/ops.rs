@@ -187,10 +187,14 @@ impl FragmentCell {
     /// and the loader's callbacks read the code when there is none.
     pub(crate) fn facet(&self) -> CellResult<js::Facet> {
         let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
-        if rows.is_empty() {
+        let Some(loader_id) = rows.first().and_then(|r| r["loader_id"].as_str()) else {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
-        }
+        };
+        // the version the loader runs (installed_id less this fragment's
+        // key, which is the same for every version of it): one dynamic worker a day
+        self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+
     }
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.
@@ -224,6 +228,11 @@ impl FragmentCell {
         // mutation or a job acts, which takes a membership of one's own
         let purpose = if decl.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
         let role = decide(facts.visibility, standing, purpose, decl.role)?;
+        // a mutation or a job writes: past its owner's overdraft the fragment
+        // takes none, and its queries still answer
+        if decl.kind != OpKind::Query {
+            self.writable().await?;
+        }
         // Members act with their own role, which is never `public`: only
         // callers holding the public floor alone are rate limited.
         if role == Role::Public && !self.rate.borrow_mut().allow(principal, js::now_ms()) {
@@ -420,12 +429,14 @@ impl FragmentCell {
                 }
                 json!({ "aged": ms })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects" | "fail-meter-acks" | "fail-after-paid")) => {
                 let key = match lever {
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
                     "fail-join" => MetaKey::TestFailJoin,
+                    "fail-meter-acks" => MetaKey::TestFailMeterAcks,
+                    "fail-after-paid" => MetaKey::TestFailAfterPaid,
                     _ => MetaKey::TestDropEffects,
                 };
                 let times = body["times"].as_u64().ok_or_else(|| CellError::invalid(format!("{lever} names how many times")))?;
@@ -484,7 +495,26 @@ impl FragmentCell {
                 json!({ "members": self.fill_members(fill)? })
             }
             Some("code-builds") => json!({ "builds": self.app.builds() }),
-            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, forget-steps, hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, or age-outside")),
+            Some("meter-now") => {
+                // every counted minute closed, a storage sample taken, and
+                // the batch sent now (a waiting one again: the ledger
+                // answers a resend as before)
+                if body["sample"] != false {
+                    self.sample_storage(true).await?;
+                }
+                if body["resend"] == true {
+                    self.exec("UPDATE meter_batches SET sent_at = NULL", vec![])?;
+                }
+                self.flush_meters(true).await?;
+                self.meter_state()?
+            }
+            Some("meter") => self.meter_state()?,
+            Some("forget-standing") => {
+                *self.standing.borrow_mut() = None;
+                json!({ "ok": true })
+            }
+            _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, or forget-standing")),
         })
     }
 }

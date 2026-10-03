@@ -257,11 +257,12 @@ export class App extends DurableObject {
 - **`fetch(request)`**, if the App has one, answers every site path that
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.
-- **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning})`,
-  `job.ai.image({prompt, path})`, `job.ai.video({prompt, path})` call
-  OpenRouter with the fragment's `OPENROUTER_API_KEY` secret; images and
-  video are written to `path` on `main`. A reasoning model can spend a
-  small `max_tokens` thinking: pass `reasoning: {effort: "low"}`.
+- **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning_effort})`,
+  `job.ai.image({prompt, path})`, `job.ai.video({prompt, path})`. Text
+  runs on a tier, `model: "cheap"` (the default) or `"medium"`; images and
+  video are written to `path` on `main`. You pay for them, from your
+  ledger (below). GLM can spend a small `max_tokens` thinking:
+  `reasoning_effort` is `low` unless you ask for `high`.
 
 ## An agent in your fragment
 
@@ -277,7 +278,7 @@ calories` is a working example):
   "channels":   { "ask":  { "read": "viewer", "post": "viewer" },
                   "work": { "read": "viewer", "post": "editor" } },
   "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask",
-             "model": "z-ai/glm-5.3-flash" }
+             "model": "cheap" }
 }
 ```
 
@@ -289,7 +290,8 @@ calories` is a working example):
   of one.
 - `tools` are operations of this fragment (never an owner-only one): the
   model is offered those, as the person asking may call them, and no
-  other fragment's, no files, no deploy. `model` is optional.
+  other fragment's, no files, no deploy. `model` is optional: a tier,
+  `cheap` (the default) or `medium`.
 - A signed-in person's post to the channel (`fragment.post("ask",
   {text})`) starts a turn; an anonymous one starts nothing. Someone
   signed in who holds the link counts as a viewer for it, as they do on
@@ -299,7 +301,8 @@ calories` is a working example):
 - Its answer lands on the channel as `{text, turn}`, and its steps on
   `work` (a start naming who asked, each tool call, an end): render them
   as you like.
-- You pay for its model calls, from your budget.
+- You pay for its model calls, from your ledger. Past your fragment's
+  cap, it answers only you.
 
 A job asks it too, for the run's principal (a triggered run's: the
 fragment, as an editor), and waits for the answer:
@@ -395,18 +398,27 @@ fragment rotate my-thing --view                            # a new share link
 Only the owner manages members, invites, visibility, and tokens.
 `fragment.json` grants nothing.
 
-## Your AI budget
+## Your ledger
 
-The fragments you own pay for their AI (`job.ai`) from your monthly
-budget, whoever started the run, unless a fragment sets its own
-`OPENROUTER_API_KEY`; so do your agents' model calls, whoever asked them. A step reserves its worst case first; one the month
-cannot cover is held ("budget used up"): replay it after a top-up or next
-month.
+You pay for what is yours: your fragments' hosting (requests, storage, a
+code version's day) and their AI (`job.ai`), whoever started the run, and
+your agents' model calls, whoever asked them. A seat includes credit
+each month; operators grant more. A paid step reserves its worst case
+first, and one your ledger cannot cover is held, saying why: replay it
+after a top-up or next month.
+
+- At zero, agents and AI stop; your fragments keep serving and taking
+  writes.
+- $2 below zero, your fragments go read-only (reads still serve) until a
+  top-up brings you above zero.
+- Each fragment has a monthly cap, $5 unless you set one: past it, AI
+  steps and agent turns there stop for everyone but you.
 
 ```
-fragment budget              # what is left this month, and what spent it
-fragment budget usage        # every paid step this month (--period 2026-09)
-fragment runs my-thing       # each run shows what it cost
+fragment ledger                    # your credit, your plan, what is stopped, this month's spend by fragment
+fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
+fragment runs my-thing             # each run shows what it cost
+fragment ledger grant ann 20 --why "a top-up"   # operators only
 ```
 
 ## You and your keys
@@ -451,8 +463,7 @@ fragment secret rm my-thing API_KEY
 ```
 
 Your code never holds a secret: `job.fetch` fills `{{API_KEY}}` in a
-header at the way out, and AI steps use `OPENROUTER_API_KEY`. Never write
-secret values into files.
+header at the way out. Never write secret values into files.
 
 ## Rules of the road
 
@@ -471,7 +482,8 @@ fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
-fragment budget [usage [--period P] | top-up <id> <usd>]
+fragment ledger [grant <who> <usd> --why W]
+fragment cap <name> <usd>|default
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
@@ -510,7 +522,8 @@ its wording:
 - `too_large`: over a limit the message names (413)
 - `app_failed`: the app's code refused or threw (422)
 - `rate_limited`: too many calls; back off (429)
-- `budget_used_up`: this month's AI budget cannot cover it (402)
+- `budget_used_up`: your ledger refused it: no credit, a fragment's cap, or read-only past the overdraft (402); `fragment ledger` says which
+
 - `storage_full`: the app's database is at its cap; the change rolled back (507)
 - `unavailable`: the host, or a service behind it, did not answer; retrying is safe
 - `outcome_unknown`: a write's answer was lost; it may have been applied

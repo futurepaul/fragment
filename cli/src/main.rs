@@ -15,11 +15,12 @@ use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEM
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use fragment_core::budget::dollars;
+use fragment_core::price::{dollars, USD};
+use fragment_proto::ledger::{LedgerStatus, Standing};
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
-    AgentState, BudgetView, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted,
-    Rotated, Run, RunList, TurnOutcome, Visibility,
+    AgentState, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted, Rotated,
+    Run, RunList, TurnOutcome, Visibility,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -198,11 +199,19 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
-    /// Your AI budget this month: what is left, and what spent it (the
-    /// fragments you own pay for their AI unless they have their own key)
-    Budget {
+    /// Your usage ledger: your credit, your plan, what you may still
+    /// spend, and this month's spend by fragment (your fragments' hosting
+    /// and AI, and your agents' models, bill you)
+    Ledger {
         #[command(subcommand)]
-        sub: Option<BudgetCmd>,
+        sub: Option<LedgerCmd>,
+    },
+    /// A fragment's monthly cap, which you own: past it, AI steps and agent
+    /// turns stop for everyone but you until next month (default $5)
+    Cap {
+        name: String,
+        /// Dollars a month, or `default`
+        usd: String,
     },
     /// Pause an operation's triggers (calls still work)
     Pause { name: String, op: String },
@@ -320,7 +329,7 @@ enum AgentCmd {
     /// Make an agent you own; prints its npub (add it to fragments as a member)
     Create {
         name: String,
-        /// An OpenRouter model id (default z-ai/glm-5.3-flashx)
+        /// Its model tier: cheap (the default) or medium
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -352,14 +361,37 @@ enum AgentCmd {
 }
 
 #[derive(Subcommand)]
-enum BudgetCmd {
-    /// Every paid step this month (or --period YYYY-MM)
-    Usage {
+enum LedgerCmd {
+    /// Grant someone credit (the deployment's operators): a username, an
+    /// identity (id:…), or `me`
+    Grant {
+        who: String,
+        usd: f64,
+        /// Why, for whoever reads the ledger later
         #[arg(long)]
-        period: Option<String>,
+        why: String,
+        /// The grant's id (again: the same grant, made once)
+        #[arg(long)]
+        id: Option<String>,
     },
-    /// Add dollars to someone's month (the fleet's operators)
-    TopUp { who: String, usd: f64 },
+}
+
+/// Dollars, as the ledger's micro-dollars: positive, at most a cent's
+/// millionth apart from what was typed.
+fn micros_of(usd: f64) -> Result<i64> {
+    if !usd.is_finite() || usd <= 0.0 || usd > 1e9 {
+        return Err(usage("a positive number of dollars"));
+    }
+    Ok((usd * USD as f64).round() as i64)
+}
+
+/// What a standing stops, for people.
+fn standing_text(s: &Standing) -> String {
+    match s {
+        Standing::Ok => "agents run, AI runs, fragments take writes".into(),
+        Standing::AgentsStopped { why } => format!("agents and AI are stopped ({})", serde_json::to_value(why).unwrap_or_default().as_str().unwrap_or("")),
+        Standing::ReadOnly { why } => format!("your fragments are read-only ({})", serde_json::to_value(why).unwrap_or_default().as_str().unwrap_or("")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -395,6 +427,9 @@ enum MembersCmd {
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// Lend the member's agents nothing: only the person acts with it
+        #[arg(long)]
+        people_only: bool,
     },
     /// Remove a member (owner only)
     Rm { name: String, who: String },
@@ -1115,42 +1150,37 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Cmd::Budget { sub } => match sub {
+        Cmd::Ledger { sub } => match sub {
             None => {
-                let v: BudgetView = c.call_as(c.get("/api/budget")?)?;
+                let v: LedgerStatus = c.call_as(c.get("/api/ledger")?)?;
                 json_exit(j, &v);
-                println!(
-                    "{}: {} of {} left ({} spent{})",
-                    v.period,
-                    dollars(v.remaining_micros.max(0)),
-                    dollars(v.allowance_micros),
-                    dollars(v.spent_micros),
-                    if v.reserved_micros > 0 { format!(", {} held by steps running now", dollars(v.reserved_micros)) } else { String::new() }
-                );
-                if v.warn {
-                    println!("most of this month's budget is used: paid steps stop when it runs out");
-                }
-                for u in v.usage.iter().take(10) {
-                    println!("  {}\t{}\t{}\t{}", dollars(u.quantity), u.kind, u.fragment, u.state.as_str());
+                let plan = serde_json::to_value(v.plan)?.as_str().unwrap_or("").to_string();
+                println!("{}: {} available ({} balance, {} held by calls running now), plan {plan}", v.month, dollars(v.available_micros.max(0)), dollars(v.balance_micros), dollars(v.reserved_micros));
+                println!("{}", standing_text(&v.standing));
+                for f in &v.fragments {
+                    println!("  {}\t{} of its {} cap", f.fragment, dollars(f.spent_micros), dollars(f.cap_micros));
                 }
             }
-            Some(BudgetCmd::Usage { period }) => {
-                let path = match period {
-                    Some(p) => format!("/api/budget/usage?period={}", encode_q(&p)),
-                    None => "/api/budget/usage".to_string(),
-                };
-                let v: BudgetView = c.call_as(c.get(&path)?)?;
-                json_exit(j, &v);
-                for u in &v.usage {
-                    println!("{}\t{}\t{}\t{}\t{}", dollars(u.quantity), u.state.as_str(), u.kind, u.model.as_deref().unwrap_or(""), u.source_ref);
-                }
-            }
-            Some(BudgetCmd::TopUp { who, usd }) => {
-                let v: BudgetView = c.call_as(c.post_json(&format!("/api/budget/{who}/top-up"), &json!({ "usd": usd }))?)?;
-                json_exit(j, &v);
-                println!("{who}: {} of {} left in {}", dollars(v.remaining_micros), dollars(v.allowance_micros), v.period);
+            Some(LedgerCmd::Grant { who, usd, why, id }) => {
+                let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
+                let id = id.unwrap_or_else(|| format!("cli-{:016x}", rand::random::<u64>()));
+                let body = json!({ "id": id, "micros": micros_of(usd)?, "by": me.id, "why": why });
+                c.call(c.post_json(&format!("/api/ledger/{who}/grant"), &body)?)?;
+                json_exit(j, &json!({ "granted": body }));
+                println!("granted {who} {} ({id})", dollars(micros_of(usd)?));
             }
         },
+        Cmd::Cap { name, usd } => {
+            let micros = match usd.as_str() {
+                "default" => None,
+                n => Some(micros_of(n.parse::<f64>().map_err(|_| usage("a cap is dollars, or `default`"))?)?),
+            };
+            let id = format!("cli-{:016x}", rand::random::<u64>());
+            let v = c.call(c.put_json(&format!("/api/f/{name}/cap"), &json!({ "id": id, "micros": micros }))?)?;
+            json_exit(j, &v);
+            println!("{name}: {} a month{}", dollars(v["capMicros"].as_i64().unwrap_or(0)), if v["default"] == true { " (the default)" } else { "" });
+        }
+
         Cmd::Triggers { name } => {
             let v = c.call(c.get(&format!("/api/f/{name}/triggers"))?)?;
             json_exit(j, &v);
@@ -1384,10 +1414,10 @@ fn run(cli: Cli) -> Result<()> {
                     println!("{}\t{}{owned}", m.role.as_str(), m.principal);
                 }
             }
-            MembersCmd::Add { name, who, role } => {
+            MembersCmd::Add { name, who, role, people_only } => {
                 let who = member_named(who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role })?)?)?;
+                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {

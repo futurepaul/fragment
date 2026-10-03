@@ -222,6 +222,10 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::files::CAP_HEADER, "files")))
     } else if path == "deliver/report" {
         Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
+    } else if path.starts_with("computer/") {
+        Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
+    } else if path == "meter/acked" || path == "meter/whose" {
+        Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path.starts_with("test/") {
         Ok(None)
     } else {
@@ -241,6 +245,21 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
     Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
+}
+
+/// The internal call `path` with a JSON `body` on the Durable Object
+/// `name` of `binding`: its JSON answer, or its refusal as it named it.
+pub(crate) async fn ask_object(env: &Env, binding: &str, name: &str, path: &str, body: &serde_json::Value) -> CellResult<serde_json::Value> {
+    let req = internal_request(path, &body.to_string())?;
+    let mut resp = env.durable_object(binding)?.get_by_name(name)?.fetch_with_request(req).await?;
+    let status = resp.status_code();
+    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    if status == 200 {
+        return Ok(v);
+    }
+    let code = v["error"].as_str().and_then(|c| serde_json::from_value::<ErrorCode>(serde_json::json!(c)).ok()).unwrap_or(ErrorCode::HostFailed);
+    let message = v["message"].as_str().map(str::to_string).unwrap_or_else(|| format!("{binding} {name} answered {status}"));
+    Err(CellError::new(code, message))
 }
 
 /// `internal_request` for `entry.mjs` (the job driver and the `Files`

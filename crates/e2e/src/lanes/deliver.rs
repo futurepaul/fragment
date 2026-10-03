@@ -1,8 +1,10 @@
 //! Deliveries and AI (slice F): web push from mutations and jobs through
 //! the delivery queue to a push service that checks VAPID and decrypts as
 //! a browser would; subscriptions that are gone, retries, the dead-letter
-//! report; `notifyUrls`; and OpenRouter text, images, and video as a
-//! job's steps, with generated media stored as files.
+//! report; `notifyUrls`; and AI as a job's steps: text through the model
+//! route (the Workers AI fake), images and video on OpenRouter with the
+//! deployment's key, generated media stored as files. What each paid step
+//! costs is the ledger section's.
 
 use std::time::{Duration, Instant};
 
@@ -195,23 +197,20 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait))
     };
 
-    let r = run("t0", "summarize", json!({ "text": "hi" }))?;
-    s.ok("without the fragment's own OPENROUTER_API_KEY, its owner's budget pays (the budget section)", r["status"] == "succeeded", &r);
-    api.call(Call {
-        method: "PUT",
-        url: format!("{}/api/f/{name}/secrets/OPENROUTER_API_KEY", api.base),
-        body: Some(crate::OPENROUTER_KEY.as_bytes().to_vec()),
-        keys: Some(&owner),
-        ..Call::default()
-    })?;
     let r = run("t1", "summarize", json!({ "text": "the meeting notes" }))?;
-    s.ok("a job's text step answers the model's text", r["output"]["text"] == "echo: the meeting notes" && r["output"]["model"] == "openai/gpt-5-mini", &r);
-    let calls = s.openrouter.calls();
     s.ok(
-        "OpenRouter got the fragment's key, and the model",
-        calls.iter().any(|c| c.1 == "/api/v1/chat/completions" && c.2 == "openai/gpt-5-mini" && c.3 == format!("Bearer {}", crate::OPENROUTER_KEY)),
-        format!("{calls:?}"),
+        "a job's text step answers the model's text, on the model its tier names",
+        r["output"]["text"] == "echo: the meeting notes" && r["output"]["model"] == "@cf/zai-org/glm-5.3" && r["output"]["tier"] == "medium",
+        &r,
     );
+    let call = s.ai.calls().last().cloned();
+    s.ok(
+        "the model route sent its input bounded: the job's reasoning effort as given (high is one GLM takes), its tokens capped",
+        call.as_ref().is_some_and(|c| c.model == "@cf/zai-org/glm-5.3" && c.body["reasoning_effort"] == "high" && c.body["max_tokens"] == 16_384 && c.body.get("model").is_none()),
+        format!("{call:?}"),
+    );
+    let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
+    s.ok("a step on the high tier is refused, saying why (decision 23)", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("high tier is off")), &r);
 
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.png" }))?;
     s.ok(
@@ -220,11 +219,10 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     s.ok(
-        "the job's reasoning option reaches OpenRouter as given",
-        calls.iter().any(|c| c.1 == "/api/v1/chat/completions" && c.4 == r#"{"effort":"low"}"#),
-        format!("{calls:?}"),
+        "with the image model the plan names, on the deployment's own key",
+        s.openrouter.calls().iter().any(|c| c.1 == "/api/v1/images" && c.2 == "google/gemini-3.1-flash-lite-image" && c.3 == format!("Bearer {}", crate::OPENROUTER_KEY)),
+        "",
     );
-    s.ok("with the image model the plan names", s.openrouter.calls().iter().any(|c| c.1 == "/api/v1/images" && c.2 == "google/gemini-3.1-flash-lite-image"), "");
     let big = image_bytes("a large mural");
     let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.png" }))?;
     let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "art/mural.png").unwrap_or_default());
@@ -250,12 +248,16 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         "",
     );
 
-    s.openrouter.fail_next(&[503]);
+    s.ai.fail_next(&[503]);
     let r = run("t2", "summarize", json!({ "text": "again" }))?;
-    s.ok("an OpenRouter 503 is retried", r["output"]["text"] == "echo: again", &r);
+    s.ok("the model's 503 is retried", r["output"]["text"] == "echo: again", &r);
+    s.openrouter.fail_next(&[503]);
+    let r = run("i3", "draw", json!({ "prompt": "a harbour", "path": "art/harbour.png" }))?;
+    s.ok("an OpenRouter 503 is retried", r["status"] == "succeeded", &r);
     s.openrouter.fail_next(&[402]);
-    let r = run("t3", "summarize", json!({ "text": "no money" }))?;
-    s.ok("out of credits holds the run, saying so", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("out of credits")), &r);
+    let r = run("i4", "draw", json!({ "prompt": "no money", "path": "art/none.png" }))?;
+    s.ok("OpenRouter out of credits holds the run, saying so", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("out of credits")), &r);
+
     let everything = format!("{}{}", events(api, &owner, &name), api.signed(&owner, "GET", &format!("/api/f/{name}/runs?limit=200"), None)?.text);
     s.ok("the key appears in no run or event", !everything.contains(crate::OPENROUTER_KEY), "the key leaked");
     Ok(())

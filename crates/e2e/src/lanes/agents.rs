@@ -1,7 +1,8 @@
 //! Agents (phase 5): an agent is a key with goose's loop and its
 //! conversations in its own cell. Its tools are the operations of the
 //! fragments it belongs to and the platform's verbs, called through the
-//! signed API; the model is the OpenRouter fake, scripted. Turns steer,
+//! signed API; its model calls go through the platform's model route to the
+//! Workers AI fake, scripted, and its owner's ledger pays. Turns steer,
 //! stop, and survive a killed node without running an operation twice (the
 //! spike's checks, on the product). An agent acts for whoever asked,
 //! capped (ROADMAP decision 17): at the platform and through its turns.
@@ -9,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fragment_fakes::openrouter::Reply;
+use fragment_fakes::workers_ai::Reply;
 use fragment_nip98::Keys;
 use fragment_proto::limits;
 use serde_json::{json, Value};
@@ -69,7 +70,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let full = format!("{name}.{username}");
     s.ok(
         "the owner makes an agent under their username: its own key, registered as theirs at once",
-        r.status == 200 && agent_npub.starts_with("npub1") && r.body["name"] == full.as_str() && r.body["model"] == fragment_proto::AGENT_MODEL && agent_id.starts_with("id:"),
+        r.status == 200 && agent_npub.starts_with("npub1") && r.body["name"] == full.as_str() && r.body["model"] == fragment_proto::DEFAULT_TIER.as_str() && agent_id.starts_with("id:"),
         &r,
     );
     let reg = api.signed(&owner, "GET", &format!("/api/identities/{agent_id}"), None)?;
@@ -184,9 +185,14 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // a turn: the model calls the operation, then answers
-    s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "milk" }))]), Reply::Text("Added milk.".into())]);
-    let calls_before = s.openrouter.calls().len();
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "milk" }))]), Reply::Text("Added milk.".into())]);
+    let calls_before = s.ai.calls().len();
+    let metered = || {
+        let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "entries", "prefix": "aig:" })));
+        r.map(|r| r.body["entries"].as_array().map_or(0, Vec::len)).unwrap_or(0)
+    };
+    let metered_before = metered();
     let r = agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add milk to my list" })))?;
     s.ok("a turn starts", r.status == 200 && r.body["started"] == true, &r);
     // one read that waits in the agent's cell, not a view read twice a second
@@ -205,16 +211,18 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let ops = api.signed(&owner, "GET", &format!("/api/f/{todo}/channels/ops"), None)?;
     let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
     s.ok("as the agent (its key, through the signed API)", by_agent, &ops);
-    // the owner's org key, minted by the platform's Ledger with their allowance as its limit
-    let org = format!("fragment org:{}", owner_id.trim_start_matches("id:"));
-    let owners = s.openrouter.minted().into_iter().find(|m| m.name == org).map(|m| format!("Bearer {}", m.key));
-    let spent: Vec<String> = s.openrouter.calls()[calls_before..].iter().filter(|c| c.1 == "/api/v1/chat/completions").map(|c| c.3.clone()).collect();
+    // each model call went through the model route, metered on the owner's ledger
+    let calls = s.ai.calls()[calls_before..].to_vec();
+    let paid = metered() - metered_before;
     s.ok(
-        "its turn spent its owner's month: every model call carried the owner's own key",
-        owners.is_some() && !spent.is_empty() && spent.iter().all(|a| Some(a) == owners.as_ref()),
-        format!("{} calls; owner's key minted: {}", spent.len(), owners.is_some()),
+        "its turn's model calls went through the model route on its tier, each metered on its owner's ledger, its agent an opaque id",
+        calls.len() == 2
+            && paid == 2
+            && calls.iter().all(|c| c.model == "@cf/zai-org/glm-5.3-flash" && c.metadata["agent_id"].as_str().is_some_and(|a| a.len() == 16) && c.affinity.as_deref() == c.metadata["agent_id"].as_str()),
+        format!("{} calls, {paid} metered: {calls:?}", calls.len()),
     );
-    let chats = s.openrouter.chats();
+
+    let chats = s.ai.chats();
     let schema = chats
         .iter()
         .flat_map(|c| c["tools"].as_array().cloned().unwrap_or_default())
@@ -226,16 +234,16 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // in (the 403 of 2026-09-25): through the platform's verbs, for the owner
     let marker = format!("marker-{}", &agent_id[3..11]);
     api.signed(&owner, "POST", &format!("/api/f/{other}/files"), Some(&json!({ "files": [{ "path": "notes.txt", "text": marker }] })))?;
-    s.openrouter.clear_script();
-    s.openrouter.script(&[
+    s.ai.clear_script();
+    s.ai.script(&[
         Reply::Tools(vec![("platform__read_file".into(), json!({ "fragment": other, "path": "notes.txt" }))]),
         Reply::Tools(vec![("platform__call".into(), json!({ "fragment": other, "operation": "add_todo", "input": { "text": "by my agent" } }))]),
         Reply::Text("Added it to your other list.".into()),
     ]);
-    let asked = s.openrouter.chats().len();
+    let asked = s.ai.chats().len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add to my other list" })))?;
     let v = settle(s, &agents, &owner, &name, wait);
-    let read = s.openrouter.chats().get(asked + 1).is_some_and(|c| c["messages"].to_string().contains(&marker));
+    let read = s.ai.chats().get(asked + 1).is_some_and(|c| c["messages"].to_string().contains(&marker));
     s.ok("the owner's turn reads a file of an app the owner made, which its agent is not in", read && v["outcome"] == "idle", json!({ "outcome": v["outcome"], "error": v["error"] }));
     let ops = api.signed(&owner, "GET", &format!("/api/f/{other}/channels/ops"), None)?;
     let by_agent = ops.body["records"].as_array().into_iter().flatten().any(|r| r["body"]["op"] == "add_todo" && r["principal"] == agent_id.as_str());
@@ -244,8 +252,8 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // it makes a fragment from a template for its owner, as they could
     let label = s.name("counter");
     let app = format!("{label}.{username}");
-    s.openrouter.clear_script();
-    s.openrouter.script(&[
+    s.ai.clear_script();
+    s.ai.script(&[
         Reply::Tools(vec![("platform__create_fragment".into(), json!({ "label": label, "template": "blank" }))]),
         Reply::Text("Your page is up.".into()),
     ]);
@@ -266,7 +274,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
 
     // steer mid-tool: the message waits for the tool, then joins the turn
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 3000 })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "eggs" }))]), Reply::Text("Added eggs and noted bread.".into())]);
+    s.ai.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "eggs" }))]), Reply::Text("Added eggs and noted bread.".into())]);
     let before = runs_of(&view(&agents, &owner, &name), &add).len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add eggs" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &name), &add).len() > before);
@@ -274,12 +282,12 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a message during a turn steers it", r.body["steered"] == true, &r);
     let v = settle(s, &agents, &owner, &name, wait);
     let steered = v["messages"].as_array().into_iter().flatten().any(|m| m["steer"] == true && m["text"] == "and bread");
-    let seen = s.openrouter.chats().last().is_some_and(|c| c["messages"].to_string().contains("and bread"));
+    let seen = s.ai.chats().last().is_some_and(|c| c["messages"].to_string().contains("and bread"));
     s.ok("the steer joins the conversation after the tool, and the model reads it", steered && seen && v["outcome"] == "idle", &v);
 
     // stop: a held tool call ends at once, interrupted
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 8000 })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(fragment_core::tools::tool_name(&todo, "list").expect("a tool name"), json!({}))]), Reply::Text("unused".into())]);
+    s.ai.script(&[Reply::Tools(vec![(fragment_core::tools::tool_name(&todo, "list").expect("a tool name"), json!({}))]), Reply::Text("unused".into())]);
     let list = fragment_core::tools::tool_name(&todo, "list").expect("a tool name");
     let before = runs_of(&view(&agents, &owner, &name), &list).len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "read my list slowly" })))?;
@@ -291,12 +299,12 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let v = settle(s, &agents, &owner, &name, wait);
     let took = t0.elapsed();
     s.ok("stop ends a turn mid-tool, well before the tool would", r.status == 200 && v["outcome"] == "stopped" && took < Duration::from_secs(4), format!("{took:?} {}", v["outcome"]));
-    s.openrouter.clear_script();
+    s.ai.clear_script();
 
     // a kill after the operation ran, before its result was saved: the
     // watchdog replays the call with the same id, and it runs once
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_in_tool_ms": 4000, "watchdog_ms": 3000 })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "once" }))]), Reply::Text("Added it once.".into())]);
+    s.ai.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "once" }))]), Reply::Text("Added it once.".into())]);
     let before = runs_of(&view(&agents, &owner, &name), &add).len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add once" })))?;
     s.eventually(wait, || runs_of(&view(&agents, &owner, &name), &add).len() > before);
@@ -312,7 +320,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a kill after the tool's result was saved: nothing runs again
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "hold_after_tool_ms": 4000, "watchdog_ms": 3000 })))?;
-    s.openrouter.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "between" }))]), Reply::Text("Done between.".into())]);
+    s.ai.script(&[Reply::Tools(vec![(add.clone(), json!({ "text": "between" }))]), Reply::Text("Done between.".into())]);
     let tools_steps = |v: &Value| v["steps"].as_array().into_iter().flatten().filter(|st| st["step"] == "tools").count();
     let steps_before = tools_steps(&view(&agents, &owner, &name));
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "add between" })))?;
@@ -332,12 +340,12 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     let window = 6;
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "window_messages": window })))?;
     let list = fragment_core::tools::tool_name(&todo, "list").expect("a tool name");
-    s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("Your list is long.".into())]);
-    let asked = s.openrouter.chats().len();
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("Your list is long.".into())]);
+    let asked = s.ai.chats().len();
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "what is on my list?" })))?;
     let v = settle(s, &agents, &owner, &name, wait);
-    let chats = s.openrouter.chats();
+    let chats = s.ai.chats();
     let sent: Vec<usize> = chats.iter().skip(asked).map(|c| c["messages"].as_array().map_or(0, |m| m.len())).collect();
     let stored = v["messages"].as_array().map_or(0, |m| m.len());
     let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
@@ -352,13 +360,13 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // a turn that alone outgrows the window ends in an error that says so;
     // the agent is not broken: the next message starts a turn that fits
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({ "window_messages": 2 })))?;
-    s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("unused".into())]);
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Tools(vec![(list.clone(), json!({}))]), Reply::Text("unused".into())]);
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "read it again" })))?;
     let v = settle(s, &agents, &owner, &name, wait);
     s.ok("a turn longer than the window ends in an error that says so", v["outcome"] == "error" && v["error"].as_str().is_some_and(|e| e.contains("outgrew")), json!({ "outcome": v["outcome"], "error": v["error"] }));
-    s.openrouter.clear_script();
-    s.openrouter.script(&[Reply::Text("Still here.".into())]);
+    s.ai.clear_script();
+    s.ai.script(&[Reply::Text("Still here.".into())]);
     agents.signed(&owner, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": "are you there?" })))?;
     let v = settle(s, &agents, &owner, &name, wait);
     let last = v["messages"].as_array().and_then(|m| m.last()).cloned().unwrap_or_default();
@@ -376,7 +384,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "lens": lens, "newest": newest }),
     );
     agents.signed(&owner, "POST", &format!("/api/a/{name}/test"), Some(&json!({})))?;
-    s.openrouter.clear_script();
+    s.ai.clear_script();
 
     // an agent follows more than 16 channels: it listens to a 17th room's
     // chat, and a room deleted is dropped from what it follows as it

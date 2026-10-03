@@ -31,7 +31,7 @@ use worker::{Delay, SqlStorage, Storage};
 
 use crate::fleet::Fleet;
 use crate::js;
-use crate::model::{self, OpenRouter, Spend};
+use crate::model::{self, ModelRoute};
 use crate::progress::Progress;
 use crate::store::{self, kv_get, kv_set, kv_u64, Effect, Session, Store};
 use crate::tools::{FragmentTools, Scope};
@@ -43,13 +43,12 @@ pub const WATCHDOG_MS_MIN: u64 = 2_000;
 const EVENTS_BUFFER: usize = 1024;
 
 pub struct Model {
-    /// The OpenRouter base (`OPENROUTER_API_URL`, default https://openrouter.ai).
-    pub base: String,
+    /// The agent's tier (the platform's model route picks its model).
     pub name: String,
     /// One model call's deadline (model.rs `DEADLINE_MS`, or a test control's).
     pub deadline_ms: u64,
-    /// Where its calls are paid (the owner's month).
-    pub spend: Spend,
+    /// The fragment the turn is in, whose cap its calls are under.
+    pub fragment: Option<String>,
 }
 
 /// One turn's driver: its conversation, and whom it acts for.
@@ -242,7 +241,8 @@ pub async fn drive(driver: Driver) -> anyhow::Result<TurnOutcome> {
     arm_watchdog(&driver.storage, &sql).await?;
     let store = Store { sql: driver.storage.sql() };
     let provider: Arc<dyn Provider> =
-        Arc::new(OpenRouter { base: driver.model.base.clone(), deadline_ms: driver.model.deadline_ms, spend: driver.model.spend.clone() });
+        Arc::new(ModelRoute { fleet: driver.fleet.acting_for(&driver.asker), fragment: driver.model.fragment.clone(), deadline_ms: driver.model.deadline_ms });
+
     let fleet = driver.fleet.acting_for(&driver.asker);
     let tools = FragmentTools::new(fleet, driver.storage.sql(), driver.id.clone(), driver.conv.clone(), driver.owner_turn, driver.scope.clone());
     let operation = ToolOperation::new().with_provider(Arc::new(tools));

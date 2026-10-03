@@ -146,6 +146,16 @@ pub struct SetFragmentCap {
     pub micros: Option<i64>,
 }
 
+/// `PUT /api/f/<name>/cap` (the fragment's owner): its monthly cap, in
+/// micro-dollars, or `None` for the default. The path names the fragment;
+/// `id` makes the change once (the same id again changes nothing).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PutCap {
+    pub id: String,
+    pub micros: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

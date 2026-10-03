@@ -99,11 +99,11 @@ export class App extends DurableObject {
     return await job.call("no_such_op", {});
   }
 
-  // A step whose args do not fit (a text step names no model): the
-  // platform says why, and the job may catch it.
+  // A step whose args do not fit (a video names no prompt): the platform
+  // says why, and the job may catch it.
   async misfit(_input, job) {
     try {
-      await job.ai.text({ prompt: "which model?" });
+      await job.ai.video({ path: "what.mp4" });
       return { caught: false };
     } catch (e) {
       return { caught: true, name: e.name, message: e.message };

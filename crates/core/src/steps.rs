@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::de::value::MapDeserializer;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::effects::FileContent;
 
@@ -150,17 +150,18 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
     Option::<String>::deserialize(d).map(Some)
 }
 
-/// `job.ai.text`: chat completions. Keys the platform does not read are
-/// ignored, as OpenRouter's would be.
+/// `job.ai.text`: chat completions through the platform's model route
+/// (cell/src/models.rs). Keys the platform does not read are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiText {
-    /// An OpenRouter model id.
-    pub model: String,
+    /// A tier (`fragment_proto::Tier`: `cheap` unless named), never a model id.
+    pub model: Option<String>,
     /// The conversation; without it, `prompt` is one user message.
     pub messages: Option<Vec<Value>>,
     pub prompt: Option<String>,
-    /// OpenRouter's reasoning control, passed as given.
-    pub reasoning: Option<Map<String, Value>>,
+    /// GLM's reasoning control (`low` or `high`; anything else is `low`:
+    /// crate::models).
+    pub reasoning_effort: Option<String>,
     pub max_tokens: Option<u64>,
 }
 
@@ -178,7 +179,7 @@ pub struct AiImage {
 pub struct AiVideo {
     pub prompt: String,
     pub model: Option<String>,
-    /// Seconds, passed as given (its reservation is clamped: budget.rs).
+    /// Seconds, passed as given (its worst case is clamped: media.rs).
     pub duration: Option<i64>,
     pub resolution: Option<String>,
     pub aspect_ratio: Option<String>,
@@ -266,7 +267,7 @@ mod tests {
             ("files.stat", json!({ "path": "log.txt" })),
             ("files.write", json!({ "path": "log.txt", "text": "a\n", "expect": null })),
             ("files.remove", json!({ "path": "log.txt" })),
-            ("ai.text", json!({ "model": "openai/gpt-5-mini", "prompt": "hi", "reasoning": { "effort": "low" }, "max_tokens": 100 })),
+            ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.png" })),
             ("ai.video.start", json!({ "prompt": "a cat", "duration": 6, "resolution": "768p" })),
             ("ai.video.poll", json!({ "id": "v1" })),
@@ -302,8 +303,10 @@ mod tests {
         assert_eq!((v.duration, v.model), (None, None));
         let Ok(Step::AgentStart(a)) = step("agent.start", json!({ "prompt": "p" })) else { panic!() };
         assert_eq!((a.conversation, a.channel), (None, None), "the run's own conversation, posted nowhere");
-        let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
+        let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
         assert_eq!((t.prompt, t.messages.map(|m| m.len())), (None, Some(1)), "a key the platform does not read is ignored");
+        let Ok(Step::AiText(t)) = step("ai.text", json!({ "prompt": "hi" })) else { panic!() };
+        assert_eq!(t.model, None, "the tier is the default unless named");
     }
 
     #[test]
@@ -315,9 +318,9 @@ mod tests {
         refused("ai.foo", json!({}), "unknown variant `ai.foo`");
         refused("call", json!({ "input": {} }), "missing field `op`");
         refused("call", json!({ "op": "save" }), "missing field `input`");
-        refused("ai.text", json!({ "prompt": "hi" }), "missing field `model`");
-        refused("ai.text", json!({ "model": "m", "max_tokens": "100" }), "invalid type");
-        refused("ai.text", json!({ "model": "m", "reasoning": true }), "invalid type");
+        refused("ai.text", json!({ "model": "cheap", "max_tokens": "100" }), "invalid type");
+        refused("ai.text", json!({ "model": 7 }), "invalid type");
+        refused("ai.text", json!({ "model": "cheap", "reasoning_effort": true }), "invalid type");
         refused("ai.image", json!({ "prompt": "p" }), "missing field `path`");
         refused("fetch", json!({ "url": "https://x/", "method": "GET", "headers": { "n": 1 } }), "invalid type");
         refused("publish", json!({ "channel": "feed", "body": {} }), "missing field `kind`");

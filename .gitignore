@@ -8,3 +8,4 @@ cell/build/
 cell/client/
 cell/target/
 .wrangler/
+cell/wrangler.local.jsonc

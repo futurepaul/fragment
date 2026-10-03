@@ -66,6 +66,16 @@ impl Fleet {
         Ok(url.to_string())
     }
 
+    /// A path's URL and its signature over `body`, for a call made by hand
+    /// and read as it streams (model.rs): `for` is in the URL when the
+    /// fleet acts for someone.
+    pub fn signed(&self, method: &str, path: &str, body: &[u8]) -> anyhow::Result<(String, String)> {
+        let url = self.url(path)?;
+        let payload = (!body.is_empty()).then(|| hex::encode(Sha256::digest(body)));
+        let auth = self.signer.sign(Sign::Header { method, url: &url, payload })?;
+        Ok((url, auth))
+    }
+
     /// A signed request; answers the status and the JSON body (`Null` when
     /// empty, a string when it is not JSON: a file's text).
     pub async fn call(&self, method: Method, path: &str, body: Option<&Value>) -> anyhow::Result<(u16, Value)> {
