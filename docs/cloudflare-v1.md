@@ -653,7 +653,8 @@ exit says.
        image, so it runs by name and not in CI). A wake follows its
        chats in 2.5 s and answers a first message in about 5 s.
    - Not yet: any of it on Containers. That is the hosted lane's, after
-     phase 2's preview. The shell (onboarding,
+     phase 2's preview.
+5. **The shell and the blessed templates.** The shell (onboarding,
    sidebar, tabs, profile, search, connections) and the chat and agent
    templates on decision 40. The shell's tabs sign in to their fragments
    through a platform-origin frame-session mint, with a frames lane; the
