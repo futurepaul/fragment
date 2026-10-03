@@ -22,14 +22,16 @@
       <div class="sidebar-top">
         <div class="brand" id="brand">Finite.Computer</div>
         <div class="sidebar-top-actions">
-        <button class="icon-button" id="search-agents" type="button" title="Search chats and apps" aria-label="Search chats and apps" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
+        <button class="icon-button" id="search-agents" type="button" title="Search chats, apps and messages" aria-label="Search chats, apps and messages" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
         </button>
         </div>
       </div>
-      <div class="section-label agents-label">Agents<button class="icon-button small" id="new-agent" type="button" title="New agent" aria-label="New agent">
+      <div class="section-label agents-label">Agents<span class="section-actions"><button class="icon-button small" id="new-group" type="button" title="New group chat" aria-label="New group chat" aria-haspopup="dialog">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/></svg>
+        </button><button class="icon-button small" id="new-agent" type="button" title="New agent" aria-label="New agent">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-        </button></div>
+        </button></span></div>
       <nav class="rows" id="chats"></nav>
       <div class="section-label">Apps<button class="icon-button small" id="add-app" type="button" title="Add an app" aria-label="Add an app"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
       <nav class="rows" id="apps"></nav>
@@ -94,11 +96,23 @@
       <div class="rename-actions"><button id="new-agent-cancel" type="button">Cancel</button><button type="submit" id="new-agent-go">Make it</button></div>
     </form>
   </dialog>
+  <!-- a group chat: two or more of the person's agents, the first picked its lead (decision 8) -->
+  <dialog class="rename-agent" id="new-group-dialog" aria-labelledby="new-group-title">
+    <form id="new-group-form">
+      <h2 id="new-group-title">A new group chat</h2>
+      <p>Pick two agents or more. The first you pick leads: it answers unless you @mention another.</p>
+      <div class="pick-agents" id="new-group-agents" role="group" aria-label="Its agents"></div>
+      <label for="new-group-name">A name (optional)</label>
+      <input id="new-group-name" name="name" maxlength="48" autocomplete="off" placeholder="Its agents' names if you don't">
+      <p id="new-group-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="new-group-cancel" type="button">Cancel</button><button type="submit" id="new-group-go" disabled>Make it</button></div>
+    </form>
+  </dialog>
   <dialog class="rename-agent" id="rename-agent" aria-labelledby="rename-title">
     <form id="rename-form">
       <h2 id="rename-title">Name your agent</h2>
       <p>A name for what you’re working on together.</p>
-      <label for="agent-name">Agent name</label>
+      <label for="agent-name" id="rename-label">Agent name</label>
       <input id="agent-name" name="name" maxlength="48" required autocomplete="off">
       <p id="rename-error" class="form-error" role="alert" hidden></p>
       <div class="rename-actions"><button id="rename-cancel" type="button">Cancel</button><button type="submit">Save name</button></div>
@@ -106,10 +120,10 @@
   </dialog>
   <dialog class="search-dialog" id="search-dialog" aria-labelledby="search-title">
     <div class="search-heading">
-      <h2 id="search-title">Search chats and apps</h2>
+      <h2 id="search-title">Search chats, apps and messages</h2>
       <button class="icon-button" id="search-close" type="button" aria-label="Close search" title="Close search"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
     </div>
-    <input id="workspace-search" type="search" aria-label="Search chats and apps" placeholder="Search chats and apps…" autocomplete="off" autofocus>
+    <input id="workspace-search" type="search" aria-label="Search chats, apps and messages" placeholder="Search chats, apps and messages…" autocomplete="off" maxlength="256" autofocus>
     <div class="search-results" id="search-results"></div>
     <p class="search-status" id="search-status" role="status"></p>
   </dialog>

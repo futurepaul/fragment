@@ -301,6 +301,31 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-result .agent-copy { overflow: hidden; }
 .search-result .label { font-weight: 500; }
 .search-status { margin: 12px 10px 0; font-size: 12px; color: var(--text-secondary); }
+.search-result .meta { flex: none; }
+.search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* a group chat's mark: its agents' avatars in one avatar's room, the lead
+   on top (shell.js `mark`); sized by the room it stands in */
+.avatar-stack { --stack: 40px; --dot: calc(var(--stack) * .66); position: relative; display: inline-block; width: var(--stack); height: var(--stack); flex: none; }
+.avatar-stack.small { --stack: 26px; }
+#chats .avatar-stack { --stack: 36px; }
+.search-result .avatar-stack { --stack: 32px; }
+.avatar-stack[data-count="3"] { --dot: calc(var(--stack) * .56); }
+.avatar-stack > .agent-avatar, #chats .avatar-stack > .agent-avatar, .search-result .avatar-stack > .agent-avatar {
+  position: absolute; width: var(--dot); height: var(--dot); margin: 0; box-shadow: 0 0 0 2px var(--bg-sidebar);
+}
+.avatar-stack > .agent-avatar:nth-child(1) { left: 0; top: 0; z-index: 3; }
+.avatar-stack > .agent-avatar:nth-child(2) { right: 0; bottom: 0; z-index: 2; }
+.avatar-stack[data-count="3"] > .agent-avatar:nth-child(1) { left: calc((var(--stack) - var(--dot)) / 2); }
+.avatar-stack[data-count="3"] > .agent-avatar:nth-child(2) { left: 0; right: auto; }
+.avatar-stack[data-count="3"] > .agent-avatar:nth-child(3) { right: 0; bottom: 0; z-index: 1; }
+.section-actions { display: inline-flex; align-items: center; gap: 2px; }
+/* the new group chat's agents, picked in order (the first leads) */
+.pick-agents { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; max-height: 40vh; overflow-y: auto; }
+.pick-agents .row { width: 100%; border: 1px solid transparent; }
+.pick-agents .row[aria-pressed="true"] { background: var(--bg-active); border-color: var(--border-strong); }
+.pick-agents .meta { flex: none; }
+.rename-actions button:disabled { opacity: .5; cursor: default; }
 
 /* ---- what the handoff did not draw, in its look ---- */
 .muted { color: var(--text-tertiary); }

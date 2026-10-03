@@ -14,6 +14,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::api::{Api, Call, Reply};
+use crate::browser::{Browser, Page};
 use crate::Suite;
 
 /// A request as the shell's page sends it: the session cookie, the
@@ -139,6 +140,172 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a title is a blessed template's alone", r.status == 400, &r);
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
+    search_and_archive(s, api, &session, &username)
+}
+
+/// How long a message takes to reach a person's search: its fragment's
+/// alarm sends it, and a backoff waits on a list that holds no role yet.
+const SEARCH_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A search's message hits in `fragment`.
+fn hits_in(r: &Reply, fragment: &str) -> Vec<Value> {
+    r.body["messages"].as_array().map(|l| l.iter().filter(|m| m["fragment"] == fragment).cloned().collect()).unwrap_or_default()
+}
+
+/// `q`, as a URL's query value.
+fn query(q: &str) -> String {
+    crate::api::url_enc(q)
+}
+
+/// Search (decision 9) and archiving, the person's own view (docs/api.md,
+/// Search): a message's words find it, for the chat's people only, in
+/// fragments they are in now; a query is words, never FTS5 syntax; a
+/// person archives a fragment for themselves alone, twice the same as
+/// once, and only one of theirs. Goal: the person's list is a fenced
+/// projection (lesson 12). Method: three people (the shell's person, a
+/// member who is removed and comes back, and an outsider with a chat of
+/// their own), each asking their own list through the API.
+fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "name": "garden-talk", "template": "chat", "title": "Garden talk" })), &[])?;
+    let chat = r.body["name"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && chat == format!("garden-talk.{username}"), "making the chat: {r}");
+    let said = "Our tomatoes need water every Tuesday";
+    let post = |id: &str, channel: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/{channel}"), Some(&json!({ "id": id, "body": body })), &[]);
+    // the template's channels are the chat's as soon as it installs
+    let took = s.eventually(SEARCH_WAIT, || post("m1", "chat", json!({ "text": said })).is_ok_and(|r| r.status == 200));
+    let posted = post("m1", "chat", json!({ "text": said }))?;
+    anyhow::ensure!(took && posted.body["replayed"] == true, "posting to the chat: {posted}");
+    let seq = posted.body["record"]["seq"].as_i64().unwrap_or(0);
+    // a record that is no message (a page's own kind, an agent's step) is never searched
+    let step = post("w1", "work", json!({ "kind": "turn.step", "turn": "t1", "step": 1, "text": "zucchini plans" }))?;
+    anyhow::ensure!(step.status == 200, "posting a step: {step}");
+    let search = |q: &str| shell(api, session, "GET", &format!("/api/search?q={}", query(q)), None, &[]);
+
+    // a message's words find it, newest first, with where it is and a snippet
+    let found = s.eventually(SEARCH_WAIT, || search("tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
+    let r = search("tomatoes")?;
+    let hit = hits_in(&r, &chat).first().cloned().unwrap_or_default();
+    s.ok(
+        "search finds a message by its words: its chat, channel, record and a snippet",
+        found && r.status == 200 && hit["channel"] == "chat" && hit["seq"] == seq && hit["at"].is_i64() && hit["snippet"].as_str().is_some_and(|t| t.contains("tomatoes")),
+        &r,
+    );
+    let r = search("TOMAT tues")?;
+    s.ok("every word, ignoring case, each a prefix", hits_in(&r, &chat).len() == 1, &r);
+    let basil = post("m2", "chat", json!({ "text": "Basil wants water too" }))?;
+    anyhow::ensure!(basil.status == 200, "posting again: {basil}");
+    let both = s.eventually(SEARCH_WAIT, || search("water").is_ok_and(|r| hits_in(&r, &chat).len() == 2));
+    let r = search("water")?;
+    let snippets: Vec<Value> = hits_in(&r, &chat).iter().map(|h| h["snippet"].clone()).collect();
+    s.ok("two messages are two hits, the newest first, each with its own snippet", both && snippets == [json!("Basil wants water too"), json!(said)], &r);
+    let r = search("tomatoes zucchini")?;
+    s.ok("a word the message lacks finds nothing (an agent's step is not searched)", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
+    let r = search("zucchini")?;
+    s.ok("nor is a record that is no message", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
+    let r = search("garden")?;
+    let titled = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["kind"] == "chat" && f["title"] == "Garden talk"));
+    s.ok("a fragment's title finds it, before any message", titled, &r);
+
+    // FTS5's syntax in a query is words, never operators
+    let r = search("tomatoes OR zucchini")?;
+    s.ok("OR in a query is a word: no message has it, so nothing matches", r.status == 200 && hits_in(&r, &chat).is_empty(), &r);
+    let r = search("\"tomat")?;
+    s.ok("an unbalanced quote is text", r.status == 200 && hits_in(&r, &chat).len() == 1, &r);
+    for q in ["NOT tomatoes", "text:tomatoes", "NEAR(tomatoes water)", "tomatoes AND", "*", "^water", "(", "{text}: water"] {
+        let r = search(q)?;
+        s.ok(&format!("{q:?} is a query like any other (200, no FTS5 error)"), r.status == 200 && r.body["messages"].is_array(), &r);
+    }
+    let r = shell(api, session, "GET", &format!("/api/search?q={}", "x".repeat(fragment_proto::limits::SEARCH_QUERY_MAX_BYTES + 1)), None, &[])?;
+    s.ok("a query past its length is refused (400)", r.status == 400, &r);
+    let r = shell(api, session, "GET", "/api/search", None, &[])?;
+    s.ok("a search names its query (400)", r.status == 400, &r);
+    let r = shell(api, session, "GET", "/api/search?q=a&q=b", None, &[])?;
+    s.ok("once (400)", r.status == 400, &r);
+    let r = api.call(Call { method: "GET", url: format!("{}/api/search?q=tomatoes", api.base), ..Call::default() })?;
+    s.ok("and no one unsigned searches (401)", r.status == 401, &r);
+
+    // a member finds what was said before they joined; an outsider never does
+    let member = api.person()?;
+    let outsider = api.person()?;
+    let member_id = api.identity(&member)?;
+    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    anyhow::ensure!(r.status == 200, "adding the member: {r}");
+    let theirs = |keys: &fragment_nip98::Keys, q: &str| api.signed(keys, "GET", &format!("/api/search?q={}", query(q)), None);
+    let found = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
+    s.ok("a new member's search finds what the chat said before they joined (signed, with their key)", found, theirs(&member, "tomatoes")?);
+    let own = s.named(api, &outsider, "plot")?;
+    let r = api.create_with(&outsider, json!({ "name": own, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "the outsider's chat: {r}");
+    let mine = api.signed(&outsider, "POST", &format!("/api/f/{own}/channels/chat"), Some(&json!({ "id": "o1", "body": { "text": "my tomatoes are fine" } })));
+    let theirs_found = s.eventually(SEARCH_WAIT, || theirs(&outsider, "tomatoes").is_ok_and(|r| !hits_in(&r, &own).is_empty()));
+    let r = theirs(&outsider, "tomatoes")?;
+    s.ok(
+        "someone not in the chat finds their own message, never the chat's",
+        mine.is_ok_and(|m| m.status == 200) && theirs_found && hits_in(&r, &chat).is_empty(),
+        &r,
+    );
+    let r = search("tomatoes")?;
+    s.ok("nor does the chat's person find the outsider's", hits_in(&r, &own).is_empty() && hits_in(&r, &chat).len() == 1, &r);
+
+    // archiving: the person's own view, and only of what they hold a role on
+    let archived = |r: &Reply, name: &str| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == name).map(|f| f["archived"] == true));
+    let list = |keys: Option<&fragment_nip98::Keys>| match keys {
+        Some(k) => api.signed(k, "GET", "/api/fragments", None),
+        None => shell(api, session, "GET", "/api/fragments", None, &[]),
+    };
+    let archive = |name: &str, body: Value| shell(api, session, "PUT", &format!("/api/fragments/{name}/archived"), Some(&body), &[]);
+    let r = archive(&chat, json!({ "archived": true }))?;
+    s.ok("the person archives a chat of theirs", r.status == 200 && r.body == json!({ "name": chat, "archived": true }), &r);
+    let again = archive(&chat, json!({ "archived": true }))?;
+    s.ok("archiving it again is the same", again.status == 200 && again.body == r.body, &again);
+    let mine = list(None)?;
+    s.ok("their list says it is archived", archived(&mine, &chat) == Some(true), &mine);
+    let member_list = list(Some(&member))?;
+    s.ok("a member's list does not", archived(&member_list, &chat) == Some(false), &member_list);
+    let r = search("tomatoes")?;
+    let r2 = search("garden")?;
+    let titled = r2.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str() && f["archived"] == true));
+    s.ok("search still finds it, and its messages, saying it is archived", hits_in(&r, &chat).len() == 1 && titled, &r2);
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": true })))?;
+    let unarchived = archive(&chat, json!({ "archived": false }))?;
+    let (mine, member_list) = (list(None)?, list(Some(&member))?);
+    s.ok(
+        "the member archives it for themselves: the person unarchives it, and each list keeps its own",
+        r.status == 200 && unarchived.status == 200 && archived(&mine, &chat) == Some(false) && archived(&member_list, &chat) == Some(true),
+        json!({ "mine": archived(&mine, &chat), "member's": archived(&member_list, &chat) }),
+    );
+    let r = archive("garden-talk", json!({ "archived": true }))?;
+    let undone = archive("garden-talk", json!({ "archived": false }))?;
+    s.ok("a bare label names the person's own", r.status == 200 && r.body["name"] == chat.as_str() && undone.status == 200, &r);
+    let r = archive(&own, json!({ "archived": true }))?;
+    s.ok("a fragment they are not in is none of theirs to archive (404)", r.status == 404, &r);
+    let r = archive(&format!("nothing-here.{username}"), json!({ "archived": true }))?;
+    s.ok("nor one that does not exist (404)", r.status == 404, &r);
+    let r = archive("Not A Name", json!({ "archived": true }))?;
+    s.ok("a name that is none is refused (400)", r.status == 400, &r);
+    let r = archive(&chat, json!({}))?;
+    let r2 = archive(&chat, json!({ "archived": "yes" }))?;
+    s.ok("a body without `archived`, or not a boolean, is refused (400)", r.status == 400 && r2.status == 400, format!("{r} {r2}"));
+
+    // removed, a member's results go, and so does their archiving
+    let r = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{member_id}"), None, &[])?;
+    anyhow::ensure!(r.status == 200, "removing the member: {r}");
+    let gone = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| r.status == 200 && hits_in(&r, &chat).is_empty()));
+    let r = theirs(&member, "garden")?;
+    let titled = r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == chat.as_str()));
+    s.ok("a removed member's search finds nothing of the chat, by its words or its title", gone && !titled, &r);
+    let r = api.signed(&member, "PUT", &format!("/api/fragments/{chat}/archived"), Some(&json!({ "archived": false })))?;
+    s.ok("nor may they archive it now (404)", r.status == 404, &r);
+    let r = shell(api, session, "PUT", &format!("/api/f/{chat}/members/{member_id}"), Some(&json!({ "role": "viewer" })), &[])?;
+    anyhow::ensure!(r.status == 200, "adding the member again: {r}");
+    let back = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| hits_in(&r, &chat).len() == 1));
+    let member_list = list(Some(&member))?;
+    s.ok("back in, they find it again, once, and it is not archived for them", back && archived(&member_list, &chat) == Some(false), &member_list);
+
+    // a deleted fragment's messages go from its people's search
+    let r = api.signed(&outsider, "DELETE", &format!("/api/f/{own}"), None)?;
+    let gone = s.eventually(SEARCH_WAIT, || theirs(&outsider, "tomatoes").is_ok_and(|r| r.status == 200 && hits_in(&r, &own).is_empty()));
+    s.ok("a deleted fragment's messages leave its people's search", r.status == 200 && gone, theirs(&outsider, "tomatoes")?);
     Ok(())
 }
 
@@ -247,6 +414,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let two = b.until(&page, "document.querySelectorAll('#chats .agent-row').length === 2 && !document.getElementById('new-agent-dialog').open", agent_wait);
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
 
+    // both agents in one chat, search, and archiving, as the person uses them
+    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &title }, &shots)?;
+
     // an app's window
     b.click(&page, "#add-app")?;
     let catalog = b.until(&page, "document.querySelector('.catalog form')", wait);
@@ -314,5 +484,142 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The shell's person in its browser lane: their platform session, their
+/// username, and their first agent's name (its title).
+struct Person<'a> {
+    session: &'a str,
+    username: &'a str,
+    first: &'a str,
+}
+
+/// A JS string literal.
+fn js(s: &str) -> String {
+    serde_json::to_string(s).expect("a string encodes")
+}
+
+/// The replies on a chat's `chat` from `agent` whose text holds `said`.
+fn replies(api: &Api, session: &str, chat: &str, agent: &str, said: &str) -> usize {
+    let r = shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat?after=0&limit=1000"), None, &[]);
+    r.ok()
+        .and_then(|r| r.body["records"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter(|x| x["principal"] == agent && x["body"]["text"].as_str().is_some_and(|t| t.starts_with("echo:") && t.contains(said)))
+        .count()
+}
+
+/// Clicks the open menu's item named `text` (a script's click: a menu's
+/// button needs no gesture). Answers whether there was one.
+fn menu_item(b: &mut Browser, page: &Page, text: &str) -> Result<bool> {
+    let clicked = b.eval(page, &format!("(() => {{ const i = [...document.querySelectorAll('#menu button')].find((b) => b.textContent === {}); i?.click(); return !!i; }})()", js(text)))?;
+    Ok(clicked == true)
+}
+
+/// A group chat of the person's two agents, made from the sidebar (the
+/// first picked its lead): the sidebar shows it as a group, its agents'
+/// colours stacked; each answers when @mentioned, and the lead when no one
+/// is. Then search: a message's words find it, and clicking it opens its
+/// chat. Then archiving from the chat's menu: the chat leaves the sidebar,
+/// search still finds it, and Unarchive brings it back.
+fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
+    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let id_of = |label: &str| agents.iter().find(|a| a["fragment"] == format!("{label}.{}", me.username).as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let first_label = me.first.to_lowercase();
+    let (lead, other) = (id_of("reader"), id_of(&first_label));
+    anyhow::ensure!(lead.starts_with("id:") && other.starts_with("id:"), "the two agents' identities: {r}");
+
+    b.click(page, "#new-group")?;
+    let offered = b.until(page, "document.getElementById('new-group-dialog').open && document.querySelectorAll('#new-group-agents .pick').length === 2", wait);
+    s.ok("New group chat offers the person's agents", offered, "");
+    let pick = |id: &str| format!("#new-group-agents .pick[data-identity={}]", js(id));
+    b.click(page, &pick(&lead))?;
+    let one = b.eval(page, "document.getElementById('new-group-go').disabled")?;
+    b.click(page, &pick(&other))?;
+    let order = b.eval(
+        page,
+        &format!(
+            "[document.querySelector({})?.querySelector('.meta')?.textContent, document.querySelector({})?.querySelector('.meta')?.textContent, document.getElementById('new-group-go').disabled]",
+            js(&pick(&lead)),
+            js(&pick(&other))
+        ),
+    )?;
+    s.ok("it takes two agents or more, in the order picked: the first leads", one == true && order == json!(["Lead", "2", false]), &order);
+    let _ = b.screenshot(page, &shots.join("desktop-new-group.png"));
+    b.eval(page, "document.getElementById('new-group-form').requestSubmit()")?;
+    let made = b.until(page, "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open", wait);
+    let row = b.eval(
+        page,
+        "(() => { const g = document.querySelector('#chats .agent-row[data-group=\"2\"]'); if (!g) return null; const color = (a) => a.style.getPropertyValue('--agent-color'); \
+         const direct = Object.fromEntries([...document.querySelectorAll('#chats .agent-row:not([data-group])')].map((r) => [r.querySelector('.label').textContent, color(r.querySelector('.agent-avatar'))])); \
+         return { key: g.dataset.key, label: g.querySelector('.label').textContent, stack: [...g.querySelectorAll('.avatar-stack .agent-avatar')].map(color), direct, heading: document.querySelectorAll('#agent-mark .avatar-stack .agent-avatar').length }; })()",
+    )?;
+    let colors = json!([row["direct"]["Reader"], row["direct"][me.first]]);
+    s.ok(
+        "the sidebar shows it as a group: its agents' names, their colours stacked (the lead's first, each its identity's)",
+        made && row["label"] == format!("Reader, {}", me.first).as_str() && row["stack"] == colors && colors[0].is_string() && row["heading"] == 2,
+        &row,
+    );
+    let group = row["key"].as_str().unwrap_or("").trim_start_matches("chat:").to_string();
+    let r = shell(api, me.session, "GET", &format!("/api/f/{group}/members"), None, &[])?;
+    let listed: Vec<&str> = r.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").filter_map(|m| m["principal"].as_str()).collect();
+    s.ok("its members are the two agents, the lead added first", listed == [lead.as_str(), other.as_str()], &r);
+
+    // each answers its @mention; with none, the lead answers
+    let say = |id: &str, text: &str| shell(api, me.session, "POST", &format!("/api/f/{group}/channels/chat"), Some(&json!({ "id": id, "body": { "text": text } })), &[]);
+    let to_other = format!("@{first_label} are you there");
+    say("g1", &to_other)?;
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &group, &other, &to_other) == 1);
+    s.ok(&format!("@{first_label} answers its @mention in the group"), answered, "");
+    say("g2", "@reader and you")?;
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &group, &lead, "@reader and you") == 1);
+    s.ok("and @reader its own", answered, "");
+    say("g3", "hello both of you")?;
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &group, &lead, "hello both of you") == 1);
+    s.ok("a message that @mentions no one, the lead answers", answered && replies(api, me.session, &group, &other, "hello both of you") == 0, "");
+    let host = fragment_proto::flat_name(&group).unwrap_or_default();
+    let shown = s.eventually(wait, || {
+        b.eval_in_frame(page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches("echo:").count() >= 3 && t.contains("are you there") && t.contains("and you"))).unwrap_or(false)
+    });
+    s.ok("the group's chat, framed in the shell, shows both agents' answers", shown, &host);
+    let _ = b.screenshot(page, &shots.join("desktop-group.png"));
+
+    // search: a message's words, and clicking one opens its chat
+    let first_chat = format!("{first_label}-chat.{}", me.username);
+    b.click(page, "#search-agents")?;
+    b.eval(page, &fill("#workspace-search", "water garden"))?;
+    let hit = format!("#search-results .search-message[data-fragment={}]", js(&first_chat));
+    let found = b.until(page, &format!("document.querySelector({})", js(&hit)), wait);
+    s.ok("searching a message's words lists it under Messages, in its chat", found, b.eval(page, "document.getElementById('search-results').innerText")?);
+    let _ = b.screenshot(page, &shots.join("desktop-search.png"));
+    b.click(page, &hit)?;
+    let opened = b.until(page, &format!("!document.getElementById('search-dialog').open && document.getElementById('chat-title').textContent === {}", js(me.first)), wait);
+    s.ok("clicking it opens its chat", opened, b.eval(page, "document.getElementById('chat-title').textContent")?);
+
+    // archiving, from the chat's menu: the person's own view
+    let row_of = |name: &str| format!("document.querySelector({})", js(&format!("#chats [data-key={}]", js(&format!("chat:{name}")))));
+    b.click(page, "#agent-heading")?;
+    let archived = menu_item(b, page, "Archive")?;
+    let left = b.until(page, &format!("!{} && {} && document.getElementById('chat-title').textContent !== {}", row_of(&first_chat), row_of(&group), js(me.first)), wait);
+    s.ok("Archive, from its menu: the chat leaves the sidebar, and another opens", archived && left, b.eval(page, "document.getElementById('chats').innerText")?);
+    b.click(page, "#search-agents")?;
+    b.eval(page, &fill("#workspace-search", "water garden"))?;
+    let rows = js(&format!("#search-results [data-fragment={}]", js(&first_chat)));
+    let marked = b.until(page, &format!("[...document.querySelectorAll({rows})].some((r) => r.querySelector('.meta')?.textContent === 'Archived')"), wait);
+    s.ok("search still finds it, marked archived", marked, b.eval(page, "document.getElementById('search-results').innerText")?);
+    b.click(page, &hit)?;
+    b.until(page, &format!("document.getElementById('chat-title').textContent === {}", js(me.first)), wait);
+    b.click(page, "#agent-heading")?;
+    let unarchived = menu_item(b, page, "Unarchive")?;
+    let back = b.until(page, &row_of(&first_chat), wait);
+    s.ok("Unarchive, from its menu, brings it back", unarchived && back, "");
+
+    // the phone's picture below is of the Reader's chat
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:reader-chat.{}", me.username))))?;
     Ok(())
 }

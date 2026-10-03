@@ -1,6 +1,7 @@
 // The shell: the platform's one page (docs/cloudflare-v1.md, decisions
-// 6–12). Its sidebar is the person's fragments by kind: their agents (each
-// a chat, with its lead agent's name and colour) and their apps. The open
+// 6–12). Its sidebar is the person's fragments by kind: their chats (a
+// direct chat with one agent, in its colour, or a group of several, their
+// colours stacked) and their apps, less the ones they archived. The open
 // chat fills the middle column and apps open as windows in the viewer;
 // each is a frame of the fragment's own origin, signed in there by the
 // platform's frame mint (`/auth/frame`), for this page only. This page
@@ -28,6 +29,7 @@ const ICON = {
   people: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/>',
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
   screen: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
+  archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
 // Skyler's agent palette: a plain colored circle, no eyes
@@ -42,9 +44,10 @@ const CATALOG = [
 ];
 
 // me: the signed-in person; fragments: their list (name, role, kind,
-// title, sharing); computer: theirs, with its agents; agents: by identity;
-// previews: each chat's newest message
-const state = { me: null, fragments: [], computer: null, defaultImage: null, agents: new Map(), previews: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+// title, sharing, archived); computer: theirs, with its agents; agents: by
+// identity; previews: each chat's newest message; members: each chat's
+// agents, by identity, the lead (the first added) first
+const state = { me: null, fragments: [], computer: null, defaultImage: null, agents: new Map(), previews: new Map(), members: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -76,6 +79,8 @@ const titleOf = (name) => byName(name)?.title || labelOf(name);
 const own = (f) => f.role === "owner";
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
+// the sidebar's: what the person has not archived (search still finds the rest)
+const shown = (list) => list.filter((f) => !f.archived);
 // a frame of one of the person's fragments, signed in there by the platform
 // A path segment: the API's ids keep their ":" (`computer:…`, `id:…`) as
 // sent, since the router matches segments as they are, not decoded.
@@ -89,15 +94,34 @@ const colorOf = (id) => {
   for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
   return COLORS[h % COLORS.length];
 };
-// The identity of the agent a fragment is (`maple.ann`), or of a chat's
-// lead (`maple-chat.ann`, made beside it).
+// The identity of the agent a fragment is (`maple.ann`), or of a direct
+// chat's (`maple-chat.ann`, made beside it), until the chat's members are read.
 const agentOf = (name) => {
   const [label, ...rest] = name.split(".");
   const agent = [label.replace(/-chat$/, ""), ...rest].join(".");
   return [...state.agents.values()].find((a) => a.fragment === agent)?.identity ?? null;
 };
-// a chat's face: its title and its lead agent's colour
-const identity = (name) => ({ title: titleOf(name), color: colorOf(agentOf(name)), preview: state.previews.get(name) ?? "" });
+// A chat's agents, the lead first: its member list, once read (a group's
+// come from nowhere else); a direct chat's agent until then.
+const agentsOf = (name) => state.members.get(name) ?? [agentOf(name)].filter(Boolean);
+const isGroup = (name) => (state.members.get(name)?.length ?? 0) >= 2;
+// a chat's face: its title, its lead agent's colour, and its agents' colours
+const identity = (name) => {
+  const agents = agentsOf(name);
+  return { title: titleOf(name), color: colorOf(agents[0] ?? null), colors: agents.map(colorOf), preview: state.previews.get(name) ?? "" };
+};
+// A chat's mark: its agent's avatar, or a group's agents' stacked (at most
+// three, the lead first), coloured by identity as the chat's page does.
+function mark(name, size = "") {
+  const who = identity(name);
+  if (!isGroup(name)) return avatar(who, size);
+  const stack = el("span", `avatar-stack ${size}`);
+  const colors = who.colors.slice(0, 3);
+  stack.dataset.count = String(colors.length);
+  stack.setAttribute("aria-hidden", "true");
+  stack.append(...colors.map((color) => avatar({ color })));
+  return stack;
+}
 
 function notice(title, text, ...actions) {
   const n = $("notice");
@@ -279,37 +303,46 @@ function renderHeading() {
   if (!open) return;
   const who = identity(state.current);
   $("chat-title").textContent = who.title;
-  $("agent-mark").replaceChildren(avatar(who, "small"));
+  $("agent-mark").replaceChildren(mark(state.current, "small"));
   const frame = state.frames.get(state.current);
   if (frame) frame.title = who.title;
 }
 function renderChats() {
-  const list = chats();
+  const list = shown(chats());
   $("chats").replaceChildren(...(list.length ? list.map((f) => {
     const who = identity(f.name);
     const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}`);
     row.type = "button";
     row.dataset.key = `chat:${f.name}`;
+    if (isGroup(f.name)) row.dataset.group = String(agentsOf(f.name).length);
     row.setAttribute("aria-current", f.name === state.current && !state.page ? "page" : "false");
     const text = el("span", "agent-copy");
     text.append(el("span", "label", who.title), el("span", "agent-preview", who.preview || (own(f) ? "Say hello" : f.role)));
-    row.append(avatar(who), text, ...badges(f));
+    row.append(mark(f.name), text, ...badges(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", "Your first agent starts here")]));
+  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : "Your first agent starts here")]));
 }
 $("agent-heading").onclick = () => {
   const name = state.current;
+  const group = isGroup(name);
   const agent = agentOfChat(name);
+  // a group's agents each have a profile; a direct chat's agent has one
+  const profiles = group
+    ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
+    : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
   openMenu($("agent-heading"), [
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     { icon: "invite", text: "Invite…", onClick: () => share(name) },
-    ...(agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : []),
-    ...(state.computer ? [{ icon: "screen", text: "Its computer's screen", onClick: () => openScreen() }] : []),
+    ...profiles,
+    ...(state.computer ? [{ icon: "screen", text: group ? "Their computer's screen" : "Its computer's screen", onClick: () => openScreen() }] : []),
+    archiveItem(name),
   ]);
 };
-// the agent fragment a chat is with: the one whose title the chat carries
+// the agent fragment a direct chat is with: the one whose title the chat
+// carries (a group's agents keep names of their own)
 function agentOfChat(name) {
+  if (isGroup(name)) return null;
   const title = titleOf(name);
   return [...state.agents.values()].find((a) => titleOf(a.fragment) === title)?.fragment ?? null;
 }
@@ -342,7 +375,7 @@ function paneIcon(name) {
 }
 const iconOf = (name) => appIcon(labelOf(name));
 function renderApps() {
-  const list = apps();
+  const list = shown(apps());
   $("apps").replaceChildren(...(list.length ? list.map((f) => {
     const row = el("button", `row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
     row.type = "button";
@@ -351,7 +384,7 @@ function renderApps() {
     if (!own(f)) row.append(el("span", "meta", f.role));
     row.onclick = () => { openApp(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", "No apps yet")]));
+  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]));
 }
 function openApp(name) {
   const f = byName(name);
@@ -365,8 +398,26 @@ function openApp(name) {
       ...(own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
       { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
       { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name); } },
+      { icon: ICON.more, title: "More", onClick: (e) => openMenu(e.currentTarget, [archiveItem(name)]) },
     ],
   });
+}
+
+// ---- archiving: the person's own view (their list's row), not the fragment's ----
+function archiveItem(name) {
+  const archived = !!byName(name)?.archived;
+  return { icon: "archive", text: archived ? "Unarchive" : "Archive", onClick: () => setArchived(name, !archived) };
+}
+async function setArchived(name, archived) {
+  try {
+    await api("PUT", `/api/fragments/${seg(name)}/archived`, { archived });
+    await load();
+    // the open chat, archived, gives the middle column to another
+    const next = shown(chats()).find((f) => f.name !== name);
+    if (archived && state.current === name && !state.page && next) openChat(next.name);
+  } catch (e) {
+    notice(archived ? "It was not archived" : "It was not unarchived", e.message);
+  }
 }
 // a fragment's file viewer asks for a file as a window (only a frame of one
 // of the person's own fragments, for a file of that same origin)
@@ -463,10 +514,77 @@ $("new-agent-form").onsubmit = async (e) => {
   }
 };
 
+// ---- a group chat: several of the person's agents in one chat (decision 8) ----
+// Through public APIs only, as makeAgent: a chat fragment on the chat
+// template, titled by its name or its agents' names, and the agents added
+// as editors one at a time in the order picked, so the first is the lead
+// (the first added, by `addedAt`: the chat's page and its agents' bridges
+// read it from the member list).
+async function makeGroup(picked, chosen) {
+  if (picked.length < 2) throw new Error("A group chat has two agents or more.");
+  const name = chosen?.trim() ?? "";
+  const title = name || picked.map((a) => titleOf(a.fragment)).join(", ");
+  const chat = await api("POST", "/api/fragments", { name: freeLabel(slug(name || "group")), template: "chat", title });
+  for (const a of picked) await api("PUT", `/api/f/${chat.name}/members/${seg(a.identity)}`, { role: "editor" });
+  if (state.computer) api("POST", `/api/computers/${seg(state.computer.computer)}/wake`, {}).catch(() => {});
+  return chat.name;
+}
+const groupDialog = $("new-group-dialog");
+let picking = [];
+function renderPicks() {
+  const agents = [...state.agents.values()];
+  $("new-group-agents").replaceChildren(...(agents.length ? agents.map((a) => {
+    const at = picking.findIndex((p) => p.identity === a.identity);
+    const row = el("button", "row pick");
+    row.type = "button";
+    row.setAttribute("aria-pressed", String(at >= 0));
+    row.dataset.identity = a.identity;
+    row.append(avatar({ color: colorOf(a.identity) }, "small"), el("span", "label", titleOf(a.fragment)));
+    if (at >= 0) row.append(el("span", "meta", at === 0 ? "Lead" : String(at + 1)));
+    row.onclick = () => {
+      picking = at >= 0 ? picking.filter((p) => p.identity !== a.identity) : [...picking, a];
+      renderPicks();
+    };
+    return row;
+  }) : [el("p", "muted", "Your agents show here once you have some.")]));
+  $("new-group-go").disabled = picking.length < 2;
+}
+function newGroup() {
+  picking = [];
+  $("new-group-form").reset();
+  $("new-group-error").hidden = true;
+  renderPicks();
+  groupDialog.showModal();
+  prewake();
+}
+$("new-group").onclick = newGroup;
+$("new-group-cancel").onclick = () => groupDialog.close();
+$("new-group-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const go = $("new-group-go");
+  go.disabled = true;
+  go.textContent = "Making it…";
+  try {
+    const chat = await makeGroup(picking, $("new-group-name").value);
+    groupDialog.close();
+    await load();
+    openChat(chat);
+  } catch (err) {
+    $("new-group-error").textContent = err.message;
+    $("new-group-error").hidden = false;
+  } finally {
+    go.textContent = "Make it";
+    go.disabled = picking.length < 2;
+  }
+};
+
 // ---- renaming: the chat's title (and its agent's, so they stay one) ----
 let renaming = null;
 function rename(name) {
   renaming = name;
+  const group = isGroup(name);
+  $("rename-title").textContent = group ? "Name this chat" : "Name your agent";
+  $("rename-label").textContent = group ? "Chat name" : "Agent name";
   $("agent-name").value = titleOf(name);
   $("rename-error").hidden = true;
   $("rename-agent").showModal();
@@ -526,44 +644,85 @@ function showCatalog() {
 }
 $("add-app").onclick = () => { showCatalog(); leaveSidebar(); };
 
-// ---- search: the person's chats and apps ----
-function renderSearchResults() {
-  const query = $("workspace-search").value.trim().toLocaleLowerCase();
-  const hit = (f) => `${titleOf(f.name)} ${state.previews.get(f.name) ?? ""} ${f.name}`.toLocaleLowerCase().includes(query);
+// ---- search: the person's chats, apps and messages (decision 9) ----
+// Empty, it lists what the sidebar does; with words, it asks the person's
+// list (`GET /api/search`: titles and names, then messages, newest first,
+// archived ones included). A message opens its chat; it does not scroll to
+// the message (docs/api.md, Search).
+const isChat = (name) => byName(name)?.kind === "chat";
+function openFound(name) {
+  $("search-dialog").close();
+  if (isChat(name)) openChat(name); else openApp(name);
+  leaveSidebar();
+}
+function foundRow(name, preview, extra) {
+  const f = byName(name);
+  const row = el("button", "row search-result");
+  row.type = "button";
+  row.dataset.fragment = name;
+  const text = el("span", "agent-copy");
+  text.append(el("span", "label", titleOf(name)));
+  if (preview) text.append(el("span", "agent-preview", preview));
+  row.append(isChat(name) ? mark(name, "small") : iconOf(name), text);
+  if (f?.archived) row.append(el("span", "meta", "Archived"));
+  if (extra) row.append(extra);
+  row.onclick = () => openFound(name);
+  return row;
+}
+const when = (at) => {
+  const d = new Date(at);
+  return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+function renderFound(fragments, messages) {
   const results = $("search-results");
   results.replaceChildren();
+  const groups = [
+    ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, state.previews.get(f.name) ?? ""))],
+    ["Agents", fragments.filter((f) => f.kind === "agent").map((f) => foundRow(f.name, ""))],
+    ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
+    // a message in a fragment the list has not shown yet is left out until it has
+    ["Messages", messages.filter((m) => byName(m.fragment)).map((m) => {
+      const row = foundRow(m.fragment, m.snippet, el("span", "meta", when(m.at)));
+      row.classList.add("search-message");
+      row.dataset.seq = String(m.seq);
+      return row;
+    })],
+  ];
   let count = 0;
-  for (const [heading, list, chat] of [["Agents", chats().filter(hit), true], ["Apps", apps().filter(hit), false]]) {
-    if (!list.length) continue;
-    results.append(el("h3", null, heading));
-    for (const f of list) {
-      count++;
-      const row = el("button", "row search-result");
-      row.type = "button";
-      const text = el("span", "agent-copy");
-      text.append(el("span", "label", titleOf(f.name)));
-      if (chat) text.append(el("span", "agent-preview", state.previews.get(f.name) ?? ""));
-      row.append(chat ? avatar(identity(f.name), "small") : iconOf(f.name), text);
-      row.onclick = () => {
-        $("search-dialog").close();
-        if (chat) openChat(f.name); else openApp(f.name);
-        leaveSidebar();
-      };
-      results.append(row);
-    }
+  for (const [heading, rows] of groups) {
+    if (!rows.length) continue;
+    count += rows.length;
+    results.append(el("h3", null, heading), ...rows);
   }
   $("search-status").textContent = count ? `${count} result${count === 1 ? "" : "s"}` : "Nothing found.";
 }
+let asked = 0;
+let typing = null;
+async function search() {
+  const q = $("workspace-search").value.trim();
+  const mine = ++asked;
+  if (!q) return renderFound([...shown(chats()), ...shown(apps())], []);
+  try {
+    const found = await api("GET", `/api/search?q=${encodeURIComponent(q)}`);
+    // a slower answer to an older query never replaces a newer one's
+    if (mine === asked) renderFound(found.fragments ?? [], found.messages ?? []);
+  } catch (e) {
+    if (mine === asked) $("search-status").textContent = e.message;
+  }
+}
 $("search-agents").onclick = () => {
   $("workspace-search").value = "";
-  renderSearchResults();
+  search();
   $("search-dialog").showModal();
   $("search-agents").setAttribute("aria-expanded", "true");
   $("workspace-search").focus();
 };
 $("search-close").onclick = () => $("search-dialog").close();
 $("search-dialog").addEventListener("close", () => $("search-agents").setAttribute("aria-expanded", "false"));
-$("workspace-search").addEventListener("input", renderSearchResults);
+$("workspace-search").addEventListener("input", () => {
+  clearTimeout(typing);
+  typing = setTimeout(search, 150);
+});
 $("workspace-search").addEventListener("keydown", (e) => {
   const first = $("search-results").querySelector("button");
   if (e.key === "ArrowDown" && first) { e.preventDefault(); first.focus(); }
@@ -956,6 +1115,20 @@ async function load() {
   renderHeading();
   renderUpdate();
   previews().catch(() => {});
+  chatMembers().catch(() => {});
+}
+// each chat's agents, from its member list (the first added first): a
+// group is a chat with two or more; one that does not answer keeps what
+// was read of it before
+async function chatMembers() {
+  await Promise.all(chats().map(async (f) => {
+    const listed = await api("GET", `/api/f/${f.name}/members`).catch(() => null);
+    if (!listed) return;
+    const agents = (listed.members ?? []).filter((m) => m.kind === "agent").map((m) => m.principal);
+    state.members.set(f.name, agents);
+  }));
+  renderChats();
+  renderHeading();
 }
 // each chat's newest message, for its row
 async function previews() {
@@ -986,7 +1159,7 @@ async function start(open) {
   if (!chats().length && !open && !settings) return creatingAgent();
   $("first-run").hidden = true;
   $("layout").hidden = false;
-  const pick = open ?? (byName(state.current) ? state.current : chats()[0]?.name);
+  const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
   if (settings) await openSettings(false);
   else if (pick) openChat(pick);
   else notice("No chats yet", "Make an agent to start.");

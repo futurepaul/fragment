@@ -429,7 +429,9 @@ and styles only inline and images only from the platform
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
  | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, webhookSecret, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name deleted before, finds) the code.storage repo. With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once; one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat` and `agent` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps). `notes` is the CLI's only (`fragment new --template notes`). |
-| `GET /api/fragments` | any signer | → `{fragments: [{name, role, sharing?}]}`; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
+| `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
+| `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
+| `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility (a fragment from before sends it once, on its next change or alarm; until then it has none); an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `DELETE /api/f/{name}` | owner | → `{ok, deleted}`; the app's database goes too; the repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, operations, error}, viewToken, inboxToken (editor), urls: {canonical}, blobMinBytes}` |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
@@ -1273,6 +1275,59 @@ signed-in person when it carries `x-fragment-shell: 1` and
 `Sec-Fetch-Site: same-origin`, and, writing, the platform's exact
 `Origin`. Anything else needs a signature as before. Adding a key still
 needs a key.
+
+Its sidebar is the person's list: chats (kind `chat`), then apps, less
+the ones they archived (`PUT /api/fragments/{name}/archived`, above).
+A chat with two agents or more is a **group** (decision 8): "New group
+chat" makes a chat fragment on the `chat` template, titled by the name
+given or else its agents' names, and adds the agents picked as editors
+one at a time in the order picked, so the first is its lead (the first
+added, by `addedAt`). Which agents a chat has is its member list
+(`GET /api/f/{name}/members`), never its name; the sidebar stacks their
+avatars, each in its identity's colour (the chat page's FNV-1a choice).
+
+### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
+
+Search is FTS5 in the person's `Principal` cell (principal.rs), a
+projection the fragments keep, as they keep the list:
+
+- **What is searched.** A record is a message when its body is an object
+  whose `kind` is absent or `"message"`; its text is the body's `text`,
+  when that is a string, and only that (docs/chat-records.md: a person's
+  message and an agent's reply; never a page's own kinds, an agent's
+  steps, Stop). The platform knows no template: this is the convention a
+  fragment's records follow to be found. Only channels every member may
+  read (read role `viewer` or weaker) are searched, and the platform's
+  own (`events`, `ops`, `inbox`) never. A message's first 4 KiB are
+  searched (`limits::SEARCH_TEXT_MAX_BYTES`); its record keeps all of it.
+  Titles and labels are searched from the list itself. A fragment's files
+  are not searched yet.
+- **Who gets it.** A fragment sends its messages to its people: members
+  that are not agents (agents need no search). It logs each message in
+  the record's own turn and sends each person, from an outbox with the
+  outboxes' backoff, what their list has not taken, a batch of at most
+  100 at a time from the fragment's alarm (search.rs). A person who joins
+  gets what the fragment still logs, from its start.
+- **The fence.** A list takes a fragment's messages only while its row
+  for that fragment names a role, at the fragment's incarnation; each
+  entry once (keyed by the fragment and its place in the fragment's log),
+  so a batch sent twice or late adds nothing. Leaving the fragment (or
+  its deletion, or its making again) arrives as the row's change, which
+  drops every entry of it, and a search reads entries only of rows that
+  name a role: search sees only what the person can see now.
+- **Limits.** A list keeps a fragment's newest 10 000 entries
+  (`SEARCH_ENTRIES_PER_FRAGMENT_MAX`, as many as a postable channel keeps
+  records) and 100 000 in all (`SEARCH_ENTRIES_MAX`), the oldest going
+  first. A search answers at most 20 fragments and 50 messages, each with
+  a snippet of at most 300 bytes of plain text around its words.
+- **A query is words.** Each word (split at spaces; one with no letter or
+  digit is dropped) must be in the message, as a word or a word's start,
+  ignoring case and accents. FTS5's syntax is never read: `OR`, `NOT`,
+  `NEAR(…)`, `column:`, `*`, `^` and quotes are text like any other.
+
+The shell's search dialog shows the fragments, then the messages; a
+message opens its chat (or app). It does not scroll to the message: the
+chat's page has no way to be told one yet.
 
 ## Computers (docs/computers.md, phase 4)
 

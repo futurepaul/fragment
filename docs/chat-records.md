@@ -110,6 +110,12 @@ the same record (or 409, for another option).
 
 Any other `kind` on `chat` is the page's own and is never a message.
 
+**Search.** A person's message and an agent's reply are what the
+shell's search finds (docs/api.md, The shell, Search): a body whose
+`kind` is absent or `"message"`, by its `text` alone (its first 4 KiB).
+No other record here is searched, Stop, prompt answers and everything on
+`work` included.
+
 ## `work`
 
 Posted by the agent, each with the id `wk:<turn>:<part>`, so a replayed
