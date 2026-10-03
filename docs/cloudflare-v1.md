@@ -173,17 +173,27 @@ speaking Cloudflare's APIs) returns once this product works.
 
     The inactivity timeout is only a safety net. An idle stop gives the
     guest about 5 seconds of SIGTERM, and the DO can't exec during it.
-    A wake starts the container with `RESTORE_PENDING=1`, restores
-    `/data`, and touches `/run/computer/restored`. The image waits for
-    that file before its own init runs. The
-    platform gives every computer an S3 endpoint scoped to its own R2
-    prefix through an intercept, so the guest holds no credential. The
+
+    **A wake starts from a per-computer snapshot.** At sleep, after the
+    save, the DO takes `snapshotContainer()` (5–6 s, about 12 MB). A wake
+    then calls `start({containerSnapshot})` when the computer's pinned
+    image matches the snapshot. Otherwise it starts the image and
+    restores: the container starts with `RESTORE_PENDING=1`, the DO
+    restores `/data`, and it touches `/run/computer/restored`, which the
+    image waits for before its own init runs. The DO retries a
+    "temporarily unavailable" start (spike S3b).
+
+    The platform gives every computer an S3 endpoint scoped to its own
+    R2 prefix through an intercept, so the guest holds no credential. The
     Hermes image uses it for Litestream, streaming Hermes' SQLite
-    continuously. The agent's self is in its fragment. CI runs a restore
-    drill into an empty computer.
+    continuously. Litestream is for disaster recovery only: it restores
+    about 3 s per database, so it stays off the wake path. The agent's
+    self is in its fragment. CI runs a restore drill into an empty
+    computer.
 19. **Image updates.** The image is pinned per computer. A new default
-    image reaches a sleeping computer at its next wake. Wakes restore
-    `/data` anyway, so the update path is the path every wake takes.
+    image reaches a sleeping computer at its next wake, through the
+    image-plus-restore path, since the snapshot is for the old image. The
+    first start of a new image at a location pays its pull (24–40 s).
     A canary is a per-computer pin. Rollback is the pin back, plus a
     point-in-time restore when the new image moved its data's schema.
 20. **Preview environments.** Every branch deploys a complete, separately
@@ -353,6 +363,13 @@ speaking Cloudflare's APIs) returns once this product works.
     - an open port tab;
     - or a keepalive socket that the guest holds to the Computer DO
       itself.
+
+    **A page wakes it early.** When a page opens a fragment the computer
+    subscribes to (a chat), or someone starts typing there, the platform
+    starts the computer at once. It stops again after 60 s if nothing
+    arrives. An unused pre-wake costs about $0.002, and it hides the
+    whole wake if it fires 3 s before the message is sent (spike S3b).
+    The rule names no runtime; it is presence on a subscribed channel.
 
     Twenty minutes after neither has been true, it sleeps. Spike S3
     found that traffic from the container, even a socket to another DO,
@@ -526,13 +543,11 @@ exit says.
    Exit: a verdict and evidence for each spike.
 
    Status, 2026-10-02:
-   - Done (see "Spike results"): Loader and Facets (S1), and Hermes on
-     Containers (S3).
+   - Done (see "Spike results"): Loader and Facets (S1), Hermes on
+     Containers (S3) and its wake (S3b), Pipes (S5), AI Gateway (S4).
    - Folded into phase 2's first step: the cell on real Workers, and a
      per-branch deployment on `finite.place`.
-   - Done: WorkOS Pipes (S5).
-   - Half done: AI Gateway (S4). Its second half (Unified Billing, Opus,
-     ZDR, spend limits) is running with an AI Gateway token.
+   - Phase 0 is complete.
 1. **Freeze and cut. Done 2026-10-02.**
    - `celld-final` was tagged and the `celld` branch pushed.
    - The product half of decision 33 went: about 64k lines.
@@ -709,6 +724,60 @@ What it changes:
   `state.db` for Litestream, and keep the screen's lease;
 - a risk: cold wakes are slow.
 
+**S3b, a Hermes computer's wake (2026-10-02; evidence in
+`spikes/s3b-wake/RESULTS.md`; about $0.4).** Ready went from 13.1 s to
+2.95 s (p50, 2 vCPU / 6 GiB), and the first token from 18.8 s to 5.9 s.
+
+The baseline waterfall:
+
+| Phase | Time |
+|---|---|
+| Container start | 1.6 s |
+| Restore | 0.4 s |
+| Setup scripts | 1.1 s |
+| Profile reconcile | 1.3 s |
+| `update-ca-certificates` | 1.0 s |
+| Hermes' gateway importing without bytecode | 6.6 s |
+
+The cuts, cumulative, in the order measured:
+
+| Cut | Ready after it |
+|---|---|
+| Bytecode compiled into the image | 7.0 s |
+| Gateway imports preloaded during the restore | 6.2 s |
+| Unused messaging-platform plugins disabled | 4.5 s |
+| Gateway's own skills syncs skipped, its files read ahead | 3.8 s |
+| A single-layer image | 3.6 s |
+| A per-computer snapshot in place of the restore | 2.95 s |
+
+What didn't help:
+- 4 vCPU gives no gain, because the boot is one Python thread.
+- A golden snapshot shared by every computer saves nothing once
+  bytecode is in the image.
+- Native directory snapshots (`snapshotDirectory`) are only behind the
+  `experimental` flag in production.
+- The pre-distributed `cloudflare/debian-trixie` base wouldn't start on
+  this account, and would save only about 1 s of a first pull.
+
+What goes where:
+- **The Hermes image's boot list** (phase 4): bytecode with
+  `unchecked-hash`, `plugins.disabled` for platforms and dashboard auth,
+  a gateway preloaded before the restore gate, setup gated on stamps,
+  the CA appended rather than regenerated, a readahead list, a
+  single-layer image, and the dashboard and screen lazy.
+- **Upstream Hermes:** load only the configured platforms, key the skills
+  sync on the image revision, use lazy imports, and ship bytecode.
+- **The generic Computer DO:** snapshot-backed wakes (decision 18) and a
+  pre-wake on presence (decision 39).
+
+Snapshot facts:
+- They work only with the `durable_object` scheduling policy.
+- They hold files only, are tied to the image version, are immutable,
+  are capped at 20 GB, and are kept 30 days.
+- There is no deletion API and no published price.
+- They are stored as tags in the image's registry repository; whether
+  they count against the 50 GB limit is unverified.
+
 **S4, AI Gateway (2026-10-02, both halves; evidence in
 `spikes/s4-gateway/RESULTS.md`; about $0.62 of Workers AI).** Wrangler's
 OAuth login has no AI Gateway scope, so the gateway, Unified Billing,
@@ -854,10 +923,14 @@ Each one needs a test in the phase that ports its feature.
   raising the gateway's own cap of 200 requests a minute. Paul,
   2026-10-02: don't worry about it while building; request it in the
   production account during cutover (phase 10).
-- **Slow cold wakes.** Hermes takes about 21 s to wake with a restore,
-  and 42–82 s on a new image. The chat must show the computer waking.
-  The idle window and the $200 always-on seat hide it. Hermes' boot
-  (bytecode, skipped setup, the restored `/opt/data`) is where to cut.
+- **Cold wakes**, after spike S3b's cuts:
+  - Hermes is ready in about 3 s, and the first token arrives in about
+    6 s (4 s with a first-turn warm-up that needs a hook upstream);
+  - with a pre-wake, about 1 s is perceived;
+  - a new image version's first start at a location still takes 24–40 s.
+
+  Hermes' Python start stays about 2 s on this CPU, and Cloudflare has
+  no memory snapshots. The chat shows the computer waking from t = 0.
 - **Unproven paths:**
   - a bridge's long-lived connection to a fragment through the egress
     swap;
