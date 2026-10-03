@@ -314,6 +314,11 @@ pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
 }
 
 /// A binding of the node's; `section` is where wrangler.jsonc declares it.
+/// Whether the deployment declares the binding `name`.
+pub fn has_binding(env: &JsValue, name: &str) -> bool {
+    get(env, name).is_ok_and(|b| !b.is_undefined())
+}
+
 fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
     let binding = get(env, name)?;
     if binding.is_undefined() {

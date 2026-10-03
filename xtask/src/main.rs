@@ -103,6 +103,12 @@ fn build() -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
+    // the runtime: wrangler's local workerd, or celld (docs/self-host.md, seam 1)
+    let celld = match args.iter().position(|a| a == "--runtime").and_then(|i| args.get(i + 1)).map(String::as_str) {
+        None | Some("wrangler") => false,
+        Some("celld") => true,
+        Some(other) => bail!("--runtime is wrangler or celld, not {other}"),
+    };
     // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -141,7 +147,8 @@ fn dev(args: &[String]) -> Result<()> {
     let (model_upstream, node) = self_host(&read)?;
     // computers run on the node when there is one, else in local Docker;
     // with neither, the stack runs without computers, and says so
-    let docker = node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    // (celld runs no containers of its own: its computers are a node's)
+    let docker = !celld && node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     let computers = node.is_some() || docker;
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
@@ -197,11 +204,26 @@ fn dev(args: &[String]) -> Result<()> {
         // in the terminal's group: Ctrl-C stops it with xtask
         own_group: false,
     };
-    let (node, took) = devstack::Node::start(&tools, &opts)?;
-    println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
-    println!("  node log:     {}", node.log.display());
+    enum Running {
+        Wrangler(devstack::Node),
+        Celld(devstack::celld::CelldNode),
+    }
+    let (running, base, log, took) = if celld {
+        let tools = devstack::celld::CelldTools::locate()?;
+        let copts = devstack::celld::CelldOptions { project: opts.project.clone(), with: opts.with.clone(), port: opts.port, clean: opts.clean, log_dir: opts.log_dir.clone() };
+        let (n, took) = devstack::celld::CelldNode::start(&tools, &copts)?;
+        let (base, log) = (n.base.clone(), n.log.clone());
+        (Running::Celld(n), base, log, took)
+    } else {
+        let (n, took) = devstack::Node::start(&tools, &opts)?;
+        let (base, log) = (n.base.clone(), n.log.clone());
+        (Running::Wrangler(n), base, log, took)
+    };
+    println!("fragment dev: {base} (ready in {took:.1?}; Ctrl-C stops it)");
+    println!("  runtime:      {}", if celld { "celld (CELLD_BIN)" } else { "wrangler dev (workerd)" });
+    println!("  node log:     {}", log.display());
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
-    println!("  agents:       {}/api/agents (beside it; signed)", node.base);
+    println!("  agents:       {base}/api/agents (beside it; signed)");
     println!("  code.storage: {} (the fake)", fake.url);
     match std::env::var("FRAGMENT_MODEL_URL") {
         Ok(u) => println!("  models:       {u} (a self-hosted model server)"),
@@ -210,7 +232,7 @@ fn dev(args: &[String]) -> Result<()> {
     match (std::env::var("FRAGMENT_NODE_URL"), docker) {
         (Ok(u), _) => println!("  computers:    the sandcastle node at {u}"),
         (Err(_), true) => println!("  computers:    local Docker (the stub image)"),
-        (Err(_), false) => println!("  computers:    none (Docker is not reachable, and no FRAGMENT_NODE_URL)"),
+        (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
@@ -218,10 +240,17 @@ fn dev(args: &[String]) -> Result<()> {
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
     // it left (wrangler's teardown removes its computers, not their sidecars)
     devstack::signals::outlive_interrupt()?;
-    let status = node.wait()?;
-    println!("wrangler dev exited: {status}");
-    let removed = devstack::containers::remove(&devstack::cell_dir())?;
-    println!("removed {} containers the dev node left", removed.containers);
+    let status = match running {
+        Running::Wrangler(n) => n.wait()?,
+        Running::Celld(n) => n.wait()?,
+    };
+    println!("the node exited: {status}");
+    // the runtime's own containers alone: celld runs none, nor does a
+    // stack whose computers are a node's
+    if docker {
+        let removed = devstack::containers::remove(&devstack::cell_dir())?;
+        println!("removed {} containers the dev node left", removed.containers);
+    }
     Ok(())
 }
 
