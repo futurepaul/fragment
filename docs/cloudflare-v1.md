@@ -603,6 +603,32 @@ What it changes:
   `state.db` for Litestream, and keep the screen's lease;
 - a risk: cold wakes are slow.
 
+**S4, AI Gateway (2026-10-02, half run; evidence in
+`spikes/s4-gateway/RESULTS.md`; about $0.62 of Workers AI).** Wrangler's
+OAuth login has no AI Gateway scope, so the gateway, Unified Billing,
+Opus, ZDR and spend limits wait on an API token with AI Gateway Edit.
+Self-deploy's `SETUP.md` must ask for that token too.
+
+What ran, against Workers AI directly:
+- Both GLM tiers do OpenAI-style tool calls over streaming.
+- GLM-5.3 takes a 1M-token context; a 308K-token prompt answered, so the
+  64K listing was wrong.
+- Cost is exact from usage: neurons × $0.000011 matched token ×
+  catalog price on all 18 calls. Prices come from the catalog API
+  (`/ai/models/search`).
+
+Intercept facts:
+- Call through the Worker's `env.AI` binding with a named gateway
+  (`{gateway: {id, metadata: {user_id, agent_id}, collectLog: false}}`),
+  so no token is held. The id `default` silently creates a logging
+  gateway, so always name ours.
+- Usage arrives on every chunk; meter only the last, cumulative one.
+- Clamp GLM's `reasoning_effort`, which otherwise defaults to `max`.
+- ZDR covers only Unified Billing's third-party providers (Opus), and the
+  gateway's logs are a separate setting.
+- Gateway spend limits are eventually consistent, so they are only a
+  backstop. Our ledger stays authoritative.
+
 ## Bugs the port must fix
 
 Found 2026-10-02 building `avatar-lab` on fragment.club (`celld-final`).
@@ -644,9 +670,12 @@ Each one needs a test in the phase that ports its feature.
     gateway until raised;
   - the Worker Loader, Facets and the containers' `durable_object`
     scheduling policy are betas.
-- **Model context.** Cloudflare lists GLM-5.3, the medium tier, at 64K,
-  but Paul expects 1M like GLM-5.3 Flash (spike S3 sent Flash 257K).
-  The AI Gateway spike checks it with a prompt past 64K.
+- **Workers AI rate limits.** GLM-5.3 and Flash are "paid models":
+  20 requests a minute per model per account on standard billing, and 50
+  with prepaid credits through a gateway. At about 4 calls a Hermes
+  turn, that is roughly 12 turns a minute for the whole account.
+  Escalation: ask Cloudflare for an increase (the Custom Requirements
+  Form) before launch. The gateway's own cap is 200 requests a minute.
 - **Slow cold wakes.** Hermes takes about 21 s to wake with a restore,
   and 42–82 s on a new image. The chat must show the computer waking.
   The idle window and the $200 always-on seat hide it. Hermes' boot
