@@ -184,48 +184,56 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
 
-    // first run: a username, then the first agent
+    // first run: a username, then the default agent, made while the shell
+    // waits with no question asked (Paul, 2026-10-03)
     let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
     s.ok("signed in with no username, the shell asks for one", asked, "");
     let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
     b.eval(&page, &fill("#first-run-card input[name=username]", &username))?;
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
-    let first = b.until(&page, "document.querySelector('#first-run-card textarea[name=job]')", wait);
-    s.ok("then: what should your first agent do?", first, "");
-    // setup's computer starts while the job is typed, not after it is sent
-    let warming = s.eventually(wait, || {
-        shell(api, &session, "GET", "/api/computers", None, &[]).is_ok_and(|r| {
-            r.body["computers"].as_array().is_some_and(|c| c.len() == 1 && matches!(c[0]["phase"].as_str(), Some("starting" | "awake")))
-        })
-    });
-    let seen = shell(api, &session, "GET", "/api/computers", None, &[])?;
-    s.ok("and the person's computer is already starting as they type it", warming, &seen);
-    let _ = b.screenshot(&page, &shots.join("first-agent.png"));
-    b.eval(&page, &fill("#first-run-card textarea[name=job]", "hello there, please help me water the garden"))?;
-    b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
+    let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
+    s.ok("then the shell makes their default agent, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
+    let _ = b.screenshot(&page, &shots.join("creating.png"));
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
     if !opened {
-        let _ = b.screenshot(&page, &shots.join("first-agent-failed.png"));
+        let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
-    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, error: document.querySelector('#first-run-card .form-error')?.textContent ?? null, apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
-    s.ok("the agent is made, named, and its chat opens in the shell", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
+    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
+    s.ok("the agent is made, named, and its chat opens once it is ready", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     let title = row.as_str().unwrap_or("").to_string();
     let chat = format!("{}-chat.{username}", title.to_lowercase());
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
+    // ready is ready: its computer awake, and the agent following its chat
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
+    let awake = computers.body["computers"][0]["phase"] == "awake";
+    let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"));
+    s.ok("as it opens, its computer is awake and the agent follows the chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
-    let answered = {
-        let t0 = std::time::Instant::now();
-        let mut seen = false;
-        while t0.elapsed() < agent_wait && !seen {
-            seen = b.eval_in_frame(&page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("water the garden") && t.contains("echo:"))).unwrap_or(false);
-            if !seen {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
+    // the person's first message, answered by an agent already up
+    let t0 = std::time::Instant::now();
+    let mut typed = false;
+    while t0.elapsed() < wait && !typed {
+        let sent = b.eval_in_frame(&page, &host, "(() => { const t = document.getElementById('text'); if (!t || t.disabled) return false; t.value = 'hello there, please help me water the garden'; t.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('say').requestSubmit(); return true; })()");
+        typed = sent.ok() == Some(Value::Bool(true));
+        if !typed {
+            std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        seen
-    };
-    s.ok("its chat is framed, signed in on the chat's own origin, and the agent answers the job in it", signed && answered, &host);
+    }
+    let t1 = std::time::Instant::now();
+    let mut answered = false;
+    while typed && t1.elapsed() < wait && !answered {
+        answered = b.eval_in_frame(&page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("water the garden") && t.contains("echo:"))).unwrap_or(false);
+        if !answered {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    s.ok(
+        "its chat is framed, signed in on the chat's own origin, and the agent answers the first message at once",
+        signed && typed && answered,
+        json!({ "host": host, "typed": typed, "answeredInMs": t1.elapsed().as_millis() as u64 }),
+    );
     let sidebar = b.until(&page, "document.getElementById('layout').classList.contains('left-open') && document.getElementById('sidebar').getBoundingClientRect().width > 0", wait);
     s.ok("at a desktop's width the sidebar shows beside the chat", sidebar, "");
     let _ = b.screenshot(&page, &shots.join("desktop-chat.png"));

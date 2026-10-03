@@ -346,3 +346,15 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .sheet iframe { display: block; width: min(92vw, 460px); height: 600px; border: 0; }
 .picture { gap: 10px; cursor: pointer; }
 .picture img { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+/* setup: the steps of making the default agent (shell.js creatingAgent) */
+.creating-steps { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.creating-steps li { display: flex; align-items: center; gap: 10px; color: var(--text-tertiary); }
+.creating-steps li::before { content: ""; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); box-sizing: border-box; flex: none; }
+.creating-steps li.doing { color: var(--text-primary); }
+.creating-steps li.doing::before { border-color: var(--text-primary); border-right-color: transparent; animation: creating-spin .8s linear infinite; }
+.creating-steps li.done { color: var(--text-secondary); }
+.creating-steps li.done::before { border-color: var(--success); background: var(--success); }
+.creating-steps li.failed { color: var(--danger-text); }
+.creating-steps li.failed::before { border-color: var(--danger-text); }
+@keyframes creating-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .creating-steps li.doing::before { animation: none; } }
