@@ -115,7 +115,9 @@ A page imports the browser library from its own fragment:
 ## The loop
 
 ```sh
-fragment deploy garden --dir .            # sync the folder to main, then move live: the site and the app
+fragment write garden site/index.html --from index.html   # one text file to main, through the platform
+fragment deploy garden                    # move live to main: the site and the app
+fragment deploy garden --dir .            # or sync a whole folder to main, then move live
 fragment status garden                    # its link, visibility, live commit, and code.error if its code was refused
 fragment events garden --tail 30          # what happened: believe it over your memory
 fragment rollback garden                  # live back to the deploy before

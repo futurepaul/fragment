@@ -47,6 +47,9 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// A file `fragment write` sends: the files API's own cap (docs/api.md).
+const WRITE_MAX_BYTES: usize = 256 * 1024;
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Make a nostr key (or use the one you have) and add it to you: sign
@@ -303,6 +306,22 @@ enum Cmd {
     },
     /// Show or set who can see a fragment: public | link | members
     Visibility { name: String, value: Option<String> },
+    /// Write one text file to main through the platform (no folder, no git):
+    /// what an agent on a computer uses. `fragment deploy` puts it live.
+    Write {
+        name: String,
+        /// The repo path, relative (`site/index.html`, `garden/raw/note.md`)
+        path: String,
+        /// Its text from a file, or `-` for stdin
+        #[arg(long, conflicts_with = "text")]
+        from: Option<PathBuf>,
+        /// Its text
+        #[arg(long)]
+        text: Option<String>,
+        /// The commit's message
+        #[arg(long)]
+        message: Option<String>,
+    },
     /// Post to a fragment's inbox (webhook-style, token auth)
     Inbox {
         name: String,
@@ -1094,6 +1113,46 @@ fn run(cli: Cli) -> Result<()> {
                 report.print();
             }
             std::process::exit(report.exit_code());
+        }
+        // no folder to sync and no preview: the platform moves live itself
+        // (POST …/deploy), so nothing here talks to git (an agent on a computer)
+        Cmd::Deploy { name, dir: None, note, preview: false } => {
+            let r = c.post_json(&format!("/api/f/{name}/deploy"), &json!({ "note": note }))?;
+            let v: Value = c.call_as(r)?;
+            let live_tip = v["live"].as_str().unwrap_or("").to_string();
+            let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
+            if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip.as_str())) {
+                return Err(anyhow::Error::new(CodedError {
+                    code: Code::InvalidRequest,
+                    msg: format!("live moved to {}, but the platform refused its code, so the last good code keeps serving: {why}", &live_tip[..12.min(live_tip.len())]),
+                }));
+            }
+            let live_url = &st.urls.canonical;
+            json_exit(j, &json!({ "live": live_url, "liveTip": live_tip, "mainTip": live_tip }));
+            println!("live: {live_url}");
+            if let (Visibility::Link, Some(tok)) = (st.visibility, &st.view_token) {
+                println!("share link: {}", share_link(live_url, tok));
+            }
+        }
+        Cmd::Write { name, path, from, text, message } => {
+            let text = match (from, text) {
+                (Some(f), None) if f.as_os_str() == "-" => {
+                    let mut t = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut t).context("reading stdin (a file is text)")?;
+                    t
+                }
+                (Some(f), None) => std::fs::read_to_string(&f).with_context(|| format!("reading {} (a file written this way is text; sync a folder for others)", f.display()))?,
+                (None, Some(t)) => t,
+                _ => return Err(usage("name the file's text: --text TEXT, or --from FILE (- for stdin)")),
+            };
+            if text.len() > WRITE_MAX_BYTES {
+                return Err(usage(format!("a file written this way is at most {} KiB; sync a folder for larger ones", WRITE_MAX_BYTES / 1024)));
+            }
+            let msg = message.unwrap_or_else(|| format!("write {path}"));
+            let r = c.post_json(&format!("/api/f/{name}/files"), &json!({ "files": [{ "path": path, "text": text }], "message": msg }))?;
+            let v: Value = c.call_as(r)?;
+            json_exit(j, &json!({ "path": path, "commit": v["commit"] }));
+            println!("wrote {path} to main ({}); `fragment deploy {name}` puts it live", v["commit"].as_str().map(|c| &c[..8.min(c.len())]).unwrap_or("?"));
         }
         Cmd::Deploy { name, dir, note, preview } => {
             let deployed = deploy(&c, &name, dir.as_deref(), note.as_deref(), preview, codestorage_override().as_deref())?;

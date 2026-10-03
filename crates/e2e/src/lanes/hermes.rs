@@ -286,6 +286,52 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "list": reply_of(&listed), "whoami": reply_of(&whoami) }),
     );
 
+    // phase 6's exit: from its chat, the agent builds an app, publishes it and
+    // shares its link, then ingests a source into a brain and searches it,
+    // all with the `fragment` CLI in its terminal, acting for its owner
+    let run = |s: &Suite, n: u32, cmd: &str| -> Result<Option<String>> {
+        let r = say(n, &format!("run: {cmd}"))?;
+        let turn = turn_for(&r);
+        s.eventually(TURN, || ended(&turn).is_some());
+        Ok(reply_of(&turn))
+    };
+    let said = |reply: &Option<String>, mark: &str| reply.as_deref().is_some_and(|t| t.contains(mark));
+    let username = agent_name.split_once('.').map(|(_, u)| u.to_string()).unwrap_or_default();
+    let owner_name = |label: &str| format!("{label}.{username}");
+    let made = run(s, 60, "fragment create groceries --template todo --json | grep -c '\"ok\":true' | sed 's/^/made-/'")?;
+    let wrote = run(s, 61, "fragment write groceries site/hello.html --text '<h1>Picked by the agent</h1>' --json | grep -c '\"ok\":true' | sed 's/^/wrote-/'")?;
+    let live = run(s, 62, "fragment deploy groceries | grep -o 'view=[0-9a-f]*' | head -1 | sed 's/^/link-/'")?;
+    let app = owner_name("groceries");
+    let status = api.signed(&owner, "GET", &format!("/api/f/{app}/status"), None)?;
+    let owned = status.body["owner"] == api.identity(&owner)?.as_str();
+    let token = status.body["viewToken"].as_str().unwrap_or("").to_string();
+    let page = api.call(Call { method: "GET", url: format!("{}?view={token}", api.site_url(&app, "hello.html")), ..Call::default() })?;
+    s.ok(
+        "from its chat, the agent makes an app (its owner's), writes a page, and publishes it",
+        said(&made, "made-1") && said(&wrote, "wrote-1") && owned && page.text.contains("Picked by the agent"),
+        json!({ "made": made, "wrote": wrote, "owner": status.body["owner"], "page": page.status }),
+    );
+    s.ok(
+        "and shares it: its share link, which an anonymous visitor opens",
+        said(&live, &format!("link-view={token}")) && !token.is_empty(),
+        json!({ "reply": live, "token": !token.is_empty() }),
+    );
+    let brain = run(s, 63, "fragment create garden --template brain --title 'Garden notes' --json | grep -c '\"ok\":true' | sed 's/^/brain-/'")?;
+    let ingested = run(s, 64, "printf '# Tomatoes\\n\\nWater the tomatoes at dawn, before the heat.\\n' | fragment write garden garden/raw/tomatoes.md --from - --json | grep -c '\"ok\":true' | sed 's/^/ingested-/'")?;
+    let found = run(s, 65, "fragment call garden search --input '{\"q\":\"tomatoes dawn\"}' --json | grep -o 'garden/raw/tomatoes.md' | head -1 | sed 's/^/found-/'")?;
+    let brain_name = owner_name("garden");
+    let searched = api.signed(&owner, "POST", &format!("/api/f/{brain_name}/ops/search"), Some(&json!({ "id": "e2e-brain-search", "input": { "q": "tomatoes" } })))?;
+    s.ok(
+        "then makes a brain, ingests a source into it, and finds it by searching",
+        said(&brain, "brain-1") && said(&ingested, "ingested-1") && said(&found, "found-garden/raw/tomatoes.md"),
+        json!({ "brain": brain, "ingested": ingested, "found": found }),
+    );
+    s.ok(
+        "the brain is its owner's, and its search finds the source for its owner too",
+        searched.status == 200 && searched.text.contains("garden/raw/tomatoes.md"),
+        &searched,
+    );
+
     // delegation (decision 36): Skyler shares a fragment with the owner as an
     // editor, and the owner's agent edits it acting for them (`?for=`); a
     // people-only share, or the agent held below its owner, refuses it

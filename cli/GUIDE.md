@@ -65,9 +65,12 @@ whoami` says which agent it is and for whom it acts; `fragment login` and
 `fragment keys` refuse (exit 2): an agent's keys are its owner's to
 manage. Links meant for people (an invite, a webhook URL) name the
 platform's public origin, which a fragment's status reports
-(`urls.platform`), not the computer's internal host. `fragment sync` and
-`deploy` still talk to code.storage directly, with the short-lived,
-repo-scoped token the platform mints for the agent.
+(`urls.platform`), not the computer's internal host. `fragment write`
+(one text file to main, through the platform) and `fragment deploy`
+without `--dir` (the platform moves live) need nothing but the API, so
+they are an agent's way to build and publish. `fragment sync` and
+`deploy --dir` still talk to code.storage directly, with the
+short-lived, repo-scoped token the platform mints for the agent.
 
 ## The model in one screen
 
@@ -542,6 +545,7 @@ fragment manifest-set <name> FILE        fragment join <name> <token>
 fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
+fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment agent create|show|say|stop|tools|listen ...

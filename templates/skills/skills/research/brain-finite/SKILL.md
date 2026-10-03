@@ -20,8 +20,8 @@ nvk's llm-wiki (MIT, `LICENSE` beside this file).
 
 What every brain answers:
 
-- **Files.** Markdown pages at main, synced by `fragment sync` (or written
-  through the files API). A brain needs no deploy: it reads its files at
+- **Files.** Markdown pages at main, written one at a time with `fragment
+  write`, or synced as a folder by `fragment sync`. A brain needs no deploy: it reads its files at
   main, and a file trigger reindexes what changed. A file of 1 MiB or more
   becomes one of its blobs on its own as it syncs.
 - **Wikis.** Each top-level folder is a wiki, with `raw/`, `wiki/`,
@@ -66,7 +66,8 @@ wants a new one. What you make is your owner's, with you as its editor.
 ## The loop
 
 ```sh
-fragment sync <brain> --dir ~/brains/<brain>          # read and write it as a folder
+fragment write <brain> garden/raw/<slug>.md --from note.md   # one source in, through the platform
+fragment sync <brain> --dir ~/brains/<brain>          # or read and write it as a folder
 # orient, edit with ordinary file tools…
 fragment sync <brain> --dir ~/brains/<brain>          # one commit; conflicts land beside as .conflict- copies
 fragment call <brain> search --input '{"q": "…"}'     # check that what you added is found
