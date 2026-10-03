@@ -270,3 +270,9 @@ pub async fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>>
     }
     Ok(hosts.iter().map(|h| fragment_core::swap::TagKey::derive(h)).collect())
 }
+
+/// The self-hosted model upstream's key (bound as `MODEL_KEY`), when it
+/// takes one (docs/self-host.md, seam 3).
+pub async fn model_key(env: &Env) -> CellResult<Option<String>> {
+    secret(env, store::MODEL_KEY).await
+}

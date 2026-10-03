@@ -218,6 +218,7 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
         codestorage_key: d.codestorage.private_key.clone(),
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
         operator_keys,
+        model_key: None,
     })
 }
 

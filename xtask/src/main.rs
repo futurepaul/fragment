@@ -58,7 +58,7 @@
 
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
@@ -138,6 +138,11 @@ fn dev(args: &[String]) -> Result<()> {
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let (model_upstream, node) = self_host(&read)?;
+    // computers run on the node when there is one, else in local Docker;
+    // with neither, the stack runs without computers, and says so
+    let docker = node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let computers = node.is_some() || docker;
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -167,11 +172,14 @@ fn dev(args: &[String]) -> Result<()> {
         operators: None,
         signins_pending_max: None,
         test_secret: None,
-        computer_image: Some("stub".into()),
+        computer_image: computers.then(|| "stub".into()),
         computer_snapshots: false,
         providers: None,
         operator_key_values: vec![],
         swap_upstream: None,
+        model_upstream,
+        node,
+        containers: docker,
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
@@ -195,7 +203,15 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
     println!("  agents:       {}/api/agents (beside it; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
-    println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    match std::env::var("FRAGMENT_MODEL_URL") {
+        Ok(u) => println!("  models:       {u} (a self-hosted model server)"),
+        Err(_) => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
+    }
+    match (std::env::var("FRAGMENT_NODE_URL"), docker) {
+        (Ok(u), _) => println!("  computers:    the sandcastle node at {u}"),
+        (Err(_), true) => println!("  computers:    local Docker (the stub image)"),
+        (Err(_), false) => println!("  computers:    none (Docker is not reachable, and no FRAGMENT_NODE_URL)"),
+    }
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
@@ -207,6 +223,34 @@ fn dev(args: &[String]) -> Result<()> {
     let removed = devstack::containers::remove(&devstack::cell_dir())?;
     println!("removed {} containers the dev node left", removed.containers);
     Ok(())
+}
+
+/// The self-hosted lane's settings for dev (docs/self-host.md), each from
+/// the environment, secrets from files: a model server
+/// (`FRAGMENT_MODEL_URL`, `FRAGMENT_MODELS`, `FRAGMENT_MODEL_KEY_FILE`) and
+/// a sandcastle node for computers (`FRAGMENT_NODE_URL`,
+/// `FRAGMENT_NODE_SECRET_FILE`, `FRAGMENT_NODE_IMAGES`).
+type ReadFile<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
+
+fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Option<devstack::NodeVars>)> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let model = match var("FRAGMENT_MODEL_URL") {
+        Some(url) => Some(devstack::ModelUpstreamVars {
+            url,
+            models: var("FRAGMENT_MODELS").context("FRAGMENT_MODEL_URL needs FRAGMENT_MODELS: {\"<catalog id>\": \"<the server's model>\"}")?,
+            key: read("FRAGMENT_MODEL_KEY_FILE")?,
+        }),
+        None => None,
+    };
+    let node = match var("FRAGMENT_NODE_URL") {
+        Some(url) => Some(devstack::NodeVars {
+            url,
+            secret: read("FRAGMENT_NODE_SECRET_FILE")?.context("FRAGMENT_NODE_URL needs FRAGMENT_NODE_SECRET_FILE")?,
+            images: var("FRAGMENT_NODE_IMAGES").context("FRAGMENT_NODE_URL needs FRAGMENT_NODE_IMAGES: {\"<name>\": \"<reference>\"}")?,
+        }),
+        None => None,
+    };
+    Ok((model, node))
 }
 
 /// The templates `try` scaffolds.

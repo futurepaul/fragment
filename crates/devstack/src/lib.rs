@@ -177,14 +177,19 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// binding and its secret's name) in wrangler's local store, as a deploy
 /// binds them in the account's, and its computer images built from
 /// Dockerfiles of its own (`containers::scope_images`), so that no other
-/// stack's teardown removes its computers.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// stack's teardown removes its computers. Without `containers`, computers
+/// run on a sandcastle node (docs/self-host.md, seam 2), or nowhere: the
+/// runtime's own containers, and Docker for them, go unused.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], containers: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     absolute_images(&mut config, project)?;
     containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    if !containers {
+        obj.remove("containers");
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
@@ -211,7 +216,7 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.
@@ -347,6 +352,32 @@ pub struct Fleet {
     pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// A self-hosted model upstream (docs/self-host.md, seam 3), in place
+    /// of `ai_url` and the gateway.
+    pub model_upstream: Option<ModelUpstreamVars>,
+    /// A sandcastle node new computers run on (docs/self-host.md, seam 2).
+    pub node: Option<NodeVars>,
+    /// The runtime's own containers (Docker under `wrangler dev`): `false`
+    /// when computers run on a sandcastle node instead, or nowhere.
+    pub containers: bool,
+}
+
+/// An OpenAI-compatible model server as the cell reads it.
+pub struct ModelUpstreamVars {
+    /// Its base, with its `/v1`.
+    pub url: String,
+    /// `FRAGMENT_MODELS`' JSON: catalog id to the server's model.
+    pub models: String,
+    /// Its key, bound as `MODEL_KEY` (`Fleet::bound`), when it takes one.
+    pub key: Option<String>,
+}
+
+/// A sandcastle node as the cell reads it.
+pub struct NodeVars {
+    pub url: String,
+    pub secret: String,
+    /// `FRAGMENT_NODE_IMAGES`' JSON: an image's name to its reference.
+    pub images: String,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -361,7 +392,11 @@ impl Fleet {
     /// The store secrets its Workers are bound to, by name.
     pub fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        store::Bound::conventional(self.workos.is_some(), &providers)
+        let mut bound = store::Bound::conventional(self.workos.is_some(), &providers);
+        if self.model_upstream.as_ref().is_some_and(|m| m.key.is_some()) {
+            bound.model_key = Some("fragment-model-key".into());
+        }
+        bound
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -379,9 +414,12 @@ impl Fleet {
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
         }
+        if let (Some(name), Some(key)) = (&bound.model_key, self.model_upstream.as_ref().and_then(|m| m.key.as_ref())) {
+            values.push((name.as_str(), key.as_str()));
+        }
         assert_eq!(values.len(), bound.cell().len(), "every binding has its value");
         store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        write_local_config(project, &bound.cell(), self.containers)?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
@@ -448,6 +486,15 @@ impl Fleet {
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
+        if let Some(m) = &self.model_upstream {
+            vars.push(("FRAGMENT_MODEL_URL", m.url.as_str()));
+            vars.push(("FRAGMENT_MODELS", m.models.as_str()));
+        }
+        if let Some(n) = &self.node {
+            vars.push(("FRAGMENT_NODE_URL", n.url.as_str()));
+            vars.push(("FRAGMENT_NODE_SECRET", n.secret.as_str()));
+            vars.push(("FRAGMENT_NODE_IMAGES", n.images.as_str()));
+        }
         write_dev_vars(project, &vars)
     }
 }
@@ -470,7 +517,7 @@ impl AgentFleet {
     /// Renders the fleet into the project's `.dev.vars`, and its bindings
     /// (`bound.agent()`, the platform fleet's names) into its local config.
     pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
-        write_local_config(project, &bound.agent())?;
+        write_local_config(project, &bound.agent(), true)?;
         let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
         if self.test_hooks {
             vars.push(("AGENT_TEST_HOOKS", "allow"));
