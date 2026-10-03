@@ -531,6 +531,7 @@ impl ComputerCell {
         let snapshot_js = snapshot.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
+        let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
         self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
