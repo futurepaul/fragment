@@ -1,5 +1,5 @@
 //! The shell (docs/cloudflare-v1.md, decisions 6–12): the platform's one
-//! page, at `/`, and its files at `/__shell/<file>`, compiled into the
+//! page, at `/` and `/settings`, and its files at `/__shell/<file>`, compiled into the
 //! release (cell/shell/). It holds no key: its script calls the API with
 //! the person's platform session (lib.rs `shell_session`) and frames their
 //! fragments, each signed in on its own origin by the platform's frame mint.
@@ -58,7 +58,8 @@ fn frame_src(cfg: &Config, url: &Url) -> String {
     }
 }
 
-/// `GET /`: the shell's page, for anyone (signed out, it asks them to sign in).
+/// `GET /` and `GET /settings`: the shell's page, for anyone (signed out,
+/// it asks them to sign in; the shell opens the view its path names).
 pub fn page(req: &Request, cfg: &Config, url: &Url) -> Result<Response> {
     let h = Headers::new();
     h.set("content-type", "text/html; charset=utf-8")?;
