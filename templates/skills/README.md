@@ -93,8 +93,11 @@ suffix, so none collides with a skill Hermes bundles or one an agent makes.
   takes its key in the URL, which the swap cannot fill.
 - Left out as no skill reads them: tufte-viz's demo pages (2.5 MB), the
   OOXML schemas under powerpoint's `scripts/office/schemas/` (no script of
-  it reads them), the paper-writing templates' example PDFs, and compiled
-  Python (`__pycache__`). `inference-sh/cli-finite` is now
+  it reads them), and compiled Python (`__pycache__`).
+- The paper-writing skills' conference LaTeX kits (38k lines of `.sty`,
+  `.bst`, `.tex`) are gone, and so is `ml-paper-writing-finite`, a
+  duplicate of `research-paper-writing-finite` (Paul, 2026-10-04: skills
+  stay minimal): an agent fetches the venue's own kit, which changes yearly. `inference-sh/cli-finite` is now
   `inference-sh/inference-sh-cli-finite`, its directory its name.
 
 ### What the deployment must offer

@@ -344,10 +344,10 @@ mod tests {
         for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
-        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite"] {
+        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 43, "finite-skills' 47, less shared-skills, with sites, publishing and website building one skill, and brain and llm-wiki one");
+        assert_eq!(names.len(), 42, "finite-skills' 47, less shared-skills, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 

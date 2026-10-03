@@ -421,14 +421,5 @@ COLM (Conference on Language Modeling) focuses specifically on language model re
 
 ## Template Locations
 
-All conference templates are in the `templates/` directory:
-
-```
-templates/
-├── icml2026/       # ICML 2026 official
-├── iclr2026/       # ICLR 2026 official
-├── neurips2025/    # NeurIPS 2025
-├── acl/            # ACL style files
-├── aaai2026/       # AAAI 2026
-└── colm2025/       # COLM 2025
-```
+Each venue publishes its own LaTeX kit with its call for papers (and on
+Overleaf); start from that year's kit, never an older copy.

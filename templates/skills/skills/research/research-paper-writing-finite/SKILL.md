@@ -764,12 +764,16 @@ Template Setup Checklist:
 - [ ] Step 6: Clean up template artifacts only at the end
 ```
 
-**Step 1: Copy the Full Template**
+**Step 1: Start from the venue's own kit**
+
+Download the venue's official LaTeX kit from its call for papers (or its
+Overleaf template), never a copy from memory: venues change their style
+files every year.
 
 ```bash
-cp -r templates/neurips2025/ ~/papers/my-paper/
-cd ~/papers/my-paper/
-ls -la  # Should see: main.tex, neurips.sty, Makefile, etc.
+mkdir -p ~/papers/my-paper && cd ~/papers/my-paper
+# unpack the venue's kit here; then
+ls -la  # Should see: main.tex, the venue's .sty, its .bst
 ```
 
 Copy the ENTIRE directory, not just the .tex file. Templates include style files (.sty), bibliography styles (.bst), example content, and Makefiles.
@@ -839,7 +843,7 @@ Work through systematically: title/authors → abstract → introduction → met
 
 **Universal**: Double-blind, references don't count, appendices unlimited, LaTeX required.
 
-Templates in `templates/` directory. See [templates/README.md](templates/README.md) for compilation setup (VS Code, CLI, Overleaf, other IDEs).
+Each venue publishes its kit with its call for papers; compile with `latexmk -pdf main.tex` (or on Overleaf).
 
 ### Tables and Figures
 
@@ -1299,8 +1303,8 @@ pdflatex main.tex
 When converting between venues, **never copy LaTeX preambles between templates**:
 
 ```bash
-# 1. Start fresh with target template
-cp -r templates/icml2026/ new_submission/
+# 1. Start fresh from the target venue's own kit
+mkdir new_submission  # and unpack the venue's kit into it
 
 # 2. Copy ONLY content sections (not preamble)
 #    - Abstract text, section content, figures, tables, bib entries
@@ -1581,9 +1585,7 @@ See [references/reviewer-guidelines.md](references/reviewer-guidelines.md) for d
 
 ### LaTeX Templates
 
-Templates in `templates/` for: **NeurIPS 2025**, **ICML 2026**, **ICLR 2026**, **ACL**, **AAAI 2026**, **COLM 2025**.
-
-See [templates/README.md](templates/README.md) for compilation instructions.
+Use the venue's own kit, from its call for papers: NeurIPS, ICML, ICLR, ACL, AAAI and COLM each publish one every year.
 
 ### Key External Sources
 

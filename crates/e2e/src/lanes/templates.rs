@@ -168,7 +168,7 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
         "the managed set is decision 17's: the rewritten skills there, shared-skills and what they replace gone",
-        skill_names.len() == 43
+        skill_names.len() == 42
             && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"].iter().all(|n| skill_names.contains(n))
             && !skill_names.iter().any(|n| ["shared-skills-finite", "finite-sites-publishing-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite"].contains(n)),
         format!("{skill_names:?}"),

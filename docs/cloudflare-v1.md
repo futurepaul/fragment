@@ -166,7 +166,7 @@ speaking Cloudflare's APIs) returns once this product works.
     2026-10-02: agents can do anything they could do in Finite).
 
     Status, 2026-10-03 (branch `claude/skills`; templates/skills/README.md):
-    - Built: the blessed `skills` template, its repo the managed set (43
+    - Built: the blessed `skills` template, its repo the managed set (42
       skills: finite-skills less shared-skills, apps, fragment git, brain,
       Google through `fragment-connection:google`, image generation through
       a fragment AI step, Finite-only paths and keys stripped). A fragment
