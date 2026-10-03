@@ -246,6 +246,16 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let phone = b.until(&page, "!document.getElementById('layout').hidden && document.querySelector('#frames iframe')", wait);
     let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth + 1")?;
     s.ok("on a phone it fits its width, a chat open", phone && fits == true, &fits);
+    // the chat names its agent once `__people` answers: the picture waits for it
+    let reader = fragment_proto::flat_name(&format!("reader-chat.{username}")).unwrap_or_default();
+    let t0 = std::time::Instant::now();
+    while t0.elapsed() < wait {
+        let named = b.eval_in_frame(&page, &reader, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.contains("Message Reader")));
+        if named == Some(true) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
     Ok(())
