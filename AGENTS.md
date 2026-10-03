@@ -112,14 +112,11 @@ debt ledger).
   into the celld fork), `crates/templates` (`templates/`, embedded),
   `crates/fakes` (code.storage, OpenRouter, WorkOS, a push service),
   `crates/devstack`, `crates/e2e`.
-- `.github/workflows/ci.yml` runs `check`, and the e2e in parallel: two
-  jobs build what it runs (`cargo xtask e2e-kit`: the cell's wasm on
-  Linux; on macOS the agent's wasm, the node cached by its fork commit,
-  the CLI, and the suite), four shards each run a slice of the sections
-  from that kit (`--only`, and `--except` for the rest), and one `e2e`
-  check passes when every shard does. Master's runs save the build
-  caches with the tree they were built from, so a pull request's run
-  rebuilds only the crates its changes reach.
+- `.github/workflows/ci.yml` runs `check` only. The celld e2e on macOS
+  left CI with the move to Cloudflare; run `cargo xtask e2e` locally until
+  phase 2 brings the e2e back on Linux (workerd) and as the hosted lane
+  (docs/cloudflare-v1.md). `release.yml` still builds the CLI for macOS
+  and Linux.
 - Nothing on master deploys. fragment.club (the hosted fleet) deploys
   only from the `celld` branch (tag `celld-final`) until cutover: its
   fleet file, node image, `cargo xtask deploy`/`fleet`/`e2e --fleet`,

@@ -574,8 +574,10 @@ exit says.
    on a preview. The celld fork and native `KEYS` are deleted here. The
    wrangler migrations restart from scratch, since nothing migrates:
    celld refused `deleted_classes`, so the Computer and Hermes tags are
-   still listed. Exit: core fragment sections green locally and on a
-   preview.
+   still listed. CI got the e2e back: the celld e2e on macOS left CI on
+   2026-10-03, leaving only `check`, so phase 2 adds the workerd e2e on
+   Linux and the hosted lane on a branch preview. Exit: core fragment
+   sections green locally, in CI, and on a preview.
 3. **The ledger.** Meters, plans, guests, caps, the overdraft and
    read-only, and operator commands. Exit: metering matches the price
    book, and caps and zero behave; valid, invalid and replay tests for
