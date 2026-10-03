@@ -44,6 +44,9 @@ pub struct ComputerAgent {
     pub fragment: String,
     /// The agent's identity (`id:…`): it acts as this.
     pub identity: String,
+    /// What it is called: its fragment's label (`juniper` of
+    /// `juniper.paul`), how people @mention it.
+    pub name: String,
     /// Its owner, a person.
     pub owner: String,
 }

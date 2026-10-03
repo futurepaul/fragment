@@ -30,7 +30,9 @@ ENV BRIDGE_RUNTIME=script \
     BRIDGE_SCRIPT_SCRATCH=/tmp/bridge-script \
     BRIDGE_SCREEN_LISTEN=0.0.0.0:6080 \
     BRIDGE_SCREEN_DIR=/opt/fragment/screen
-RUN mkdir -p /data /run/computer
+# no /data: the platform's restore makes it, and a directory from an image
+# layer cannot be swapped for a restored one (EXDEV under overlayfs)
+RUN mkdir -p /run/computer
 EXPOSE 6080
 # PID 1 is the bridge: it handles SIGTERM itself (gone within 3 s).
 ENTRYPOINT ["/usr/local/bin/fragment-bridge", "run"]

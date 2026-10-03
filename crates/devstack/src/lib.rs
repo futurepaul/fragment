@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-/// A node must announce "ready" within this.
-pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
+/// A node must announce "ready" within this: wrangler builds the computer
+/// images first (a cold build of the stub compiles its bridge in Docker).
+pub const READY_TIMEOUT: Duration = Duration::from_secs(900);
 /// A graceful stop must finish within this.
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -126,7 +127,7 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
 }
 
 /// The binaries the node needs.

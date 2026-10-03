@@ -428,10 +428,15 @@ impl ComputerCell {
         Ok(self
             .rows("SELECT fragment, identity, owner FROM agents ORDER BY added_at", vec![])?
             .into_iter()
-            .map(|r| ComputerAgent {
-                fragment: r["fragment"].as_str().unwrap_or_default().to_string(),
-                identity: r["identity"].as_str().unwrap_or_default().to_string(),
-                owner: r["owner"].as_str().unwrap_or_default().to_string(),
+            .map(|r| {
+                let fragment = r["fragment"].as_str().unwrap_or_default().to_string();
+                let name = fragment_proto::split_fragment_name(&fragment).map(|(label, _)| label.to_string()).unwrap_or_default();
+                ComputerAgent {
+                    identity: r["identity"].as_str().unwrap_or_default().to_string(),
+                    owner: r["owner"].as_str().unwrap_or_default().to_string(),
+                    fragment,
+                    name,
+                }
             })
             .collect())
     }

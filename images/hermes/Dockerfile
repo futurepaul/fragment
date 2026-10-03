@@ -67,7 +67,7 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /tmp/rh \
  && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
  && rm -rf /tmp/rh \
- && mkdir -p /data /run/computer /var/lib/fragment-run
+ && mkdir -p /run/computer /var/lib/fragment-run
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
 # restated, without upstream's VOLUME.

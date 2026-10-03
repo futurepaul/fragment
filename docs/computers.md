@@ -84,7 +84,10 @@ holds. Other internet traffic goes out as it is (decision 43).
 ### Data and the restore gate
 
 - `/data` is the only directory kept across sleeps. Everything else is
-  the image's.
+  the image's. The image does not ship `/data`: the restore makes it,
+  swapping a restored directory into place, which overlayfs refuses for
+  a directory from an image layer (EXDEV); on a first start the image
+  makes it itself.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).

@@ -12,7 +12,7 @@
 //!   computer may be about to hear from, wakes it early (a pre-wake).
 
 use fragment_core::npub;
-use fragment_proto::{valid_channel_name, ErrorCode};
+use fragment_proto::{split_fragment_name, valid_channel_name, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -71,6 +71,12 @@ impl FragmentCell {
                     }
                 };
                 self.set_meta(MetaKey::Computer, &b.computer)?;
+                // the agent keeps its own state here (its SOUL.md, memories,
+                // skills, routines): it is an editor of its own fragment
+                if self.member_role(&identity)?.is_none() {
+                    let as_owner = self.as_owner()?;
+                    self.set_member(&as_owner, &identity, fragment_proto::SetRole { role: Role::Editor, people_only: false }).await?;
+                }
                 self.event("computer.assigned", &format!("runs on {}", b.computer), json!({ "computer": b.computer, "identity": identity }));
                 Ok(json!({ "identity": identity }))
             }
@@ -119,6 +125,16 @@ impl FragmentCell {
             }
             r => Err(CellError::new(ErrorCode::NotFound, format!("no route computer/{r}"))),
         }
+    }
+
+    /// The fragment's owner as a caller, for what the platform does on the
+    /// owner's behalf here (adding the agent as a member).
+    fn as_owner(&self) -> CellResult<crate::fragment::Caller> {
+        let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
+        let (_, username) = split_fragment_name(&name).ok_or_else(|| CellError::host(format!("{name} is not <label>.<username>")))?;
+        let identity = fragment_proto::Identity { id: owner, kind: IdentityKind::Person, owner: None, username: Some(username.to_string()), held: None };
+        let signed = crate::routed::Signed::new(identity, None);
+        Ok(crate::fragment::Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), mode: None })
     }
 
     /// This agent fragment runs on `computer`, or refuses.

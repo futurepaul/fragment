@@ -79,7 +79,12 @@ impl FragmentCell {
         )?;
         let subs: Vec<Value> = rows
             .iter()
-            .map(|r| json!({ "id": r["id"], "principal": npub::display(r["principal"].as_str().unwrap_or("")), "channel": r["channel"], "url": r["url"], "createdAt": r["created_at"] }))
+            .map(|r| {
+                let url = r["url"].as_str().unwrap_or("");
+                // a computer's wake subscription has no URL anyone fetches (runs_on.rs)
+                let wake = url.starts_with("computer:");
+                json!({ "id": r["id"], "principal": npub::display(r["principal"].as_str().unwrap_or("")), "channel": r["channel"], "url": (!wake).then_some(url), "wake": wake, "createdAt": r["created_at"] })
+            })
             .collect();
         json_response(&json!({ "subscriptions": subs }))
     }

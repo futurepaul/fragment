@@ -9,6 +9,8 @@
   // forwards to Rust, which workers-rs does not wrap for these.
   "main": "entry.mjs",
   "compatibility_date": "2026-01-01",
+  // the Sandbox SDK's DirectoryBackup (entry.mjs) imports Node's modules
+  "compatibility_flags": ["nodejs_compat"],
   "build": { "command": "worker-build --release", "watch_dir": ["src", "../crates"] },
   "worker_loaders": [{ "binding": "LOADER" }],
   // One Workflow instance per run of a job or triggered operation (jobs.rs).

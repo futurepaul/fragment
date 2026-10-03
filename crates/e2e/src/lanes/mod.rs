@@ -7,6 +7,7 @@ mod appfiles;
 mod blobs;
 mod author;
 mod budget;
+mod computers;
 mod control;
 mod deliver;
 mod identities;
@@ -84,6 +85,7 @@ const LANES: &[Lane] = &[
     budget::budget,
     agents::agents,
     addon::addon,
+    computers::computers,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,
