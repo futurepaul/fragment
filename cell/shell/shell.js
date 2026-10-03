@@ -77,15 +77,27 @@ const own = (f) => f.role === "owner";
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
 // a frame of one of the person's fragments, signed in there by the platform
+// A path segment: the API's ids keep their ":" (`computer:…`, `id:…`) as
+// sent, since the router matches segments as they are, not decoded.
+const seg = (s) => encodeURIComponent(s).replace(/%3A/gi, ":");
 const framed = (name, path = "/") => `/auth/frame?name=${encodeURIComponent(name)}&return=${encodeURIComponent(path)}`;
-const colorOf = (name) => {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.codePointAt(0)) >>> 0;
+// An agent's colour, chosen by its identity as the chat's page chooses it
+// (templates/chat: FNV-1a over the id), so the two always agree.
+const colorOf = (id) => {
+  if (!id) return COLORS[0];
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
   return COLORS[h % COLORS.length];
 };
-// a chat's face: its title and its lead agent's colour (from its name, as
-// the agent's own page chooses it)
-const identity = (name) => ({ title: titleOf(name), color: colorOf(titleOf(name)), preview: state.previews.get(name) ?? "" });
+// The identity of the agent a fragment is (`maple.ann`), or of a chat's
+// lead (`maple-chat.ann`, made beside it).
+const agentOf = (name) => {
+  const [label, ...rest] = name.split(".");
+  const agent = [label.replace(/-chat$/, ""), ...rest].join(".");
+  return [...state.agents.values()].find((a) => a.fragment === agent)?.identity ?? null;
+};
+// a chat's face: its title and its lead agent's colour
+const identity = (name) => ({ title: titleOf(name), color: colorOf(agentOf(name)), preview: state.previews.get(name) ?? "" });
 
 function notice(title, text, ...actions) {
   const n = $("notice");
@@ -124,24 +136,45 @@ function show(spec) {
   layout.show("right");
 }
 
-// A frame of `name`. One still on this origin once it loads is the mint's
-// refusal (a fragment this person may not open here): it says so instead.
-function frameOf(src, title) {
+// A frame of `src` (the mint's, for fragment `name`; a port's ticket).
+function frameOf(src, title, name = null) {
   const frame = el("iframe");
   frame.title = title;
   frame.src = src;
   frame.allow = "clipboard-write; microphone";
-  frame.addEventListener("load", () => {
-    let path = null;
-    try {
-      path = frame.contentDocument?.location.pathname ?? null;
-    } catch {}
-    // a cross-origin frame (the fragment's own) is out of reach: it showed
-    if (path?.startsWith("/auth/frame")) frame.classList.add("refused");
-    theme(frame);
-  });
+  if (name) frame.dataset.fragment = name;
+  frame.dataset.src = src;
+  frame.addEventListener("load", () => theme(frame));
   return frame;
 }
+
+// A frame that could not sign in says so, and how on (the mint's note,
+// auth.rs `frame_note`, or a fragment's page whose browser keeps its frame
+// cookie from it): in this page's look, in the frame's place, tried again
+// when the person comes back from the tab it sent them to.
+const BLOCKED = {
+  consent: (t) => [`Open ${t} to continue`, "It isn't yours, and no one shared it with you: it learns who you are only once you say so, in a tab of its own.", "Open it in a tab", "_blank"],
+  cookies: (t) => [`${t} can't sign in here`, "This browser keeps a window's own sign-in from it. Open it in a tab instead.", "Open it in a tab", "_blank"],
+  "signed-out": (t) => [`Sign in to see ${t}`, "You're signed out.", "Sign in", "_top"],
+};
+const html = (t) => String(t).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+addEventListener("message", (event) => {
+  const d = event.data;
+  if (d?.fragment !== "signin-blocked" || !Object.hasOwn(BLOCKED, d.why)) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  if (!frame || frame.dataset.fragment !== d.name) return;
+  const [title, text, go, target] = BLOCKED[d.why](titleOf(d.name));
+  const href = d.why === "signed-out" ? `/auth/login?return=${encodeURIComponent(location.pathname)}` : `/auth/fragment?name=${encodeURIComponent(d.name)}&return=/`;
+  frame.dataset.blocked = d.why;
+  frame.srcdoc = `<!doctype html><link rel="stylesheet" href="/__shell/shell.css"><body class="frame-note"><div class="notice"><strong>${html(title)}</strong><span>${html(text)}</span><a class="allow" href="${html(href)}" target="${target}" rel="noopener">${html(go)}</a></div></body>`;
+});
+addEventListener("focus", () => {
+  for (const frame of document.querySelectorAll("iframe[data-blocked]")) {
+    delete frame.dataset.blocked;
+    frame.removeAttribute("srcdoc");
+    frame.src = frame.dataset.src;
+  }
+});
 // The frames follow this page's light or dark (they may not see its media).
 const dark = matchMedia("(prefers-color-scheme: dark)");
 function theme(frame) {
@@ -290,8 +323,7 @@ function openChat(name) {
   store.set(CURRENT, name);
   $("notice").hidden = true;
   if (!state.frames.has(name)) {
-    const frame = frameOf(framed(name), titleOf(name));
-    frame.dataset.fragment = name;
+    const frame = frameOf(framed(name), titleOf(name), name);
     $("frames").append(frame);
     state.frames.set(name, frame);
   }
@@ -323,14 +355,14 @@ function renderApps() {
 function openApp(name) {
   const f = byName(name);
   if (!f) return;
-  const frame = frameOf(framed(name), titleOf(name));
+  const frame = frameOf(framed(name), titleOf(name), name);
   const status = el("span", "pane-sharing");
   status.append(...badges(f));
   show({
     key: `app:${name}`, title: titleOf(name), subtitle: own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
     actions: [
       ...(own(f) ? [{ icon: ICON.share, title: "Share…", onClick: () => share(name) }] : []),
-      { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`) }) },
+      { icon: ICON.folder, title: "Files", onClick: () => show({ key: `tree:${name}`, title: titleOf(name), subtitle: "files", icon: paneIcon("folder"), body: frameOf(framed(name, "/__files"), `${titleOf(name)} files`, name) }) },
       { icon: ICON.reload, title: "Reload", onClick: () => { frame.src = framed(name); } },
     ],
   });
@@ -354,7 +386,7 @@ addEventListener("message", (e) => {
 async function openScreen() {
   if (!state.computer) return;
   try {
-    const t = await api("POST", `/api/computers/${encodeURIComponent(state.computer.computer)}/ports/6080/ticket`, {});
+    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, {});
     const frame = frameOf(t.url, "Its computer's screen");
     show({ key: "screen", title: "Computer", subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
   } catch (e) {
@@ -383,20 +415,21 @@ async function makeAgent(job, chosen) {
   const name = chosen?.trim() || pickName();
   const label = freeLabel(slug(name));
   const agent = await api("POST", "/api/fragments", { name: label, template: "agent", title: name });
+  const computer = await api("POST", "/api/computers", {});
+  const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
+  const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
+  // its colour is its identity's, as every page that shows it chooses it
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-job",
     message: "its job",
-    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(name) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  const computer = await api("POST", "/api/computers", {});
-  const assigned = await api("PUT", `/api/computers/${encodeURIComponent(computer.computer)}/agents/${encodeURIComponent(agent.name)}`, {});
-  const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
   const chat = await api("POST", "/api/fragments", { name: `${label}-chat`, template: "chat", title: name });
-  if (id) await api("PUT", `/api/f/${chat.name}/members/${encodeURIComponent(id)}`, { role: "editor" });
+  if (id) await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
   await api("POST", `/api/f/${chat.name}/channels/chat`, { id: "job", body: { text: job.trim() } });
   // a wake now hides the start's latency: the agent is up as the page opens
-  api("POST", `/api/computers/${encodeURIComponent(computer.computer)}/wake`, {}).catch(() => {});
+  api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
   return chat.name;
 }
 const dialog = $("new-agent-dialog");
@@ -544,7 +577,7 @@ function prewake() {
   const c = state.computer;
   if (!c || document.hidden || Date.now() - woke < 60_000 || c.phase === "awake" || c.phase === "starting") return;
   woke = Date.now();
-  api("POST", `/api/computers/${encodeURIComponent(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
 }
 document.addEventListener("visibilitychange", prewake);
 function renderUpdate() {
@@ -560,9 +593,9 @@ $("update-go").onclick = async () => {
   const c = state.computer;
   $("update-go").disabled = true;
   try {
-    await api("PUT", `/api/computers/${encodeURIComponent(c.computer)}/image`, { image: state.defaultImage });
-    await api("POST", `/api/computers/${encodeURIComponent(c.computer)}/sleep`, {});
-    state.computer = await api("POST", `/api/computers/${encodeURIComponent(c.computer)}/wake`, {});
+    await api("PUT", `/api/computers/${seg(c.computer)}/image`, { image: state.defaultImage });
+    await api("POST", `/api/computers/${seg(c.computer)}/sleep`, {});
+    state.computer = await api("POST", `/api/computers/${seg(c.computer)}/wake`, {});
     $("update-confirm").hidden = true;
     $("update-pill").hidden = false;
     renderUpdate();
@@ -651,7 +684,7 @@ async function openSettings() {
   agents.append(...(mine.length ? mine.map((a) => {
     const row = el("button", "row");
     row.type = "button";
-    row.append(avatar({ color: colorOf(titleOf(a.fragment)) }, "small"), el("span", "label", titleOf(a.fragment)));
+    row.append(avatar({ color: colorOf(a.identity) }, "small"), el("span", "label", titleOf(a.fragment)));
     row.onclick = () => openApp(a.fragment);
     return row;
   }) : [el("p", "muted", "None yet.")]));

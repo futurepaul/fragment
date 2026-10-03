@@ -307,7 +307,9 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .primary { display: inline-flex; align-items: center; justify-content: center; height: 40px; padding: 0 20px; border: 0; border-radius: 999px; background: var(--primary); color: var(--primary-foreground); font-weight: 600; text-decoration: none; }
 .primary:disabled { opacity: .6; cursor: default; }
 .quiet { display: inline-flex; align-items: center; height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: 999px; background: none; color: var(--text-primary); font-size: 13px; font-weight: 600; text-decoration: none; }
-.frames > iframe.refused { visibility: hidden; }
+/* a frame that could not sign in, saying why (shell.js BLOCKED) */
+body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); color: var(--text-primary); font-family: "Funnel Sans", system-ui, sans-serif; }
+.frame-note .notice span { display: block; }
 .page-title { font-weight: 700; margin: 0 auto; }
 /* first run: one card, centred on the shell's dark */
 .first-run { min-height: 100%; display: grid; place-items: center; padding: 24px 16px; background: var(--bg-sidebar); }

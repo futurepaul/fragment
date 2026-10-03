@@ -197,7 +197,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let title = row.as_str().unwrap_or("").to_string();
     let chat = format!("{}-chat.{username}", title.to_lowercase());
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
-    let signed = b.until(&page, &format!("[...document.querySelectorAll('#frames iframe')].some(f => !f.classList.contains('refused'))"), wait);
+    let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
     let answered = {
         let t0 = std::time::Instant::now();
         let mut seen = false;
