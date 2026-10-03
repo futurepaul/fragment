@@ -368,8 +368,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
     s.ok("the agent is made, named, and its chat opens once it is ready", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
-    let title = row.as_str().unwrap_or("").to_string();
-    let chat = format!("{}-chat.{username}", title.to_lowercase());
+    // the chat's name as the sidebar holds it: a title like "Starfire 40K"
+    // is labelled starfire-40k, so it is read, never guessed
+    let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
+    let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
+    let first_label = chat.split('.').next().unwrap_or("").trim_end_matches("-chat").to_string();
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
     // ready is ready: its computer awake, and the agent following its chat
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
@@ -415,7 +418,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a second agent, named, gets a chat of its own in the sidebar", two, "");
 
     // both agents in one chat, search, and archiving, as the person uses them
-    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &title }, &shots)?;
+    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &first_label }, &shots)?;
 
     // an app's window
     b.click(&page, "#add-app")?;
@@ -488,7 +491,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// The shell's person in its browser lane: their platform session, their
-/// username, and their first agent's name (its title).
+/// username, and their first agent's label (its fragment's, as the sidebar holds it).
 struct Person<'a> {
     session: &'a str,
     username: &'a str,
@@ -530,8 +533,8 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
     let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
     let id_of = |label: &str| agents.iter().find(|a| a["fragment"] == format!("{label}.{}", me.username).as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    let first_label = me.first.to_lowercase();
-    let (lead, other) = (id_of("reader"), id_of(&first_label));
+    let first_label = me.first;
+    let (lead, other) = (id_of("reader"), id_of(first_label));
     anyhow::ensure!(lead.starts_with("id:") && other.starts_with("id:"), "the two agents' identities: {r}");
 
     b.click(page, "#new-group")?;
