@@ -579,7 +579,7 @@ exit says.
    Linux and the hosted lane on a branch preview. Exit: core fragment
    sections green locally, in CI, and on a preview.
 
-   Status, 2026-10-03 (futurepaul/fragment#115):
+   Status, 2026-10-03 (futurepaul/fragment#115, merged):
    - Built: the cell on workerd (wrangler 4.145.0, pinned); keys in the
      cell (`crates/core/src/seal.rs`: AES-256-GCM, sealed per Durable
      Object); blobs in R2; the dev stack and the e2e on `wrangler dev`;
@@ -588,8 +588,8 @@ exit says.
      Linux in CI. The celld fork and native `KEYS` are gone, and the
      migrations restart at `v1`.
    - Evidence: the full e2e on workerd, locally (1076 passed, 0 failed
-     with phase 3) and in CI (1056 passed; the one failure, a trim's
-     wait on the slower runner, fixed in `96f3cca`).
+     with phase 3) and in CI on Linux (green on `8618a79`, after two
+     fixes to the retention check's wait on the slower runner).
    - Waiting on Paul: the hosted lane on a preview needs the
      `*.finite.place` wildcard record and a choice of sign-in for
      previews (escalations).
