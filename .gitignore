@@ -9,3 +9,6 @@ cell/client/
 cell/target/
 .wrangler/
 cell/wrangler.local.jsonc
+cell/wrangler.celld.jsonc
+agent/wrangler.celld.jsonc
+agent/.celld/
