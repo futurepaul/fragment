@@ -23,8 +23,8 @@ pub(crate) const TEMPLATES: [(&str, Template); 4] = [("blank", BLANK), ("todo", 
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;
-/// What one `POST /api/files` may write in all: an editor's write (a
-/// screenshot), larger than an app's (`limits::FILE_WRITE_MAX_BYTES`);
+/// What one `POST /api/files` may write in all: an editor's write (an
+/// image or a document), larger than an app's (`limits::FILE_WRITE_MAX_BYTES`);
 /// bigger files go through the CLI as blobs.
 const API_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
