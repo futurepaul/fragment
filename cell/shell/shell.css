@@ -269,7 +269,14 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 /* Small, flat favicon-style app marks. */
 .app-icon { --app-color: #8f88bc; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 3px; background: var(--app-color); color: #fff; flex: none; overflow: hidden; }
 .app-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-#apps { gap: 0; flex-shrink: 0; margin-bottom: 12px; }
+/* an app's card in the sidebar: its page at 1280×800 (16:10) as the
+   platform shot it after its last deploy, or its icon on the card's ground */
+.app-card { flex: none; display: inline-grid; place-items: center; width: 48px; height: 30px; border-radius: 5px; overflow: hidden; background: var(--surface-subtle); box-shadow: inset 0 0 0 1px var(--border); }
+.app-card.shot { background: var(--bg-card); box-shadow: 0 0 0 1px var(--border-strong); }
+.app-card img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+/* the same card larger, beside the sidebar, while a pointer is over its row */
+.card-peek { position: fixed; z-index: 30; width: 320px; aspect-ratio: 16 / 10; border-radius: 10px; overflow: hidden; background: var(--bg-card); box-shadow: 0 0 0 1px var(--border-strong), 0 10px 28px rgba(0,0,0,.35); pointer-events: none; }
+.card-peek img { display: block; width: 100%; height: 100%; object-fit: cover; }#apps { gap: 0; flex-shrink: 0; margin-bottom: 12px; }
 #apps .row { min-height: 32px; gap: 8px; padding: 5px 10px; font-size: 13px; }
 #apps .label { font-weight: 500; }
 

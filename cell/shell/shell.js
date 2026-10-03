@@ -376,15 +376,82 @@ function paneIcon(name) {
   return i;
 }
 const iconOf = (name) => appIcon(labelOf(name));
+// An app's card: its page as the platform shot it after its last deploy
+// (`GET /api/f/<name>/card`, read with this page's session and shown as a
+// blob URL), or its icon until it has one.
+const cards = new Map();
+function cardOf(name) {
+  const box = el("span", "app-card");
+  const card = cards.get(name);
+  if (card) {
+    const img = el("img");
+    img.src = card.url;
+    img.alt = "";
+    box.classList.add("shot");
+    box.append(img);
+  } else box.append(iconOf(name));
+  return box;
+}
+// "new", "same", or "none" (no card yet)
+async function loadCard(name) {
+  const known = cards.get(name);
+  const headers = { "x-fragment-shell": "1" };
+  if (known) headers["if-none-match"] = known.etag;
+  const r = await fetch(`/api/f/${seg(name)}/card`, { headers, credentials: "same-origin" });
+  if (r.status === 304) return "same";
+  if (r.status === 404 && !known) return "none";
+  if (!r.ok) return "same";
+  const url = URL.createObjectURL(await r.blob());
+  if (known) URL.revokeObjectURL(known.url);
+  cards.set(name, { etag: r.headers.get("etag"), url });
+  return "new";
+}
+// every listed app's, again after a deploy may have made one: an app with
+// none yet is asked again, waiting longer each time (2 s to a minute), and
+// the rest when the page comes back after a minute away
+const cardsLoad = { wait: 0, timer: null, at: 0 };
+async function loadCards() {
+  clearTimeout(cardsLoad.timer);
+  cardsLoad.at = Date.now();
+  const listed = shown(apps()).map((f) => f.name);
+  for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
+  const got = await Promise.all(listed.map((name) => loadCard(name).catch(() => "same")));
+  if (got.includes("new")) renderApps();
+  if (got.includes("none") && cardsLoad.wait < 60_000) {
+    cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
+    cardsLoad.timer = setTimeout(() => loadCards().catch(() => {}), cardsLoad.wait);
+  }
+}
+addEventListener("focus", () => { if (Date.now() - cardsLoad.at > 60_000) loadCards().catch(() => {}); });
+// a pointer over an app's row shows its card larger, beside the sidebar
+const peek = el("div", "card-peek");
+peek.hidden = true;
+peek.setAttribute("aria-hidden", "true");
+peek.append(el("img"));
+document.body.append(peek);
+function showPeek(row, name) {
+  const card = cards.get(name);
+  if (!card) return;
+  peek.firstChild.src = card.url;
+  peek.hidden = false;
+  const r = row.getBoundingClientRect();
+  const edge = Math.max(r.right, $("sidebar").getBoundingClientRect().right);
+  peek.style.left = `${Math.max(8, Math.min(edge + 12, innerWidth - peek.offsetWidth - 8))}px`;
+  peek.style.top = `${Math.max(8, Math.min(r.top + r.height / 2 - peek.offsetHeight / 2, innerHeight - peek.offsetHeight - 8))}px`;
+}
+const hidePeek = () => { peek.hidden = true; };
 function renderApps() {
+  hidePeek();
   const list = shown(apps());
   $("apps").replaceChildren(...(list.length ? list.map((f) => {
-    const row = el("button", `row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
+    const row = el("button", `row app-row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
     row.type = "button";
     row.dataset.key = `app:${f.name}`;
-    row.append(iconOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
+    row.append(cardOf(f.name), el("span", "label", titleOf(f.name)), ...badges(f));
     if (!own(f)) row.append(el("span", "meta", f.role));
-    row.onclick = () => { openApp(f.name); leaveSidebar(); };
+    row.onclick = () => { hidePeek(); openApp(f.name); leaveSidebar(); };
+    row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
+    row.onpointerleave = hidePeek;
     return row;
   }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]));
 }
@@ -1119,6 +1186,8 @@ async function load() {
   renderUpdate();
   previews().catch(() => {});
   chatMembers().catch(() => {});
+  cardsLoad.wait = 0;
+  loadCards().catch(() => {});
 }
 // each chat's agents, from its member list (the first added first): a
 // group is a chat with two or more; one that does not answer keeps what
