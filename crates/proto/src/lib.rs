@@ -1497,13 +1497,13 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, sharing: None }] };
-        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner" }] }));
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, sharing: None }] };
+        assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, sharing: Some(sharing) }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), sharing: Some(sharing) }] };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
+            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 } }] })
         );
         let members = MemberList { members: vec![] };
         assert_eq!(value(&members), serde_json::json!({ "members": [] }));
