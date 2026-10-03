@@ -6,6 +6,7 @@
 
 pub mod fake;
 pub mod hermes;
+pub mod model;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

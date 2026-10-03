@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
-use fragment_bridge::runtime::relay::{Relay, RelayConfig, END_SETTLE_MS};
+use fragment_bridge::runtime::relay::{Relay, RelayConfig, EMPTY_SETTLE_MS, END_SETTLE_MS};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
 use fragment_bridge::{ev, limits, screen};
@@ -56,6 +56,7 @@ fn runtime() -> Box<dyn Runtime> {
                 secret,
                 media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
                 end_settle_ms: parse_ms("BRIDGE_RELAY_SETTLE_MS", END_SETTLE_MS),
+                empty_settle_ms: parse_ms("BRIDGE_RELAY_EMPTY_SETTLE_MS", EMPTY_SETTLE_MS),
             };
             Box::new(Relay { config })
         }

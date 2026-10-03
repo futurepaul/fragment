@@ -11,7 +11,11 @@
 //! - an approval is a `prompt` frame; the owner's answer goes back as an
 //!   inbound `prompt_response`, at once, mid-turn;
 //! - `👀` on, then off as the turn ends, then `✅` or `❌`: its end (a
-//!   stopped turn gets only the `👀` off);
+//!   stopped turn gets only the `👀` off). Hermes brackets one message more
+//!   than once: its multiplexed gateway's dispatch is a bracket of its own,
+//!   with nothing in it, before the turn's. So a bracket that said nothing
+//!   ends the turn only after `EMPTY_SETTLE_MS` with no new `👀`, and one
+//!   that said something ends it at its `✅`;
 //! - a file is uploaded to `/relay/media`, then sent by `send_media`;
 //!   a message's attachments are re-hosted at `/relay/media/<id>`.
 //!
@@ -47,6 +51,10 @@ use wire::{Action, FromGateway};
 /// How long after `👀` comes off the bridge waits for `✅` or `❌` before it
 /// ends the turn without one (a stopped turn sends neither).
 pub const END_SETTLE_MS: u64 = 1_500;
+/// How long a turn that has said nothing yet waits after its `👀` comes off
+/// for another bracket (the turn's own, after the gateway's dispatch:
+/// measured 3 s apart on an emulated first turn) before it ends empty.
+pub const EMPTY_SETTLE_MS: u64 = 20_000;
 /// Files kept for Hermes (uploads and re-hosted attachments), at most; past
 /// it the oldest go.
 pub const MEDIA_KEPT_MAX: usize = 256;
@@ -61,6 +69,7 @@ pub struct RelayConfig {
     /// Where uploads land (scratch, not `/data`).
     pub media_dir: PathBuf,
     pub end_settle_ms: u64,
+    pub empty_settle_ms: u64,
 }
 
 pub struct Relay {
@@ -117,8 +126,33 @@ struct Inflight {
     /// Progress messages, and how many of their lines are steps already.
     progress: HashMap<String, usize>,
     next_part: u32,
+    /// Its `👀` came off (and no new one since): when, and the outcome its
+    /// `✅`/`❌` said, if one came.
     ending_since: Option<Instant>,
+    outcome: Option<Outcome>,
+    /// It said something: a reply, a draft, a step, a prompt, a file.
+    said: bool,
     stopped: bool,
+}
+
+impl Inflight {
+    /// When a turn whose `👀` came off ends: at once once it said something
+    /// and `✅`/`❌` came, after `END_SETTLE_MS` when it said something or
+    /// was stopped, after `EMPTY_SETTLE_MS` otherwise.
+    fn due(&self, settle: Duration, empty: Duration) -> Option<Outcome> {
+        let since = self.ending_since?;
+        let spoke = self.said || self.stopped;
+        let outcome = || match (&self.outcome, self.stopped) {
+            (_, true) => Outcome::Stopped,
+            (Some(o), false) => o.clone(),
+            (None, false) => Outcome::Idle,
+        };
+        let waited = since.elapsed();
+        if spoke && (self.outcome.is_some() || waited >= settle) {
+            return Some(outcome());
+        }
+        (waited >= empty).then(outcome)
+    }
 }
 
 /// A prompt's answer, kept until Hermes acks it.
@@ -377,7 +411,7 @@ impl Loop {
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame: frame.clone(), acked: false, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, stopped: false });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame: frame.clone(), acked: false, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, outcome: None, said: false, stopped: false });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "connected": self.conn.is_some() && self.greeted });
         self.send(frame);
@@ -462,6 +496,20 @@ impl Loop {
 
     async fn act(&mut self, action: Action) -> Value {
         let ok = json!({ "success": true });
+        // One line per op Hermes asks for: its kind and ids, never its text.
+        match &action {
+            Action::Send { chat, content, reply } => crate::ev!("relay.op", { "op": "send", "chat": chat, "reply": reply, "chars": content.chars().count(), "turn": self.by_chat.get(chat) }),
+            Action::Edit { chat, message_id, content } => crate::ev!("relay.op", { "op": "edit", "chat": chat, "message": message_id, "chars": content.chars().count() }),
+            Action::React { chat, message_id, emoji, remove } => crate::ev!("relay.op", { "op": "react", "chat": chat, "message": message_id, "emoji": emoji, "remove": remove, "turn": self.by_chat.get(chat) }),
+            Action::Draft { chat, draft_id, content, done } => crate::ev!("relay.op", { "op": "draft", "chat": chat, "draft": draft_id, "final": done, "chars": content.chars().count() }),
+            Action::Prompt { chat, prompt_id, options, .. } => crate::ev!("relay.op", { "op": "prompt", "chat": chat, "prompt": prompt_id, "options": options.len() }),
+            Action::Unsupported { op } => crate::ev!("relay.op", { "op": op, "supported": false }),
+            other => crate::ev!("relay.op", { "op": format!("{other:?}").split([' ', '{']).next().unwrap_or("").to_lowercase() }),
+        }
+        match &action {
+            Action::Send { chat, .. } | Action::Edit { chat, .. } | Action::Draft { chat, .. } | Action::Prompt { chat, .. } | Action::SendMedia { chat, .. } => self.spoke(chat),
+            _ => {}
+        }
         let turn_of = |chat: &str, by_chat: &HashMap<String, String>| by_chat.get(chat).cloned();
         match action {
             Action::Send { chat, content, reply } => {
@@ -522,14 +570,23 @@ impl Loop {
                 }
                 let f = self.inflight.get_mut(&turn).expect("held");
                 match (emoji.as_str(), remove) {
+                    // A bracket begins: whatever ending was pending is not the end.
+                    (wire::STARTED, false) => {
+                        f.ending_since = None;
+                        f.outcome = None;
+                    }
                     (wire::STARTED, true) => f.ending_since = Some(Instant::now()),
                     (wire::DONE, false) => {
-                        let outcome = if f.stopped { Outcome::Stopped } else { Outcome::Idle };
-                        self.end(&turn, outcome).await;
+                        f.outcome = Some(Outcome::Idle);
+                        f.ending_since.get_or_insert_with(Instant::now);
                     }
-                    (wire::FAILED, false) => self.end(&turn, Outcome::Error("Hermes' turn failed".into())).await,
+                    (wire::FAILED, false) => {
+                        f.outcome = Some(Outcome::Error("Hermes' turn failed".into()));
+                        f.ending_since.get_or_insert_with(Instant::now);
+                    }
                     _ => {}
                 }
+                self.settle().await;
                 ok
             }
             Action::Draft { chat, content, .. } => {
@@ -581,12 +638,19 @@ impl Loop {
         self.emit(Event::End { turn: turn.to_string(), outcome }).await;
     }
 
-    /// Turns whose `👀` came off with no `✅`/`❌` after it end now.
+    /// Turns whose ending is due (`Inflight::due`) end now.
     async fn settle(&mut self) {
-        let settle = Duration::from_millis(self.cfg.end_settle_ms);
-        let due: Vec<(String, bool)> = self.inflight.iter().filter(|(_, f)| f.ending_since.is_some_and(|t| t.elapsed() >= settle)).map(|(id, f)| (id.clone(), f.stopped)).collect();
-        for (turn, stopped) in due {
-            self.end(&turn, if stopped { Outcome::Stopped } else { Outcome::Idle }).await;
+        let (settle, empty) = (Duration::from_millis(self.cfg.end_settle_ms), Duration::from_millis(self.cfg.empty_settle_ms));
+        let due: Vec<(String, Outcome)> = self.inflight.iter().filter_map(|(id, f)| f.due(settle, empty).map(|o| (id.clone(), o))).collect();
+        for (turn, outcome) in due {
+            self.end(&turn, outcome).await;
+        }
+    }
+
+    /// The chat's turn said something (so its next `✅` is its end).
+    fn spoke(&mut self, chat: &str) {
+        if let Some(f) = self.by_chat.get(chat).and_then(|t| self.inflight.get_mut(t)) {
+            f.said = true;
         }
     }
 }

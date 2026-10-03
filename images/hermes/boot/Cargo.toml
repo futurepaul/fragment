@@ -1,7 +1,20 @@
 [package]
 name = "hermes-boot"
 version = "0.1.0"
+description = "The Hermes image's boot: restore gate, preload, config, profiles from the computer's agents, their repos, Litestream, the bridge"
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "hermes-boot"
+path = "src/main.rs"
+
 [dependencies]
+base64.workspace = true
+bytes.workspace = true
+fragment-bridge = { path = "../../bridge" }
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true

@@ -6,7 +6,8 @@
 //! - dials `<url>/relay` with its token, says `hello`, reads the descriptor,
 //!   and dials again (with backoff) whenever the socket ends, unless away;
 //! - each inbound is acked, then its turn runs concurrently with other
-//!   chats': `👀`; its tool progress (`tool`) as a send answering nothing
+//!   chats': first an empty bracket (`👀`, off, `✅`: the multiplexed
+//!   gateway's dispatch, as the real one sends it), then `👀`; its tool progress (`tool`) as a send answering nothing
 //!   and an edit adding a line; an approval (`risky`) as a `prompt` op whose
 //!   `prompt_response` answer resolves it mid-turn, confirmed by an interim
 //!   send; its reply as `draft` frames, then one `send` answering the
@@ -218,6 +219,13 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     let chat = event["source"]["chat_id"].as_str().unwrap_or("").to_string();
     let mid = event["message_id"].as_str().unwrap_or("").to_string();
     let react = |emoji: &str, remove: bool| json!({ "op": "react", "chat_id": chat, "message_id": mid, "emoji": emoji, "remove": remove });
+    // Hermes' multiplexed gateway brackets the message once as it dispatches
+    // it to its profile, with nothing inside, before the turn's own bracket
+    // (seen in the real image: 👀, 👀 off, ✅, then the turn ~3 s later).
+    gw.act(react("👀", false)).await;
+    gw.act(react("👀", true)).await;
+    gw.act(react("✅", false)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
     let text = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
     let mut reply = format!("echo: [{}] {text}", event["source"]["user_name"].as_str().unwrap_or("?"));
