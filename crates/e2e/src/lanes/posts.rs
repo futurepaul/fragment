@@ -237,8 +237,10 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         let r = api.signed(owner, "GET", &format!("/api/f/{name}/channels"), None).ok()?;
         r.body["channels"].as_array()?.iter().find(|c| c["name"] == "wall")?["seq"].as_i64()
     };
-    // the oldest go as the fragment trims, a moment after the post that passed them
-    let trimmed = s.eventually(Duration::from_secs(60), || first(api) == Some(appended - kept + 1));
+    // the oldest go as the fragment trims, as each post past them is applied:
+    // the fills' effects (10 048 records) are applied after their commits,
+    // which takes over a minute on a slow runner
+    let trimmed = s.eventually(Duration::from_secs(180), || first(api) == Some(appended - kept + 1));
     s.ok(
         &format!("a postable channel keeps its newest {kept} records: past them, the oldest go"),
         failed.is_none() && newest() == Some(appended) && trimmed,
