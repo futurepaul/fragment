@@ -150,7 +150,17 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let site = s.dir("deploy-site");
     std::fs::create_dir_all(site.join("site"))?;
     s.login(api, &home);
-    let created = s.cli_json(api, &home, &["create", &s.name("deploy"), "--json"])?;
+    // a fragment's tokens are credentials: shown only on request
+    let plain = s.cli_json(api, &home, &["create", &s.name("deploy-plain"), "--json"])?;
+    s.ok(
+        "create --json leaves out the tokens unless asked",
+        plain["name"].is_string() && ["viewToken", "inboxToken", "webhookSecret"].iter().all(|t| plain.get(t).is_none()),
+        &plain,
+    );
+    let out = s.cli(api, &home, &["create", &s.name("deploy-human")]);
+    s.ok("and create prints none, pointing at `fragment open`", out.status.success() && !text(&out).contains("?view=") && !text(&out).contains("?t=") && text(&out).contains("fragment open"), text(&out));
+    let created = s.cli_json(api, &home, &["create", &s.name("deploy"), "--show-tokens", "--json"])?;
+    s.ok("--show-tokens shows them", created["viewToken"].is_string() && created["webhookSecret"].is_string(), &created);
     let name = created["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &created);
     let view = created["viewToken"].as_str().unwrap_or("").to_string();
@@ -204,5 +214,16 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         s.ok("the CLI's key is readable for the op check", false, home.display());
     }
+
+    // a deploy whose code the platform refuses says so and fails
+    std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json").replacen("\"add_todo\"", "\"Add-Todo\"", 1))?;
+    let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
+    s.ok(
+        "a deploy whose code is refused exits non-zero, naming why",
+        !out.status.success() && text(&out).contains("refused its code") && text(&out).contains("Add-Todo"),
+        text(&out),
+    );
+    let st6 = s.cli_json(api, &home, &["status", &name, "--json"])?;
+    s.ok("and the last good code keeps serving", st6["code"]["sha"] == st5["code"]["sha"] && st6["pins"]["live"] != st5["pins"]["live"], &st6["code"]);
     Ok(())
 }

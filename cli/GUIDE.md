@@ -175,6 +175,10 @@ fragment verify my-thing --dir .            # full-content audit
 }
 ```
 
+- An operation's name is a method of your `App`, matching
+  `^[a-z][a-z0-9_]{0,63}$`. A deploy whose `fragment.json` the platform
+  refuses (a bad name, an unknown kind) keeps the last good code serving,
+  and `fragment deploy` says why and exits 1.
 - `role` is who may call it: `public`, `viewer` (default for queries),
   `editor` (default for mutations and jobs), `owner`.
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
@@ -188,6 +192,11 @@ fragment verify my-thing --dir .            # full-content audit
 - A channel with a `post` role (`"post": "viewer"`) takes records people
   post (`fragment.post`, `fragment post`); `"signedIn": true` beside it
   refuses anyone not signed in (a link holder is a viewer).
+- Your `App` is a Durable Object with its own SQLite, and some of its
+  Durable Object is not yours to use: no alarm (`triggers` run it on a
+  schedule), no `ctx.storage.transaction` (a mutation is the
+  transaction), no `ctx.storage.put` or `delete` (write SQL in a
+  mutation), and no facets of its own. Each throws, saying so.
 
 ```js
 // app.mjs
@@ -467,7 +476,7 @@ fragment host [<url>]                    fragment runs <name> [<run>] [--status 
 fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
-fragment create <name> [--visibility V]  fragment inbox <name> --token T --payload JSON
+fragment create <name> [--visibility V] [--show-tokens]  fragment inbox <name> --token T --payload JSON
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...

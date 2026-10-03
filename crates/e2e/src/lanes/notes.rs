@@ -17,7 +17,7 @@ pub fn notes(s: &mut Suite, api: &Api) -> Result<()> {
     let home = s.dir("notes-home");
     s.login(api, &home);
     let keys = s.cli_keys(&home).expect("the CLI logged in");
-    let c = s.cli_json(api, &home, &["create", &s.name("notes"), "--json"])?;
+    let c = s.cli_json(api, &home, &["create", &s.name("notes"), "--show-tokens", "--json"])?;
     let name = c["name"].as_str().unwrap_or("").to_string();
     s.hook(api, &c);
     let root = s.dir("notes");

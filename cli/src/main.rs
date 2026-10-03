@@ -89,6 +89,10 @@ enum Cmd {
         /// public | link (default) | members
         #[arg(long)]
         visibility: Option<String>,
+        /// Show the share link, the webhook URL and the webhook secret (they
+        /// are credentials: `fragment open` shows the links later)
+        #[arg(long)]
+        show_tokens: bool,
     },
     /// List fragments you have a role on
     List,
@@ -835,20 +839,32 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("revoked {npub}");
         }
-        Cmd::Create { name, visibility } => {
-            // the fragment's own key is made by the platform (its KEYS)
+        Cmd::Create { name, visibility, show_tokens } => {
             let visibility = match visibility.as_deref() {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
             let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template: None };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
-            json_exit(j, &v);
+            if j {
+                // its tokens are credentials: on request only (a transcript keeps what is printed)
+                let mut data = serde_json::to_value(&v)?;
+                if !show_tokens {
+                    for token in ["viewToken", "inboxToken", "webhookSecret"] {
+                        data.as_object_mut().expect("Created is an object").remove(token);
+                    }
+                }
+                ok_exit(&data);
+            }
             println!("created fragment {}", v.name);
             println!("  npub:         {}", v.npub);
-            println!("  share link:   {}", share_link(&v.canonical, &v.view_token));
-            println!("  webhook URL:  {}/api/f/{}/inbox?t={}", c.host, v.name, v.inbox_token);
-            println!("  canonical:   {}", v.canonical);
+            println!("  canonical:    {}", v.canonical);
+            if show_tokens {
+                println!("  share link:   {}", share_link(&v.canonical, &v.view_token));
+                println!("  webhook URL:  {}/api/f/{}/inbox?t={}", c.host, v.name, v.inbox_token);
+            } else {
+                println!("  its share link and webhook URL: fragment open {}", v.name);
+            }
         }
         Cmd::List => {
             let v: FragmentList = c.call_as(c.get("/api/fragments")?)?;
@@ -981,6 +997,13 @@ fn run(cli: Cli) -> Result<()> {
                 Deployed::Live { live_tip, main_tip, .. } => (live_tip, main_tip),
             };
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
+            // the refresh installed live (or refused its code) before it answered
+            if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip.as_str())) {
+                return Err(anyhow::Error::new(CodedError {
+                    code: Code::InvalidRequest,
+                    msg: format!("live moved to {}, but the platform refused its code, so the last good code keeps serving: {why}", &live_tip[..12.min(live_tip.len())]),
+                }));
+            }
             let live_url = &st.urls.canonical;
             json_exit(j, &json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
             println!("live: {live_url}");
