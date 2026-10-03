@@ -943,7 +943,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
-        (Method::Get, ["healthz"]) => {
+        (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;
             resp.headers_mut().set("x-fragment-deploy", &cfg.deploy_id)?;
             Ok(resp)
