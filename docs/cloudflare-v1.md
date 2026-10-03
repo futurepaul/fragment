@@ -765,19 +765,45 @@ exit says.
    publishes and shares an app, ingests into a brain and searches it;
    the skills list matches the skills fragment.
 
-   Status, 2026-10-03, skills (branch `claude/skills`; decision 17's
-   status):
-   - Evidence, local: the templates section (a skills fragment lists and
-     reads the release's managed set exactly, a file of its own wins), the
-     shell-ui section (the shell makes the skills fragment at setup; its
-     Skills section lists exactly that fragment's files by category, and an
-     agent's own skill beside it), the hermes section (a profile has the
-     managed set and its own, its own winning, as Hermes itself finds them;
-     its terminal runs `fragment` as itself, for its owner), and the
-     images' Docker lane.
-   - Not yet: an agent building and deploying an app from a chat (`fragment
-     deploy` reaches code.storage directly, which the local lane's
-     containers cannot), on a preview.
+   Status, 2026-10-03 (futurepaul/fragment#118, stacked on #117):
+   - Built:
+     - **The brain** (decision 30): a blessed `brain` template on the
+       notes vault UI.
+       - Finite Brain's layout and wiki conventions.
+       - FTS5 sections ranked by BM25, kept current by a file trigger,
+         behind a `search` operation.
+       - Assets are blobs. It is offered in the shell's catalog.
+     - **The skills** (decision 17): a blessed `skills` template of the
+       managed set, finite-skills ported.
+       - The Finite-specific skills are rewritten: apps, git, brain,
+         Google through the swap, images on FLUX.
+       - hermes-boot installs the set read-only into every profile, beside
+         each agent's own, its own winning.
+       - The shell's settings list them.
+     - **The `fragment` CLI in the Hermes image**, acting as the agent
+       with no key in it.
+       - `fragment create --template`.
+       - `fragment write`: one file through the platform.
+       - `fragment deploy` without `--dir`: the platform moves live.
+     - **Cards** (decision 31): each move of live is shot with Browser
+       Rendering for the app's card in the shell, metered to the owner.
+     - An app's redirect now reaches the browser (both hops into a
+       fragment had followed it).
+   - Evidence, local on workerd with the vendors faked at their
+     boundaries:
+     - **The exit** (the real-Hermes lane, 40 passed, 0 failed): from its
+       chat, the agent, acting for its owner,
+       - makes a todo app (its owner's), writes a page, and deploys it;
+       - gets its share link, which an anonymous visitor opens;
+       - makes a brain, ingests a source, and finds it by searching.
+     - **The skills list** matches the skills fragment: the shell-ui and
+       templates sections.
+     - **Sections** templates, brain, notes, deploy, site, shell,
+       shell-ui, ledger, computers: 427 passed, 0 failed.
+   - The agent shares by its link: making an app public or adding members
+     is the owner's, since an agent acts at most as an editor (decision
+     36). Whether a person's own agents may share for them is Paul's call.
+   - Not yet: the same on a preview (phase 7's hosted lane).
 7. **The rest of fragments.** Jobs, cron, deliveries, webhooks, push,
    blobs, secrets, AI steps. Exit: their e2e sections green, plus a test
    for the in-fragment agent's reply-operation answer path, which has
