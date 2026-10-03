@@ -201,3 +201,9 @@ pub fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>> {
     }
     Ok(hosts.iter().map(|h| fragment_core::swap::TagKey::derive(h)).collect())
 }
+
+/// The self-hosted model upstream's key (`FRAGMENT_MODEL_KEY`), when it
+/// takes one (docs/self-host.md, seam 3).
+pub fn model_key(env: &Env) -> Option<String> {
+    secret(env, "FRAGMENT_MODEL_KEY")
+}
