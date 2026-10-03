@@ -24,6 +24,10 @@ FROM busybox:1.37-musl
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=build /fragment-bridge /usr/local/bin/fragment-bridge
 COPY stub/screen /opt/fragment/screen
+# which build this is, served beside the screen (the platform's upgrade and
+# rollback lane reads it through the computer's port)
+ARG STUB_VERSION=1
+RUN echo "$STUB_VERSION" > /opt/fragment/screen/version.txt
 ENV BRIDGE_RUNTIME=script \
     BRIDGE_STATE_DIR=/data/bridge \
     BRIDGE_MEDIA_DIR=/tmp/bridge-media \

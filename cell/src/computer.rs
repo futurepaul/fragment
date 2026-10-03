@@ -107,7 +107,8 @@ impl MetaKey {
     }
 }
 
-/// What a snapshot is of.
+/// What a snapshot is of: the image's reference (its name can stand for
+/// another image after a redeploy).
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     id: String,
@@ -119,6 +120,9 @@ pub struct ComputerCell {
     state: State,
     raw: JsValue,
     cfg: &'static Config,
+    /// Whether this isolate has looked for a container an earlier one left
+    /// running (lesson 6: `adopt`).
+    adopted: std::cell::Cell<bool>,
 }
 
 impl DurableObject for ComputerCell {
@@ -127,7 +131,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg }
+        ComputerCell { state, raw, cfg, adopted: std::cell::Cell::new(false) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -279,6 +283,12 @@ impl ComputerCell {
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
         let mut queue = vec![first];
+        if !self.adopted.replace(true) {
+            if let Some(exited) = self.adopt().await? {
+                // the event that brought this isolate up applies after the exit
+                queue.push(exited);
+            }
+        }
         let mut refused = None;
         while let Some(event) = queue.pop() {
             let mut life = self.lifecycle()?;
@@ -294,6 +304,24 @@ impl ComputerCell {
             }
         }
         Ok(refused)
+    }
+
+    /// A new isolate's first look (lesson 6): a container its lifecycle says
+    /// is running is taken over (watched again, its intercepts and idle
+    /// stop armed again, never destroyed: `/data` may be unsaved), or, gone,
+    /// reported as exited.
+    async fn adopt(&self) -> CellResult<Option<Event>> {
+        let generation = match self.lifecycle()?.phase {
+            Phase::Starting { generation, .. } | Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => generation,
+            Phase::Asleep | Phase::Failed { .. } => return Ok(None),
+        };
+        let g = JsValue::from_f64(generation as f64);
+        if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
+            return Ok(Some(Event::Exited { generation }));
+        }
+        let id = self.must(MetaKey::Id)?;
+        self.call("arm", &[g, id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)]).await?;
+        Ok(None)
     }
 
     async fn alarm_at(&self, at: Option<i64>) -> CellResult<()> {
@@ -357,8 +385,9 @@ impl ComputerCell {
         if js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) {
             self.call("destroy", &[JsValue::from_f64(0.0), "a new start".into()]).await?;
         }
-        let snapshot = match self.meta(MetaKey::Snapshot)? {
-            Some(text) if self.cfg.computer_snapshots => serde_json::from_str::<Snapshot>(&text).ok().filter(|s| s.image == image).map(|s| s.id),
+        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
+        let snapshot = match (self.meta(MetaKey::Snapshot)?, &reference) {
+            (Some(text), Some(r)) if self.cfg.computer_snapshots => serde_json::from_str::<Snapshot>(&text).ok().filter(|s| &s.image == r).map(|s| s.id),
             _ => None,
         };
         let backup = if snapshot.is_none() { self.meta(MetaKey::Backup)? } else { None };
@@ -407,8 +436,15 @@ impl ComputerCell {
                 let name = format!("{}-{generation}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default().replace(':', "-"));
                 match self.call("snapshot", &[g.clone(), name.into()]).await.map(|s| s.as_string()) {
                     Ok(Some(id)) => {
-                        let image = self.meta(MetaKey::Image).ok().flatten().unwrap_or_default();
-                        let _ = self.set_meta(MetaKey::Snapshot, &serde_json::to_string(&Snapshot { id, image }).unwrap_or_default());
+                        let name = self.meta(MetaKey::Image).ok().flatten().unwrap_or_default();
+                        match self.call("imageRef", &[name.as_str().into()]).await.ok().and_then(|r| r.as_string()) {
+                            Some(image) => {
+                                let _ = self.set_meta(MetaKey::Snapshot, &serde_json::to_string(&Snapshot { id, image }).unwrap_or_default());
+                            }
+                            None => {
+                                let _ = self.del_meta(MetaKey::Snapshot);
+                            }
+                        }
                     }
                     // a computer without a snapshot wakes from its image and backup
                     _ => {

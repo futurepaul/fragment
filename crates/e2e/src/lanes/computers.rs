@@ -248,11 +248,26 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
 
-    // its image pin
+    // its image pin: an upgrade at the next wake, then a rollback, its data kept
+    let version = || api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(&owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default();
+    s.ok("it runs its first build", version() == "1", version());
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "no-such-image" })))?;
     s.ok("an image the deployment does not have is refused", r.status == 400, &r);
+    let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub-next" })))?;
+    s.ok("the next build is pinned", r.status == 200 && r.body["image"] == "stub-next", &r);
+    s.ok("it keeps running the build it started with until it sleeps", version() == "1", version());
+    std::thread::sleep(QUEUE_DRAIN);
+    api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    s.ok("woken, it runs the next build (an upgrade)", version() == "2", version());
+    say(30, "after the upgrade")?;
+    replies_so_far += 1;
+    let kept = s.eventually(WAKE, || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len() == replies_so_far);
+    s.ok("with its /data restored: it answers anew, and nothing twice", kept, json!(agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len()));
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/image"), Some(&json!({ "image": "stub" })))?;
-    s.ok("one it has is pinned", r.status == 200 && r.body["image"] == "stub", &r);
+    s.ok("the first build is pinned again", r.status == 200 && r.body["image"] == "stub", &r);
+    std::thread::sleep(QUEUE_DRAIN);
+    api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
 
     // a computer's egress alone asks for a wake subscription
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/subscriptions"), Some(&json!({ "channel": "chat", "wake": true })))?;
@@ -268,6 +283,24 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let ran = s.eventually(Duration::from_secs(150), || routine(&records(api, &owner, &chat_name, "chat")));
     s.ok("its cron's routine wakes it, and the agent does it in the chat", ran, "");
     api.signed(&owner, "POST", &format!("/api/f/{agent_name}/pause"), Some(&json!({ "op": "routine", "paused": true })))?;
+    let routines = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).len();
+
+    // the platform crashes while it is awake: a new isolate takes the
+    // computer over (lesson 6), and it answers what comes next, once
+    api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+    s.crash()?;
+    let api = s.start(false, true)?;
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
+    s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
+    let after = s.eventually(WAKE, || agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == routines + 1);
+    std::thread::sleep(Duration::from_secs(2));
+    let replies = agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity);
+    s.ok(
+        "the computer answers it, once",
+        after && replies.len() == routines + 1 && replies.last().is_some_and(|r| r["body"]["text"].as_str().is_some_and(|t| t.contains("after the crash"))),
+        json!(replies.len()),
+    );
+    std::thread::sleep(QUEUE_DRAIN);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
     Ok(())

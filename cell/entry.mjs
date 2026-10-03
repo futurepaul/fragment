@@ -164,6 +164,26 @@ class ContainerHost {
     return Object.keys(this.#c.images || {});
   }
 
+  // What the name `image` stands for in this deployment (its reference: a
+  // redeploy that changes the image keeps the name and changes this).
+  imageRef(image) {
+    const ref = this.#c.images && this.#c.images[image];
+    return ref === undefined ? null : typeof ref === "string" ? ref : JSON.stringify(ref);
+  }
+
+  // A new isolate finds the container of start `generation` (lesson 6):
+  // when it runs, this isolate takes it, watching its exit again. Answers
+  // whether it runs.
+  adopt(generation) {
+    if (!this.#c.running) return false;
+    this.#generation = generation;
+    this.#c.monitor().then(
+      () => this.#report("container/exited", { generation }),
+      (e) => this.#report("container/exited", { generation, why: String((e && e.message) || e) }),
+    );
+    return true;
+  }
+
   // Starts `image` (or a snapshot of it), then watches it: its exit, for
   // any reason, is reported as `container/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
