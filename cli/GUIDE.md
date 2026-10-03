@@ -258,11 +258,13 @@ export class App extends DurableObject {
   is not a file in `site/` (any method); `x-fragment-principal` and
   `x-fragment-role` say who.
 - **AI** (jobs): `job.ai.text({model, prompt, max_tokens, reasoning_effort})`,
-  `job.ai.image({prompt, path})`, `job.ai.video({prompt, path})`. Text
-  runs on a tier, `model: "cheap"` (the default) or `"medium"`; images and
-  video are written to `path` on `main`. You pay for them, from your
-  ledger (below). GLM can spend a small `max_tokens` thinking:
-  `reasoning_effort` is `low` unless you ask for `high`.
+  `job.ai.image({prompt, path, steps})`. Text runs on a tier,
+  `model: "cheap"` (the default) or `"medium"`; an image is a JPEG
+  (FLUX.1 [schnell], 1 to 8 `steps`, 4 by default) written to `path` on
+  `main`, which ends in `.jpg` or `.jpeg`. You pay for them, from your
+  ledger (below). `job.ai.video` is off until videos run on Cloudflare.
+  GLM can spend a small `max_tokens` thinking: `reasoning_effort` is
+  `low` unless you ask for `high`.
 
 ## An agent in your fragment
 

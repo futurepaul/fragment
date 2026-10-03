@@ -602,9 +602,10 @@ exit says.
    - Built: the `Ledger` Durable Object on the pure core; the model
      route (`cheap` and `medium` on Workers AI through the gateway,
      `high` refused) for the agents' Worker and, from phase 4, the
-     computer's intercept (`models::complete`); AI steps on it (images
-     and videos on OpenRouter with the deployment's key until phase 7,
-     metered as `Usage::Billed`; bugs 2 and 3 fixed); the gates (at
+     computer's intercept (`models::complete`); AI steps on it (bugs 2
+     and 3 fixed; since 2026-10-03 images are FLUX.1 [schnell] on Workers
+     AI, metered in neurons, bugs 1 and 5 fixed for them, and video steps
+     are off until they run on Cloudflare: OpenRouter is gone); the gates (at
      zero, agents and AI stop; past the overdraft, a fragment refuses
      writes); each fragment's meters (requests, dynamic workers,
      storage) through the `fragment-ledger` queue; `fragment ledger` and
@@ -934,7 +935,9 @@ Each one needs a test in the phase that ports its feature.
    (`cell/src/ai.rs`) commits through `commit_files`, which caps a write
    at 256 KiB, while blobs start at 1 MiB. The error was "the files
    written is 347234 bytes; the limit is 262144". Phase 7: a generated
-   file is a blob from the first byte, or the two limits meet.
+   file is a blob from the first byte, or the two limits meet. *Fixed
+   2026-10-03:* `store_media` commits as the platform, past an app's
+   write limit, so the limits meet (the e2e's `ai` section).
 2. **A retried image step buys a new image.** Every `store_media` error
    is retryable, so each retry calls the model again, and only the last
    attempt is settled in the ledger. Phase 3/7: a storage failure after
@@ -951,6 +954,8 @@ Each one needs a test in the phase that ports its feature.
 5. **An image is served by its path's extension, not its bytes.** A JPEG
    saved at `.png` is served as `image/png`. Phase 7: `job.ai.image`
    picks the extension from the media type, or `__file` sniffs it.
+   *Fixed for images 2026-10-03:* the model draws JPEGs, and
+   `job.ai.image` refuses a path that does not end in `.jpg` or `.jpeg`.
 6. **Small job-written files have no cacheable URL.** `__file` is
    `no-store`, and only blobs (1 MiB and up) have `__blob/<sha>`. Phase 7:
    a content-addressed, immutable URL for any committed file.

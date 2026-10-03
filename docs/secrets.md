@@ -25,7 +25,7 @@ the cell stores.
 |---|---|
 | A person's GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, the WorkOS API key, the OpenRouter key that pays for image and video steps (until phase 7), the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env. Models need none: the Worker's AI binding is pre-authenticated (spike S4) |
+| The deployment's host secret, the code.storage org key, the WorkOS API key, the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A person's connections (Google, GitHub, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
@@ -36,15 +36,15 @@ uses it reads it from there.
 ## How code uses a secret
 
 - **App code** (the facet) has no network and no keys. It asks the
-  platform through a capability ("call OpenRouter", "fetch this API with
+  platform through a capability ("draw an image", "fetch this API with
   secret X"), and the platform adds the credential on the way out
   (`globalOutbound` is `null`; the capability is the only way out).
   Built in slice D: a job's `job.fetch` names a secret as `{{NAME}}` in a
   header, and the supervisor opens it only as the request leaves
   (`step_fetch` in `cell/src/jobs.rs`). That one function is the egress
   point a native egress in the celld fork would take over. `job.ai.*`
-  images and videos add the deployment's `OPENROUTER_API_KEY` the same
-  way, as the call leaves (cell/src/ai.rs).
+  steps need no key: text and images go through the Worker's AI binding
+  (cell/src/ai.rs, models.rs).
 - **Agents in cells** call models through the platform's model route
   (cell/src/models.rs), which holds no key either: the Worker's AI
   binding is pre-authenticated, and the payer's ledger meters each call.

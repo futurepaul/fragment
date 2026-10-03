@@ -23,15 +23,14 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
 | `FRAGMENT_LEGACY_HOST_SUFFIX` | where fragments were served before the suffix moved: a fragment's host under it redirects to its host under the suffix (Moved hosts, below); counted only beside a different suffix. fragment.club's is `fragment.club`, its suffix `fragment.boats` |
-| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, a held run's video to settle, or a template or the agent it declares still to land. Any other fragment is polled once a day |
+| `FRAGMENT_POLL_INTERVAL_S` | the webhook backstop (default 300), and how often running runs are checked against their Workflows, for a busy fragment: one something outside the platform may have written in the last day (a storage token was minted for it, or a webhook arrived), or with a run in flight, an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment is polled once a day |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses (dev and e2e fakes); never on a shared fleet |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
 | `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
 | `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour) |
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
-| `OPENROUTER_API_URL` | where image and video steps go (default https://openrouter.ai), until phase 7 |
-| `AI_GATEWAY_ID` | the AI Gateway the model route calls through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models are off |
+| `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
@@ -53,7 +52,6 @@ no author code can name one:
 | `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
 | `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
 | `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
-| `OPENROUTER_API_KEY` | the deployment's OpenRouter key, which pays for image and video steps until phase 7 (each is metered on its payer's ledger); unset, those steps are off |
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
 on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
@@ -630,59 +628,56 @@ A job's AI steps bill the fragment's owner, on their ledger (Ledger,
 below), capped when the run's principal is neither the owner nor an
 agent of theirs (a run does not record whom an agent asked for). Text
 goes through the platform's model route (Models, below) by tier; images
-and videos go to OpenRouter with the deployment's own key
-(`OPENROUTER_API_KEY`) until phase 7, metered as what OpenRouter reports
-they cost (`usage.cost`) with the margin on top. The key is added at the
-egress point and never reaches the app.
+are FLUX.1 [schnell] (`@cf/black-forest-labs/flux-1-schnell`) on Workers
+AI, on the model route's transport (the `AI` binding through the
+deployment's AI Gateway), metered in neurons at Workers AI's price for
+it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`).
+Nothing holds a key: the binding is pre-authenticated.
 
 Each paid step reserves its worst case on the owner's ledger before its
 call (text: its request's bytes as tokens in and its tier's capped
-`max_tokens` out; an image $0.10; a video $0.10 a second), under the
-step's reference, `step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
+`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps),
+under the step's reference,
+`step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
 It keeps what the call bought beside the step (by
 `<fragment>@<incarnation>/run/<run>/step/<index>`, the same in every
-attempt), then settles from the usage the call reported (one that
-reported none is charged its reservation, `ai.cost-missing`, never
-nothing). So:
+attempt), then settles from the usage the call reported (an image's
+tiles from its JPEG's size, and its steps; a text call that reported no
+usage is charged its reservation, `ai.cost-missing`, never nothing). So:
 
 - a step tried again after its call answered reuses what it kept and
   never calls again: a settle that did not land lands, and an image whose
   commit failed commits from its kept bytes (bug 2). A replayed run
   reuses what its earlier attempts paid for, and pays only for the rest;
 - a step that fails for good before its call used anything (a refusal
-  from the vendor, the high tier) releases its reservation, and so does a
+  from the model, the high tier) releases its reservation, and so does a
   step whose retries ran out, and any hold of a run that ended (bug 3,
   `ai.released`);
 - a step the owner's ledger refuses (no credit, a guest, the fragment's
   cap) fails with the ledger's reason, 402 `budget_used_up` in its words
   (uncaught, the run is held; replay it after a top-up or next month).
 
-A video's cost comes with the poll that sees it end: completed, it
-settles at what OpenRouter reports (its reservation when none is); one
-that fails, is cancelled, or expires is charged what is reported, or
-nothing (`ai.video-undelivered`), and a run held while its video still
-waits gives the reservation back. The steps:
+The steps:
 
 - `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?})`
   → `{text, model, tier, usage}`: `model` is a tier, `cheap` (the default)
   or `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
-- `job.ai.image({prompt, path, model?, aspect_ratio?})` (default
-  `google/gemini-3.1-flash-lite-image`) → `{path, size, sha256,
-  mediaType}`: the image is written to `main` at `path` (a blob when 1 MiB
-  or more).
-- `job.ai.video({prompt, path, model?, duration?, resolution?,
-  aspect_ratio?})` (default `minimax/hailuo-3-max`) → the same, for the
-  video: the job starts it, polls every 20 seconds (up to about 15
-  minutes) as steps, and saves it as a blob. Each poll step answers
-  `{status, ended, error, urls, usage}`; `ended` is the platform's list
-  of final statuses (completed, failed, cancelled, expired), and a video
-  that ended any way but completed throws.
+- `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
+  mediaType}`: a JPEG (`image/jpeg`) written to `main` at `path`, which
+  ends in `.jpg` or `.jpeg` (a file is served by its extension: bug 5),
+  in git under 1 MiB (past an app's 256 KiB write limit: bug 1), a blob
+  from 1 MiB. `prompt` is 1 to 2048 characters and `steps` 1 to 8 (4
+  unless named); any other key (a model, an aspect ratio) is refused. An
+  answer that is no JPEG is refused and charged its reservation
+  (`ai.image-refused`).
+- `job.ai.video(…)` is refused, saying "video steps are off until they
+  run on Cloudflare" (the debt ledger); nothing is reserved or called.
 
-A model's or OpenRouter's 429 or 5xx is retried; other refusals fail the
-step with the vendor's message. A run answers `costMicros`: what its
-paid steps were charged.
+A model's 429 or 5xx is retried; other refusals fail the step with the
+model's message. A run answers `costMicros`: what its paid steps were
+charged (none when nothing was).
 
 ### Models (docs/cloudflare-v1.md, decision 23)
 
@@ -826,7 +821,7 @@ arguments do not fit its kind (`job.ai.text` without a model, say), with
 what does not fit. Every kind of step and its arguments are defined once,
 as `Step` in `crates/core/src/steps.rs`. A job that throws is
 **held**: its run keeps the input and error until someone replays it. At
-most 256 steps (`limits::JOB_STEPS_MAX`; a video waits in polls and
+most 256 steps (`limits::JOB_STEPS_MAX`; an agent's turn waits in polls and
 sleeps) and 4 MiB of step results per run; a result of at most 1 MiB.
 
 Every job call and every trigger is a **run**: `queued`, `running`,
