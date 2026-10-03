@@ -166,9 +166,38 @@ was lost in a restart, or it was refused (too many waiting).
 ```
 
 A file is one of the chat fragment's blobs: its poster uploads it first
-(`PUT /api/f/{chat}/blobs/{sha256}`, which takes editors), then posts
-the record naming it; a page reads it at `__blob/<sha256>`. At most 8 a
-record, 25 MiB each.
+(`PUT /api/f/{chat}/blobs/{sha256}`, which takes editors; a page, `PUT
+__blob/<sha256>` through `fragment.blob(file)`), then posts the record
+naming it; a page reads it at `__blob/<sha256>`. At most 8 a record, 25
+MiB each.
+
+## The page (`templates/chat`)
+
+The chat template's page reads and writes only these records. It
+follows `chat` from its last 400 records and, for a viewer, `work` from
+its last 1000, and lays them out in time: a person's message; an
+agent's consecutive steps as one card; a prompt as a card whose buttons
+only `asks` may press (enabled for them alone), then how it closed; a
+reply; and a turn's end when it was not `idle` (Stopped, or the error,
+quietly). A turn's draft shows after the turn's last record, and while
+a turn runs with no draft nor open card, a working line does. It posts:
+
+- a message with a fresh id of its own (`crypto.randomUUID()`), the same
+  id again only for the same body sent again after a failure; its `to`
+  the chat's agents its `@mentions` name, when they name any; its files
+  uploaded first, at most 8 of at most 25 MiB each, and its text cut to
+  32 KiB;
+- Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
+  asker while it runs (the send circle is Stop then);
+- a prompt's answer with the id `pr:<prompt>`.
+
+Who is who comes from the fragment: `__members` lists the chat's agents
+(the lead first), and `__people` names them (an agent's `name` is its
+agent fragment's label, which `@mentions` it). An agent's color is one
+of six, chosen by its identity until agents carry one; the chat takes
+its lead's. The shell that frames it may send `postMessage({fragment:
+"theme", mode: "light"|"dark"})`; otherwise it follows
+`prefers-color-scheme`.
 
 ## `tasks` (an agent fragment's)
 
