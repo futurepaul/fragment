@@ -608,7 +608,7 @@ zip itself (`FRAGMENT_BROWSER_ZIP=<path>`), checked against the same pin.
   ready in 4.9 s, the renderer named in its banner and in the cell's
   `FRAGMENT_BROWSER_URL`. A session started (the browser answering CDP)
   in 35 to 39 ms, and closed in about 10 ms, leaving no process.
-- **16 host tests** run against stand-in browsers (shell scripts on the
+- **13 host tests** run against stand-in browsers (shell scripts on the
   same pipes):
   - a session's CDP both ways, a 300 KB message whole;
   - a second client refused (409), then let in once the first leaves;
@@ -622,8 +622,9 @@ zip itself (`FRAGMENT_BROWSER_ZIP=<path>`), checked against the same pin.
   - every browser stopped with its renderer, and a crashed renderer's
     homes cleared by the next;
   - the gate's rule and its SOCKS5;
-  - WebSocket framing (RFC 6455's key; unmasked, reserved, oversized
-    and non-UTF-8 frames refused);
+  - the CDP socket, tungstenite's server side: a message in fragments
+    joined; unmasked, reserved, unknown, oversized and non-UTF-8 frames
+    each closed with its code;
   - the pinned zip: a hash mismatch, a path outside, a link, the limits.
 - **Two run by name** against chrome-headless-shell 154 itself
   (`cargo test -p fragment-devstack -- --ignored`):
