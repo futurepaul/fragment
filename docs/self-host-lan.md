@@ -1,7 +1,7 @@
 # fragment on the home network, run as an intranet
 
 Status: **built 2026-10-04, tested on high ports from this box** (branch
-`selfhost-lan`, off `selfhost`; never merged). The steps marked **sudo** and
+`selfhost`, the spike; never merged). The steps marked **sudo** and
 the router's and the phone's are Paul's: this guide is them, in order.
 docs/self-host.md is the design (seams 4 and 9, "What corporate networks
 bring"); this is how the home network plays a company's.
@@ -47,7 +47,7 @@ banner names.
 
 ## 1. The box, once (sudo)
 
-Run these from the branch's checkout, `~/dev/finite/fragment-lan`.
+Run these from the spike's checkout, `~/dev/finite/fragment-selfhost`.
 
 **1a. A fixed address.** The zone answers 192.168.50.7, so the box must
 keep it. On the ASUS router (http://192.168.50.1): LAN, DHCP Server,
@@ -101,7 +101,7 @@ CA' -i ~/.local/state/fragment-lan/ca/ca.pem` (after step 2 makes it).
 ## 2. Start the stack
 
 ```sh
-cd ~/dev/finite/fragment-lan
+cd ~/dev/finite/fragment-selfhost
 export FRAGMENT_LAN_STATE=$HOME/.local/state/fragment-lan
 export FRAGMENT_LAN_BIN=/usr/local/lib/fragment-lan/fragment-lan   # step 1b's (omit with the sysctl)
 export CELLD_BIN=$HOME/dev/finite/celld/target/release/celld
@@ -213,8 +213,8 @@ Or open the profile (`http://192.168.50.7/ca`) and install it in System
 Settings, General, Device Management. Firefox keeps its own store: in
 `about:config`, `security.enterprise_roots.enabled` true.
 
-**The CLI**, built from this branch (its first commit makes it trust the
-OS's roots beside the public ones; the released CLI trusts the public
+**The CLI**, built from this branch (it trusts the OS's roots beside the
+public ones, as master will with PR #130; the released CLI trusts the public
 roots alone):
 
 ```sh
