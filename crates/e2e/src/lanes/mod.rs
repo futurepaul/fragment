@@ -8,6 +8,7 @@ mod blobs;
 mod brain;
 mod chat;
 mod author;
+mod codestore;
 mod computers;
 mod control;
 mod credentials;
@@ -58,6 +59,7 @@ const LANES: &[Lane] = &[
     members::secrets,
     delegation::delegation,
     plane::files,
+    codestore::codestore,
     plane::deploy,
     templates::templates,
     share::share,
