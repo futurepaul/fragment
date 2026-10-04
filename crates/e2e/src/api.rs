@@ -395,7 +395,7 @@ impl Api {
         })
     }
 
-    /// A GET to another service (the WorkOS fake), as it is.
+    /// A GET to another service (a sign-in fake), as it is.
     pub fn external(&self, url: &str) -> Result<Reply> {
         let resp = self.http.get(url).send().with_context(|| format!("GET {url}"))?;
         let status = resp.status().as_u16();
@@ -406,11 +406,12 @@ impl Api {
     }
 
     /// A browser signing in as `email`: the platform session's cookie
-    /// value. Locally through WorkOS (the fake); hosted, through the
-    /// levers' e2e sign-in, with no paid calls.
+    /// value. Locally through the node's provider (the WorkOS fake, or the
+    /// OpenID Connect fake); hosted, through the levers' e2e sign-in, with
+    /// no paid calls.
     pub fn sign_in(&self, email: &str) -> Result<String> {
         match self.run.levers_sign_in {
-            false => self.sign_in_through_workos(email),
+            false => self.sign_in_through_the_provider(email),
             true => self.e2e_sign_in(email, 0).map(|(session, _)| session),
         }
     }
@@ -443,15 +444,16 @@ impl Api {
         Ok(keys)
     }
 
-    /// A browser signing in as `email` through WorkOS (the fake): the
-    /// platform session's cookie value.
-    fn sign_in_through_workos(&self, email: &str) -> Result<String> {
+    /// A browser signing in as `email` through the node's provider (a
+    /// fake, which signs in whoever `login_hint` names): the platform
+    /// session's cookie value.
+    fn sign_in_through_the_provider(&self, email: &str) -> Result<String> {
         let path = format!("/auth/login?return=/&login_hint={}", url_enc(email));
         let start = self.unsigned("GET", &path, None)?;
         anyhow::ensure!(start.status == 302, "GET {path}: {start}");
         let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
         let back = self.external(&start.header("location"))?;
-        anyhow::ensure!(back.status == 302, "WorkOS (fake) authorize: {back}");
+        anyhow::ensure!(back.status == 302, "the provider's (a fake's) authorize: {back}");
         let done = self.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })?;
         anyhow::ensure!(done.status == 302, "the callback: {done}");
         let session = done.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string)).context("a session cookie")?;
