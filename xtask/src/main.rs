@@ -12,7 +12,8 @@
 //!                    behind the model route, and the agents' Worker beside it
 //!                    (their turns spend their owner's ledger; new people are
 //!                    seats with the month's included credit). Sign-in is the
-//!                    WorkOS fake on :8794, or with FRAGMENT_SIGNIN=oidc the
+//!                    WorkOS fake's AuthKit on :8795 (Pipes on :8794), or
+//!                    with FRAGMENT_SIGNIN=oidc the
 //!                    OpenID Connect fake on :8798, or a real provider
 //!                    (FRAGMENT_OIDC_ISSUER: `dev_signin`). FRAGMENT_DEV_PORT
 //!                    moves the cell and its fakes (`dev_ports`). --lan serves
