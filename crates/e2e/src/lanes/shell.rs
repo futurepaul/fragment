@@ -127,31 +127,35 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
 
     // connections (decisions 22 and 37): every provider the deployment
     // offers, its kind and the person's state there
-    let status = |r: &Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["state"].clone());
-    let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
-    let rows = r.body["providers"].as_array().cloned().unwrap_or_default();
-    let row = |p: &str| rows.iter().find(|x| x["provider"] == p).cloned().unwrap_or(Value::Null);
-    let keys = crate::SWAP_KEYS.iter().all(|(name, _, env)| {
-        let k = row(name);
-        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
-    });
-    s.ok(
-        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
-        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
-        &r,
-    );
-    let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
-    s.ok("an operator key is no connection to authorize (400)", r.status == 400, &r);
-    let r = shell(api, &session, "POST", &format!("/api/connections/{}/authorize", crate::SWAP_CONNECTION), Some(&json!({})), &[])?;
-    let consent = r.body["url"].as_str().unwrap_or("").to_string();
-    s.ok("and starts one: a consent URL for the person's browser", r.status == 200 && consent.starts_with(&s.workos.url), &r);
-    let done = api.external(&consent)?;
-    let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
-    s.ok("followed, the account is connected", done.status == 200 && status(&r) == Some(json!("connected")), &r);
-    let again = api.external(&consent)?;
-    s.ok("(a consent is followed once)", again.status == 400, &again);
-    let r = shell(api, &session, "POST", "/api/connections/notion/authorize", Some(&json!({})), &[])?;
-    s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
+    if s.oidc_signin() {
+        s.skip("the shell's connections", "they are WorkOS Pipes', whose people sign in through WorkOS; this run signs people in with OpenID Connect");
+    } else {
+        let status = |r: &Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["state"].clone());
+        let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
+        let rows = r.body["providers"].as_array().cloned().unwrap_or_default();
+        let row = |p: &str| rows.iter().find(|x| x["provider"] == p).cloned().unwrap_or(Value::Null);
+        let keys = crate::SWAP_KEYS.iter().all(|(name, _, env)| {
+            let k = row(name);
+            k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
+        });
+        s.ok(
+            "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
+            status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
+            &r,
+        );
+        let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
+        s.ok("an operator key is no connection to authorize (400)", r.status == 400, &r);
+        let r = shell(api, &session, "POST", &format!("/api/connections/{}/authorize", crate::SWAP_CONNECTION), Some(&json!({})), &[])?;
+        let consent = r.body["url"].as_str().unwrap_or("").to_string();
+        s.ok("and starts one: a consent URL for the person's browser", r.status == 200 && consent.starts_with(&s.workos.url), &r);
+        let done = api.external(&consent)?;
+        let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
+        s.ok("followed, the account is connected", done.status == 200 && status(&r) == Some(json!("connected")), &r);
+        let again = api.external(&consent)?;
+        s.ok("(a consent is followed once)", again.status == 400, &again);
+        let r = shell(api, &session, "POST", "/api/connections/notion/authorize", Some(&json!({})), &[])?;
+        s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
+    }
 
     // a template that is not blessed is copied, and its kind is what it says
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "garden", "template": "todo", "title": "x" })), &[])?;

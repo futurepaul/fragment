@@ -1,4 +1,6 @@
-//! Sign-in (phase 4 slice B), against the WorkOS fake: people are keyed by
+//! Sign-in (phase 4 slice B), against the WorkOS fake, or the OpenID Connect
+//! fake (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4, whose own
+//! checks are `oidc_cases`): people are keyed by
 //! their `(issuer, subject)`, browsers hold sessions (the platform's, then
 //! one per fragment origin through a single-use redemption), a CLI key
 //! joins a person through a browser approval, and a browser and the CLI
@@ -224,13 +226,27 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // the round trip
+    let oidc = s.oidc_signin();
     let r = api.unsigned("GET", "/auth/login?return=/x", None)?;
     let to = r.header("location");
-    s.ok(
-        "sign-in starts at WorkOS: this environment, a callback here, and a state",
-        r.status == 302 && to.contains("/user_management/authorize?") && to.contains("client_id=client_fragment_e2e") && to.contains(&url_enc(&format!("{}/auth/callback", api.base))) && to.contains("state="),
-        &r,
-    );
+    let callback_here = to.contains(&url_enc(&format!("{}/auth/callback", api.base)));
+    match oidc {
+        false => s.ok(
+            "sign-in starts at WorkOS: this environment, a callback here, and a state",
+            r.status == 302 && to.contains("/user_management/authorize?") && to.contains("client_id=client_fragment_e2e") && callback_here && to.contains("state="),
+            &r,
+        ),
+        true => s.ok(
+            "sign-in starts at the OpenID Connect provider: this client, a callback here, openid, a state, a nonce, and PKCE's S256 challenge",
+            r.status == 302
+                && to.starts_with(&format!("{}/authorize?", s.oidc.url))
+                && to.contains(&format!("client_id={}", crate::OIDC_CLIENT))
+                && callback_here
+                && to.contains("scope=openid")
+                && ["state=", "nonce=", "code_challenge=", "code_challenge_method=S256"].iter().all(|p| to.contains(p)),
+            &r,
+        ),
+    }
     let login = cookie_line(&r, "fragment_login");
     s.ok("the state is bound to this browser by a cookie (HttpOnly, SameSite=Lax)", login.contains("HttpOnly") && login.contains("SameSite=Lax") && login.contains("Path=/;"), &login);
     let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
@@ -255,14 +271,21 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let r = api.unsigned("GET", "/auth/login?invitation_token=Z1uX3Rbw_cIl-5fIG", None)?;
-    s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
-    let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
-    s.ok("and a malformed one does not", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
-    s.workos.fail_next("access_denied");
+    if oidc {
+        s.ok("an invitation's token is WorkOS's: an OpenID Connect request carries none", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
+    } else {
+        s.ok("an invitation's token rides along to WorkOS (it lets its invitee sign up)", r.header("location").contains("&invitation_token=Z1uX3Rbw_cIl-5fIG"), &r);
+        let r = api.unsigned("GET", "/auth/login?invitation_token=%22%3E%3Cscript%3E", None)?;
+        s.ok("and a malformed one does not", r.status == 302 && !r.header("location").contains("invitation_token"), &r);
+    }
+    match oidc {
+        true => s.oidc.fail_next("access_denied"),
+        false => s.workos.fail_next("access_denied"),
+    }
     let r = api.unsigned("GET", "/auth/login", None)?;
     let back = api.external(&format!("{}&login_hint=denied@e2e.test", r.header("location")))?;
     let r = api.call(Call { method: "GET", url: back.header("location"), cookie: r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")), ..Call::default() })?;
-    s.ok("a refusal at WorkOS is shown, and signs no one in", r.status == 400 && r.text.contains("access_denied"), &r);
+    s.ok("a refusal at the provider is shown, and signs no one in", r.status == 400 && r.text.contains("access_denied"), &r);
 
     // the way back never leaves the platform (audit R1: the first three once
     // landed on https://evil.example/ after a real sign-in)
@@ -357,8 +380,16 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = picture(&api.base, "same-origin")?;
     let shown = api.unsigned("GET", &format!("/api/users/{chosen}/picture"), None)?;
     s.ok("(from the platform's own page, the shell, the picture is set)", r.status == 200 && shown.status == 200, format!("{r} / {shown}"));
-    let user = s.workos.user("paul@e2e.test");
-    s.workos.set_email(&user.id, "paul@renamed.test");
+    match oidc {
+        true => {
+            let user = s.oidc.user("paul@e2e.test");
+            s.oidc.set_email(&user.id, "paul@renamed.test");
+        }
+        false => {
+            let user = s.workos.user("paul@e2e.test");
+            s.workos.set_email(&user.id, "paul@renamed.test");
+        }
+    }
     let renamed = api.sign_in("paul@renamed.test")?;
     let k3 = Keys::generate();
     let r = api.approve(&renamed, &k3)?;
@@ -367,7 +398,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let other = api.sign_in("paul@renamed.test.example")?;
     let k4 = Keys::generate();
     let r = api.approve(&other, &k4)?;
-    s.ok("another WorkOS user is another person, whatever their email looks like", r.status == 200 && r.body["id"] != paul_id.as_str(), &r);
+    s.ok("another of the provider's users is another person, whatever their email looks like", r.status == 200 && r.body["id"] != paul_id.as_str(), &r);
 
     // linking a second sign-in: explicit, from a signed-in session
     let r = with_session(api, "GET", "/auth/link", &renamed)?;
@@ -740,6 +771,10 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let member_on_g = site_cookie(api, &member_session, &g)?;
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;
     s.ok("(the member still reads the other fragment)", r.status == 200, &r);
+    let logouts = match oidc {
+        true => s.oidc.logouts().len(),
+        false => s.workos.ended().len(),
+    };
     let r = api.call(Call {
         method: "POST",
         url: format!("{}/auth/logout", api.base),
@@ -750,11 +785,30 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let to = r.header("location");
     let (status, cleared) = (r.status, cookie_line(&r, "fragment_session"));
     let back = api.external(&to)?;
-    s.ok(
-        "signing out ends the session, and sends the browser to end WorkOS's",
-        status == 302 && to.contains("/user_management/sessions/logout?session_id=") && cleared.contains("Max-Age=0") && back.status == 302 && s.workos.ended().len() == 1,
-        format!("{status} {to} {cleared}"),
-    );
+    match oidc {
+        false => s.ok(
+            "signing out ends the session, and sends the browser to end WorkOS's",
+            status == 302 && to.contains("/user_management/sessions/logout?session_id=") && cleared.contains("Max-Age=0") && back.status == 302 && s.workos.ended().len() == logouts + 1,
+            format!("{status} {to} {cleared}"),
+        ),
+        true => {
+            // RP-initiated logout: the provider is handed the session's id_token as the hint, and the way back
+            let ended = s.oidc.logouts();
+            let hint = ended.last().and_then(|l| l.id_token_hint.clone()).unwrap_or_default();
+            s.ok(
+                "signing out ends the session, and sends the browser to the provider's end_session_endpoint with its id_token and the way back",
+                status == 302
+                    && to.starts_with(&format!("{}/logout?", s.oidc.url))
+                    && cleared.contains("Max-Age=0")
+                    && back.status == 302
+                    && back.header("location") == format!("{}/", api.base)
+                    && ended.len() == logouts + 1
+                    && hint.split('.').count() == 3
+                    && ended.last().and_then(|l| l.client_id.as_deref()) == Some(crate::OIDC_CLIENT),
+                format!("{status} {to} {cleared}"),
+            );
+        }
+    }
     let r = api.page(&g, "", Some(&format!("fragment_site={member_on_g}")))?;
     s.ok("and every fragment session made from it", r.status == 401, &r);
     let r = who(api, &member_session)?;
@@ -901,6 +955,137 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
             && name == api.qualified(&owner, &s.name("by-an-agent"))?
             && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
         format!("{r} {members}"),
+    );
+    if oidc {
+        oidc_cases(s, api)?;
+    }
+    Ok(())
+}
+
+/// A sign-in begun and answered by the provider, not yet finished: the
+/// callback URL it sends the browser to (its code and state), and the
+/// browser's login cookie.
+fn begun(api: &Api, hint: &str) -> Result<(String, String)> {
+    let r = api.unsigned("GET", &format!("/auth/login?return=/&login_hint={}", url_enc(hint)), None)?;
+    anyhow::ensure!(r.status == 302, "/auth/login: {r}");
+    let bound = r.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).context("a login cookie")?;
+    let back = api.external(&r.header("location"))?;
+    anyhow::ensure!(back.status == 302, "the provider's authorize: {back}");
+    Ok((back.header("location"), bound))
+}
+
+/// The callback a browser holding `cookie` follows.
+fn finished(api: &Api, callback: &str, cookie: &str) -> Result<Reply> {
+    api.call(Call { method: "GET", url: callback.to_string(), cookie: Some(cookie.to_string()), ..Call::default() })
+}
+
+fn param(url: &str, name: &str) -> String {
+    reqwest::Url::parse(url).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned())).unwrap_or_default()
+}
+
+/// What only an OpenID Connect sign-in has (docs/self-host.md, seam 4),
+/// by the fake's levers: the client's authentication, PKCE holding a code
+/// to the sign-in that asked for it, a person with no email, ES256, every
+/// way an id_token can be wrong refused, and the provider's keys rotated.
+fn oidc_cases(s: &mut Suite, api: &Api) -> Result<()> {
+    use fragment_fakes::oidc::{Alg, Spoil};
+
+    api.sign_in("oidc-basic@e2e.test")?;
+    let auth = s.oidc.token_auth();
+    s.ok(
+        "the code is exchanged form-encoded, the client authenticated with client_secret_basic (the provider lists it first)",
+        auth.last().map(String::as_str) == Some("client_secret_basic"),
+        format!("{auth:?}"),
+    );
+
+    // Goal: PKCE binds a code to the sign-in that asked for it. Method: a
+    // code from one sign-in finished under another's state, as a code
+    // injected into someone else's browser would be; then a code spent
+    // once, finished again under a fresh state.
+    let (first, _) = begun(api, "oidc-pkce@e2e.test")?;
+    let (second, cookie) = begun(api, "oidc-pkce@e2e.test")?;
+    let injected = format!("{}/auth/callback?code={}&state={}", api.base, url_enc(&param(&first, "code")), param(&second, "state"));
+    let r = finished(api, &injected, &cookie)?;
+    s.ok(
+        "a code from another sign-in, finished under this one's state, signs no one in: its PKCE verifier is not this sign-in's (400)",
+        r.status == 400 && r.code() == Some(ErrorCode::InvalidRequest) && cookie_line(&r, "fragment_session").is_empty(),
+        &r,
+    );
+    let (third, cookie) = begun(api, "oidc-pkce@e2e.test")?;
+    let r = finished(api, &third, &cookie)?;
+    anyhow::ensure!(r.status == 302, "a sign-in finished: {r}");
+    let (fourth, cookie) = begun(api, "oidc-pkce@e2e.test")?;
+    let replayed = format!("{}/auth/callback?code={}&state={}", api.base, url_enc(&param(&third, "code")), param(&fourth, "state"));
+    let r = finished(api, &replayed, &cookie)?;
+    s.ok("and a code spent once is refused at the provider, under any sign-in's state (400)", r.status == 400 && cookie_line(&r, "fragment_session").is_empty(), &r);
+
+    // Goal: no email is assumed. Method: a directory person the provider
+    // names by a username alone.
+    let session = api.sign_in("jdoe-nomail")?;
+    let keys = Keys::generate();
+    let link = api.approval_link(&keys, 0);
+    let page = with_session(api, "GET", link.trim_start_matches(&api.base), &session)?;
+    let me = api.approve(&session, &keys)?;
+    let subject = &me.body["subjects"][0];
+    s.ok(
+        "a person whose provider gives no email signs in, shown by their username, their sign-in keyed by the issuer's URL",
+        page.status == 200
+            && page.text.contains("<b>jdoe-nomail</b>")
+            && subject["email"].is_null()
+            && subject["handle"] == "jdoe-nomail"
+            && subject["name"] == "jdoe-nomail (fake)"
+            && subject["issuer"] == s.oidc.url.as_str(),
+        format!("{} / {me}", page.status),
+    );
+
+    s.oidc.sign_with(Alg::Es256);
+    let es = api.sign_in("oidc-es256@e2e.test");
+    s.oidc.sign_with(Alg::Rs256);
+    s.ok("an id_token signed ES256 signs in too", es.is_ok(), format!("{es:?}"));
+
+    // Goal: an id_token that is wrong in any way signs no one in. Method:
+    // the fake spoils the next one each time, as a provider misconfigured
+    // (or someone between it and the cell) would.
+    let spoils = [Spoil::WrongAudience, Spoil::WrongIssuer, Spoil::Expired, Spoil::WrongNonce, Spoil::BadSignature, Spoil::AlgNone, Spoil::Hs256, Spoil::UnpublishedKey];
+    let mut let_in = vec![];
+    for (i, spoil) in spoils.iter().enumerate() {
+        s.oidc.spoil_next(*spoil);
+        let (callback, cookie) = begun(api, &format!("oidc-spoiled-{i}@e2e.test"))?;
+        let r = finished(api, &callback, &cookie)?;
+        if !(r.status == 401 && r.code() == Some(ErrorCode::Unauthenticated) && cookie_line(&r, "fragment_session").is_empty()) {
+            let_in.push(format!("{spoil:?}: {r}"));
+        }
+    }
+    s.ok(
+        &format!("an id_token for another client, from another issuer, expired, for another sign-in, badly signed, alg none, HS256 keyed with the client secret, or by a key never published signs no one in (401, {} of them)", spoils.len()),
+        let_in.is_empty(),
+        format!("{let_in:?}"),
+    );
+
+    // Goal: the provider rotates its keys as Dex does (the new key signs the
+    // moment it is published); the cell fetches its JWKS again for the key
+    // it lacks, at most once a cooldown, and signs people in again within
+    // one. Method: a rotation, then a sign-in tried every second.
+    let fetched = s.oidc.jwks_fetches();
+    s.oidc.rotate_keys();
+    let t0 = Instant::now();
+    let cooldown = Duration::from_millis(fragment_core::oidc::JWKS_REFETCH_MIN_MS as u64);
+    let mut tries = 0;
+    let back = s.eventually(cooldown + Duration::from_secs(10), || {
+        tries += 1;
+        let ok = api.sign_in("oidc-rotated@e2e.test").is_ok();
+        if !ok {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        ok
+    });
+    let fetches = s.oidc.jwks_fetches() - fetched;
+    s.ok(
+        "after the provider rotates its keys, sign-in works again within the JWKS cooldown, the keys fetched again once for it",
+        // one fetch for the new key, and at most one more were the cell's
+        // isolate started again meanwhile
+        back && (1..=2).contains(&fetches),
+        format!("{tries} tries in {:.1?}, {fetches} JWKS fetches", t0.elapsed()),
     );
     Ok(())
 }
