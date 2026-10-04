@@ -112,6 +112,20 @@ prebuilt bundle is in the debt ledger).
   fakes, the node, the whole deployment, levers, local Docker, Chrome,
   computers, models, two sites), and that alone chooses the hosted set.
   The node's test levers (`/api/test/*`) take a secret made per run.
+  A wait that runs out its limit prints `(a wait ran out its …s at
+  <file>:<line>)`: one that does so on a passing run costs every run.
+- `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
+  shards CI runs, each on its own runner with its own build and node
+  (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
+  one, a host test checks; rebalance it from the summaries' `ms`).
+  `--summary` writes the run's summary (any local run takes it), and
+  `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them:
+  every section ran exactly once across the shards, the counts add up,
+  and every check passed, printed as one run. CI splits each shard's run
+  in two, `--build-only` then `--no-build`, so the cache saves between
+  (the build also builds the computer images ahead of the node, beside
+  the Rust; the cell and the agent build in parallel once worker-build
+  has its tools: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
   … | --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the hosted
   lane, the same sections against the branch deployment
@@ -176,8 +190,13 @@ prebuilt bundle is in the debt ledger).
   (linux/amd64) against a fake API and a scripted model, real Hermes
   included. The e2e's computer sections run the stub image under
   `wrangler dev`, which needs Docker.
-- `.github/workflows/ci.yml` runs `check` and `e2e` on Linux.
-  `release.yml` builds the CLI for macOS and Linux.
+- `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
+  shard k/4`), and `e2e`, which needs them all and checks their
+  summaries, on Linux; a manual run (workflow_dispatch) adds the suite
+  whole in one job (`e2e-whole`), to compare counts. Its caches restore
+  on every run and save only from master's pushes (each key's contents
+  are named in the workflow). `release.yml` builds the CLI for macOS and
+  Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
   zone `finite.place` in Paul's account, and production only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
