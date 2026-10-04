@@ -3,6 +3,11 @@
 # agents' Worker under `wrangler dev` (workerd), with fakes only at the
 # vendor boundaries (docs/cloudflare-v1.md, phase 2). The celld e2e on
 # macOS is at tag celld-final.
+#
+# Caches are restored on every run and saved only from master's pushes
+# (a PR reads master's): each key names what it holds below. A save comes
+# right after the step that fills it, so a red e2e still saves its build.
+# (TEMPORARY, until this PR's warm run is proven: its own runs save too.)
 name: ci
 
 on:
@@ -19,65 +24,127 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: actions/cache@v4
+      # the registry and the debug, test and clippy builds of the three
+      # workspaces; a new rustc or lockfile is a new key
+      - id: cache
+        uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             target
             cell/target
             agent/target
-          key: check-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
-          restore-keys: check-${{ runner.os }}-
+          key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          restore-keys: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       - run: cargo xtask check
+      - if: (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+            cell/target
+            agent/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      # no setup-node: xtask fetches the pinned Node into target/tools
-      # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
-      # runs its own npm ci; the runner's node is never used
-      - uses: actions/cache@v4
+      # the registry, and what the e2e's build compiles: the CLI and the
+      # suite (target/release), xtask (target/debug), and the two Workers'
+      # wasm32 builds; a new rustc or lockfile is a new key
+      - id: cargo
+        uses: actions/cache/restore@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin/worker-build
-            ~/.cache/worker-build
-            target
-            !target/tools
-            !target/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/release
+            target/debug
             cell/target
             agent/target
-          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
-          restore-keys: e2e-${{ runner.os }}-
-      # the pinned Node, unpacked: a new pin is a new key
-      - uses: actions/cache@v4
+          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
+      # worker-build itself, and the tools it fetches (wasm-bindgen at the
+      # lockfiles' version, wasm-opt, esbuild)
+      - id: worker-build
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cache/worker-build
+          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock', 'agent/Cargo.lock') }}
+          restore-keys: worker-build-0.8.5-${{ runner.os }}-
+      # no setup-node: xtask fetches the pinned Node into target/tools
+      # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
+      # runs its own npm ci; the runner's node is never used. A new pin is
+      # a new key.
+      - id: node
+        uses: actions/cache/restore@v4
         with:
           path: target/tools
           key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       # what the JavaScript caches (target/cache): npm's tarballs, wrangler's
       # own, and the Chrome for Testing Browser Rendering downloads, which
       # the lockfile's miniflare names
-      - uses: actions/cache@v4
+      - id: js
+        uses: actions/cache/restore@v4
         with:
           path: target/cache
           key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
       - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
+      - run: cargo xtask e2e --build-only
+      - if: (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/release
+            target/debug
+            cell/target
+            agent/target
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+      - if: (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.worker-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/bin/worker-build
+            ~/.cache/worker-build
+          key: ${{ steps.worker-build.outputs.cache-primary-key }}
+      - if: (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.node.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/tools
+          key: ${{ steps.node.outputs.cache-primary-key }}
       # one run's scratch (each node boot's log, the lanes' screenshots) is
       # kept when a check fails: uploaded below
-      - run: cargo xtask e2e
+      - run: cargo xtask e2e --no-build
         env:
           CHROME_BIN: /usr/bin/google-chrome
+      # after the run: miniflare fetches its Chrome during it
+      - if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.js.outputs.cache-hit != 'true' && hashFiles('target/cache/.wrangler/chrome/**/.miniflare-install-complete') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: target/cache
+          key: ${{ steps.js.outputs.cache-primary-key }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

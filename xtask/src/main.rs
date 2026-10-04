@@ -14,7 +14,9 @@
 //!                    so nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
 //!                    or --except <section>[,...]; --rehearse keeps the hosted lane's
-//!                    rules on the local node)
+//!                    rules on the local node). CI splits it in two steps, so the
+//!                    cache saves between them: --build-only (builds, runs
+//!                    nothing), then --no-build (runs what the build left)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>]
 //!                    the suite against that branch deployment on its real vendors
@@ -255,11 +257,27 @@ fn e2e(args: &[String]) -> Result<()> {
         }
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
+    // CI's split: `--build-only` builds (and the cache is saved after it,
+    // so a red run still saves), then `--no-build` runs what it left
+    let build_only = args.iter().any(|a| a == "--build-only");
+    let no_build = args.iter().any(|a| a == "--no-build");
+    if build_only && no_build {
+        bail!("--build-only and --no-build are two steps of one run, not one");
+    }
+    let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
+    if build_only && !suite_args.is_empty() {
+        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
-    build_e2e()?;
-    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
+    if !no_build {
+        build_e2e()?;
+    }
+    if build_only {
+        return Ok(());
+    }
+    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
 }
 
 /// The suite alone, for this machine.
@@ -371,7 +389,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...]] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 
