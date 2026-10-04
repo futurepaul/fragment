@@ -795,10 +795,23 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   - Still to do: S2's checks on a real engine, which needs root, and
     the same against a Cloudflare preview. Both are Paul's.
 - **S6:** not started.
-- **Seam 5, git in a code store outside the stack: built** (branch
-  `selfhost-macrofiche`): the dev stack and the e2e on the fake, a store
-  already running, or macrofiche started for them. The whole suite
-  passed on the fake as a process of its own (seam 5, Evidence).
+- **Seam 5, git in a code store outside the stack: done.**
+  - **macrofiche**, a sibling project like sandcastle, is a self-hosted
+    git store with code.storage's API, built on git 2.55.0 pinned and
+    jailed (`/home/futurepaul/dev/finite/macrofiche`, its `docs/design.md`).
+  - The dev stack and the e2e run on the fake, a store already running,
+    or macrofiche started for them (`FRAGMENT_E2E_CODESTORE=macrofiche`,
+    `MACROFICHE_BIN`).
+  - **The whole suite on celld against macrofiche: 1316 passed, 0
+    failed, 22 skipped, in 5 m 50 s (2026-10-04).** Each skip says why:
+    - 11 skips pull the fake's own levers or count its requests;
+    - 6 are card checks, as celld has no browser;
+    - 4 are the container sections, which are the node's lane;
+    - 1 is the webhook-announced poll, as the harness does not yet
+      register macrofiche's per-repo webhook.
+  - So every cell, every fragment's git and every run here was
+    self-hosted: celld and macrofiche, with the fakes standing only for
+    sign-in (WorkOS or OpenID Connect), the model, and push.
 - **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
   beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
   it signed in through a real Dex (seam 4, Evidence).
