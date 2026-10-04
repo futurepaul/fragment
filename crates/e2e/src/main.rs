@@ -1121,7 +1121,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     s.start(true, true)?;
     // wrangler builds the computer images as it boots: built ahead (xtask's
     // build), every step is a cache hit, and the boot takes seconds
-    let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+    let log = s.node.as_ref().map(|n| std::fs::read_to_string(n.log()).unwrap_or_default()).unwrap_or_default();
     let cached = log.lines().filter(|l| l.starts_with('#') && l.ends_with(" CACHED")).count();
     println!("the node is ready in {:.1?} (its image builds: {cached} steps cached)", t0.elapsed());
     lanes::run(&mut s);
