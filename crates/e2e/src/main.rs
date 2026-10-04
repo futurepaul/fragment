@@ -721,6 +721,34 @@ impl Suite {
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
     }
 
+    /// The code store outside the run, when the node's git lives in one.
+    pub fn external_store(&self) -> Option<&store::External> {
+        self.store.as_ref()
+    }
+
+    /// Whether the section `name`, which probes a code store outside the
+    /// run, runs: only on one (`FRAGMENT_E2E_CODESTORE`). Elsewhere it is a
+    /// skip that says so: the fake in the process is the contract's
+    /// reference, and a preview's git is code.storage itself.
+    pub fn store_section(&mut self, name: &str) -> bool {
+        if self.store.is_some() {
+            return self.section(name, &[]);
+        }
+        self.asked.push(name.to_string());
+        if self.selected(name) {
+            // what the rung lacks first (a hosted run without its secret runs nothing)
+            let why = match needs::unmet(&[], self.rung) {
+                Some((need, missing)) => format!("{missing} ({})", need.name()),
+                None => format!("it probes a code store outside the run, and this run's git is {} ({}=external or macrofiche)", if self.hosted() { "the deployment's own" } else { "the fake, the contract's reference" }, store::CODESTORE_VAR),
+            };
+            match &mut self.plan {
+                Some(plan) => plan.push(Planned { section: name.into(), needs: vec![], skip: Some(why) }),
+                None => self.skip(&format!("the {name} section"), &why),
+            }
+        }
+        false
+    }
+
     /// Whether the code.storage fake's levers are the lanes': a local run
     /// whose git is the fake in this process. Its levers are an outage, a
     /// sabotaged commit, a count of the requests it answered, and its refs'
@@ -1148,7 +1176,8 @@ fn codestore(hidden: bool, scratch: &Path) -> Result<RunStore> {
                 log_dir: scratch.to_path_buf(),
             };
             let m = devstack::codestore::Macrofiche::start(&bin, &opts)?;
-            let store = store::External::new(&m.url, ORG, &org_key, "macrofiche".into())?;
+            let mut store = store::External::new(&m.url, ORG, &org_key, "macrofiche".into())?;
+            store.service = true;
             let said = format!("{} (macrofiche, {}; its log {})", m.url, bin.display(), m.log.display());
             Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(store), macrofiche: Some(m), org: ORG.into(), org_key, said })
         }
