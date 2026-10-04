@@ -26,9 +26,10 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let home = s.dir("sync-home");
     s.login(api, &home);
+    let owner = s.cli_keys(&home).expect("the CLI logged in");
     let create = |s: &Suite, base: &str| -> Result<(String, Value)> {
         let c = s.cli_json(api, &home, &["create", &s.name(base), "--show-tokens", "--json"])?;
-        s.hook(api, &c);
+        s.hook(api, &owner, &c);
         Ok((c["name"].as_str().unwrap_or("").to_string(), c))
     };
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();
@@ -57,11 +58,11 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
         std::fs::write(dir.join(f), format!("new {f}"))?;
     }
     std::fs::remove_file(dir.join("gone.md"))?;
-    let packs = s.fake.requests(&repo, "POST commit-pack");
+    let packs = s.mark(&repo);
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir), "--mode", "push"]);
-    let at = |f: &str| s.fake.file_at(&repo, "main", f);
+    let at = |f: &str| s.file_at(&repo, "main", f);
     let landed = files.iter().all(|f| at(f) == Some(format!("new {f}").into_bytes())) && at("gone.md").is_none();
-    let one = s.fake.requests(&repo, "POST commit-pack") - packs == 1;
+    let one = s.commits_since(&repo, &packs) == 1;
     s.ok("a push of three changed files and one deletion lands as one commit", code(&out) == 0 && landed && one, String::from_utf8_lossy(&out.stderr));
 
     // continuous: the change feed pulls a remote write; a local edit pushes
@@ -89,20 +90,34 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("continuous sync pulls a remote write within seconds", first_pass && pulled, std::fs::read_to_string(&log_path).unwrap_or_default());
     std::fs::write(dir.join("local.md"), "from the client")?;
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    let pushed = s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));
+    let pushed = s.eventually(Duration::from_secs(15), || s.file_at(&repo, "main", "local.md").as_deref() == Some(&b"from the client"[..]));
     s.ok("continuous sync pushes a local edit", pushed, "");
     // a save is one pass by the watcher (one head read, one listing, one
     // commit), and the feed's echo of its commit starts none: two saves,
     // each waited for, so the first's echo has come before the second
-    s.fake.take_requests("");
+    let counted = s.store_levers();
+    let before = (!counted).then(|| s.mark(&repo));
+    if counted {
+        s.fake.take_requests("");
+    }
     let mut saved = true;
     for (file, text) in [("second.md", "two"), ("third.md", "three")] {
         std::fs::write(dir.join(file), text)?;
-        saved &= s.eventually(Duration::from_secs(15), || s.fake.file_at(&repo, "main", file).as_deref() == Some(text.as_bytes()));
+        saved &= s.eventually(Duration::from_secs(15), || s.file_at(&repo, "main", file).as_deref() == Some(text.as_bytes()));
     }
-    let asked = s.fake.take_requests("editor:");
-    let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
-    s.ok("two saves are two passes of one head read, one listing, and one commit each", saved && asked == expected, format!("{asked:?}"));
+    let label = "two saves are two passes of one head read, one listing, and one commit each";
+    match before {
+        None => {
+            let asked = s.fake.take_requests("editor:");
+            let expected: std::collections::BTreeMap<String, u32> = [("GET branch", 2), ("GET files/metadata", 2), ("POST commit-pack", 2)].iter().map(|(r, n)| (r.to_string(), *n)).collect();
+            s.ok(label, saved && asked == expected, format!("{asked:?}"));
+        }
+        Some(before) => {
+            let commits = s.commits_since(&repo, &before);
+            s.ok("(two saves are two commits)", saved && commits == 2, format!("{commits} commits"));
+            s.skip_lever(label, "count of the requests it answered, by caller");
+        }
+    }
     let err = s.scratch.join(format!("sync-watch-second-{name}.log"));
     let mut second = s.bare_cli()
         .args(["sync", &name, "--dir", &dir_of(&dir), "--watch"])
@@ -201,15 +216,17 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         quiet && closed.status == 200 && idle,
         &alarm,
     );
-    let reads = s.fake.requests(&repo, "GET branch");
-    s.fake.silent_commit(&repo, "main", &[("quiet.md", Some(b"no webhook"))], "silent");
+    let reads = s.requests(&repo, "GET branch");
+    s.silent_commit(&c, &[("quiet.md", Some(b"no webhook"))]);
     std::thread::sleep(interval * 4);
-    let asked = s.fake.requests(&repo, "GET branch") - reads;
-    s.ok(
-        "and asks code.storage nothing for four poll intervals: a commit no webhook announced waits",
-        asked == 0 && !read("quiet.md"),
-        format!("{asked} branch reads"),
-    );
+    let label = "and asks code.storage nothing for four poll intervals: a commit no webhook announced waits";
+    match (reads, s.requests(&repo, "GET branch")) {
+        (Some(reads), Some(now)) => s.ok(label, now == reads && !read("quiet.md"), format!("{} branch reads", now - reads)),
+        _ => {
+            s.ok("(a commit no webhook announced waits four poll intervals unread)", !read("quiet.md"), "");
+            s.skip_lever(label, "count of the requests it answered");
+        }
+    }
 
     // an editor who may push through code.storage: a storage token
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
@@ -220,14 +237,24 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && found && ahead(&alarm, "pollAt") <= interval_ms,
         &alarm,
     );
-    let reads = s.fake.requests(&repo, "GET branch");
+    let reads = s.requests(&repo, "GET branch");
     std::thread::sleep(interval * 4);
-    println!("      busy, {} branch reads in four poll intervals; quiet, none", s.fake.requests(&repo, "GET branch") - reads);
+    if let (Some(reads), Some(now)) = (reads, s.requests(&repo, "GET branch")) {
+        println!("      busy, {} branch reads in four poll intervals; quiet, none", now - reads);
+    }
     hook("age-outside", Some(day_ms));
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
     s.ok("a day after the token, it is polled once a day again", quiet, hook("alarm", None));
     s.commit(&c, &[("announced.md", Some(b"by webhook"))]);
     let alarm = hook("alarm", None);
-    s.ok("a webhook brings the poll back to its interval too", read("announced.md") && ahead(&alarm, "pollAt") <= interval_ms, &alarm);
+    let label = "a webhook brings the poll back to its interval too";
+    match s.store_levers() {
+        true => s.ok(label, read("announced.md") && ahead(&alarm, "pollAt") <= interval_ms, &alarm),
+        // the harness's commit was followed by the owner's refresh instead
+        false => {
+            s.ok("(a commit followed by its refresh reads at once)", read("announced.md"), "");
+            s.skip(label, "no code store outside the run announces a commit by webhook: none registers the cell's (macrofiche's contract, question 2), so refresh and the poll move the pins");
+        }
+    }
     Ok(())
 }
