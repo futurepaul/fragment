@@ -195,7 +195,7 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs", "uplink.mjs"])
 }
 
 /// The binaries the node needs.

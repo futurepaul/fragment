@@ -1,13 +1,15 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
 //!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
-//!   dev [--clean]    build, then run the stack in the foreground under
+//!   dev [--clean] [--port <p>]
+//!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, the Workers AI fake on :8796
 //!                    behind the model route, and the agents' Worker beside it
 //!                    (their turns spend their owner's ledger; new people are
-//!                    seats with the month's included credit)
+//!                    seats with the month's included credit); --port moves
+//!                    the cell to <p> and each fake by as much
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -96,6 +98,12 @@ fn dev(args: &[String]) -> Result<()> {
         Some("celld") => true,
         Some(other) => bail!("--runtime is wrangler or celld, not {other}"),
     };
+    // the stack's ports: the cell's, and each fake's as far beside it as by default
+    let port = match args.iter().position(|a| a == "--port").map(|i| args.get(i + 1)) {
+        None => DEV_PORT,
+        Some(p) => p.and_then(|p| p.parse::<u16>().ok()).filter(|p| p.checked_add(DEV_AI_PORT - DEV_PORT).is_some()).context("--port is a port, with room for the fakes' six above it")?,
+    };
+    let beside = |default: u16| port + (default - DEV_PORT);
     build()?;
     let tools = devstack::Tools::locate()?;
     let clean = args.iter().any(|a| a == "--clean");
@@ -108,7 +116,7 @@ fn dev(args: &[String]) -> Result<()> {
         org: DEV_ORG.into(),
         org_key_pem: Some(key.clone()),
         state_file: Some(state),
-        port: DEV_CODESTORAGE_PORT,
+        port: beside(DEV_CODESTORAGE_PORT),
         ..Default::default()
     })?;
     // sign-in: a real WorkOS environment when its files are named (its
@@ -122,11 +130,11 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            let fake = fragment_fakes::workos::WorkOs::start_on(beside(DEV_WORKOS_PORT), DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
-    let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let ai = fragment_fakes::workers_ai::WorkersAi::start(beside(DEV_AI_PORT))?;
     let (model_upstream, node) = self_host(&read)?;
     // computers run on the node when there is one, else in local Docker;
     // with neither, the stack runs without computers, and says so
@@ -158,7 +166,7 @@ fn dev(args: &[String]) -> Result<()> {
         delivery_retry_s: None,
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        platform_url: Some(format!("http://127.0.0.1:{port}")),
         operators: None,
         signins_pending_max: None,
         test_secret: None,
@@ -176,14 +184,14 @@ fn dev(args: &[String]) -> Result<()> {
     // the agents' Worker runs beside it, as a deployment runs it
     devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
-        fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
-        agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
+        fragment_api: format!("http://127.0.0.1:{port}"),
+        agent_url: format!("http://127.0.0.1:{port}"),
         test_hooks: false,
     }
     .configure(&devstack::agent_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        port,
         clean,
         with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
@@ -209,7 +217,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {base} (ready in {took:.1?}; Ctrl-C stops it)");
     println!("  runtime:      {}", if celld { "celld (CELLD_BIN)" } else { "wrangler dev (workerd)" });
     println!("  node log:     {}", log.display());
-    println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<label>--<username>.fragment.localhost:{port}/");
     println!("  agents:       {base}/api/agents (beside it; signed)");
     println!("  code.storage: {} (the fake)", fake.url);
     match std::env::var("FRAGMENT_MODEL_URL") {
@@ -222,7 +230,7 @@ fn dev(args: &[String]) -> Result<()> {
         (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
-    println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    println!("  sign-in:      http://127.0.0.1:{port}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = match running {
         Running::Wrangler(n) => n.wait()?,
