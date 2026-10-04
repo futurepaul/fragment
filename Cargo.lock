@@ -563,6 +563,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "fragment-core",
+ "p256",
  "reqwest",
  "serde_json",
  "sha2",
