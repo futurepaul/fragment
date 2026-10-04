@@ -7,7 +7,11 @@
 //!                    code.storage fake on :8792, the Workers AI fake on :8796
 //!                    behind the model route, and the agents' Worker beside it
 //!                    (their turns spend their owner's ledger; new people are
-//!                    seats with the month's included credit)
+//!                    seats with the month's included credit). Sign-in is the
+//!                    WorkOS fake on :8794, or with FRAGMENT_SIGNIN=oidc the
+//!                    OpenID Connect fake on :8798, or a real provider
+//!                    (FRAGMENT_OIDC_ISSUER: `dev_oidc`). FRAGMENT_DEV_PORT
+//!                    moves the cell and its fakes (`dev_ports`)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -47,16 +51,35 @@ mod dns;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
+/// The dev stack's ports (`FRAGMENT_DEV_PORT` moves them all, so two stacks
+/// share a machine): the cell, then its fakes above it.
 const DEV_PORT: u16 = 8790;
-const DEV_CODESTORAGE_PORT: u16 = 8792;
-const DEV_WORKOS_PORT: u16 = 8794;
+const DEV_CODESTORAGE_OFFSET: u16 = 2;
+const DEV_WORKOS_OFFSET: u16 = 4;
 /// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
 /// never calls real models.
-const DEV_AI_PORT: u16 = 8796;
+const DEV_AI_OFFSET: u16 = 6;
+/// The OpenID Connect fake (`FRAGMENT_SIGNIN=oidc`).
+const DEV_OIDC_OFFSET: u16 = 8;
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
+/// The OpenID Connect fake's client in dev.
+const DEV_OIDC_CLIENT: &str = "fragment-dev";
+const DEV_OIDC_SECRET: &str = "oidc-secret-fragment-dev";
 const DEV_ORG: &str = "fragment-dev";
+
+/// The dev stack's base port: `FRAGMENT_DEV_PORT`, else `DEV_PORT`; its
+/// fakes take the ports above it, so it leaves room for them.
+fn dev_port() -> Result<u16> {
+    match std::env::var("FRAGMENT_DEV_PORT") {
+        Err(_) => Ok(DEV_PORT),
+        Ok(p) => match p.parse::<u16>() {
+            Ok(port) if (1024..=u16::MAX - DEV_OIDC_OFFSET).contains(&port) => Ok(port),
+            _ => bail!("FRAGMENT_DEV_PORT is a port from 1024 to {}, not {p:?}", u16::MAX - DEV_OIDC_OFFSET),
+        },
+    }
+}
 
 /// A command as errors show it: the program and its arguments only
 /// (`{cmd:?}` would print the environment set on it, where a deploy may
@@ -100,6 +123,7 @@ fn dev(args: &[String]) -> Result<()> {
         Some("celld") => true,
         Some(other) => bail!("--runtime is wrangler or celld, not {other}"),
     };
+    let port = dev_port()?;
     // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
@@ -114,7 +138,7 @@ fn dev(args: &[String]) -> Result<()> {
         org: DEV_ORG.into(),
         org_key_pem: Some(key.clone()),
         state_file: Some(state),
-        port: DEV_CODESTORAGE_PORT,
+        port: port + DEV_CODESTORAGE_OFFSET,
         ..Default::default()
     })?;
     // sign-in: a real WorkOS environment when its files are named (its
@@ -128,20 +152,23 @@ fn dev(args: &[String]) -> Result<()> {
     let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
         (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
         _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(DEV_WORKOS_PORT, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
+            let fake = fragment_fakes::workos::WorkOs::start_on(port + DEV_WORKOS_OFFSET, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
             (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
         }
     };
-    let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let ai = fragment_fakes::workers_ai::WorkersAi::start(port + DEV_AI_OFFSET)?;
+    let (oidc, oidc_fake) = dev_oidc(port, &read)?;
     let (model_upstream, node) = self_host(&read)?;
     // computers run on the node when there is one, else in local Docker;
     // with neither, the stack runs without computers, and says so
     // (celld runs no containers of its own: its computers are a node's)
     let docker = !celld && node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     let computers = node.is_some() || docker;
-    let workos_label = match &workos.api_url {
-        Some(u) => format!("{u} (the fake)"),
-        None => format!("WorkOS {}", workos.client_id),
+    let signin_label = match (&oidc, &workos.api_url) {
+        (Some(o), _) if oidc_fake.is_some() => format!("{} (the OpenID Connect fake)", o.issuer),
+        (Some(o), _) => format!("the OpenID Connect provider {}", o.issuer),
+        (None, Some(u)) => format!("{u} (the WorkOS fake)"),
+        (None, None) => format!("WorkOS {}", workos.client_id),
     };
     devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
@@ -163,8 +190,9 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        oidc,
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        platform_url: Some(format!("http://127.0.0.1:{port}")),
         operators: None,
         signins_pending_max: None,
         test_secret: None,
@@ -180,14 +208,14 @@ fn dev(args: &[String]) -> Result<()> {
     // the agents' Worker runs beside it, as a deployment runs it
     devstack::AgentFleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
-        fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
-        agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
+        fragment_api: format!("http://127.0.0.1:{port}"),
+        agent_url: format!("http://127.0.0.1:{port}"),
         test_hooks: false,
     }
     .configure(&devstack::agent_dir())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
-        port: DEV_PORT,
+        port,
         clean,
         with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
@@ -213,7 +241,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {base} (ready in {took:.1?}; Ctrl-C stops it)");
     println!("  runtime:      {}", if celld { "celld (CELLD_BIN)" } else { "wrangler dev (workerd)" });
     println!("  node log:     {}", log.display());
-    println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<label>--<username>.fragment.localhost:{port}/");
     println!("  agents:       {base}/api/agents (beside it; signed)");
     println!("  code.storage: {} (the fake)", fake.url);
     match std::env::var("FRAGMENT_MODEL_URL") {
@@ -226,7 +254,7 @@ fn dev(args: &[String]) -> Result<()> {
         (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
-    println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
+    println!("  sign-in:      http://127.0.0.1:{port}/ via {signin_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     let status = match running {
         Running::Wrangler(n) => n.wait()?,
@@ -234,6 +262,45 @@ fn dev(args: &[String]) -> Result<()> {
     };
     println!("the node exited: {status}");
     Ok(())
+}
+
+/// Sign-in on OpenID Connect for dev (docs/self-host.md, seam 4), when
+/// asked for: a real provider (`FRAGMENT_OIDC_ISSUER`, with
+/// `FRAGMENT_OIDC_CLIENT_ID`, the secret's file
+/// `FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally `FRAGMENT_OIDC_SCOPES`,
+/// `FRAGMENT_OIDC_CLAIMS`, `FRAGMENT_OIDC_AUTH`; its redirect URIs must
+/// include `http://127.0.0.1:<port>/auth/callback`), else with
+/// `FRAGMENT_SIGNIN=oidc` the fake (any email or username), else none:
+/// WorkOS signs people in.
+fn dev_oidc(port: u16, read: ReadFile) -> Result<(Option<devstack::OidcVars>, Option<fragment_fakes::oidc::Oidc>)> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let Some(issuer) = var("FRAGMENT_OIDC_ISSUER") {
+        let vars = devstack::OidcVars {
+            issuer,
+            client_id: var("FRAGMENT_OIDC_CLIENT_ID").context("FRAGMENT_OIDC_ISSUER needs FRAGMENT_OIDC_CLIENT_ID")?,
+            client_secret: read("FRAGMENT_OIDC_CLIENT_SECRET_FILE")?,
+            scopes: var("FRAGMENT_OIDC_SCOPES"),
+            claims: var("FRAGMENT_OIDC_CLAIMS"),
+            auth: var("FRAGMENT_OIDC_AUTH"),
+        };
+        return Ok((Some(vars), None));
+    }
+    match var("FRAGMENT_SIGNIN").as_deref() {
+        None | Some("workos") => Ok((None, None)),
+        Some("oidc") => {
+            let fake = fragment_fakes::oidc::Oidc::start_on(port + DEV_OIDC_OFFSET, DEV_OIDC_CLIENT, DEV_OIDC_SECRET)?;
+            let vars = devstack::OidcVars {
+                issuer: fake.url.clone(),
+                client_id: DEV_OIDC_CLIENT.into(),
+                client_secret: Some(DEV_OIDC_SECRET.into()),
+                scopes: None,
+                claims: None,
+                auth: None,
+            };
+            Ok((Some(vars), Some(fake)))
+        }
+        Some(other) => bail!("FRAGMENT_SIGNIN is workos or oidc, not {other:?}"),
+    }
 }
 
 /// The self-hosted lane's settings for dev (docs/self-host.md), each from
@@ -273,13 +340,14 @@ fn try_template(args: &[String]) -> Result<()> {
     if !TRY_TEMPLATES.contains(&tpl.as_str()) {
         bail!("{}", usage());
     }
-    if TcpStream::connect(("127.0.0.1", DEV_PORT)).is_err() {
-        bail!("nothing answers on :{DEV_PORT}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
+    let port = dev_port()?;
+    if TcpStream::connect(("127.0.0.1", port)).is_err() {
+        bail!("nothing answers on :{port}: start `cargo xtask dev` in another terminal, wait for `ready`, then try again");
     }
     let root = devstack::repo_root();
     run(Command::new("cargo").args(["build", "--quiet", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "fragment-cli"]))?;
     let cli = root.join("target/debug/fragment");
-    let host = format!("http://127.0.0.1:{DEV_PORT}");
+    let host = format!("http://127.0.0.1:{port}");
     let name = args.get(1).cloned().unwrap_or_else(|| format!("{tpl}-{}", devstack::random_hex(2)));
     let dir = root.join("target/devstack/try");
     std::fs::create_dir_all(&dir)?;
@@ -287,7 +355,7 @@ fn try_template(args: &[String]) -> Result<()> {
     let who = Command::new(&cli).args(["whoami"]).env("FRAGMENT_HOST", &host).output()?;
     if !who.status.success() {
         bail!(
-            "your CLI key is no one's on the dev stack yet. Once:\n  FRAGMENT_HOST={host} {} login\n(the dev stack signs in through the WorkOS fake: any email)",
+            "your CLI key is no one's on the dev stack yet. Once:\n  FRAGMENT_HOST={host} {} login\n(the dev stack's sign-in fakes take any email)",
             cli.display()
         );
     }
