@@ -309,7 +309,7 @@ fn read_answer(stream: &mut impl Read) -> Result<u16, String> {
         Framing::Empty => {}
         Framing::Length(n) => answer.take(n)?,
         Framing::Chunked => answer.chunks()?,
-        Framing::Close => answer.to_end()?,
+        Framing::Close => answer.rest()?,
     }
     assert!(answer.buf.len() <= ANSWER_BYTES_MAX, "an answer is read within its bound");
     Ok(status)
@@ -393,7 +393,7 @@ impl<R: Read> Answer<'_, R> {
     }
 
     /// A body with no length: to the end of the stream, which the server ends.
-    fn to_end(&mut self) -> Result<(), String> {
+    fn rest(&mut self) -> Result<(), String> {
         let mut tmp = [0u8; 16384];
         // bounded: each pass reads at least a byte, and the check stops at ANSWER_BYTES_MAX
         loop {
