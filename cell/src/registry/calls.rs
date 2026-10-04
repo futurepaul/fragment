@@ -405,17 +405,31 @@ impl Call for TestHook {
 // ------------------------------------------------------------- sign-in
 
 /// `POST /login/begin`: a sign-in starts (`link_to`: a signed-in session
-/// adding a second sign-in to its person).
+/// adding a second sign-in to its person); an OpenID Connect one (`oidc`)
+/// with a PKCE verifier and a nonce, which the registry keeps with it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Begin {
     pub return_to: String,
     pub link_to: Option<String>,
+    #[serde(default)]
+    pub oidc: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Began {
     pub state: String,
+    /// An OpenID Connect sign-in's: what the authorization request carries.
+    #[serde(default)]
+    pub oidc: Option<OidcBegan>,
+}
+
+/// The verifier's S256 challenge (the verifier stays in the registry), and
+/// the nonce the id_token must carry back.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct OidcBegan {
+    pub challenge: String,
+    pub nonce: String,
 }
 
 impl Call for Begin {
@@ -444,6 +458,23 @@ pub(crate) struct Exchanged {
 
 impl Call for Exchange {
     const PATH: &'static str = "/login/exchange";
+    type Answer = Exchanged;
+}
+
+/// `POST /login/oidc`: an OpenID Connect provider's code, exchanged with
+/// the sign-in's verifier and the client's secret (KEYS), its id_token
+/// verified, and the sign-in finished. `redirect_uri` is the one the
+/// authorization request named.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OidcExchange {
+    pub state: String,
+    pub code: String,
+    pub redirect_uri: String,
+}
+
+impl Call for OidcExchange {
+    const PATH: &'static str = "/login/oidc";
     type Answer = Exchanged;
 }
 
@@ -507,6 +538,10 @@ pub(crate) struct Logout {
 pub(crate) struct LoggedOut {
     /// WorkOS's session, to end there too.
     pub workos_sid: Option<String>,
+    /// An OpenID Connect sign-in's id_token: the hint its provider's logout
+    /// takes (RP-Initiated Logout 1.0).
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 impl Call for Logout {
