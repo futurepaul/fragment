@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
-use fragment_core::codestorage::{self as core_cs, TokenCache, TreeEntry};
+use fragment_core::codestorage::{self as core_cs, Promotion, TokenCache, TreeEntry};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
 use serde_json::Value;
@@ -40,6 +40,16 @@ thread_local! {
 pub struct Cs<'a> {
     cfg: &'a CodeStorageConfig,
     env: &'a Env,
+}
+
+/// A restore commit's outcome.
+enum Restored {
+    Commit(String),
+    /// `live` moved from the tip it was to restore (409).
+    Moved,
+    /// 412: the restore would change nothing, or `live` is at the base or
+    /// no longer holds it (it moved).
+    Refused,
 }
 
 pub struct FileHead {
@@ -284,10 +294,44 @@ impl<'a> Cs<'a> {
         }
     }
 
-    /// Moves `live` to `main`'s tip (a fast-forward when it can, else a
-    /// merge commit), guarded by `expected_live`: the new tip, or `None`
-    /// when `live` moved first (read it again).
-    pub async fn promote_live(&self, repo: &str, expected_live: &str, message: &str, author: (&str, &str)) -> CellResult<Option<String>> {
+    /// Makes `live` serve `main`'s tip, by the steps a merge preview of
+    /// main into live calls for (`core_cs::Promotion`): a fast-forward, a
+    /// restore commit of main's tip, or a restore commit of their merge
+    /// base and then the merge. Each step is guarded by the `live` the
+    /// preview read: the new tip, or `None` when live moved meanwhile
+    /// (preview again).
+    pub async fn promote_live(&self, repo: &str, message: &str, author: (&str, &str)) -> CellResult<Option<String>> {
+        let path = format!("/api/repos/{}/merge/preview?{}", seg(repo), core_cs::DEPLOY_PREVIEW_QUERY);
+        let promotion = match self.json(Method::Get, &path, repo, &["git:read"], None).await? {
+            (200, v) => core_cs::promotion(&v).ok_or_else(|| upstream("merge preview", 200, v.to_string().as_bytes()))?,
+            (status, v) => return Err(upstream("merge preview", status, v.to_string().as_bytes())),
+        };
+        match promotion {
+            Promotion::Current { live } => Ok(Some(live)),
+            Promotion::FastForward { live } => self.merge_live(repo, &live, message, author).await,
+            Promotion::Restore { live, main } => match self.restore_live(repo, &main, &live, message, author).await? {
+                Restored::Commit(tip) => Ok(Some(tip)),
+                Restored::Moved => Ok(None),
+                // no change: live's files are main's already, if live is
+                // still where the preview saw it
+                Restored::Refused => Ok((self.branch_head(repo, "live").await?.as_deref() == Some(live.as_str())).then_some(live)),
+            },
+            Promotion::RestoreThenMerge { live, base } => {
+                let live = match self.restore_live(repo, &base, &live, &core_cs::back_to_base_message(message, &base), author).await? {
+                    Restored::Commit(tip) => tip,
+                    Restored::Moved => return Ok(None),
+                    // no change: live's files are the base's already (the
+                    // merge's guard catches a live that moved)
+                    Restored::Refused => live,
+                };
+                self.merge_live(repo, &live, message, author).await
+            }
+        }
+    }
+
+    /// Merges `main` into `live` (a fast-forward when it can), guarded by
+    /// `expected_live`: the new tip, or `None` when `live` moved first.
+    async fn merge_live(&self, repo: &str, expected_live: &str, message: &str, author: (&str, &str)) -> CellResult<Option<String>> {
         let body = serde_json::json!({
             "target_branch": "live",
             "source_ref": "main",
@@ -296,10 +340,34 @@ impl<'a> Cs<'a> {
             "commit_message": message,
             "author": { "name": author.0, "email": author.1 },
         });
-        match self.json(Method::Post, &format!("/api/repos/{}/merge", seg(repo)), repo, &["git:write"], Some(body)).await? {
-            (200 | 201, v) => v["target"]["new_sha"].as_str().filter(|s| !s.is_empty()).map(|s| Some(s.to_string())).ok_or_else(|| upstream("merge", 200, v.to_string().as_bytes())),
-            (409, _) => Ok(None),
-            (status, v) => Err(upstream("merge", status, v.to_string().as_bytes())),
+        let path = format!("/api/repos/{}/merge", seg(repo));
+        let (status, bytes) = self.call(Method::Post, &path, repo, &["git:write"], Some(("application/json", body.to_string()))).await?;
+        match status {
+            // a conflict is no moved live: retrying cannot pass
+            409 if core_cs::merge_conflicted(&bytes) => Err(upstream("merge (main does not merge into live)", status, &bytes)),
+            409 => Ok(None),
+            200 | 201 => {
+                let v: Value = serde_json::from_slice(&bytes).map_err(|e| upstream("merge", status, format!("not JSON: {e}").as_bytes()))?;
+                v["target"]["new_sha"].as_str().filter(|s| core_cs::is_sha(s)).map(|s| Some(s.to_string())).ok_or_else(|| upstream("merge", status, &bytes))
+            }
+            _ => Err(upstream("merge", status, &bytes)),
+        }
+    }
+
+    /// A restore commit on `live` with the tree of `base`, an ancestor of
+    /// its tip, guarded by `expected_live`.
+    async fn restore_live(&self, repo: &str, base: &str, expected_live: &str, message: &str, author: (&str, &str)) -> CellResult<Restored> {
+        let path = format!("/api/repos/{}/restore-commit", seg(repo));
+        let line = core_cs::restore_commit("live", base, expected_live, message, author);
+        let (status, bytes) = self.call(Method::Post, &path, repo, &["git:write"], Some(("application/x-ndjson", line))).await?;
+        match status {
+            409 => Ok(Restored::Moved),
+            412 => Ok(Restored::Refused),
+            200 | 201 => {
+                let v: Value = serde_json::from_slice(&bytes).map_err(|e| upstream("restore-commit", status, format!("not JSON: {e}").as_bytes()))?;
+                core_cs::committed(&v).map(Restored::Commit).ok_or_else(|| upstream("restore-commit", status, &bytes))
+            }
+            _ => Err(upstream("restore-commit", status, &bytes)),
         }
     }
 

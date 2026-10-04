@@ -765,3 +765,28 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a computer's sync and deploy go through its API egress
   (the files and deploy routes, or a code.storage intercept that swaps
   the token in), proven by the hermes lane deploying an app from a chat.
+
+## A CLI deploy after a rollback moves live twice, outside the plane's lock
+
+- **Observed:** 2026-10-03, deploys after a rollback. code.storage merges
+  three ways, so a deploy whose `live` has diverged from `main` (a
+  rollback's restore commit, then main moved) first restores live to
+  their merge base, then merges main in, which then takes main's files
+  whole (`fragment_core::codestorage::Promotion`). The cell's own deploy
+  (`go_live`) holds its plane lock across both moves, so a push webhook
+  for the first waits and pins the second. `fragment deploy` moves live
+  from the CLI, which holds no lock of the cell's.
+- **Risk:** for one round trip the cell may pin the first move, and serve
+  (and install code from) the deploy the rollback undid; a CLI deploy that
+  fails between the two moves leaves it pinned until the next deploy,
+  which converges (its restore changes nothing). And `fragment rollback`
+  without `--to` right after such a deploy restores the first move's
+  files, not the files the rollback served (by first parents, as the fake
+  lists; the service's date order picks among main's commits, the
+  contract's question 4).
+- **First proof:** a fragment's events showing a `webhook.push` for live
+  pinned between the two moves of one `fragment deploy`.
+- **Delete when:** `fragment deploy` moves live through the cell's
+  `POST /api/f/{name}/deploy` (one implementation, under the lock), or
+  code.storage merges with the source's tree; and `rollback`'s default
+  target is the commit live served before its tip.
