@@ -929,7 +929,8 @@ async function openSettings(push = true) {
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
   ]);
-  const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
+  // an OpenID Connect sign-in may give no email: its username, else its subject
+  const emails = (state.me.subjects ?? []).map((x) => x.email || x.handle).filter(Boolean);
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
   const account = section(

@@ -1,13 +1,14 @@
 //! The deployment's keys, held in its Cloudflare Secrets Store and bound to
 //! the platform Worker by name (docs/secrets.md; the bindings' names are
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
-//! rest, the code.storage org key, WorkOS's client id and API key, and the
-//! operator's keys a computer's swap sends; and what is derived from the
-//! host secret: the key placeholders' tags are made with (`tag_keys`).
-//! This file is the one place the cell reads them (`secret`), through a
-//! per-isolate cache that holds a value at most a minute
-//! (`secrets_store::CACHE_MS_MAX`), so a value set again in the store is in
-//! use everywhere within a minute, with no deploy.
+//! rest, the code.storage org key, WorkOS's client id and API key, the
+//! OpenID Connect client's secret, and the operator's keys a computer's
+//! swap sends; and what is derived from the host secret: the key
+//! placeholders' tags are made with (`tag_keys`). This file is the one
+//! place the cell reads them (`secret`), through a per-isolate cache that
+//! holds a value at most a minute (`secrets_store::CACHE_MS_MAX`), so a
+//! value set again in the store is in use everywhere within a minute, with
+//! no deploy.
 //!
 //! Only the platform Worker's env holds the bindings. An app runs in an
 //! isolate of its own from the Worker Loader, with an env the platform
@@ -18,15 +19,19 @@
 use std::cell::RefCell;
 
 use fragment_core::codestorage::{Claims, OrgKey};
+use fragment_core::oidc::{self, Provider};
 use fragment_core::seal::{self, SealError};
 use fragment_core::secrets_store::{self as store, Cache};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use worker::{Env, Fetch, Headers, Method, Request, RequestInit, State};
 
-use crate::config::Config;
+use crate::config::{Config, OidcConfig};
 use crate::error::{CellError, CellResult};
 use crate::js;
+
+/// The largest answer read from a token endpoint.
+const TOKEN_ANSWER_MAX_BYTES: usize = 64 * 1024;
 
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
@@ -202,6 +207,34 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
         o.remove("refresh_token");
     }
     Ok((status, answer))
+}
+
+/// The OpenID Connect code exchange (RFC 6749 4.1.3, with PKCE's
+/// verifier), the client authenticated with its secret as the deployment
+/// or the provider says (`Provider::client_auth`): (status, the answer's
+/// bytes, at most `TOKEN_ANSWER_MAX_BYTES`). The answer holds tokens: it is
+/// read for its id_token and dropped, never logged.
+pub async fn oidc_token(env: &Env, provider: &Provider, cfg: &OidcConfig, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<(u16, Vec<u8>)> {
+    // a public client has none, and proves itself with PKCE alone
+    let secret = secret(env, store::OIDC_CLIENT_SECRET).await?;
+    let auth = provider.client_auth(cfg.auth, secret.is_some()).map_err(|e| CellError::host(e.to_string()))?;
+    let request = oidc::token_request(auth, &cfg.client_id, secret.as_deref(), code, redirect_uri, verifier);
+    let headers = Headers::new();
+    headers.set("content-type", "application/x-www-form-urlencoded")?;
+    headers.set("accept", "application/json")?;
+    if let Some(a) = &request.authorization {
+        headers.set("authorization", a)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(request.body.into()));
+    let req = Request::new_with_init(&provider.token_endpoint, &init)?;
+    let failed = |e: worker::Error| CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token endpoint did not answer: {e}"));
+    let mut resp = Fetch::Request(req).send().await.map_err(failed)?;
+    let bytes = resp.bytes().await.map_err(failed)?;
+    if bytes.len() > TOKEN_ANSWER_MAX_BYTES {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token answer is over {TOKEN_ANSWER_MAX_BYTES} bytes")));
+    }
+    Ok((resp.status_code(), bytes))
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`
