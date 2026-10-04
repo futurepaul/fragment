@@ -586,6 +586,7 @@ dependencies = [
  "hex",
  "reqwest",
  "serde_json",
+ "sha1",
  "sha2",
  "tungstenite",
 ]
