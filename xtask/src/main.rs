@@ -1,6 +1,7 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
+//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
+//!                    parallel once worker-build has fetched its tools: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
@@ -15,7 +16,8 @@
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...],
 //!                    --except <section>[,...], or --shard <k>/<n> (the table's, as CI
 //!                    splits it); --summary <file> writes the run's summary; --rehearse
-//!                    keeps the hosted lane's rules on the local node).
+//!                    keeps the hosted lane's rules on the local node). The build
+//!                    builds the computer images ahead of the node beside the Rust.
 //!                    CI splits it in two steps, so the cache saves between them:
 //!                    --build-only (builds, runs nothing), then --no-build (runs
 //!                    what the build left)
@@ -49,12 +51,11 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod build;
 mod deploy;
 mod dns;
 mod summary;
 
-
-const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
 const DEV_WORKOS_PORT: u16 = 8794;
@@ -82,23 +83,9 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// cell/ and agent/ for wasm32 (build.rs).
 fn build() -> Result<()> {
-    build_worker(&devstack::cell_dir())?;
-    build_worker(&devstack::agent_dir())
-}
-
-/// One Worker project (`cell/` or `agent/`) for wasm32, into its `build/`.
-/// One at a time: worker-build fetches its tools into one shared cache,
-/// and two at once race there.
-fn build_worker(dir: &Path) -> Result<()> {
-    let out = Command::new("worker-build").arg("--version").output().context(
-        "worker-build is not installed: cargo install worker-build --version 0.8.5 --locked",
-    )?;
-    let version = String::from_utf8_lossy(&out.stdout);
-    if !version.contains(WORKER_BUILD_VERSION) {
-        bail!("worker-build {WORKER_BUILD_VERSION} is required, found {}", version.trim());
-    }
-    run(Command::new("worker-build").arg("--release").current_dir(dir))
+    build::workers()
 }
 
 fn dev(args: &[String]) -> Result<()> {
@@ -294,16 +281,20 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// What the e2e runs: the workers, the CLI (the e2e drives it too), and the
-/// suite. The native binaries build alongside the workers, which build one
-/// at a time (worker-build fetches its tools into one shared cache, and two
-/// at once race there).
+/// What the e2e runs: the workers (build.rs: in parallel once worker-build
+/// has its tools), the CLI (the e2e drives it too) and the suite beside
+/// them, and the computer images the node's boot builds, built ahead
+/// beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
-    std::thread::scope(|s| {
+    let t0 = std::time::Instant::now();
+    let built = std::thread::scope(|s| {
+        let images = s.spawn(build::images);
         let native = s.spawn(build_native);
-        let workers = [devstack::cell_dir(), devstack::agent_dir()].iter().try_for_each(|dir| build_worker(dir));
-        workers.and(native.join().expect("the native build does not panic"))
-    })
+        let workers = build::workers();
+        workers.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+    });
+    println!("built the workers, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    built
 }
 
 /// The CLI and the suite, for this machine.

@@ -120,7 +120,10 @@ prebuilt bundle is in the debt ledger).
   `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them:
   every section ran exactly once across the shards, the counts add up,
   and every check passed, printed as one run. CI splits each shard's run
-  in two, `--build-only` then `--no-build`, so the cache saves between.
+  in two, `--build-only` then `--no-build`, so the cache saves between
+  (the build also builds the computer images ahead of the node, beside
+  the Rust; the cell and the agent build in parallel once worker-build
+  has its tools: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
   … | --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the hosted
   lane, the same sections against the branch deployment
