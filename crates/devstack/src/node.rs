@@ -181,17 +181,25 @@ pub struct Node {
 
 impl Node {
     /// `node <script>` in the environment every JavaScript process here
-    /// gets: PATH led by this Node's directory, so whatever it starts
-    /// through `#!/usr/bin/env node` runs on this Node too, with the rest of
-    /// PATH kept (Docker, worker-build, cargo, clang are found as before);
-    /// `XDG_CACHE_HOME` at `cache` (miniflare keeps the Chrome for Testing
-    /// that Browser Rendering runs on in `$XDG_CACHE_HOME/.wrangler/chrome`);
-    /// and none of `VARS_CLEARED`.
+    /// gets (`command`).
     pub fn script(&self, script: &Path, cache: &Path) -> Result<Command, NodeError> {
+        let mut cmd = self.command(cache)?;
+        cmd.arg(script);
+        Ok(cmd)
+    }
+
+    /// `node`, with no arguments yet, in the environment every JavaScript
+    /// process here gets: PATH led by this Node's directory, so whatever it
+    /// starts through `#!/usr/bin/env node` runs on this Node too, with the
+    /// rest of PATH kept (Docker, worker-build, cargo, clang are found as
+    /// before); `XDG_CACHE_HOME` at `cache` (miniflare keeps the Chrome for
+    /// Testing that Browser Rendering runs on in
+    /// `$XDG_CACHE_HOME/.wrangler/chrome`); and none of `VARS_CLEARED`.
+    pub fn command(&self, cache: &Path) -> Result<Command, NodeError> {
         assert!(cache.is_absolute(), "a cache directory is named absolutely: its processes run elsewhere");
         let path = self.path(std::env::var_os("PATH").as_deref())?;
         let mut cmd = Command::new(&self.node);
-        cmd.arg(script).env("PATH", path).env("XDG_CACHE_HOME", cache);
+        cmd.env("PATH", path).env("XDG_CACHE_HOME", cache);
         for var in VARS_CLEARED {
             cmd.env_remove(var);
         }

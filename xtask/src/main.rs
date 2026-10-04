@@ -19,7 +19,9 @@
 //!       [--dry-run | --sweep] [--max-paid-calls <n>]
 //!                    the suite against that branch deployment on its real vendors
 //!                    (crates/e2e/src/hosted.rs); --dry-run prints its plan
-//!   check            host tests and clippy, warnings denied
+//!   check            every first-party JavaScript file parses (node --check;
+//!                    xtask/src/js_syntax.rs), then host tests and clippy,
+//!                    warnings denied
 //!   deploy --config <file> [--branch <name>]
 //!                    build and deploy to Cloudflare from a deployment's config
 //!                    (deploy/example.jsonc): a branch gets a complete copy of
@@ -28,8 +30,9 @@
 //!                    remove a branch deployment (irreversible)
 //!
 //! dev, e2e, deploy and teardown run wrangler and npm on the pinned Node,
-//! fetched into target/tools on first use, never a `node` from PATH
-//! (crates/devstack/src/node.rs; FRAGMENT_NODE names another).
+//! and check runs `node --check` on it, fetched into target/tools on first
+//! use, never a `node` from PATH (crates/devstack/src/node.rs;
+//! FRAGMENT_NODE names another).
 //!
 //! fragment.club runs on celld from the `celld` branch (the tag celld-final)
 //! until the cutover (docs/cloudflare-v1.md, decision 35): `deploy` never
@@ -44,6 +47,7 @@ use fragment_devstack as devstack;
 
 mod deploy;
 mod dns;
+mod js_syntax;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
@@ -314,6 +318,18 @@ fn no_conflict_markers(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Every first-party JavaScript file parses, on the pinned Node (fetched
+/// into target/tools on first use; no node_modules needed): seconds here,
+/// where the e2e would find it most of an hour in (xtask/src/js_syntax.rs).
+fn javascript_parses(root: &Path) -> Result<()> {
+    let node = devstack::node::locate(&root.join(devstack::TOOLS_DIR))?;
+    let started = std::time::Instant::now();
+    let files = js_syntax::files(root)?;
+    js_syntax::check(&node, &root.join(devstack::CACHE_DIR), root, &files)?;
+    println!("JavaScript: {} files parse (node --check on Node {}, {:.1?})", files.len(), node.release, started.elapsed());
+    Ok(())
+}
+
 fn check() -> Result<()> {
     let root = devstack::repo_root();
     no_conflict_markers(&root)?;
@@ -321,6 +337,7 @@ fn check() -> Result<()> {
     let copies = ["cli/GUIDE.md", "README.md", "cell/shell/shell.js"].map(|path| read(path).map(|text| (path, text)));
     let copies: Vec<(&str, String)> = copies.into_iter().collect::<Result<_>>()?;
     skill_installs_release(&read("cli/SKILL.md")?, &read(".github/workflows/release.yml")?, &copies)?;
+    javascript_parses(&root)?;
     run(Command::new("cargo").args(["test", "--workspace", "--all-features"]).current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])

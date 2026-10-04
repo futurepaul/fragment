@@ -78,8 +78,12 @@ prebuilt bundle is in the debt ledger).
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
   to the system's cache. Moving the pin: README.md, "The pinned Node".
 - `cargo xtask build`: the cell and the agents for wasm32.
-- `cargo xtask check`: host tests and clippy (host and wasm), warnings
-  denied.
+- `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
+  `.cjs` git tracks or would add, less the vendored ones) through `node
+  --check` on the pinned Node, each as a module or a classic script as
+  it is loaded (`xtask/src/js_syntax.rs`: its `VENDORED` and `CLASSIC`
+  lists), naming each file and line that does not parse; then host tests
+  and clippy (host and wasm), warnings denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
   builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
