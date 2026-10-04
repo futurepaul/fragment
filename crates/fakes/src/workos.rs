@@ -11,7 +11,10 @@
 //! by the user's browser through the consent URL the authorize call gives
 //! (`POST /data-integrations/{provider}/authorize`, then `GET
 //! /pipes/consent`), and may come to need authorizing again; each token
-//! asked for is new, and lasts an hour.
+//! asked for is new, and lasts an hour. Its state is read with no token
+//! (`GET /user_management/users/{user}/connected_accounts/{provider}`,
+//! https://workos.com/docs/reference/pipes/connected-account): `connected`
+//! or `needs_reauthorization`, 404 when there is none.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,6 +44,8 @@ struct State {
     tokens: HashMap<String, Vec<String>>,
     /// Consents given out and not yet followed: state → (user id, provider).
     consents: HashMap<String, (String, String)>,
+    /// Connected accounts' states read (each with no token).
+    states_read: u64,
 }
 
 impl State {
@@ -206,6 +211,26 @@ impl WorkOs {
                     }
                     None => problem(400, "invalid_request", "this consent was used or never given"),
                 },
+                // a connected account's state, with no token in it
+                ("GET", p) if p.starts_with("/user_management/users/") && p.contains("/connected_accounts/") => {
+                    if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
+                        return problem(401, "unauthorized", "the API key is wrong");
+                    }
+                    let rest = &p["/user_management/users/".len()..];
+                    let Some((user, provider)) = rest.split_once("/connected_accounts/") else { return problem(404, "not_found", "no such route") };
+                    s.states_read += 1;
+                    match s.pipes.get(&(user.to_string(), provider.to_string())).copied() {
+                        None => problem(404, "not_found", "no connected account"),
+                        Some(authorized) => Response::json(
+                            200,
+                            &json!({
+                                "object": "connected_account", "id": format!("conn_{user}_{provider}"), "user_id": user, "organization_id": null,
+                                "scopes": [], "state": if authorized { "connected" } else { "needs_reauthorization" },
+                                "created_at": "2026-10-01T00:00:00.000Z", "updated_at": "2026-10-01T00:00:00.000Z",
+                            }),
+                        ),
+                    }
+                }
                 ("POST", p) if p.starts_with("/data-integrations/") && p.ends_with("/token") => {
                     if req.header("authorization") != Some(format!("Bearer {key}").as_str()) {
                         return problem(401, "unauthorized", "the API key is wrong");
@@ -261,6 +286,11 @@ impl WorkOs {
         let mut s = self.state.lock().expect("workos state");
         let user = s.user_for(email);
         s.pipes.insert((user.id, provider.to_string()), authorized);
+    }
+
+    /// How many connected accounts' states were read.
+    pub fn states_read(&self) -> u64 {
+        self.state.lock().expect("workos state").states_read
     }
 
     /// The access tokens handed out for `provider`, oldest first.

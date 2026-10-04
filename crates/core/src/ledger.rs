@@ -133,6 +133,16 @@ impl Month {
     pub fn label(self) -> String {
         format!("{:04}-{:02}", 1970 + self.0 / 12, self.0 % 12 + 1)
     }
+
+    /// The month `label` (`YYYY-MM`, `label`'s inverse) names.
+    pub fn parse(label: &str) -> Option<Month> {
+        let (y, m) = label.split_once('-')?;
+        if y.len() != 4 || m.len() != 2 || !y.bytes().chain(m.bytes()).all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (y, m): (u32, u32) = (y.parse().ok()?, m.parse().ok()?);
+        ((1970..=9999).contains(&y) && (1..=12).contains(&m)).then(|| Month((y - 1970) * 12 + m - 1))
+    }
 }
 
 /// What a spend is, for the questions the platform asks before it lets

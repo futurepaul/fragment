@@ -252,6 +252,22 @@ speaking Cloudflare's APIs) returns once this product works.
     connection: an agent may use every connection its owner has, unless
     its owner narrows it to a list (decision 44). Templates ask before
     sending email, sharing files or accepting invites.
+
+    Status (Paul, 2026-10-04; branch `claude/credentials`,
+    docs/computers.md "Connections and operator keys"): Google only for
+    now, a row of the deployment's provider catalog (`providers`, one
+    typed list that replaced `FRAGMENT_CONNECTIONS` and
+    `FRAGMENT_OPERATOR_KEYS`), so another connection is a catalog row and
+    its provider enabled in Pipes. Each agent's placeholder is its own
+    (`fcx_google_<tag>`, the tag an HMAC of computer, agent and provider
+    under a key derived from the host secret) in a standard environment
+    variable (`GOOGLE_OAUTH_ACCESS_TOKEN`), so any SDK or CLI works
+    unmodified, with no header of ours (`x-fragment-agent` is gone from the
+    swap). A guest is given a connection once Pipes says it is connected
+    (its connected account, read with no token minted). Approvals are
+    Hermes' own: a person who connected something lets their agents use
+    it. Every call is counted by agent and month, and the shell's
+    Connections page shows it.
 23. **Models through AI Gateway**, Unified Billing, with zero data
     retention on and the gateway's request logs off. Three tiers: GLM-5.3
     Flash (cheap), GLM-5.3 (medium), both on Workers AI, and Claude Opus
@@ -377,6 +393,20 @@ speaking Cloudflare's APIs) returns once this product works.
       the operator's keys.
     - Both kinds are swapped in at the computer's intercept, and every
       call is metered to your credit at cost plus the margin.
+
+    Status (Paul, 2026-10-04; branch `claude/credentials`): the
+    operator's keys are Perplexity, Google Places, xAI and ElevenLabs,
+    rows of the provider catalog, each priced per call at its vendor's
+    list price (`fragment_core::price::DEFAULT_KEYS`, with sources: $0.005,
+    $0.035, $0.12 and $0.15 before the margin; the last two estimate a
+    typical call, as the swap counts calls, not posts or minutes), each
+    key a file Paul supplies (docs/secrets.md). Each agent's placeholder
+    (`fck_perplexity_<tag>`) is in the variable the vendor's SDK reads
+    (`PERPLEXITY_API_KEY`, `GOOGLE_PLACES_API_KEY`, `XAI_API_KEY`,
+    `ELEVENLABS_API_KEY`), swapped in a header, a query parameter or basic
+    auth as its row says; a person's own keys are a third kind (`own`),
+    sealed by their computer and never metered. The managed skills read
+    the variables.
 38. **Routines are fragment cron.** An agent's routines are its
     fragment's cron triggers, not Hermes' own scheduler, which is turned
     off. A trigger posts to a channel the agent's bridge subscribes to,

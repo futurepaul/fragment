@@ -10,6 +10,7 @@ mod chat;
 mod author;
 mod computers;
 mod control;
+mod credentials;
 mod delegation;
 mod deliver;
 mod frames;

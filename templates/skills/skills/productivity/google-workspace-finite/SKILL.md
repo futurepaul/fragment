@@ -13,13 +13,12 @@ metadata:
 # Google Workspace
 
 Gmail, Calendar, Drive, Contacts, Sheets, and Docs through your owner's
-connected Google account. Your computer holds no Google credential: the
-helper sends the connection's placeholder (`Authorization: Bearer
-fragment-connection:google`) and names you (`x-fragment-agent:
-$FRAGMENT_AS_AGENT`), and the computer swaps in a short-lived token for your
-owner's account. There is no OAuth setup to run, no client secret and no
-token file: never ask the person for one, and never create a Google Cloud
-project for them.
+connected Google account. Your computer holds no Google credential:
+`GOOGLE_OAUTH_ACCESS_TOKEN` holds the connection's placeholder (it names
+you), the helper sends it as a bearer token to Google's own hosts, and the
+computer swaps in a short-lived token for your owner's account. There is
+no OAuth setup to run, no client secret and no token file: never ask the
+person for one, and never create a Google Cloud project for them.
 
 ## Connected?
 
@@ -30,16 +29,16 @@ $GAPI check
 
 - `{"status": "connected", "email": …}`: go on.
 - `not_connected`: your owner has not connected Google, or must authorize
-  it again. Ask them to connect it in the shell's Settings, under
-  Connections, then check again.
+  it again (`GOOGLE_OAUTH_ACCESS_TOKEN` is then unset). Ask them to connect
+  it in the shell's Settings, under Connections, then check again: your
+  computer is given it within seconds.
 - `forbidden`: your owner narrowed your connections and left Google out, or
   Google refused the scope. Say which, and stop.
 
-The deployment names its Google connection `google` unless told otherwise
-(`GOOGLE_CONNECTION` names another), with the hosts `gmail.googleapis.com`,
-`www.googleapis.com`, `people.googleapis.com`, `sheets.googleapis.com` and
-`docs.googleapis.com`. The scopes it grants are in
-`references/google-workspace-scopes.json`.
+The deployment's Google connection (`google`) is swapped for the hosts
+`gmail.googleapis.com`, `www.googleapis.com`, `people.googleapis.com`,
+`sheets.googleapis.com` and `docs.googleapis.com` only. The scopes it grants
+are in `references/google-workspace-scopes.json`.
 
 ## References
 
@@ -133,13 +132,13 @@ $GAPI docs get DOC_ID
 
 ### Anything else
 
-Any other Google REST call works the same way: send the placeholder and
-your name, and let the computer swap the token.
+Any other Google REST call, or Google's own client libraries given the
+variable as their access token, works the same way: send it as a bearer
+token, and the computer swaps the token in.
 
 ```bash
 curl -s "https://www.googleapis.com/calendar/v3/users/me/calendarList" \
-  -H "Authorization: Bearer fragment-connection:google" \
-  -H "x-fragment-agent: $FRAGMENT_AS_AGENT"
+  -H "Authorization: Bearer $GOOGLE_OAUTH_ACCESS_TOKEN"
 ```
 
 ## Output Format
@@ -175,4 +174,3 @@ exit 1.
 | `not_connected` | Your owner connects Google in Settings → Connections |
 | `forbidden` | Your owner left Google off this agent's connections, or the scope is missing |
 | `HttpError 403: Access Not Configured` | That API is not enabled for the deployment's Google client: tell the person, and stop |
-| `no_agent` | Run it from your computer's terminal (`FRAGMENT_AS_AGENT` names you) |

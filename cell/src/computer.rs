@@ -17,13 +17,16 @@
 //! - **Its guest** reaches the platform only through the intercepts
 //!   (`ComputerEgress`): the API as its agents (each request signed by the
 //!   agent fragment it names, which checks it runs here), its own view,
-//!   and the keepalive socket that holds it awake. A request to a
-//!   connection's or an operator key's host has its placeholders swapped
-//!   for the credential (`egress_swap`, decisions 22 and 37), which this
-//!   cell resolves: for an agent that runs here (any of its owner's
-//!   connections, unless its owner narrowed them: decision 44), and a
-//!   connection's token from WorkOS Pipes, held until shortly before it
-//!   expires.
+//!   and the keepalive socket that holds it awake. Its own view lists, per
+//!   agent, the credentials the agent may use, each a placeholder that
+//!   names the agent (`swap::TagKey`). A request to a provider's host has
+//!   its placeholders swapped for the credentials (`egress_swap`,
+//!   decisions 22 and 37), which this cell resolves: for the agent the tag
+//!   names, among those that run here now (any of its owner's providers,
+//!   unless its owner narrowed them: decision 44); a connection's token
+//!   from WorkOS Pipes, held until shortly before it expires; an operator
+//!   key, metered; an own key its owner gave, sealed here. Each call a
+//!   provider answered is counted by agent and month (`uses`).
 //! - **Its agents' new fragments** (`computer/joined`, from a fragment an
 //!   agent of its was added to): the agent's own fragment posts `joined`
 //!   on its `tasks`, and the fragment that added it then wakes the
@@ -32,11 +35,12 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Socket, Step, Wake};
-use fragment_core::ledger::{Meter, MeterRow, Spend};
+use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::price::Usage;
-use fragment_core::swap::{self, Credential};
-use fragment_proto::computer::{valid_computer_id, AgentConnections, ComputerAgent, ComputerPhase, ComputerView, PortTicket};
+use fragment_core::swap::{self, Placeholder, Plan};
+use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -68,16 +72,36 @@ const AGENT_HEADER: &str = "x-fragment-agent";
 const SESSION_COOKIE: &str = "fragment_computer";
 const FRAME_COOKIE: &str = "fragment_computer_frame";
 
-/// `agents.connections` is JSON: `null`, every connection the owner has
+/// `agents.connections` is JSON: `null`, every provider the owner has
 /// (decision 44), or a list that narrows it. An agent's row names it as
 /// it is made (`computer/assign`), so the column's default is never read.
+/// `uses` counts each agent's calls to each provider a month (`Month`'s
+/// index) and what they were charged; `own_keys` holds the owner's own
+/// keys, sealed for this object.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL, connections TEXT NOT NULL DEFAULT 'null');
 CREATE TABLE IF NOT EXISTS awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS tickets (hash TEXT PRIMARY KEY, port INTEGER NOT NULL, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
+CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
+/// The Durable Object class a sealed own key names (`keys::scope`).
+const SEAL_CLASS: &str = "Computer";
+/// Months of uses kept (this one and the twelve before it).
+const USES_MONTHS_KEPT: u32 = 13;
+/// Use rows one month holds at most (providers × agents, with room for
+/// agents that came and went).
+const USES_ROWS_MAX: u64 = 4 * (catalog::PROVIDERS_MAX as u64) * AGENTS_MAX;
+/// How long a connection's state, as Pipes said it, is believed: the
+/// guest reads its credentials every few seconds, and asking WorkOS that
+/// often is not ours to do. The person's own read of their connections
+/// tells it at once (`computer/own-keys`), and so does a swap Pipes
+/// refused.
+const STATES_TTL_MS: i64 = 60_000;
+/// After WorkOS did not answer, its states are asked again no sooner.
+const STATES_RETRY_MS: i64 = 10_000;
 
 /// Agent fragments one computer runs.
 const AGENTS_MAX: u64 = 16;
@@ -161,6 +185,9 @@ pub struct ComputerCell {
     /// Connections' tokens by (owner, provider): the token and until when
     /// it is used. In memory only: a new isolate asks WorkOS again.
     tokens: RefCell<BTreeMap<(String, String), (String, i64)>>,
+    /// The owner's connections' states as Pipes last said them, and until
+    /// when they are believed (`STATES_TTL_MS`). In memory only.
+    states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -169,7 +196,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -238,13 +265,68 @@ struct Unassign {
 #[derive(Deserialize)]
 struct SetConnections {
     fragment: String,
-    /// `None`: every connection the owner has (decision 44).
+    /// `None`: every provider the owner has (decision 44).
     connections: Option<Vec<String>>,
 }
 
 /// What an agent may have swapped in, as `agents.connections` keeps it.
 fn stored_connections(text: &str, fragment: &str) -> CellResult<Option<Vec<String>>> {
     serde_json::from_str(text).map_err(|e| CellError::host(format!("{fragment}'s stored connections {text:?}: {e}")))
+}
+
+/// Whether an agent narrowed to `narrowed` may use `provider`.
+fn may_use(narrowed: &Option<Vec<String>>, provider: &str) -> bool {
+    narrowed.as_ref().is_none_or(|list| list.iter().any(|p| p == provider))
+}
+
+/// `computer/credentials`' body: the placeholders a request to `host`
+/// carries, each its provider and tag (the egress planned them).
+#[derive(Deserialize)]
+struct CredentialsAsk {
+    host: String,
+    placeholders: Vec<Asked>,
+}
+
+#[derive(Deserialize)]
+struct Asked {
+    provider: String,
+    tag: String,
+}
+
+/// `computer/used`'s body: an agent's calls a provider answered, at `at`,
+/// each with what it was charged.
+#[derive(Deserialize)]
+struct UsedAsk {
+    agent: String,
+    at: i64,
+    uses: Vec<Used>,
+}
+
+#[derive(Deserialize)]
+struct Used {
+    provider: String,
+    micros: i64,
+}
+
+/// `computer/uses`' body: a month (`YYYY-MM`), or this one.
+#[derive(Deserialize)]
+struct UsesAsk {
+    month: Option<String>,
+}
+
+/// `computer/own-key`'s body: the owner's own key for `provider`, or none.
+#[derive(Deserialize)]
+struct OwnKeyAsk {
+    provider: String,
+    key: Option<String>,
+}
+
+/// `computer/own-keys`' body: the owner's connections' states, as their
+/// own read of them just found (kept for the guest's next read).
+#[derive(Deserialize)]
+struct OwnKeysAsk {
+    #[serde(default)]
+    connections: Option<BTreeMap<String, ProviderState>>,
 }
 
 /// `computer/joined`'s body: the agent `identity` was added to `fragment`,
@@ -254,14 +336,6 @@ struct JoinedAsk {
     identity: String,
     fragment: String,
     at: i64,
-}
-
-/// `computer/credential`'s body: what `agent` asked to have swapped in.
-#[derive(Deserialize)]
-struct CredentialAsk {
-    agent: String,
-    connection: Option<String>,
-    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -480,9 +554,9 @@ impl ComputerCell {
         self.exec("DELETE FROM awake WHERE from_ms >= ? AND from_ms <= ?", vec![first.into(), last.into()])
     }
 
-    /// The hosts the swap intercepts: every connection's and operator key's.
+    /// The hosts the swap intercepts: every provider's in the catalog.
     fn swap_hosts(&self) -> JsValue {
-        js::to_js(&json!(swap::all_hosts([&self.cfg.connections, &self.cfg.operator_keys])))
+        js::to_js(&json!(self.cfg.providers.hosts()))
     }
 
     /// The environment every image may rely on (docs/computers.md).
@@ -613,9 +687,141 @@ impl ComputerCell {
                 fragment,
                 name,
                 connections,
+                credentials: vec![],
             });
         }
         Ok(agents)
+    }
+
+    /// The guest's own view (`GET /api/computer`): its agents, each with
+    /// the credentials it may use now (a connection its owner connected, an
+    /// operator key the deployment holds, an own key its owner gave; none
+    /// its owner narrowed it from), each a placeholder naming the agent.
+    async fn guest_view(&self) -> CellResult<ComputerView> {
+        let mut view = self.view()?;
+        let catalog = &self.cfg.providers;
+        view.credential_env = catalog.env_names();
+        if catalog.is_empty() || view.agents.is_empty() {
+            return Ok(view);
+        }
+        let keys = crate::keys::tag_keys(&self.env)?;
+        let states = self.connection_states(&view.owner).await;
+        let own = self.own_key_names()?;
+        for agent in &mut view.agents {
+            for p in catalog.providers() {
+                if !may_use(&agent.connections, &p.name) {
+                    continue;
+                }
+                let available = match p.kind {
+                    Kind::Connection => states.get(&p.name) == Some(&ProviderState::Connected),
+                    Kind::Operator => crate::keys::operator_key(&self.env, &p.name).is_some(),
+                    Kind::Own => own.contains(&p.name),
+                };
+                if !available {
+                    continue;
+                }
+                let tag = keys[0].tag(&view.computer, &agent.fragment, &p.name);
+                agent.credentials.push(AgentCredential {
+                    provider: p.name.clone(),
+                    kind: p.kind,
+                    env: p.env.clone(),
+                    placeholder: Placeholder::new(p.kind, &p.name, &tag).text(),
+                    hosts: p.hosts.clone(),
+                });
+            }
+        }
+        Ok(view)
+    }
+
+    /// The owner's connections' states: as Pipes last said them while
+    /// that is believed, else asked again (no token minted). WorkOS not
+    /// answering is logged and reads as nothing connected, asked again
+    /// shortly.
+    async fn connection_states(&self, owner: &str) -> BTreeMap<String, ProviderState> {
+        let now = js::now_ms();
+        if let Some((states, until)) = self.states.borrow().as_ref() {
+            if *until > now {
+                return states.clone();
+            }
+        }
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, owner).await {
+            Ok(s) => (s, now + STATES_TTL_MS),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
+                (BTreeMap::new(), now + STATES_RETRY_MS)
+            }
+        };
+        *self.states.borrow_mut() = Some((states.clone(), until));
+        states
+    }
+
+    /// One connection's state, as a swap just learned it.
+    fn note_state(&self, provider: &str, state: ProviderState) {
+        if let Some((states, _)) = self.states.borrow_mut().as_mut() {
+            states.insert(provider.to_string(), state);
+        }
+    }
+
+    /// The providers the owner gave an own key for.
+    fn own_key_names(&self) -> CellResult<Vec<String>> {
+        let rows = self.rows("SELECT provider FROM own_keys ORDER BY provider", vec![])?;
+        Ok(rows.iter().filter_map(|r| r["provider"].as_str().map(str::to_string)).collect())
+    }
+
+    /// The owner's own key for `provider`, opened.
+    fn own_key(&self, provider: &str) -> CellResult<Option<String>> {
+        let rows = self.rows("SELECT sealed FROM own_keys WHERE provider = ?", vec![provider.into()])?;
+        let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()) else { return Ok(None) };
+        let scope = crate::keys::scope(SEAL_CLASS, &self.state);
+        let opened = crate::keys::open(&self.env, &scope, sealed)?;
+        if let Some(resealed) = opened.resealed {
+            self.exec("UPDATE own_keys SET sealed = ? WHERE provider = ?", vec![resealed.into(), provider.into()])?;
+        }
+        let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
+        Ok(Some(key))
+    }
+
+    /// A month's uses: each agent's calls to each provider and their charges.
+    fn uses(&self, month: Month) -> CellResult<ComputerUses> {
+        let rows = self.rows("SELECT provider, agent, calls, micros FROM uses WHERE month = ? ORDER BY provider, agent", vec![i64::from(month.0).into()])?;
+        let uses = rows
+            .iter()
+            .map(|r| ProviderUse {
+                provider: r["provider"].as_str().unwrap_or_default().to_string(),
+                agent: r["agent"].as_str().unwrap_or_default().to_string(),
+                calls: r["calls"].as_u64().unwrap_or(0),
+                micros: r["micros"].as_i64().unwrap_or(0),
+            })
+            .collect();
+        Ok(ComputerUses { computer: self.must(MetaKey::Id)?, month: month.label(), uses })
+    }
+
+    /// Counts an agent's calls a provider answered, in `at`'s month, and
+    /// forgets months past `USES_MONTHS_KEPT`. A month already holding
+    /// `USES_ROWS_MAX` rows takes no new one (its calls are logged).
+    fn count_uses(&self, b: &UsedAsk) -> CellResult<()> {
+        if b.at <= 0 || b.uses.len() > swap::PLACEHOLDERS_MAX || !fragment_proto::valid_fragment_name(&b.agent) {
+            return Err(CellError::invalid("a use names an agent, when, and at most a request's providers"));
+        }
+        let month = Month::of(b.at);
+        for u in &b.uses {
+            if self.cfg.providers.get(&u.provider).is_none() || u.micros < 0 {
+                return Err(CellError::invalid(format!("no provider {:?} to count, or a charge below zero", u.provider)));
+            }
+            let m = i64::from(month.0);
+            let held = self.rows("SELECT COUNT(*) AS n FROM uses WHERE month = ?", vec![m.into()])?;
+            let exists = !self.rows("SELECT 1 FROM uses WHERE month = ? AND provider = ? AND agent = ?", vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into()])?.is_empty();
+            if !exists && held.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) >= USES_ROWS_MAX {
+                console_error!("{}", json!({ "computer": "uses-full", "month": month.label(), "provider": u.provider, "agent": b.agent }));
+                continue;
+            }
+            self.exec(
+                "INSERT INTO uses (month, provider, agent, calls, micros) VALUES (?, ?, ?, 1, ?) ON CONFLICT (month, provider, agent) DO UPDATE SET calls = calls + 1, micros = micros + excluded.micros",
+                vec![m.into(), u.provider.as_str().into(), b.agent.as_str().into(), u.micros.into()],
+            )?;
+        }
+        let oldest = i64::from(month.0.saturating_sub(USES_MONTHS_KEPT - 1));
+        self.exec("DELETE FROM uses WHERE month < ?", vec![oldest.into()])
     }
 
     fn view(&self) -> CellResult<ComputerView> {
@@ -637,6 +843,7 @@ impl ComputerCell {
             why: why.or(self.meta(MetaKey::Note)?),
             agents: self.agents()?,
             origin,
+            credential_env: vec![],
         })
     }
 
@@ -719,9 +926,9 @@ impl ComputerCell {
                 if let Some(list) = b.connections.as_mut() {
                     list.sort();
                     list.dedup();
-                    if let Some(c) = list.iter().find(|c| !self.cfg.connections.contains_key(c.as_str())) {
-                        let offered: Vec<&String> = self.cfg.connections.keys().collect();
-                        return Err(CellError::invalid(format!("no connection {c:?} on this deployment (its connections: {offered:?})")));
+                    if let Some(c) = list.iter().find(|c| self.cfg.providers.get(c).is_none()) {
+                        let offered: Vec<&str> = self.cfg.providers.providers().iter().map(|p| p.name.as_str()).collect();
+                        return Err(CellError::invalid(format!("no provider {c:?} on this deployment (its providers: {offered:?})")));
                     }
                 }
                 if self.rows("SELECT fragment FROM agents WHERE fragment = ?", vec![b.fragment.as_str().into()])?.is_empty() {
@@ -732,9 +939,53 @@ impl ComputerCell {
                 self.exec("UPDATE agents SET connections = ? WHERE fragment = ?", vec![text.into(), b.fragment.as_str().into()])?;
                 json_response(&self.view()?)
             }
-            "computer/credential" => {
-                let b: CredentialAsk = body_json(&mut req).await?;
-                json_response(&self.credential(b).await?)
+            "computer/credentials" => {
+                let b: CredentialsAsk = body_json(&mut req).await?;
+                json_response(&self.credentials(b).await?)
+            }
+            "computer/used" => {
+                let b: UsedAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                self.count_uses(&b)?;
+                json_response(&json!({ "ok": true }))
+            }
+            "computer/uses" => {
+                let b: UsesAsk = body_json(&mut req).await?;
+                let month = match b.month.as_deref() {
+                    Some(label) => Month::parse(label).ok_or_else(|| CellError::invalid("a month is YYYY-MM"))?,
+                    None => Month::of(js::now_ms()),
+                };
+                json_response(&self.uses(month)?)
+            }
+            "computer/own-key" => {
+                let b: OwnKeyAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                if self.cfg.providers.get(&b.provider).is_none_or(|p| p.kind != Kind::Own) {
+                    return Err(CellError::invalid(format!("{:?} is no own key's provider here", b.provider)));
+                }
+                match b.key {
+                    Some(key) => {
+                        if !crate::connections::own_key_ok(&key) {
+                            return Err(CellError::invalid("a key is a printable token"));
+                        }
+                        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), key.as_bytes())?;
+                        self.exec(
+                            "INSERT INTO own_keys (provider, sealed, set_at) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET sealed = excluded.sealed, set_at = excluded.set_at",
+                            vec![b.provider.as_str().into(), sealed.into(), js::now_ms().into()],
+                        )?;
+                    }
+                    None => self.exec("DELETE FROM own_keys WHERE provider = ?", vec![b.provider.as_str().into()])?,
+                }
+                json_response(&json!({ "providers": self.own_key_names()? }))
+            }
+            "computer/own-keys" => {
+                let b: OwnKeysAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                // the owner just read their connections: believed as fresh
+                if let Some(states) = b.connections {
+                    *self.states.borrow_mut() = Some((states, js::now_ms() + STATES_TTL_MS));
+                }
+                json_response(&json!({ "providers": self.own_key_names()? }))
             }
             "computer/joined" => {
                 let b: JoinedAsk = body_json(&mut req).await?;
@@ -772,7 +1023,7 @@ impl ComputerCell {
                 self.trim("sessions", SESSIONS_MAX)?;
                 json_response(&json!({ "session": session, "port": t["port"], "maxAgeS": SESSION_TTL_MS / 1000 }))
             }
-            "computer/guest" => json_response(&self.view()?),
+            "computer/guest" => json_response(&self.guest_view().await?),
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
                 self.drive(Event::Exited { generation: b.generation }).await?;
@@ -788,52 +1039,81 @@ impl ComputerCell {
         }
     }
 
-    /// The secret to swap in for `b`'s placeholder, when its agent runs here
-    /// and may use it: `{secret, owner, identity}` (the agent's), so the
-    /// egress meters a key's call to its owner. An agent may use every
-    /// connection its owner has unless its owner narrowed it to a list
-    /// (decision 44: a person's agents are not fenced from each other, so
-    /// the list is a role's specialization, not a wall).
-    async fn credential(&self, b: CredentialAsk) -> CellResult<Value> {
-        let rows = self.rows("SELECT owner, identity, connections FROM agents WHERE fragment = ?", vec![b.agent.as_str().into()])?;
-        let agent = rows.first().ok_or_else(|| CellError::new(ErrorCode::Forbidden, format!("{} does not run on this computer", b.agent)))?;
-        let owner = agent["owner"].as_str().unwrap_or_default().to_string();
-        let identity = agent["identity"].as_str().unwrap_or_default().to_string();
-        let secret = match (b.connection, b.key) {
-            (Some(provider), None) => {
-                let narrowed = stored_connections(agent["connections"].as_str().unwrap_or_default(), &b.agent)?;
-                if let Some(list) = narrowed.filter(|list| !list.contains(&provider)) {
-                    return Err(CellError::new(
-                        ErrorCode::Forbidden,
-                        format!(
-                            "{} may not use the {provider} connection: its owner narrowed it to {} on their computer (null lets it use every connection its owner has)",
-                            b.agent,
-                            if list.is_empty() { "none".to_string() } else { list.join(", ") }
-                        ),
-                    ));
-                }
-                self.connection_token(&owner, &provider).await
+    /// The secrets to swap in for a request's placeholders (`b`, a request
+    /// to `b.host`), when their tags name one agent that runs here now and
+    /// that agent may use each provider: `{agent, identity, owner, secrets:
+    /// [{provider, tag, secret}]}`, so the egress meters a key's call to the
+    /// agent's owner and counts each call as the agent's. A tag that names
+    /// no agent of this computer (forged, another computer's, or an agent
+    /// removed since) is refused. An agent may use every provider its owner
+    /// has unless its owner narrowed it to a list (decision 44: a person's
+    /// agents are not fenced from each other, so the list is a role's
+    /// specialization, not a wall).
+    async fn credentials(&self, b: CredentialsAsk) -> CellResult<Value> {
+        if b.placeholders.is_empty() || b.placeholders.len() > swap::PLACEHOLDERS_MAX {
+            return Err(CellError::invalid(format!("ask for 1 to {} placeholders", swap::PLACEHOLDERS_MAX)));
+        }
+        let id = self.must(MetaKey::Id)?;
+        let rows = self.rows("SELECT fragment, owner, identity, connections FROM agents ORDER BY added_at", vec![])?;
+        let fragments: Vec<String> = rows.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
+        let keys = crate::keys::tag_keys(&self.env)?;
+        let mut agent: Option<&str> = None;
+        for p in &b.placeholders {
+            let provider = self.cfg.providers.get(&p.provider).ok_or_else(|| CellError::invalid(format!("no provider {:?} on this deployment", p.provider)))?;
+            if !provider.hosts.contains(&b.host) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {}", provider.name, provider.hosts.join(", "), b.host)));
             }
-            (None, Some(name)) => {
-                if !self.cfg.operator_keys.contains_key(&name) {
-                    return Err(CellError::invalid(format!("no operator key {name:?} on this deployment")));
-                }
-                if !self.cfg.key_prices.iter().any(|p| p.key == name) {
-                    return Err(CellError::new(ErrorCode::Forbidden, format!("the operator key {name} has no price on this deployment, so it is not lent")));
-                }
-                // a paid call its owner's ledger would refuse is never made (decision 27)
-                let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-                if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
-                    if e.refused.is_some() {
-                        return Err(CellError::new(e.code, e.message));
+            let named = swap::agent_of(&keys, &id, &fragments, &p.provider, &p.tag).ok_or_else(|| {
+                CellError::new(
+                    ErrorCode::Forbidden,
+                    format!("this {} placeholder names no agent on this computer: forged, another computer's, or an agent removed from it (read GET /api/computer again)", p.provider),
+                )
+            })?;
+            if agent.is_some_and(|a| a != named) {
+                return Err(CellError::invalid("one request's placeholders name one agent: send another's in a request of its own"));
+            }
+            agent = Some(named);
+        }
+        let agent = agent.expect("at least one placeholder, each naming an agent");
+        let row = rows.iter().find(|r| r["fragment"] == agent).expect("the agent named is one of the rows read");
+        let owner = row["owner"].as_str().unwrap_or_default().to_string();
+        let identity = row["identity"].as_str().unwrap_or_default().to_string();
+        let narrowed = stored_connections(row["connections"].as_str().unwrap_or_default(), agent)?;
+        let mut secrets = vec![];
+        for p in &b.placeholders {
+            let provider = self.cfg.providers.get(&p.provider).expect("checked above");
+            if !may_use(&narrowed, &provider.name) {
+                let list = narrowed.as_deref().unwrap_or_default();
+                return Err(CellError::new(
+                    ErrorCode::Forbidden,
+                    format!(
+                        "{agent} may not use {}: its owner narrowed it to {} on their computer (null lets it use every provider its owner has)",
+                        provider.name,
+                        if list.is_empty() { "none".to_string() } else { list.join(", ") }
+                    ),
+                ));
+            }
+            let secret = match provider.kind {
+                Kind::Connection => self.connection_token(&owner, &provider.name).await?,
+                Kind::Operator => {
+                    // a paid call its owner's ledger would refuse is never made (decision 27)
+                    let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
+                    if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
+                        if e.refused.is_some() {
+                            return Err(CellError::new(e.code, e.message));
+                        }
+                        console_error!("{}", json!({ "computer": "key", "ledger": e.message }));
                     }
-                    console_error!("{}", json!({ "computer": "key", "ledger": e.message }));
+                    crate::keys::operator_key(&self.env, &provider.name).ok_or_else(|| CellError::host(format!("{} is not set", catalog::key_secret_name(&provider.name))))?
                 }
-                crate::keys::operator_key(&self.env, &name).ok_or_else(|| CellError::host(format!("{} is not set", swap::key_secret_name(&name))))
+                Kind::Own => self.own_key(&provider.name)?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
+            };
+            if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+                return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}'s credential is not a printable token", provider.name)));
             }
-            _ => Err(CellError::invalid("ask for one connection or one key")),
-        }?;
-        Ok(json!({ "secret": secret, "owner": owner, "identity": identity }))
+            secrets.push(json!({ "provider": provider.name, "tag": p.tag, "secret": secret }));
+        }
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets }))
     }
 
     /// The agent `b.identity` was added to `b.fragment` (runs_on.rs, from
@@ -878,10 +1158,12 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
         }
         if answer["active"] != true {
-            let why = match answer["error"].as_str() {
-                Some("needs_reauthorization") => format!("connect {provider} again: its account needs authorizing again"),
-                _ => format!("connect {provider} first: no account is connected"),
+            // the guest's next read lists the connection no more
+            let (state, why) = match answer["error"].as_str() {
+                Some("needs_reauthorization") => (ProviderState::NeedsReauthorization, format!("connect {provider} again: its account needs authorizing again")),
+                _ => (ProviderState::NotConnected, format!("connect {provider} first: no account is connected")),
             };
+            self.note_state(provider, state);
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
         let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
@@ -1025,18 +1307,29 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Put, [id, "agents", fragment, "connections"]) => {
             owned(env, who, id).await?;
             let v: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            // a body that forgot the field is not a reset to every connection
+            // a body that forgot the field is not a reset to every provider
             if v.get("connections").is_none() {
-                return Err(CellError::invalid("name connections: a list of providers, or null for every connection its owner has"));
+                return Err(CellError::invalid("name connections: a list of providers, or null for every provider its owner has"));
             }
             let b: AgentConnections = serde_json::from_value(v).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if let Some(list) = &b.connections {
-                if list.len() > swap::CREDENTIALS_MAX || list.iter().any(|c| !swap::valid_name(c)) {
-                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", swap::CREDENTIALS_MAX)));
+                if list.len() > catalog::PROVIDERS_MAX || list.iter().any(|c| !catalog::valid_name(c)) {
+                    return Err(CellError::invalid(format!("connections are at most {} provider names, or null", catalog::PROVIDERS_MAX)));
                 }
             }
             let set = json!({ "fragment": fragment, "connections": b.connections });
             json_response(&view_of(ask(env, id, "computer/connections", &set).await?)?)
+        }
+        (Method::Get, [id, "uses"]) => {
+            owned(env, who, id).await?;
+            json_response(&ask(env, id, "computer/uses", &json!({ "month": null })).await?)
+        }
+        (Method::Get, [id, "uses", month]) => {
+            owned(env, who, id).await?;
+            if Month::parse(month).is_none() {
+                return Err(CellError::invalid("a month is YYYY-MM"));
+            }
+            json_response(&ask(env, id, "computer/uses", &json!({ "month": month })).await?)
         }
         (Method::Delete, [id, "agents", fragment]) => {
             owned(env, who, id).await?;
@@ -1326,66 +1619,44 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
 /// Headers a hop answers for itself, never sent on.
 const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "host"];
 
-/// A guest's request to a connection's or an operator key's host
-/// (decisions 22 and 37): each placeholder in its headers is swapped for
-/// the credential when the request goes to one of that credential's own
-/// hosts, for the agent `x-fragment-agent` names, and it goes on over
+/// A guest's request to a provider's host (decisions 22 and 37; Paul,
+/// 2026-10-04): each placeholder it carries, in a header, the query or
+/// basic auth (`swap::Plan`), is swapped for its credential when the
+/// request goes to one of its provider's own hosts, in a place its catalog
+/// row names, for the agent its tag names, and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
-/// Only headers carry placeholders; a body or a URL is sent as it came.
+/// A body is sent as it came. The platform's own headers (`x-fragment-…`)
+/// go to no provider. Each call the provider answered is counted as the
+/// agent's (`computer/used`), and an operator key's is metered to its
+/// owner first.
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let agent = req.headers().get(AGENT_HEADER)?;
-    let mut found: Vec<(String, String, Vec<Credential>)> = vec![];
-    let mut wanted: Vec<Credential> = vec![];
-    for (name, value) in req.headers().entries() {
-        if HOP_HEADERS.contains(&name.as_str()) || name == AGENT_HEADER {
-            continue;
-        }
-        let creds = swap::placeholders(&value).map_err(CellError::invalid)?;
-        for c in &creds {
-            let (map, what) = match c {
-                Credential::Connection(p) => (&cfg.connections, p),
-                Credential::Key(k) => (&cfg.operator_keys, k),
-            };
-            let hosts = map.get(what).ok_or_else(|| CellError::invalid(format!("{} names nothing on this deployment", c.placeholder())))?;
-            if !hosts.contains(&host) {
-                return Err(CellError::new(ErrorCode::Forbidden, format!("{} is for {}, not {host}", c.placeholder(), hosts.join(", "))));
-            }
-            if !wanted.contains(c) {
-                wanted.push(c.clone());
-            }
-        }
-        found.push((name, value, creds));
-    }
-    if wanted.len() > swap::PLACEHOLDERS_MAX {
-        return Err(CellError::invalid(format!("at most {} placeholders a request", swap::PLACEHOLDERS_MAX)));
-    }
-    let mut resolved = BTreeMap::new();
+    let headers_in: Vec<(String, String)> = req.headers().entries().filter(|(name, _)| !HOP_HEADERS.contains(&name.as_str()) && !name.starts_with("x-fragment-")).collect();
+    let plan = Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(|e| CellError::new(e.code(), e.to_string()))?;
+    let mut secrets = BTreeMap::new();
     // whose ledger a key's call goes on, and as which agent
-    let mut payer: Option<(String, String)> = None;
-    if !wanted.is_empty() {
-        let agent = agent.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "name the agent this acts as (x-fragment-agent)"))?;
-        if !fragment_proto::valid_fragment_name(&agent) {
-            return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>.<username>)"));
-        }
-        for c in &wanted {
-            let ask_body = match c {
-                Credential::Connection(p) => json!({ "agent": agent, "connection": p }),
-                Credential::Key(k) => json!({ "agent": agent, "key": k }),
-            };
-            let answer = ask(env, computer, "computer/credential", &ask_body).await?;
-            let secret = answer["secret"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| CellError::host("the computer resolved no credential"))?;
-            resolved.insert(c.clone(), secret.to_string());
-            if let (Some(owner), Some(identity)) = (answer["owner"].as_str(), answer["identity"].as_str()) {
-                payer = Some((owner.to_string(), identity.to_string()));
+    let mut payer: Option<(String, String, String)> = None;
+    if !plan.is_empty() {
+        let asked: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "tag": p.tag })).collect();
+        let answer = ask(env, computer, "computer/credentials", &json!({ "host": host, "placeholders": asked })).await?;
+        for s in answer["secrets"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let (provider, tag, secret) = (s["provider"].as_str().unwrap_or_default(), s["tag"].as_str().unwrap_or_default(), s["secret"].as_str().unwrap_or_default());
+            if let Some(p) = plan.wanted.iter().find(|w| w.provider == provider && w.tag == tag) {
+                secrets.insert(p.clone(), secret.to_string());
             }
         }
+        if secrets.len() != plan.wanted.len() || secrets.values().any(String::is_empty) {
+            return Err(CellError::host("the computer resolved fewer credentials than were asked for"));
+        }
+        let field = |k: &str| answer[k].as_str().map(str::to_string).ok_or_else(|| CellError::host(format!("the computer named no {k}")));
+        payer = Some((field("agent")?, field("owner")?, field("identity")?));
     }
+    let out_parts = plan.apply(&headers_in, url.query(), &cfg.providers, &secrets);
     let headers = Headers::new();
-    for (name, value, creds) in &found {
-        headers.set(name, &if creds.is_empty() { value.clone() } else { swap::swapped(value, &resolved) })?;
+    for (name, value) in &out_parts.headers {
+        headers.set(name, value)?;
     }
     let method = req.method();
     let body = match method {
@@ -1395,7 +1666,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     if !body.is_empty() {
         headers.set("content-length", &body.len().to_string())?;
     }
-    let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let query = out_parts.query.map(|q| format!("?{q}")).unwrap_or_default();
     let target = match &cfg.swap_upstream {
         Some(upstream) => {
             headers.set("x-fragment-upstream-host", &host)?;
@@ -1414,34 +1685,35 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         .send()
         .await
         .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")))?;
-    // each key's call the provider answered is metered to the agent's owner
-    // (decision 37), after the answer: a failed meter is logged, never retried
-    // into the guest's call
-    if let Some((owner, identity)) = payer.filter(|_| out.status_code() < 500) {
-        for key in wanted.iter().filter_map(|c| match c {
-            Credential::Key(k) => Some(k.clone()),
-            Credential::Connection(_) => None,
-        }) {
-            let reference = format!("key:{computer}:{}", js::random_hex::<12>());
-            let row = MeterRow {
-                reference: reference.clone(),
-                usage: Usage::Key { key, units: 1 },
-                fragment: None,
-                agent: Some(identity.clone()),
-                computer: Some(computer.to_string()),
-                at_ms: js::now_ms(),
-            };
-            let (env, owner) = (env.clone(), owner.clone());
-            ctx.wait_until(async move {
-                if let Err(e) = crate::ledger::ask(&env, &owner, &Meter { batch: reference, rows: vec![row] }).await {
-                    console_error!("{}", json!({ "egress": "swap", "meter": e.message }));
+    // each call the provider answered is the agent's (decision 37), after
+    // the answer: an operator key's metered to its owner, then every one
+    // counted; a failure is logged, never retried into the guest's call
+    if let Some((agent, owner, identity)) = payer.filter(|_| out.status_code() < 500) {
+        let keyed: Vec<(String, bool)> = plan.wanted.iter().map(|p| (p.provider.clone(), cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator))).collect();
+        let (env, computer) = (env.clone(), computer.to_string());
+        ctx.wait_until(async move {
+            let at = js::now_ms();
+            let mut uses = vec![];
+            for (provider, operator) in keyed {
+                let mut micros = 0;
+                if operator {
+                    let reference = format!("key:{computer}:{}", js::random_hex::<12>());
+                    let row = MeterRow { reference: reference.clone(), usage: Usage::Key { key: provider.clone(), units: 1 }, fragment: None, agent: Some(identity.clone()), computer: Some(computer.clone()), at_ms: at };
+                    match crate::ledger::ask(&env, &owner, &Meter { batch: reference, rows: vec![row] }).await {
+                        Ok(m) => micros = m.charged,
+                        Err(e) => console_error!("{}", json!({ "egress": "swap", "meter": e.message })),
+                    }
                 }
-            });
-        }
+                uses.push(json!({ "provider": provider, "micros": micros }));
+            }
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
+                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+            }
+        });
     }
-    // one line per swap (lesson 14), naming the credentials, never their values
-    if !wanted.is_empty() {
-        let names: Vec<String> = wanted.iter().map(Credential::placeholder).collect();
+    // one line per swap (lesson 14), naming the providers, never a tag or a value
+    if !plan.is_empty() {
+        let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
         console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": out.status_code() }));
     }
     Ok(out)

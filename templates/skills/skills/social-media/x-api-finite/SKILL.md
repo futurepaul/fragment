@@ -16,12 +16,11 @@ Use this skill when:
 
 ## Setup
 
-Your computer holds no keys: the helper sends the operator's key
-placeholder `fragment-key:x` (hosts `api.x.com`) with
-`x-fragment-agent: $FRAGMENT_AS_AGENT`, and the computer swaps in the real
-bearer token, metered to your owner. `X_API_BEARER_TOKEN`, when set, is
-sent instead. A 401 means this deployment does not offer the `x` key: say
-so rather than hunting for one.
+Your computer holds no keys: `X_API_BEARER_TOKEN` holds the operator's
+key's placeholder (it names you), the helper sends it to `api.x.com` as a
+bearer token, and the computer swaps in the real one, metered to your
+owner. Unset, this deployment does not offer the `x` key (the platform
+does not yet): say so rather than hunting for one.
 
 Use the local helper directly:
 

@@ -4,10 +4,10 @@
 Rewritten for fragment from Hermes Agent's Google Workspace helper (MIT,
 Nous Research): the same commands and answers, over Google's REST APIs with
 Python's standard library alone. The computer holds no Google credential:
-each request sends the connection's placeholder
-(`Authorization: Bearer fragment-connection:google`) and names its agent
-(`x-fragment-agent`), and the computer's intercept swaps in a short-lived
-token for the agent's owner (docs/computers.md, Connections).
+its environment holds the connection's placeholder, which names the agent
+(`GOOGLE_OAUTH_ACCESS_TOKEN`), each request sends it as a bearer token, and
+the computer's intercept swaps in a short-lived token for the agent's owner
+(docs/computers.md, Connections and operator keys).
 
 Usage:
   python google_api.py gmail search "is:unread" [--max 10]
@@ -28,8 +28,9 @@ Usage:
   python google_api.py check
 
 Environment:
-  FRAGMENT_AS_AGENT   the agent the request acts as (set on a fragment computer)
-  GOOGLE_CONNECTION   the connection's provider (default: google)
+  GOOGLE_OAUTH_ACCESS_TOKEN  the Google connection's placeholder (set on a
+                             fragment computer once the person connects
+                             Google), or any Google OAuth access token
 """
 
 import argparse
@@ -63,11 +64,10 @@ class GoogleError(Exception):
 
 
 def headers(extra=None):
-    agent = os.getenv("FRAGMENT_AS_AGENT", "").strip()
-    if not agent:
-        raise GoogleError(0, "no_agent", "FRAGMENT_AS_AGENT is not set: run this on your computer, as one of its agents")
-    provider = os.getenv("GOOGLE_CONNECTION", "").strip() or "google"
-    h = {"Authorization": f"Bearer fragment-connection:{provider}", "x-fragment-agent": agent, "Accept": "application/json"}
+    token = os.getenv("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    if not token:
+        raise GoogleError(0, "not_connected", "GOOGLE_OAUTH_ACCESS_TOKEN is not set: the person has not connected Google, or narrowed you from it")
+    h = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     h.update(extra or {})
     return h
 
@@ -391,7 +391,6 @@ def main():
         hint = {
             "not_connected": "the person has not connected Google (or must again): ask them to, in the shell's Settings, under Connections",
             "forbidden": "the person narrowed this agent's connections, or Google refused the scope",
-            "no_agent": "run it from your computer's terminal",
         }.get(e.code, "")
         print(json.dumps({"error": e.code or "google_error", "status": e.status, "message": str(e), "hint": hint}), file=sys.stderr)
         sys.exit(1)

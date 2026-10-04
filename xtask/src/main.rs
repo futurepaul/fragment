@@ -158,10 +158,8 @@ fn dev(args: &[String]) -> Result<()> {
         test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
-        connections: None,
-        operator_keys: None,
+        providers: None,
         operator_key_values: vec![],
-        key_prices: None,
         swap_upstream: None,
     }
     .configure(&devstack::cell_dir())?;
