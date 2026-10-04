@@ -36,10 +36,11 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
-| `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, and no OpenID Connect issuer either, sign-in answers 500 |
+| `WORKOS_CLIENT_ID` | fragment's WorkOS environment, for Pipes' connections; its people are keyed `workos:<it>` |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
-| `FRAGMENT_OIDC_ISSUER` | sign-in with any OpenID Connect provider instead (docs/self-host.md, seam 4): its issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback), its metadata at `<issuer>/.well-known/openid-configuration`. Set, it signs people in; WorkOS, configured beside it, serves Pipes' connections alone |
-| `FRAGMENT_OIDC_CLIENT_ID` | its client (required with the issuer) |
+| `FRAGMENT_OIDC_ISSUER` | who signs people in (docs/self-host.md, seam 4): an OpenID Connect provider's issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback), its metadata at `<issuer>/.well-known/openid-configuration`. WorkOS's is its AuthKit domain, `https://<authkit domain>`. Unset, sign-in answers 500 |
+| `FRAGMENT_OIDC_CLIENT_ID` | its client (required with the issuer): WorkOS's is an OAuth application's, not the environment's |
+| `FRAGMENT_OIDC_KEYED_AS` | the issuer people are keyed under (default `FRAGMENT_OIDC_ISSUER`; required beside `WORKOS_CLIENT_ID`, where the default would make WorkOS's people new): WorkOS's keep `workos:<WORKOS_CLIENT_ID>`, as before sign-in was OpenID Connect; a `workos:` one that names another environment is refused as the isolate starts |
 | `FRAGMENT_OIDC_SCOPES` | the scopes asked for (default `openid email profile`; `openid` must be among them) |
 | `FRAGMENT_OIDC_CLAIMS` | which claims name the person (JSON, each field optional): `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. No email is assumed: a sign-in is shown by its email, else its first username claim, else its `sub` |
 | `FRAGMENT_OIDC_AUTH` | how the client authenticates at the token endpoint: `client_secret_basic`, `client_secret_post`, or `none` (default: with a secret, the first of the two the provider lists; without, `none`, PKCE alone) |
@@ -58,8 +59,8 @@ no author code can name one:
 | `FRAGMENT_KEY_<NAME>` | an operator key of the catalog (`perplexity` is `FRAGMENT_KEY_PERPLEXITY`, `google-places` `FRAGMENT_KEY_GOOGLE_PLACES`), uploaded from its row's `key_file` |
 | `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
 | `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
-| `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
-| `FRAGMENT_OIDC_CLIENT_SECRET` | the OpenID Connect client's secret, for its code exchange (a public client has none) |
+| `WORKOS_API_KEY` | WorkOS's API key, for Pipes |
+| `FRAGMENT_OIDC_CLIENT_SECRET` | the sign-in client's secret, for its code exchange (a public client has none) |
 | `FRAGMENT_TEST_SECRET` | the test levers' secret (Test levers, below): honoured on a branch deployment (`FRAGMENT_HOST_LABEL_SUFFIX`) or a local fleet (`FRAGMENT_EGRESS_LOCAL`) alone, 32 to 256 bytes of printable ASCII; one set on a deployment of its own, or one too short, is logged (`levers.refused`) and honoured nowhere. `cargo xtask deploy` uploads it from the config's `test_secret_file`, for a `--branch` deploy only |
 
 ## Test levers
@@ -80,12 +81,12 @@ for an e2e person (403 otherwise), and the registry's are no route
 
 | Route | Body → answer |
 |---|---|
-| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone WorkOS signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls and AI steps, each a reservation) at `paidCalls` from now: 0 unless asked, at most 200; their ledger refuses the one past it (402 `budget_used_up`). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
+| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone a provider signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls and AI steps, each a reservation) at `paidCalls` from now: 0 unless asked, at most 200; their ledger refuses the one past it (402 `budget_used_up`). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their `e2e-…` fragments |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
 | `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, and `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), and `{person: {issuer, subject, email}}` makes a person as a sign-in keys them, without one (`{identity, created}`; not under `e2e.test`): the e2e's stand-in for people a sign-in made before it changed (docs/self-host.md, seam 4) |
 
 The agents' own test controls (`POST /api/a/{name}/test`, Agents below)
 are another Worker's, on with `AGENT_TEST_HOOKS=allow`, which only the
@@ -251,14 +252,16 @@ unsigned (an inbox, a webhook, a site) names it in full.
 
 ## Sign-in (phase 4 slice B)
 
-A person is keyed by their verified `(issuer, subject)`: the issuer is
-`workos:<client id>` (the environment), the subject WorkOS's user id; or,
-with an OpenID Connect provider (`FRAGMENT_OIDC_ISSUER`; docs/self-host.md,
-seam 4), the issuer's URL and the id_token's `sub`. The email (and an
-OpenID Connect sign-in's name and username) are attributes, refreshed at
-each sign-in and never matched.
+A person is keyed by their verified `(issuer, subject)`: one OpenID
+Connect provider signs people in (`FRAGMENT_OIDC_ISSUER`; docs/self-host.md,
+seam 4), WorkOS's AuthKit or another; the subject is the id_token's `sub`,
+and the issuer is as the deployment keys its people
+(`FRAGMENT_OIDC_KEYED_AS`): WorkOS's are `workos:<client id>` (the
+environment), their subject the WorkOS user id, as before sign-in was
+OpenID Connect; another provider's are its URL. The email, name and
+username are attributes, refreshed at each sign-in and never matched.
 
-With OpenID Connect, `/auth/login` sends the browser to the provider's
+`/auth/login` sends the browser to the provider's
 `authorization_endpoint` (from its metadata) with `response_type=code`,
 the scopes, a state, a nonce, and PKCE's S256 challenge; the registry keeps
 the verifier and the nonce with the state and never lets the verifier out.
@@ -282,10 +285,10 @@ random bytes, the registry keeps their SHA-256).
 | method & path (platform origin) | what |
 | --- | --- |
 | `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/settings` it opens its settings |
-| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state), or the OpenID Connect provider's (above); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
+| `GET /auth/login?return=&login_hint=` | → the provider's authorization endpoint (above; `redirect_uri` `<platform>/auth/callback`); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
-| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a provider's `error` is shown (400); a sign-in already finished or past its ten minutes, or a code the provider refuses (a callback sent again), is 400 `invalid_request`; an OpenID Connect id_token that does not verify is 401 |
-| `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`), or the OpenID Connect provider's (above); from another origin, 403 (`GET` shows the button) |
+| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a provider's `error` is shown (400); a sign-in already finished or past its ten minutes, or a code the provider refuses (a callback sent again), is 400 `invalid_request`; an id_token that does not verify is 401 |
+| `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to the provider's logout when it offers one (above), else home (AuthKit offers none: its own session stays); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403, and so is every request on a fleet without a suffix |
