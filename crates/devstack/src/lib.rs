@@ -22,6 +22,28 @@ mod node_release;
 pub mod store;
 pub mod summary;
 
+/// A running node, on either runtime.
+pub enum AnyNode {
+    Wrangler(Node),
+    Celld(celld::CelldNode),
+}
+
+impl AnyNode {
+    pub fn stop(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.stop(),
+            AnyNode::Celld(n) => n.stop(),
+        }
+    }
+
+    pub fn crash(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.crash(),
+            AnyNode::Celld(n) => n.crash(),
+        }
+    }
+}
+
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
 pub const READY_TIMEOUT: Duration = Duration::from_secs(900);
@@ -195,9 +217,11 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)], containers: bo
 /// queues, and the local store's secrets): before its fleet is configured,
 /// which seeds the store again.
 pub fn clear_state(project: &Path) -> Result<()> {
-    let state = state_dir(project);
-    if state.exists() {
-        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    // either runtime's: wrangler's, and celld's (docs/self-host.md, seam 1)
+    for state in [state_dir(project), celld::state_dir(project)] {
+        if state.exists() {
+            fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+        }
     }
     Ok(())
 }

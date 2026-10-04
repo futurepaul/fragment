@@ -353,12 +353,11 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         Some(agent) => json!({ "x-session-affinity": agent }),
         None => json!({}),
     };
-    if let Some(upstream) = &cfg.model_upstream {
-        // a self-hosted deployment's OpenAI-compatible server (docs/self-host.md,
-        // seam 3): the bounded input is already OpenAI's, less its model
-        let Some(name) = upstream.models.get(model) else {
-            return Err(CellError::new(ErrorCode::UpstreamFailed, format!("this deployment's model server serves nothing for {model} (FRAGMENT_MODELS)")));
-        };
+    // a self-hosted model server's (docs/self-host.md, seam 3), for the
+    // models it maps: the bounded input is already OpenAI's, less its model.
+    // A model it does not map goes on as before (an image step to the
+    // binding, or to the dev fake).
+    if let Some((upstream, name)) = cfg.model_upstream.as_ref().and_then(|u| u.models.get(model).map(|n| (u, n))) {
         let mut body = input.clone();
         body["model"] = json!(name);
         let h = Headers::new();
@@ -388,7 +387,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
     }
     let Some(gateway) = &cfg.ai_gateway_id else {
-        return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("this deployment has no route to {model}: AI_GATEWAY_ID (its AI Gateway), or a model server that maps it (FRAGMENT_MODELS)")));
     };
     let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
     js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))

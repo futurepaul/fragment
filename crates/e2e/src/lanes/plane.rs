@@ -177,28 +177,51 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     // the deploy's preview card, shot after it, never in its request (decision 31)
     let keys = s.cli_keys(&home).unwrap_or_else(Keys::generate);
     let live1 = st["pins"]["live"].as_str().unwrap_or("").to_string();
-    let first = super::site::card_showing(s, api, &keys, &name, &live1);
-    s.ok("the deploy makes a preview card of the live it deployed", first.as_ref().is_some_and(super::site::is_card), super::site::card_detail(&first));
-    let made = super::site::event_kinds(api, &keys, &name).iter().filter(|k| *k == "card.made").count();
-    s.ok("one card for one deploy", made == 1, made);
+    let cards = s.shoots_cards();
+    let first = match cards {
+        true => {
+            let first = super::site::card_showing(s, api, &keys, &name, &live1);
+            s.ok("the deploy makes a preview card of the live it deployed", first.as_ref().is_some_and(super::site::is_card), super::site::card_detail(&first));
+            let made = super::site::event_kinds(api, &keys, &name).iter().filter(|k| *k == "card.made").count();
+            s.ok("one card for one deploy", made == 1, made);
+            first
+        }
+        false => {
+            let skipped = s.eventually(Duration::from_secs(20), || super::site::event_kinds(api, &keys, &name).iter().any(|k| k == "card.skipped"));
+            s.ok("with no browser, a deploy shoots no card, and its events say so", skipped, super::site::event_kinds(api, &keys, &name).join(","));
+            None
+        }
+    };
 
     std::fs::write(site.join("site/index.html"), "<h1>v2 marker</h1>")?;
     s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
     let st2 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("a second deploy moves live", st2["pins"]["live"] != st["pins"]["live"], &st2);
     s.ok("the site follows live", page(api).contains("v2 marker"), page(api));
-    let second = super::site::card_showing(s, api, &keys, &name, st2["pins"]["live"].as_str().unwrap_or(""));
+    let second = match cards {
+        true => super::site::card_showing(s, api, &keys, &name, st2["pins"]["live"].as_str().unwrap_or("")),
+        false => None,
+    };
     let (tag1, tag2) = (first.as_ref().map(|r| r.header("etag")).unwrap_or_default(), second.as_ref().map(|r| r.header("etag")).unwrap_or_default());
-    s.ok(
-        "a second deploy replaces the card: another image, of the new live",
-        second.as_ref().is_some_and(super::site::is_card) && tag2 != tag1 && second.as_ref().map(|r| &r.bytes) != first.as_ref().map(|r| &r.bytes),
-        json!({ "first": super::site::card_detail(&first), "second": super::site::card_detail(&second) }),
-    );
     let conditional = |tag: &str| {
         api.call(Call { method: "GET", url: format!("{}/api/f/{name}/card", api.base), keys: Some(&keys), extra: vec![("if-none-match", tag.to_string())], ..Call::default() })
     };
-    let (same, old) = (conditional(&tag2)?, conditional(&tag1)?);
-    s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
+    match cards {
+        true => {
+            s.ok(
+                "a second deploy replaces the card: another image, of the new live",
+                second.as_ref().is_some_and(super::site::is_card) && tag2 != tag1 && second.as_ref().map(|r| &r.bytes) != first.as_ref().map(|r| &r.bytes),
+                json!({ "first": super::site::card_detail(&first), "second": super::site::card_detail(&second) }),
+            );
+            let (same, old) = (conditional(&tag2)?, conditional(&tag1)?);
+            s.ok("the card revalidates by its tag: 304 for the current one, the new image for the one before", same.status == 304 && same.bytes.is_empty() && old.status == 200 && old.header("etag") == tag2, format!("{} | {}", same.status, old.status));
+        }
+        false => {
+            let why = "this node has no browser (celld: no Browser Rendering), so it shoots no cards";
+            s.skip("a second deploy replaces the card: another image, of the new live", why);
+            s.skip("the card revalidates by its tag: 304 for the current one, the new image for the one before", why);
+        }
+    }
     let repo = created["repo"].as_str().unwrap_or("");
     match s.hosted() {
         true => s.skip("code.storage holds live where the CLI moved it", "it reads the code.storage fake's branches (a preview's git is real)"),

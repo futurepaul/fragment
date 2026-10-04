@@ -89,8 +89,9 @@ pub struct Config {
     /// upstream (docs/self-host.md, seam 3), an OpenAI-compatible server's
     /// base (with its `/v1`), and which of its models answers for each
     /// catalog id the route calls. Its key, if it takes one, is the secret
-    /// bound as `MODEL_KEY` (keys.rs). It wins over the AI binding and the
-    /// gateway.
+    /// bound as `MODEL_KEY` (keys.rs). For the models it maps, it wins over
+    /// the AI binding, the gateway and `FRAGMENT_AI_URL`; the rest go on to
+    /// them.
     pub model_upstream: Option<ModelUpstream>,
     workos: Option<WorkOsConfig>,
     /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in

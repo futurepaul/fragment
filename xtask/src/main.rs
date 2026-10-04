@@ -210,7 +210,7 @@ fn dev(args: &[String]) -> Result<()> {
     }
     let (running, base, log, took) = if celld {
         let tools = devstack::celld::CelldTools::locate()?;
-        let copts = devstack::celld::CelldOptions { project: opts.project.clone(), with: opts.with.clone(), port: opts.port, clean: opts.clean, log_dir: opts.log_dir.clone() };
+        let copts = devstack::celld::CelldOptions { project: opts.project.clone(), with: opts.with.clone(), port: opts.port, log_dir: opts.log_dir.clone() };
         let (n, took) = devstack::celld::CelldNode::start(&tools, &copts)?;
         let (base, log) = (n.base.clone(), n.log.clone());
         (Running::Celld(n), base, log, took)
