@@ -1,7 +1,7 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
-//! WorkOS's API key, and the operator's keys a computer's swap sends
-//! (`FRAGMENT_KEY_<NAME>`); and what is derived from the host secret: the
+//! WorkOS's API key, the OpenID Connect client's secret, and the
+//! operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`); and what is derived from the host secret: the
 //! key placeholders' tags are made with (`tag_keys`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
 //! Worker Loader, with an env the platform builds (`js::app_env`), so no
@@ -11,11 +11,13 @@
 use std::cell::RefCell;
 
 use fragment_core::codestorage::{Claims, OrgKey};
+use fragment_core::oidc::{self, Provider};
 use fragment_core::seal::{self, SealError};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use worker::{Env, Fetch, Headers, Method, Request, RequestInit, State};
 
+use crate::config::OidcConfig;
 use crate::error::{CellError, CellResult};
 use crate::js;
 
@@ -26,6 +28,11 @@ pub const HOST_SECRET: &str = "FRAGMENT_HOST_SECRET";
 pub const HOST_SECRET_PREVIOUS: &str = "FRAGMENT_HOST_SECRET_PREVIOUS";
 pub const CODESTORAGE_PRIVATE_KEY: &str = "CODESTORAGE_PRIVATE_KEY";
 pub const WORKOS_API_KEY: &str = "WORKOS_API_KEY";
+/// An OpenID Connect client's secret (docs/self-host.md, seam 4); a public
+/// client has none, and proves itself with PKCE alone.
+pub const OIDC_CLIENT_SECRET: &str = "FRAGMENT_OIDC_CLIENT_SECRET";
+/// The largest answer read from a token endpoint.
+const TOKEN_ANSWER_MAX_BYTES: usize = 64 * 1024;
 
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
@@ -139,6 +146,33 @@ pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &s
         o.remove("refresh_token");
     }
     Ok((status, answer))
+}
+
+/// The OpenID Connect code exchange (RFC 6749 4.1.3, with PKCE's
+/// verifier), the client authenticated with its secret as the deployment
+/// or the provider says (`Provider::client_auth`): (status, the answer's
+/// bytes, at most `TOKEN_ANSWER_MAX_BYTES`). The answer holds tokens: it is
+/// read for its id_token and dropped, never logged.
+pub async fn oidc_token(env: &Env, provider: &Provider, cfg: &OidcConfig, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<(u16, Vec<u8>)> {
+    let secret = secret(env, OIDC_CLIENT_SECRET);
+    let auth = provider.client_auth(cfg.auth, secret.is_some()).map_err(|e| CellError::host(e.to_string()))?;
+    let request = oidc::token_request(auth, &cfg.client_id, secret.as_deref(), code, redirect_uri, verifier);
+    let headers = Headers::new();
+    headers.set("content-type", "application/x-www-form-urlencoded")?;
+    headers.set("accept", "application/json")?;
+    if let Some(a) = &request.authorization {
+        headers.set("authorization", a)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(request.body.into()));
+    let req = Request::new_with_init(&provider.token_endpoint, &init)?;
+    let failed = |e: worker::Error| CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token endpoint did not answer: {e}"));
+    let mut resp = Fetch::Request(req).send().await.map_err(failed)?;
+    let bytes = resp.bytes().await.map_err(failed)?;
+    if bytes.len() > TOKEN_ANSWER_MAX_BYTES {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token answer is over {TOKEN_ANSWER_MAX_BYTES} bytes")));
+    }
+    Ok((resp.status_code(), bytes))
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`
