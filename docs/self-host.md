@@ -457,6 +457,12 @@ either.
 - The eight spoiled id_tokens, the PKCE code injection, the spent code
   and the key rotation pass against AuthKit's fake as against the strict
   one.
+- The whole suite on celld through the WorkOS fake's AuthKit: 1302
+  passed, 2 failed, 11 skipped. Neither failure is sign-in's:
+  - lockdown's health probe, right after a refused oversized body, met a
+    closed connection; the section alone then passed, 19 of 19;
+  - the ledger's card check expects a shot, which celld does not take.
+    The check is not gated on `shoots_cards`, on `selfhost` as here.
 - `cargo xtask dev --runtime celld` signed a person in through the WorkOS
   fake's AuthKit (curl, `FRAGMENT_DEV_PORT=9420`): S256, a state and a
   nonce to `/oauth2/authorize`, the callback's session, and the person
