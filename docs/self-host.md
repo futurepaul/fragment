@@ -458,7 +458,7 @@ store takes `--clean`.
 - The whole suite on celld, its git in the fake run as a process of its
   own (`fake-codestorage`, `FRAGMENT_E2E_CODESTORE=external`), none of
   its levers reachable: 1293 passed, 0 failed, 22 skipped. Eleven skips
-  are the fake's levers, each naming which; four are the container
+  are the fake's levers or its webhook, each naming which; four are the container
   sections, seven the card checks (celld shoots no cards). The store
   held 158 repos after `create` alone: its 150 fillers were made through
   `POST /api/repos`, and the name made again was found past the list's
