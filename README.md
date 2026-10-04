@@ -75,7 +75,7 @@ alias pointed at the dev stack. Fragments are served at
 ## Tests
 
 ```
-cargo xtask check          # host tests, clippy on host and wasm, warnings denied
+cargo xtask check          # node --check on our JavaScript, host tests, clippy on host and wasm, warnings denied
 cargo xtask e2e            # the full suite against a fresh wrangler dev node (--only a,b | --except a,b)
 cargo xtask e2e --shard 2/4 --summary target/e2e-summary/2.json
                            # one of CI's four shards (crates/e2e/src/lanes/mod.rs, SHARDS)
@@ -97,6 +97,7 @@ fetch it into `target/tools/` on first use (refusing a tarball whose
 hash differs), run its own npm's `npm ci` when node_modules is missing
 or stale, and start every JavaScript process on it, first on PATH, with
 its caches under `target/cache/` (Browser Rendering's Chrome included).
+`check` fetches it too, and runs `node --check` on it (no `npm ci`).
 A `node` on PATH is never used. `FRAGMENT_NODE=/abs/path/to/node` runs
 another, if it is a release of Node 22 or 24 with its npm beside it;
 `WRANGLER_BIN` names another wrangler's `bin/wrangler.js`.

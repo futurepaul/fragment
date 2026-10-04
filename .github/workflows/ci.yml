@@ -1,5 +1,6 @@
-# fragment CI on Linux: `cargo xtask check` (host tests and clippy on host
-# and wasm, warnings denied), and `cargo xtask e2e`: the cell and the
+# fragment CI on Linux: `cargo xtask check` (every first-party JavaScript
+# file through `node --check` on the pinned Node, host tests and clippy on
+# host and wasm, warnings denied), and `cargo xtask e2e`: the cell and the
 # agents' Worker under `wrangler dev` (workerd), with fakes only at the
 # vendor boundaries (docs/cloudflare-v1.md, phase 2). The celld e2e on
 # macOS is at tag celld-final.
@@ -45,11 +46,19 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            !target/tools
             cell/target
             agent/target
           key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
+      # the pinned Node `node --check` runs on, unpacked: the e2e's key,
+      # which its first shard saves from master
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
       - run: cargo xtask check
+      # the same paths as the restore (they are part of the cache's version)
       - if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
@@ -58,6 +67,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
+            !target/tools
             cell/target
             agent/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
