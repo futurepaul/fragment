@@ -164,7 +164,7 @@ pub struct ModelUpstream {
     /// Its base, `/v1` included, without a trailing slash.
     pub url: String,
     /// Catalog id (the price book's label) to the server's model name.
-    pub models: BTreeMap<String, String>,
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 /// `FRAGMENT_MODEL_URL` with `FRAGMENT_MODELS`, a JSON object of catalog
@@ -174,7 +174,7 @@ fn model_upstream(env: &Env) -> Option<ModelUpstream> {
     let url = var(env, "FRAGMENT_MODEL_URL")?.trim_end_matches('/').to_string();
     assert!(url.starts_with("http://") || url.starts_with("https://"), "FRAGMENT_MODEL_URL is an http(s) URL, not {url:?}");
     let map = var(env, "FRAGMENT_MODELS").unwrap_or_else(|| panic!("FRAGMENT_MODEL_URL needs FRAGMENT_MODELS: {{\"<catalog id>\": \"<the server's model>\"}}"));
-    let models: BTreeMap<String, String> = serde_json::from_str(&map).unwrap_or_else(|e| panic!("FRAGMENT_MODELS is {{\"<catalog id>\": \"<the server's model>\"}}: {e}"));
+    let models: std::collections::BTreeMap<String, String> = serde_json::from_str(&map).unwrap_or_else(|e| panic!("FRAGMENT_MODELS is {{\"<catalog id>\": \"<the server's model>\"}}: {e}"));
     assert!(!models.is_empty() && models.values().all(|m| !m.trim().is_empty()), "FRAGMENT_MODELS names at least one model, none empty");
     Some(ModelUpstream { url, models })
 }
