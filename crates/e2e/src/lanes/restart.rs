@@ -26,6 +26,27 @@ const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
 /// A person WorkOS signed in before sign-in was OpenID Connect.
 const KEPT_EMAIL: &str = "restart-kept@e2e.test";
+/// A node that dials in is back once it dials again: after a run's many
+/// restarts its backoff nears its ceiling (a minute, and jitter), and a
+/// dial may wait out its own bound (sandcastle's docs/node.md, The uplink).
+const NODE_BACK: Duration = Duration::from_secs(180);
+
+/// Its owner's wake of a computer placed on a node, again while its node is
+/// not back (each such answer `node_down`, typed): the last answer.
+fn woken(s: &Suite, api: &Api, who: &Keys, id: &str) -> crate::api::Reply {
+    let wake = || api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let mut last = None;
+    s.eventually(NODE_BACK, || {
+        let r = wake();
+        let done = r.as_ref().is_ok_and(|r| r.status == 200 && r.body["phase"] == "awake");
+        if let Ok(r) = r {
+            last = Some(r);
+        }
+        done
+    });
+    last.unwrap_or_else(|| wake().unwrap_or_else(|e| panic!("a wake: {e:#}")))
+}
+
 /// The checks of a computer placed on a sandcastle node, across the restarts.
 const PLACED: [&str; 3] = [
     "after a restart a computer on a sandcastle node is still placed there, and awake: its new object finds its container on the node, and puts it to sleep",
@@ -149,7 +170,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         let v = api.signed(who, "GET", &format!("/api/computers/{id}"), None)?;
         let r = api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
         s.ok(PLACED[0], v.body["node"] == node.as_str() && v.body["phase"] == "awake" && r.status == 200 && r.body["phase"] == "asleep", format!("{v} / {r}"));
-        let r = api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+        let r = woken(s, &api, who, id);
         s.ok(PLACED[1], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
     }
     let r = api.call(Call { method: "GET", url: pending_back.header("location"), cookie: Some(pending_cookie), ..Call::default() })?;
@@ -272,7 +293,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start(false, true)?;
     if let Some((who, id, node)) = &placed {
         // awake as the platform crashed: its new object adopts the container, or starts it again, there
-        let r = api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+        let r = woken(s, &api, who, id);
         s.ok(PLACED[2], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
         api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     }
