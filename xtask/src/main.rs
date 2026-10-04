@@ -2,7 +2,8 @@
 //!
 //!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
 //!                    parallel once worker-build has fetched its tools: build.rs)
-//!   dev [--clean]    build, then run the stack in the foreground under
+//!   dev [--clean] [--port <p>]
+//!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, the Workers AI fake on :8796

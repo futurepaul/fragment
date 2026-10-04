@@ -130,11 +130,34 @@ adds:
 | The same box | loopback |
 | A LAN or an intranet | a private address with TLS from the operator's CA |
 | A datacenter | a public address with TLS |
-| Behind NAT, or a corporate proxy that allows only outbound HTTPS | the **uplink** (later, phase S7): the node dials a WebSocket out to a `Node` Durable Object, which offers the same HTTP API through a `fetch` |
+| Behind NAT, or a corporate proxy that allows only outbound HTTPS | the **uplink** (phase S7): the node dials a WebSocket out to a `Node` Durable Object, which offers the same HTTP API through a `fetch` |
 
 The uplink is the only shape that works everywhere (the research below),
 and it is the "person's own computer" shape of `two-substrates.md`'s
 phase 5. iroh is an optimisation over it, not a transport we depend on.
+
+**The uplink (S7).** sandcastle's `docs/node.md`, "The uplink", is the
+protocol. In short:
+
+- The node dials `<platform>/api/nodes/uplink`. The dial is signed with
+  the node's secret over its id, a fresh nonce and the time. The platform
+  answers with a signed `hello` over that nonce before the node serves
+  anything.
+- One `Node` Durable Object per node id holds the socket (`cell/uplink.mjs`).
+  Its `fetch` sends a request down the socket as a stream of frames, and
+  streams the answer back. A `101` comes back as a `WebSocketPair`
+  bridged to the stream. A call is one message, because a Worker's TCP
+  Nagles (found item 9).
+- When the socket drops, a read the node had not yet answered (`wait`,
+  inspect) is asked again on its next dial. So a computer's `monitor()`
+  outlives a reconnect.
+- `NodeContainer` takes its transport from `FRAGMENT_NODE_URL`: a `fetch`
+  to the node's URL, as before, or the `Node` object's `fetch` for
+  `uplink:<id>`. Nothing else in it changes, and the calls are signed
+  as before.
+- Intercepts stay on HTTPS to `/api/nodes/egress`: a node that can dial
+  the platform can reach it, and the router spreads them across the
+  computers' objects instead of one node's.
 
 **Snapshots stay node-local.** A computer that moves to another node
 starts from its image and restores `/data` from its last backup. That
@@ -510,6 +533,15 @@ that also makes Cloudflare simpler or safer:
    Arch, this box. It also hard-codes amd64 and x86_64 throughout, so a
    Mac (aarch64, Hypervisor.framework) needs its own jail and egress
    path.
+9. **`ContainerHost` reports to routes the cell does not have.**
+   `entry.mjs` posts `container/exited` and `container/tab`, but the
+   Computer's routes are `computer/exited` and `computer/tab`, and
+   `routed.rs` refuses the first two names. So on master:
+   - every WebSocket to a computer's port answers 500;
+   - no exit is ever reported.
+
+   The fix is the commit "computer: the container's reports reach their
+   routes", ready to cherry-pick.
 
 ## What the spike found (running it)
 
@@ -563,6 +595,26 @@ These are listed as found. Each names where it bites and what to do.
    with the fragment's full name") is ready to cherry-pick onto master.
 8. **celld's `dev` stops on SIGINT** (Ctrl-C), not promptly on SIGTERM,
    so devstack stops it with SIGINT.
+9. **A Worker's TCP Nagles, and a Worker cannot stop it.** Through the
+   uplink, every call with a body (start, each intercept) took 40 ms
+   more than the same call direct, so a wake took 290 ms. workerd sets
+   no TCP_NODELAY and a Worker cannot set it, so the protocol carries
+   that: a message holds every frame that is ready (a call is one
+   message), and the node acknowledges at once (TCP_QUICKACK). A wake
+   now takes 46 ms (sandcastle's `docs/node.md`, The uplink, Evidence).
+10. **A dropped uplink lost the computer's `wait`.** The computer stayed
+    awake but would never have heard its container exit. The `Node`
+    object now asks a dropped read (a `GET` that is not an upgrade) again
+    on the node's next dial, for up to 30 s. So `monitor()` outlives a
+    reconnect, and `NodeContainer` is unchanged.
+11. **A long platform outage pushes the node's backoff toward a
+    minute.** A computer that wakes in that gap fails its start
+    (`wont_wake`), as it would against an unreachable node on `listen`.
+    Its owner wakes it again. A deploy is no such outage: the node dials
+    again in about a second.
+12. **`cargo xtask dev` took fixed ports** (8790 to 8796), so two stacks
+    could not share a box. `FRAGMENT_DEV_PORT=<p>` moves the cell to `p`
+    and each fake by as much.
 
 ## The spike, on this box
 
@@ -642,7 +694,27 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     pinned commit, and the guest.
   - Not run: the engine jails each VM as root, and building the computer
     images needs Docker. Both are Paul's sudo.
-- **S6 and S7:** not started.
+- **S7: done locally, against the fake engine.** The node dials
+  `/api/nodes/uplink`, and a `Node` Durable Object serves the node's API
+  over it (`cell/uplink.mjs`, and sandcastle's `crates/node/src/uplink`;
+  sandcastle's `docs/node.md`, The uplink).
+  - The setup: the node and a fake engine (a lower-rung test double: no
+    VMs) ran in a network namespace with loopback alone and listened
+    nowhere. Their only way out was a unix-socket bridge to the
+    platform's port.
+  - Through the uplink: wake (start and four intercepts) in 46 ms;
+    inspect, signal, `wait` and destroy; a guest port's HTTP (3 MB down
+    and 2 MiB up, intact) and its WebSocket; the guest's request
+    through its intercept and back; sleep.
+  - A node restart: the computer stayed awake, its `wait` asked again.
+  - A platform restart: the node dialed again by itself, and the
+    computer's new object found and adopted its container.
+  - Not shown in the stack: exec's stdin. The Sandbox SDK, its only
+    user, speaks after a `sandbox-shim`, which no double plays. It is
+    shown in sandcastle's in-process test.
+  - Still to do: S2's checks on a real engine, which needs root, and
+    the same against a Cloudflare preview. Both are Paul's.
+- **S6:** not started.
 - **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
   beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
   it signed in through a real Dex (seam 4, Evidence).
@@ -696,6 +768,21 @@ To run offline, start the stack inside `unshare -rn` (bring `lo` up
 first). Give it the model through a unix socket: `socat` on the host from
 the socket to the model's port, and in the namespace from a loopback
 port to the socket.
+
+A node the platform cannot reach dials it instead (the uplink):
+
+- `FRAGMENT_NODE_URL=uplink:<id>` on the platform;
+- an `uplink` section in the node's config:
+  `{"url": "ws://127.0.0.1:<port>/api/nodes/uplink", "id": "<id>"}` (`wss`
+  in production), with `listen` dropped.
+
+To stand a node behind NAT on this box, use the same trick as for the
+model: run the node in `unshare -rn`, with `socat` from a loopback port
+in the namespace to a unix socket, and from there to the platform's
+port. Give both relays `nodelay`. A relay that Nagles costs the uplink
+an order of magnitude (sandcastle's `docs/node.md`, Evidence).
+`FRAGMENT_DEV_PORT=8890 cargo xtask dev` keeps such a stack clear of the
+default dev ports.
 
 ## Open questions for Paul
 

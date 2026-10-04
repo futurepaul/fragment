@@ -11,19 +11,22 @@ import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
 import { NodeContainer, nodeEgress, nodeOf, routeNodeEgress } from "./node.mjs";
+import { Uplink, routeNodeUplink } from "./uplink.mjs";
 
 // The last `arm` of a computer on a node, its isolate's to repeat.
 const NODE_ARM = "node/arm";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
-// The router is Rust's, but for one route: a sandcastle node's intercepts
-// (node.mjs), on the platform's own host, which go to their computer's
-// object as they came.
+// The router is Rust's, but for two routes of a sandcastle node's, on the
+// platform's own host: its intercepts (node.mjs), which go to their
+// computer's object as they came, and its uplink (uplink.mjs), which goes
+// to its `Node` object.
 function routed(request, env, rust) {
   const url = new URL(request.url);
   const platform = env.FRAGMENT_PLATFORM_URL ? new URL(env.FRAGMENT_PLATFORM_URL).host : url.host;
   if (url.pathname === "/api/nodes/egress" && url.host === platform && nodeOf(env)) return routeNodeEgress(request, env);
+  if (url.pathname === "/api/nodes/uplink" && url.host === platform && nodeOf(env)) return routeNodeUplink(request, env);
   return rust();
 }
 
@@ -451,6 +454,19 @@ export class Computer extends DurableObject {
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
   webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
+}
+
+// A sandcastle node that dials in (uplink.mjs): one object per node id,
+// holding its uplink, through which `NodeContainer` calls the node.
+export class Node extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.uplink = new Uplink(ctx, env);
+  }
+  fetch(request) { return this.uplink.fetch(request); }
+  webSocketMessage(ws, message) { return this.uplink.webSocketMessage(ws, message); }
+  webSocketClose(ws, code, reason, clean) { return this.uplink.webSocketClose(ws, code, reason, clean); }
+  webSocketError(ws, error) { return this.uplink.webSocketError(ws, error); }
 }
 
 // Every intercepted request a computer's guest makes (docs/computers.md):
