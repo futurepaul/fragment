@@ -1765,19 +1765,16 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, p
     let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
         None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
         Some(t) if t == main_tip => t,
-        Some(mut expected) => {
+        Some(_) => {
             let mut landed: Option<String> = None;
+            // each attempt previews afresh: it reads where live is now
             for _attempt in 0..MAX_CAS_ATTEMPTS {
-                match storage.promote_live(&expected, &msg, &author) {
+                match storage.promote_live(&msg, &author) {
                     Ok(new_tip) => {
                         landed = Some(new_tip);
                         break;
                     }
-                    Err(CsError::CasRejected { .. }) => {
-                        expected = storage.branch_head(LIVE).map_err(cs_anyhow)?
-                            .ok_or_else(|| anyhow!("the live ref vanished mid-deploy"))?;
-                        continue;
-                    }
+                    Err(CsError::CasRejected { .. }) => continue,
                     Err(e) => return Err(cs_anyhow(e)),
                 }
             }
@@ -2084,7 +2081,7 @@ mod tests {
         assert_eq!(Some(live_tip), mock.branch("t", "live"));
         assert_eq!(
             mock.take_requests(""),
-            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST merge", 1), ("POST refresh", 1)])
+            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("GET merge/preview", 1), ("POST merge", 1), ("POST refresh", 1)])
         );
         std::fs::remove_dir_all(&dir).ok();
     }

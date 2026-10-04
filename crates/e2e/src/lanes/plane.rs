@@ -234,6 +234,10 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
         st5["code"]["sha"] == st5["pins"]["live"] && st5["code"]["operations"]["add_todo"]["kind"] == "mutation",
         &st5["code"],
     );
+    // the deploy after the rollback: code.storage merges three ways, so a
+    // merge of main into the rolled-back live keeps v1's page beside main's
+    // new files
+    s.ok("a deploy after a rollback serves main: the page the rollback reverted shows main's version", page(api).contains("v2 marker"), page(api));
     if let Some(keys) = s.cli_keys(&home) {
         let r = api.op(&keys, &name, "add_todo", "d1", json!({ "text": "deployed" }))?;
         s.ok("the deployed app answers", r.status == 200 && r.body["result"]["id"] == 1, &r);
