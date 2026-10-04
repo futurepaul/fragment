@@ -24,23 +24,31 @@ pub struct CodeStorageConfig {
     pub repo_prefix: String,
 }
 
-/// WorkOS AuthKit (phase 4 slice B): fragment's own environment, configured
-/// when its client id is bound (`secrets_store::WORKOS_CLIENT`; keys.rs
-/// reads it, and its API key, as `keys::workos`).
+/// WorkOS (decisions 22 and 37): fragment's own environment, for Pipes'
+/// connections alone, configured when its client id is bound
+/// (`secrets_store::WORKOS_CLIENT`; keys.rs reads it, and its API key, as
+/// `keys::workos`). Its people sign in through AuthKit's OpenID Connect
+/// provider, one issuer like any other (`OidcConfig`).
 pub struct WorkOsConfig {
     /// `WORKOS_API_URL` (default https://api.workos.com; dev and the e2e: the fake).
     pub api: String,
 }
 
-/// Sign-in with any OpenID Connect provider (docs/self-host.md, seam 4):
-/// Keycloak, Authentik, Dex, ADFS, Entra, Okta. A person is keyed by
-/// `(issuer URL, sub)`. Its client secret, when it has one, is the secret
-/// bound as `OIDC_CLIENT_SECRET`, read only by keys.rs.
+/// Sign-in (docs/self-host.md, seam 4): one OpenID Connect provider, any
+/// of them: WorkOS AuthKit (an OAuth application's), Keycloak, Authentik,
+/// Dex, ADFS, Entra, Okta. A person is keyed by `(keyed_as, sub)`. Its
+/// client secret, when it has one, is the secret bound as
+/// `OIDC_CLIENT_SECRET`, read only by keys.rs.
 pub struct OidcConfig {
     /// `FRAGMENT_OIDC_ISSUER`: the provider's issuer, exactly as its
     /// id_tokens' `iss` says it (its metadata is at
     /// `<issuer>/.well-known/openid-configuration`).
     pub issuer: String,
+    /// `FRAGMENT_OIDC_KEYED_AS`: the issuer people are keyed under (default
+    /// `issuer`): AuthKit's people keep `workos:<client id>`, the name they
+    /// had before sign-in was OpenID Connect, said as `workos`: the bound
+    /// environment's (`fragment_core::oidc::keyed_as`).
+    pub keyed_as: fragment_core::oidc::KeyedAs,
     /// `FRAGMENT_OIDC_CLIENT_ID`.
     pub client_id: String,
     /// `FRAGMENT_OIDC_SCOPES` (default `openid email profile`).
@@ -54,24 +62,20 @@ pub struct OidcConfig {
     pub auth: Option<fragment_core::oidc::ClientAuth>,
 }
 
-/// Who signs people in. OpenID Connect when it is configured; else WorkOS
-/// AuthKit. WorkOS configured beside OpenID Connect serves Pipes'
-/// connections alone (whose people are WorkOS's users).
-pub enum SignIn<'a> {
-    WorkOs(&'a WorkOsConfig),
-    Oidc(&'a OidcConfig),
-}
-
 /// `FRAGMENT_OIDC_*`, checked as the isolate starts: a deployment that
 /// names an issuer and gets the rest wrong is refused at its first request.
-fn oidc(env: &Env) -> Option<OidcConfig> {
+/// Beside WorkOS (`workos`: its client id is bound), whom sign-in keys
+/// people as is said, never defaulted (`fragment_core::oidc::keyed_as`).
+fn oidc(env: &Env, workos: bool) -> Option<OidcConfig> {
     use fragment_core::oidc;
     let issuer = var(env, "FRAGMENT_OIDC_ISSUER")?;
     let fail = |e: oidc::OidcError| -> ! { panic!("{e}") };
     oidc::check_issuer(&issuer).unwrap_or_else(|e| fail(e));
+    let keyed_as = oidc::keyed_as(&issuer, var(env, "FRAGMENT_OIDC_KEYED_AS").as_deref(), workos).unwrap_or_else(|e| fail(e));
     let client_id = var(env, "FRAGMENT_OIDC_CLIENT_ID").unwrap_or_else(|| panic!("FRAGMENT_OIDC_ISSUER needs FRAGMENT_OIDC_CLIENT_ID"));
     Some(OidcConfig {
         issuer,
+        keyed_as,
         client_id,
         scopes: oidc::scopes(var(env, "FRAGMENT_OIDC_SCOPES").as_deref()).unwrap_or_else(|e| fail(e)),
         claims: oidc::ClaimMap::parse(var(env, "FRAGMENT_OIDC_CLAIMS").as_deref()).unwrap_or_else(|e| fail(e)),
@@ -281,7 +285,11 @@ impl Config {
     }
 
     fn build(env: &Env) -> Config {
-        let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
+        let workos = crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
+            api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
+        });
+        let oidc = oidc(env, workos.is_some());
+        let delivery_retry_s =var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
         let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
         let host_suffix = suffix("FRAGMENT_HOST_SUFFIX");
         let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| host_suffix.as_ref().is_some_and(|s| s != l));
@@ -330,10 +338,8 @@ impl Config {
             push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
             delivery_retry_s,
             delivery_retry_max_s: var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s),
-            workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
-                api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
-            }),
-            oidc: oidc(env),
+            workos,
+            oidc,
             platform_url,
             default_plan: default_plan(env),
             ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
@@ -380,23 +386,16 @@ impl Config {
         self.host_label_suffix.as_deref().unwrap_or("")
     }
 
+    /// WorkOS, for Pipes' connections.
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {
         self.workos
             .as_ref()
-            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, format!("sign-in is not configured on this fleet (no {} binding)", fragment_core::secrets_store::WORKOS_CLIENT)))
+            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, format!("connections are not configured on this fleet (no {} binding)", fragment_core::secrets_store::WORKOS_CLIENT)))
     }
 
-    pub fn oidc(&self) -> CellResult<&OidcConfig> {
-        self.oidc.as_ref().ok_or_else(|| CellError::new(ErrorCode::HostFailed, "OpenID Connect sign-in is not configured on this fleet (FRAGMENT_OIDC_ISSUER)"))
-    }
-
-    /// Who signs people in here (`SignIn`).
-    pub fn signin(&self) -> CellResult<SignIn<'_>> {
-        match (&self.oidc, &self.workos) {
-            (Some(o), _) => Ok(SignIn::Oidc(o)),
-            (None, Some(w)) => Ok(SignIn::WorkOs(w)),
-            (None, None) => Err(CellError::new(ErrorCode::HostFailed, format!("sign-in is not configured on this fleet (FRAGMENT_OIDC_ISSUER, or a {} binding)", fragment_core::secrets_store::WORKOS_CLIENT))),
-        }
+    /// Who signs people in here: the OpenID Connect provider.
+    pub fn signin(&self) -> CellResult<&OidcConfig> {
+        self.oidc.as_ref().ok_or_else(|| CellError::new(ErrorCode::HostFailed, "sign-in is not configured on this fleet (FRAGMENT_OIDC_ISSUER)"))
     }
 
     /// The platform's origin, given the URL a request arrived on.

@@ -79,9 +79,12 @@ pub const SIGNINS_PENDING_MAX: u64 = 200;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
-/// The WorkOS fake's environment.
-const WORKOS_CLIENT: &str = "client_fragment_e2e";
+/// The WorkOS fake's environment, and its OAuth application, whose
+/// AuthKit signs people in.
+pub const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+pub const WORKOS_APP: &str = "client_fragment_e2e_app";
+const WORKOS_APP_SECRET: &str = "sk_app_fragment_e2e";
 /// The OpenID Connect fake's client (`FRAGMENT_E2E_SIGNIN=oidc`).
 pub const OIDC_CLIENT: &str = "fragment-e2e";
 const OIDC_SECRET: &str = "oidc-secret-fragment-e2e";
@@ -255,11 +258,12 @@ pub struct Suite {
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
     test_secret: String,
-    /// Sign-in's stand-in: people sign in through it (`Api::person`), and
-    /// Pipes', which hands out connections' tokens.
+    /// WorkOS's stand-in: its AuthKit signs people in (`Api::person`), and
+    /// its Pipes hands out connections' tokens.
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
-    /// An OpenID Connect provider: people sign in through it in WorkOS's
-    /// place when the run says so (`oidc_signin`); WorkOS then serves Pipes.
+    /// A strict OpenID Connect provider: people sign in through it in
+    /// AuthKit's place when the run says so (`oidc_signin`); WorkOS then
+    /// serves Pipes, to no one.
     pub oidc: Fake<fragment_fakes::oidc::Oidc>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
@@ -287,6 +291,7 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("AuthKit client secret", WORKOS_APP_SECRET.into()),
             ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
@@ -299,10 +304,21 @@ impl Suite {
         self.hosted_rules
     }
 
-    /// Whether people sign in through the OpenID Connect fake
-    /// (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4), not WorkOS's.
+    /// Whether people sign in through the strict OpenID Connect fake
+    /// (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4), not
+    /// WorkOS's AuthKit.
     pub fn oidc_signin(&self) -> bool {
         std::env::var("FRAGMENT_E2E_SIGNIN").as_deref() == Ok("oidc")
+    }
+
+    /// The provider people sign in through: the WorkOS fake's AuthKit, or
+    /// the strict fake. Either is one issuer to the cell, and its levers
+    /// are the same.
+    pub fn idp(&self) -> &fragment_fakes::oidc::Oidc {
+        match self.oidc_signin() {
+            true => &self.oidc,
+            false => &self.workos.authkit,
+        }
     }
 
     /// Whether the text models go through an OpenAI-compatible server's
@@ -535,13 +551,19 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            oidc: self.oidc_signin().then(|| devstack::OidcVars {
-                issuer: self.oidc.node().url.clone(),
-                client_id: OIDC_CLIENT.into(),
-                client_secret: Some(OIDC_SECRET.into()),
-                scopes: None,
-                claims: None,
-                auth: None,
+            oidc: Some(match self.oidc_signin() {
+                // beside WorkOS (Pipes), whom sign-in keys people as is said
+                true => devstack::OidcVars {
+                    issuer: self.oidc.node().url.clone(),
+                    client_id: OIDC_CLIENT.into(),
+                    client_secret: Some(OIDC_SECRET.into()),
+                    scopes: None,
+                    claims: None,
+                    auth: None,
+                    keyed_as: Some(self.oidc.node().url.clone()),
+                },
+                // WorkOS's sign-in, as a deployment spells it out
+                false => devstack::OidcVars::authkit(&self.workos.node().authkit.url, WORKOS_APP, Some(WORKOS_APP_SECRET)),
             }),
             platform_url: Some(match (self.shape, suffix) {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
@@ -1110,7 +1132,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         org_key: codestore.org_key,
         host_secret: devstack::random_hex(32),
         test_secret,
-        workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY, WORKOS_APP, WORKOS_APP_SECRET)?),
         oidc: Fake::of(hidden, "OpenID Connect", fragment_fakes::oidc::Oidc::start(OIDC_CLIENT, OIDC_SECRET)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
         operator: Keys::generate(),
