@@ -38,7 +38,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["name"] == todo.as_str() && r.body["visibility"] == "link",
         &r,
     );
-    s.hook(api, &r.body);
+    s.hook(api, &owner, &r.body);
     let todo_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     let st = api.status(&owner, &todo)?;
     s.ok("its template is main's first commit, and live", st.body["pins"]["live"].is_string() && st.body["pins"]["live"] == st.body["pins"]["main"], &st);
@@ -65,7 +65,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     // the files and deploy routes
     let blank = s.named(api, &owner, "tblank")?;
     let r = api.create_with(&owner, json!({ "name": blank, "template": "blank" }))?;
-    s.hook(api, &r.body);
+    s.hook(api, &owner, &r.body);
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         let r = api.signed(&owner, "PUT", &format!("/api/f/{blank}/members/{}", npub_of(k)), Some(&json!({ "role": role })))?;
