@@ -131,7 +131,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let name = made.body["name"].as_str().unwrap_or("").to_string();
     s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && name.starts_with(&format!("{label}.")), &made);
     anyhow::ensure!(made.status == 200, "no brain to test: {made}");
-    s.hook(api, &made.body);
+    s.hook(api, &keys, &made.body);
     let repo = made.body["repo"].as_str().unwrap_or("").to_string();
     let listed = s.eventually(WAIT, || {
         shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| {
@@ -256,7 +256,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor may a viewer write the index (reindex and mark are an editor's)", r.status == 403 && r2.status == 403, format!("{r} | {r2}"));
 
     // an asset: its bytes a blob, named by its source note, served
-    let pointer = s.fake.file_at(&repo, "main", ASSET).unwrap_or_default();
+    let pointer = s.file_at(&repo, "main", ASSET).unwrap_or_default();
     s.ok(
         "an asset of 1 MiB or more is a blob: a pointer in git",
         blob::parse(&pointer).is_some_and(|p| p.sha256 == asset_sha && p.size == asset.len() as u64),

@@ -19,12 +19,18 @@
 //! a branch deployment on real vendors: each section says what it needs
 //! (needs.rs), and one that needs what a preview lacks (a fake, the node,
 //! the whole deployment, local Docker) is a skip that says why.
+//!
+//! A local run's git may live outside it (`FRAGMENT_E2E_CODESTORE`,
+//! store.rs): a code store already running, or macrofiche started for the
+//! run. The lanes then read it through its REST API, and a check that pulls
+//! one of the code.storage fake's levers is a skip that says which.
 
 mod api;
 mod browser;
 mod hosted;
 mod lanes;
 mod needs;
+mod store;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -148,9 +154,21 @@ impl<T> Deref for Fake<T> {
     fn deref(&self) -> &T {
         match (&self.fake, self.lanes) {
             (Some(fake), true) => fake,
+            (_, false) if self.what == "code.storage" => {
+                panic!("the code.storage fake is not the lanes' on this run (hosted, or an external code store): a section that uses it declares Need::Fakes, and a check that pulls one of its levers asks Suite::store_levers first")
+            }
             _ => panic!("the {} fake on the hosted lane: a section that uses it declares Need::Fakes", self.what),
         }
     }
+}
+
+/// Where a repo's main stood, to count the commits it took after
+/// (`Suite::commits_since`).
+pub enum Mark {
+    /// The commit packs the fake was sent for the repo.
+    Packs(u32),
+    /// main's head on an external store (`None`: no main yet).
+    Head(Option<String>),
 }
 
 /// One section as a dry run plans it: what it needs, and why it would be
@@ -209,6 +227,13 @@ pub struct Suite {
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: Fake<CodeStorage>,
+    /// The code store outside the run, when the node's git lives there
+    /// (`None`: the fake, or a hosted run's own vendor).
+    store: Option<store::External>,
+    /// macrofiche, when the run started it: stopped at the run's end.
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+    /// The code store's org: every token's `iss`.
+    org: String,
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
@@ -458,9 +483,9 @@ impl Suite {
         let tools = self.tools.as_ref().context("a local run locates its tools")?;
         devstack::Fleet {
             host_secret: self.host_secret.clone(),
-            codestorage_org: ORG.into(),
+            codestorage_org: self.org.clone(),
             codestorage_key_pem: self.org_key.clone(),
-            codestorage_url: self.fake.node().url.clone(),
+            codestorage_url: self.store_url(),
             host_suffix: suffix.then(|| self.suffix().to_string()),
             legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
             // a rehearsal's node is shaped as a branch deployment, whose
@@ -575,15 +600,21 @@ impl Suite {
         self.node.take().expect("a running node").crash()
     }
 
-    /// Registers the fragment's push webhook with the fake (the dashboard
-    /// registration the real service has), so git moves reach the cell.
-    /// Hosted, nothing: the run's commits and deploys go through the API
-    /// (`commit`, `deploy`), which moves the pins itself.
-    pub fn hook(&self, api: &Api, created: &Value) {
-        if self.hosted() {
+    /// Records `owner` as the fragment's (a write the harness makes as
+    /// another writer is followed by their `refresh` on an external store,
+    /// and made as theirs hosted), and registers its push webhook with the
+    /// fake (the dashboard registration the real service has), so git moves
+    /// reach the cell. Hosted, nothing more: the run's commits and deploys
+    /// go through the API (`commit`, `deploy`), which moves the pins itself.
+    /// On an external store, nothing more either: none registers the cell's
+    /// webhook (macrofiche's contract, question 2), so `refresh` and the
+    /// poll move the pins, as on the hosted fleet.
+    pub fn hook(&self, api: &Api, owner: &Keys, created: &Value) {
+        let name = created["name"].as_str().expect("created.name");
+        self.owners.borrow_mut().insert(name.to_string(), owner.clone());
+        if self.hosted() || self.store.is_some() {
             return;
         }
-        let name = created["name"].as_str().expect("created.name");
         let repo = created["repo"].as_str().expect("created.repo");
         let secret = created["webhookSecret"].as_str().expect("created.webhookSecret");
         self.fake.register_webhook(repo, &format!("{}/api/f/{name}/webhook", api.base), secret);
@@ -595,18 +626,25 @@ impl Suite {
         if r.status != 200 {
             bail!("create {name}: {r}");
         }
-        self.hook(api, &r.body);
-        let full = r.body["name"].as_str().context("a create answers the fragment's name")?;
-        self.owners.borrow_mut().insert(full.to_string(), keys.clone());
+        r.body["name"].as_str().context("a create answers the fragment's name")?;
+        self.hook(api, keys, &r.body);
         Ok(r.body)
     }
 
     /// A commit on main by another writer, announced by webhook. Hosted,
     /// its owner's commit through the files route (`POST /api/f/{name}/files`:
-    /// one commit, main moved at once), since a preview's git is real.
+    /// one commit, main moved at once), since a preview's git is real. On
+    /// an external store, a commit pack through its API, then the owner's
+    /// `refresh`, as the CLI follows its own.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            return self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            let repo = created["repo"].as_str().expect("created.repo");
+            let Some(store) = &self.store else {
+                return self.fake.external_commit(repo, "main", changes, "e2e commit");
+            };
+            let (_, sha) = store.commit(repo, "main", changes, "e2e commit").unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}"));
+            self.as_owner(created, "refresh", &json!({}));
+            return sha;
         }
         let files: Vec<Value> = changes
             .iter()
@@ -620,18 +658,137 @@ impl Suite {
         r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
+    /// A commit on main that nothing announces (a lost webhook): only the
+    /// owner's `refresh` or the poll finds it. On an external store, any
+    /// commit the harness makes and does not follow with a refresh.
+    pub fn silent_commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
+        let repo = created["repo"].as_str().expect("created.repo");
+        match &self.store {
+            None => self.fake.silent_commit(repo, "main", changes, "silent"),
+            Some(store) => store.commit(repo, "main", changes, "silent").unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}")).1,
+        }
+    }
+
     /// Moves live to main's tip (what `fragment deploy` does), announced.
     /// Hosted, its owner's deploy (`POST /api/f/{name}/deploy`), which
-    /// installs the app at once.
+    /// installs the app at once. On an external store, live created at
+    /// main's tip or merged to it through its API, then the owner's
+    /// `refresh`, as the CLI's deploy.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
             let repo = created["repo"].as_str().expect("created.repo");
-            let tip = self.fake.branch(repo, "main").expect("main has a commit");
-            self.fake.set_branch(repo, "live", &tip);
-            return tip;
+            let Some(store) = &self.store else {
+                let tip = self.fake.branch(repo, "main").expect("main has a commit");
+                self.fake.set_branch(repo, "live", &tip);
+                return tip;
+            };
+            let (_, live) = store.go_live(repo, "deploy (e2e)").unwrap_or_else(|e| panic!("a deploy of {repo}: {e:#}"));
+            self.as_owner(created, "refresh", &json!({}));
+            return live;
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
+    }
+
+    /// Whether the code.storage fake's levers are the lanes': a local run
+    /// whose git is the fake in this process. Its levers are an outage, a
+    /// sabotaged commit, a count of the requests it answered, and its refs'
+    /// flags; on an external store a check that pulls one is a skip that
+    /// says which (`skip_lever`).
+    pub fn store_levers(&self) -> bool {
+        self.store.is_none()
+    }
+
+    /// A check that pulls the fake's `lever`, on an external store: a skip.
+    pub fn skip_lever(&mut self, label: &str, lever: &str) {
+        let store = self.store.as_ref().map_or_else(|| "the code store".to_string(), |s| s.label.clone());
+        self.skip(label, &format!("it pulls the code.storage fake's {lever}, and the node's git is {store} ({}; docs/self-host.md, seam 5)", store::CODESTORE_VAR));
+    }
+
+    /// The code store's API base, as the node and the CLI reach it.
+    pub fn store_url(&self) -> String {
+        match &self.store {
+            Some(store) => store.url.clone(),
+            None => self.fake.node().url.clone(),
+        }
+    }
+
+    /// A file's bytes on a branch of `repo` (its url form), as the store
+    /// holds them.
+    pub fn file_at(&self, repo: &str, branch: &str, path: &str) -> Option<Vec<u8>> {
+        match &self.store {
+            None => self.fake.file_at(repo, branch, path),
+            Some(store) => store.file(repo, branch, path).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// A branch's head in `repo`, as the store holds it.
+    pub fn head(&self, repo: &str, branch: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.branch(repo, branch),
+            Some(store) => store.head(repo, branch).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// An ephemeral branch's head (a preview), as an external store's API
+    /// reads one: with `ephemeral=true` (macrofiche's contract, 5.9).
+    pub fn head_ephemeral(&self, repo: &str, branch: &str) -> Option<String> {
+        let store = self.store.as_ref().expect("an external store: the fake's own refs say which are ephemeral");
+        store.head_ephemeral(repo, branch).unwrap_or_else(|e| panic!("{e:#}"))
+    }
+
+    /// The url form of the repo named `name`, as the store lists it.
+    pub fn repo_url(&self, name: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.repo_url(name),
+            Some(store) => store.repo_url(name).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// `n` empty repos made after every existing one (a busy org, so a
+    /// lookup by name must page). On an external store, made as the cell
+    /// makes one, named for the run.
+    pub fn seed_filler(&self, n: usize) {
+        let Some(store) = &self.store else { return self.fake.seed_filler(n) };
+        for i in 0..n {
+            store.create_repo(&format!("filler-{}-{i}", self.run)).unwrap_or_else(|e| panic!("{e:#}"));
+        }
+    }
+
+    /// The requests to `repo` on one route (`"GET branch"`) the store has
+    /// answered, from every caller: the fake counts them; an external
+    /// store's are not counted here (`None`).
+    pub fn requests(&self, repo: &str, route: &str) -> Option<u32> {
+        self.store.is_none().then(|| self.fake.requests(repo, route))
+    }
+
+    /// Where `repo`'s main stands now, to count the commits after it.
+    pub fn mark(&self, repo: &str) -> Mark {
+        match &self.store {
+            None => Mark::Packs(self.fake.requests(repo, "POST commit-pack")),
+            Some(_) => Mark::Head(self.head(repo, "main")),
+        }
+    }
+
+    /// The commits `repo` took since `mark`: the commit packs it was sent
+    /// (the fake), or the commits on main past the marked head (an
+    /// external store, which counts no requests).
+    pub fn commits_since(&self, repo: &str, mark: &Mark) -> u64 {
+        match (mark, &self.store) {
+            (Mark::Packs(n), None) => u64::from(self.fake.requests(repo, "POST commit-pack") - n),
+            (Mark::Head(marked), Some(store)) => {
+                if self.head(repo, "main").is_none() {
+                    return 0;
+                }
+                let history = store.history(repo, "main").unwrap_or_else(|e| panic!("{e:#}"));
+                let at = match marked {
+                    None => Some(history.len()),
+                    Some(sha) => history.iter().position(|c| c == sha),
+                };
+                at.unwrap_or_else(|| panic!("{repo}'s main moved more than {} commits past {marked:?}", store::HISTORY_MAX)) as u64
+            }
+            _ => unreachable!("a mark is the store's that made it"),
+        }
     }
 
     /// A hosted run's `POST /api/f/{name}/{route}`, signed by the owner
@@ -806,11 +963,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, rehearse: Option<u64>) 
     let root = devstack::repo_root();
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
-    let org_key = fake::generate_org_key_pem();
-    let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
+    let hidden = rehearse.is_some();
+    let codestore = codestore(hidden, &scratch)?;
+    println!("code store: {}", codestore.said);
     let project = devstack::stage_project(&scratch.join("cell"))?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
@@ -837,7 +995,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, rehearse: Option<u64>) 
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
-    let hidden = rehearse.is_some();
     let mut s = Suite {
         only,
         except,
@@ -861,10 +1018,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, rehearse: Option<u64>) 
         celld,
         port: devstack::free_port()?,
         run,
-        fake: Fake::of(hidden, "code.storage", fake),
+        fake: codestore.fake,
+        store: codestore.store,
+        macrofiche: codestore.macrofiche,
+        org: codestore.org,
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
-        org_key,
+        org_key: codestore.org_key,
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
@@ -883,6 +1043,54 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, rehearse: Option<u64>) 
         hosted::rehearse_sweep(&mut s);
     }
     finish(&mut s)
+}
+
+/// A local run's code store, as `codestore` started or found it.
+struct RunStore {
+    fake: Fake<CodeStorage>,
+    store: Option<store::External>,
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+    org: String,
+    org_key: String,
+    /// What the run's first line says it is.
+    said: String,
+}
+
+/// The node's code store (`FRAGMENT_E2E_CODESTORE`, store.rs): the fake in
+/// this process (`hidden` from the lanes on a rehearsal), a store already
+/// running, or macrofiche, started on the run's scratch with an org key
+/// made for the run (its log beside the node's).
+fn codestore(hidden: bool, scratch: &Path) -> Result<RunStore> {
+    match store::Choice::from_env()? {
+        store::Choice::Fake => {
+            let org_key = fake::generate_org_key_pem();
+            let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
+            let said = format!("{} (the code.storage fake, in this process)", fake.url);
+            Ok(RunStore { fake: Fake::of(hidden, "code.storage", fake), store: None, macrofiche: None, org: ORG.into(), org_key, said })
+        }
+        store::Choice::External => {
+            let x = devstack::codestore::ExternalStore::from_env()?;
+            let label = format!("the external store at {}", x.url);
+            let store = store::External::new(&x.url, &x.org, &x.key_pem, label.clone())?;
+            let said = format!("{label}, org {} ({}=external)", x.org, store::CODESTORE_VAR);
+            Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(store), macrofiche: None, org: x.org, org_key: x.key_pem, said })
+        }
+        store::Choice::Macrofiche => {
+            let bin = devstack::codestore::macrofiche_bin()?;
+            let org_key = fake::generate_org_key_pem();
+            let opts = devstack::codestore::MacroficheOptions {
+                dir: scratch.join("macrofiche"),
+                port: devstack::free_port()?,
+                org: ORG.into(),
+                key_pem: org_key.clone(),
+                log_dir: scratch.to_path_buf(),
+            };
+            let m = devstack::codestore::Macrofiche::start(&bin, &opts)?;
+            let store = store::External::new(&m.url, ORG, &org_key, "macrofiche".into())?;
+            let said = format!("{} (macrofiche, {}; its log {})", m.url, bin.display(), m.log.display());
+            Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(store), macrofiche: Some(m), org: ORG.into(), org_key, said })
+        }
+    }
 }
 
 /// A run's end: a name `--only` or `--except` gave that no section has
@@ -905,10 +1113,16 @@ fn finish(s: &mut Suite) -> Result<()> {
         }
         println!("      (the node stopped in {:.1?})", t0.elapsed());
     }
+    // the code store the run started stops after the node that wrote to it
+    if let Some(m) = s.macrofiche.take() {
+        if let Err(e) = m.stop() {
+            s.fail("macrofiche stops at the end of the run", format!("{e:#}"));
+        }
+    }
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    let skipped = match s.hosted() {
+    let skipped = match s.hosted() || s.store.is_some() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

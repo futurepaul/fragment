@@ -101,14 +101,24 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the same code redeployed starts again without a build: the loader holds it by id", builds() == Some(1), format!("{:?}", builds()));
     // a deploy during a code.storage outage installs once reads come back
     let v3 = String::from_utf8_lossy(TODO_APP).replace("return { n: ", "return { v: 3, n: ");
-    s.fake.fail_file_reads(true);
-    let during = ship(s, &c, v3.as_bytes(), TODO_JSON);
-    let r = api.status(&owner, &name)?;
-    s.ok("during an outage live moves but the code stays", r.body["pins"]["live"] == during.as_str() && r.body["code"]["sha"] == live2.as_str(), &r);
-    s.fake.fail_file_reads(false);
-    api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
-    let r = api.status(&owner, &name)?;
-    s.ok("after the outage the next refresh installs it", r.body["code"]["sha"] == during.as_str(), &r);
+    if s.store_levers() {
+        s.fake.fail_file_reads(true);
+        let during = ship(s, &c, v3.as_bytes(), TODO_JSON);
+        let r = api.status(&owner, &name)?;
+        s.ok("during an outage live moves but the code stays", r.body["pins"]["live"] == during.as_str() && r.body["code"]["sha"] == live2.as_str(), &r);
+        s.fake.fail_file_reads(false);
+        api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
+        let r = api.status(&owner, &name)?;
+        s.ok("after the outage the next refresh installs it", r.body["code"]["sha"] == during.as_str(), &r);
+    } else {
+        // no outage to hold: the deploy installs v3 as any other
+        let outage = "outage (file reads answering 503)";
+        s.skip_lever("during an outage live moves but the code stays", outage);
+        let during = ship(s, &c, v3.as_bytes(), TODO_JSON);
+        let r = api.status(&owner, &name)?;
+        s.skip_lever("after the outage the next refresh installs it", outage);
+        s.ok("(the deploy installs the new code)", r.body["code"]["sha"] == during.as_str(), &r);
+    }
     let r = api.op(&owner, &name, "count", "v3", json!({}))?;
     s.ok("the new code runs, built once for it", r.body["result"]["v"] == 3 && r.body["result"]["n"] == before && builds() == Some(2), format!("{r} {:?}", builds()));
     s.commit(&c, &[("app.mjs", None)]);
@@ -240,7 +250,7 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let slugs = |slug: &str| channel("feed").iter().filter(|r| r["body"]["slug"] == slug).count();
     let applied = |id: &str| channel("ops").iter().filter(|r| r["body"]["id"] == id).count();
-    let note = |s: &Suite, slug: &str| s.fake.file_at(&repo, "main", &format!("notes/{slug}.md"));
+    let note = |s: &Suite, slug: &str| s.file_at(&repo, "main", &format!("notes/{slug}.md"));
 
     let r = call("note", "n1", json!({ "slug": "one", "text": "one" }))?;
     s.ok("a note lands", r.status == 200 && note(s, "one").as_deref() == Some(&b"one"[..]) && slugs("one") == 1, &r);
@@ -269,7 +279,7 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 422 && r.message().contains("refused its effects") && r.message().contains("blob pointers"),
         &r,
     );
-    s.ok("the pointer never reaches main", s.fake.file_at(&repo, "main", "big.bin").is_none(), "");
+    s.ok("the pointer never reaches main", s.file_at(&repo, "main", "big.bin").is_none(), "");
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok(
         "the refusal is in events, and the mutation counts as applied",
@@ -285,18 +295,28 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("(the app writes a ledger row of its own)", r.status == 200, &r);
 
     // a passing failure: every try of one commit loses to another writer
-    s.fake.sabotage_commit_packs(5);
-    let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
-    s.ok("a commit that keeps failing answers a passing failure", r.status == 502 && r.error() == "upstream_failed", &r);
-    s.ok("an unrelated call answers meanwhile", notes() == 4, notes());
-    // The file is on main as soon as the commit lands; the `ops` record
-    // follows once the cell has moved its pin.
-    let landed = s.eventually(Duration::from_secs(45), || note(s, "three").is_some() && applied("n3") > 0);
-    s.ok("the alarm applies it on a later try", landed && note(s, "three").as_deref() == Some(&b"three"[..]), "");
+    if s.store_levers() {
+        s.fake.sabotage_commit_packs(5);
+        let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
+        s.ok("a commit that keeps failing answers a passing failure", r.status == 502 && r.error() == "upstream_failed", &r);
+        s.ok("an unrelated call answers meanwhile", notes() == 4, notes());
+        // The file is on main as soon as the commit lands; the `ops` record
+        // follows once the cell has moved its pin.
+        let landed = s.eventually(Duration::from_secs(45), || note(s, "three").is_some() && applied("n3") > 0);
+        s.ok("the alarm applies it on a later try", landed && note(s, "three").as_deref() == Some(&b"three"[..]), "");
+    } else {
+        // nothing sabotages it: the note lands on the first try
+        let sabotage = "sabotaged commit packs (each try losing to another writer)";
+        s.skip_lever("a commit that keeps failing answers a passing failure", sabotage);
+        s.skip_lever("an unrelated call answers meanwhile", sabotage);
+        let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
+        s.skip_lever("the alarm applies it on a later try", sabotage);
+        s.ok("(the note lands on its first try)", r.status == 200 && note(s, "three").as_deref() == Some(&b"three"[..]) && notes() == 4, &r);
+    }
     s.ok("its record is published once, and it is applied once", slugs("three") == 1 && applied("n3") == 1, json!(channel("feed")));
-    let packs = s.fake.commit_pack_count();
+    let packs = s.mark(&repo);
     let r = call("note", "n3", json!({ "slug": "three", "text": "three" }))?;
-    s.ok("its replay applies nothing again", r.status == 200 && r.body["replayed"] == true && s.fake.commit_pack_count() == packs && slugs("three") == 1, &r);
+    s.ok("its replay applies nothing again", r.status == 200 && r.body["replayed"] == true && s.commits_since(&repo, &packs) == 0 && slugs("three") == 1, &r);
 
     // a restart: the next activation settles what was pending, and only that
     s.stop()?;
