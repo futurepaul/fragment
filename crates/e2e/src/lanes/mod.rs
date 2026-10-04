@@ -129,7 +129,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
+        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "codestore", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
     ],
 ];
