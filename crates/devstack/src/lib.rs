@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod node;
 mod node_release;
+pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).

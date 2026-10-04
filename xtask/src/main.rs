@@ -12,11 +12,16 @@
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
-//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
-//!                    or --except <section>[,...]; --rehearse keeps the hosted lane's
-//!                    rules on the local node). CI splits it in two steps, so the
-//!                    cache saves between them: --build-only (builds, runs
-//!                    nothing), then --no-build (runs what the build left)
+//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...],
+//!                    --except <section>[,...], or --shard <k>/<n> (the table's, as CI
+//!                    splits it); --summary <file> writes the run's summary; --rehearse
+//!                    keeps the hosted lane's rules on the local node).
+//!                    CI splits it in two steps, so the cache saves between them:
+//!                    --build-only (builds, runs nothing), then --no-build (runs
+//!                    what the build left)
+//!   e2e-summary <dir>
+//!                    CI's `e2e` check: the shards' summaries in <dir> make the
+//!                    suite exactly once, and every check passed (summary.rs)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>]
 //!                    the suite against that branch deployment on its real vendors
@@ -46,6 +51,7 @@ use fragment_devstack as devstack;
 
 mod deploy;
 mod dns;
+mod summary;
 
 
 const WORKER_BUILD_VERSION: &str = "0.8.5";
@@ -386,10 +392,11 @@ fn main() -> Result<()> {
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
+        Some("e2e-summary") => summary::e2e_summary(&args[1..]),
         Some("check") => check(),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...]] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 
