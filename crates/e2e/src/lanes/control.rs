@@ -209,10 +209,16 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let repo = c["repo"].as_str().unwrap_or("").to_string();
-    s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
+    // the fake's url form is UUID-shaped; another store's is its own (the
+    // service's is the name itself: macrofiche's contract, question 1)
+    let url_form = match s.store_levers() {
+        true => repo.len() == 36 && repo.matches('-').count() == 4,
+        false => !repo.is_empty(),
+    };
+    s.ok("create returns the url-form repo identity", url_form, &r);
     s.ok(
         "the repo exists in code.storage as <label>--<username>",
-        s.fake.repo_url(&format!("{label}--{owner_u}")).as_deref() == Some(repo.as_str()),
+        s.repo_url(&format!("{label}--{owner_u}")).as_deref() == Some(repo.as_str()),
         &repo,
     );
     s.ok(
@@ -220,7 +226,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
         c["canonical"] == api.site_url(&name, ""),
         &r,
     );
-    s.hook(api, c);
+    s.hook(api, &owner, c);
 
     let r = api.create(&owner, &label)?;
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
@@ -274,7 +280,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", "/api/fragments", None)?;
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
     // a busy org: the repo is on a later page of the org's newest-first list
-    s.fake.seed_filler(150);
+    s.seed_filler(150);
     let r = api.create(&owner, &label)?;
     s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
