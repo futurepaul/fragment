@@ -88,11 +88,20 @@ pub struct CelldOptions {
     pub with: Vec<PathBuf>,
     pub port: u16,
     pub log_dir: PathBuf,
+    /// A private CA (PEM) a Worker's TLS trusts beside the public roots
+    /// (`CELLD_EXTRA_CA_FILE`): an intranet's, for the cell's own fetches.
+    pub extra_ca_file: Option<PathBuf>,
+    /// A process group of its own, so the e2e crashes it whole. `xtask dev`
+    /// keeps it in the terminal's, so Ctrl-C reaches it as it reaches xtask:
+    /// in a group of its own, it outlived a Ctrl-C, holding its port.
+    pub own_group: bool,
 }
 
-/// One `celld dev` process, in a process group of its own.
+/// One `celld dev` process, in a process group of its own or the
+/// terminal's (`CelldOptions::own_group`).
 pub struct CelldNode {
     child: Child,
+    own_group: bool,
     pub base: String,
     pub log: PathBuf,
 }
@@ -111,7 +120,14 @@ impl CelldNode {
         // the fork's hardening (docs/hardening.md): a facet's database
         // capped past the cell's own 16 MiB, and loaded code locked down
         cmd.env("PATH", path).env("CELLD_FACET_MAX_BYTES", (20u64 << 20).to_string()).env("CELLD_DYNAMIC_LOCKDOWN", "1").env("NO_COLOR", "1");
-        cmd.current_dir(&opts.project).process_group(0);
+        match &opts.extra_ca_file {
+            Some(ca) => cmd.env("CELLD_EXTRA_CA_FILE", ca),
+            None => cmd.env_remove("CELLD_EXTRA_CA_FILE"),
+        };
+        cmd.current_dir(&opts.project);
+        if opts.own_group {
+            cmd.process_group(0);
+        }
         let t0 = Instant::now();
         let mut child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn().with_context(|| format!("start {}", tools.celld.display()))?;
         let ready = format!("ready  http://127.0.0.1:{}", opts.port);
@@ -130,15 +146,18 @@ impl CelldNode {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        Ok((CelldNode { child, base: format!("http://127.0.0.1:{}", opts.port), log }, t0.elapsed()))
+        Ok((CelldNode { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), log }, t0.elapsed()))
     }
 
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         Ok(self.child.wait()?)
     }
 
+    /// Signals its group when it has one of its own, else celld alone
+    /// (which stops the node it supervises).
     fn signal_group(&self, signal: &str) {
-        let _ = Command::new("kill").args([signal, "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        let target = if self.own_group { format!("-{}", self.child.id()) } else { self.child.id().to_string() };
+        let _ = Command::new("kill").args([signal, "--", &target]).stderr(Stdio::null()).status();
     }
 
     /// A graceful stop, as Ctrl-C stops it (celld dev answers SIGINT): its
@@ -169,7 +188,7 @@ impl Drop for CelldNode {
     /// An early error must not leave celld holding the port: its group
     /// (the supervisor and its node) goes with it.
     fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-INT", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        self.signal_group("-INT");
     }
 }
 

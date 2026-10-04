@@ -613,7 +613,7 @@ impl Suite {
         let node = match &self.celld {
             None => devstack::AnyNode::Wrangler(devstack::Node::start(tools, &opts)?.0),
             Some(celld) => {
-                let copts = devstack::celld::CelldOptions { project: opts.project, with: opts.with, port: opts.port, log_dir: opts.log_dir };
+                let copts = devstack::celld::CelldOptions { project: opts.project, with: opts.with, port: opts.port, log_dir: opts.log_dir, extra_ca_file: None, own_group: true };
                 devstack::AnyNode::Celld(devstack::celld::CelldNode::start(celld, &copts)?.0)
             }
         };
