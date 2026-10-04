@@ -43,6 +43,14 @@ impl AnyNode {
             AnyNode::Celld(n) => n.crash(),
         }
     }
+
+    /// This boot's log.
+    pub fn log(&self) -> &Path {
+        match self {
+            AnyNode::Wrangler(n) => &n.log,
+            AnyNode::Celld(n) => &n.log,
+        }
+    }
 }
 
 /// A node must announce "ready" within this: wrangler builds the computer
