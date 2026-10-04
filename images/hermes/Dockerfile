@@ -8,8 +8,21 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+# (or linux/arm64: Hermes' image is published for both, and every stage
+# here is built for the platform asked for; docs/self-host.md, seam 2).
 
 ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
+
+# sandbox-shim, as images/stub/Dockerfile takes it: Cloudflare's build for
+# amd64, and for arm64 built from the same source.
+FROM docker.io/cloudflare/sandbox:1.0.0 AS shim-amd64
+FROM rust:1.99-alpine AS shim-arm64
+RUN apk add --no-cache build-base
+ADD https://github.com/cloudflare/sandbox-sdk.git#f9e972a14123bef3b93e9bb337bab6e83419fe7e /src
+WORKDIR /src
+RUN cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && mkdir -p /usr/local/bin && cp target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM shim-${TARGETARCH} AS shim
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -52,7 +65,7 @@ ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c4
 RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's), named to Hermes by
