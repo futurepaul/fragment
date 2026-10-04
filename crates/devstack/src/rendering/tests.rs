@@ -97,15 +97,7 @@ fn a_session_carries_cdp_and_closes() {
     assert_eq!(status_of(socket(&r, &id).unwrap_err()), 409);
     ws.close(None).unwrap();
     // the first's close is seen, then another may come
-    let t0 = Instant::now();
-    let mut again = loop {
-        match socket(&r, &id) {
-            Ok(ws) => break ws,
-            Err(e) if t0.elapsed() < Duration::from_secs(5) => assert_eq!(status_of(e), 409),
-            Err(e) => panic!("a client after the first: {e}"),
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let mut again = socket_when_free(&r, &id);
     again.send(Message::Text(r#"{"id":2}"#.into())).unwrap();
     assert_eq!(again.read().unwrap(), Message::Text(r#"{"id":2}"#.into()));
     let (status, body) = http("DELETE", &format!("{}/v1/devtools/browser/{id}", r.url));
@@ -193,6 +185,75 @@ fn an_idle_session_is_stopped_and_a_restart_starts_clean() {
     ws.send(Message::Text(r#"{"id":4}"#.into())).unwrap();
     assert_eq!(ws.read().unwrap(), Message::Text(r#"{"id":4}"#.into()));
     drop(again);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The session's socket, once its last client has left (409 until then).
+fn socket_when_free(r: &Rendering, id: &str) -> Socket {
+    let t0 = Instant::now();
+    // bounded: five seconds of 409s
+    loop {
+        match socket(r, id) {
+            Ok(ws) => return ws,
+            Err(e) if t0.elapsed() < Duration::from_secs(5) => assert_eq!(status_of(e), 409),
+            Err(e) => panic!("a client after the last: {e}"),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A client's frame as bytes: `first` (FIN, reserved bits, opcode), its
+/// payload masked as a client's must be.
+fn masked(first: u8, payload: &[u8]) -> Vec<u8> {
+    assert!(payload.len() < 126, "a short frame");
+    let mask = [0x12, 0x34, 0x56, 0x78];
+    let mut out = vec![first, 0x80 | payload.len() as u8];
+    out.extend_from_slice(&mask);
+    out.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    out
+}
+
+/// A message's fragments, with a ping between them, reach the browser as
+/// one message. Each frame that breaks the protocol ends the client's
+/// socket with its close code (1002; 1007 for text that is not UTF-8;
+/// 1009 past `MESSAGE_MAX`), and the session takes the next client.
+#[test]
+fn a_clients_fragments_are_joined_and_a_broken_frame_closes_with_its_code() {
+    use tungstenite::protocol::frame::coding::{Data, OpCode};
+    use tungstenite::protocol::frame::Frame;
+    let _exec = crate::TEST_EXEC.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = scratch("frames");
+    let r = renderer(stand_in(&dir, "echo", ECHO), &dir.join("state"));
+    let id = acquire_one(&r, 60_000);
+    let mut ws = socket_when_free(&r, &id);
+    ws.send(Message::Frame(Frame::message("{\"id\":1,", OpCode::Data(Data::Text), false))).unwrap();
+    ws.send(Message::Ping("between".into())).unwrap();
+    ws.send(Message::Frame(Frame::message("\"x\":", OpCode::Data(Data::Continue), false))).unwrap();
+    ws.send(Message::Frame(Frame::message("2}", OpCode::Data(Data::Continue), true))).unwrap();
+    let joined = (0..10).map(|_| ws.read().unwrap()).find(|m| m.is_text());
+    assert_eq!(joined, Some(Message::Text("{\"id\":1,\"x\":2}".into())), "one message, whole");
+    ws.close(None).unwrap();
+    let mut past = vec![0x82, 0x80 | 127];
+    past.extend_from_slice(&(MESSAGE_MAX as u64 + 1).to_be_bytes());
+    past.extend_from_slice(&[1, 2, 3, 4]);
+    for (what, bytes, code) in [
+        ("an unmasked frame", vec![0x81, 0x01, b'x'], 1002u16),
+        ("a reserved bit", masked(0xC1, b"x"), 1002),
+        ("an unknown opcode", masked(0x83, b"x"), 1002),
+        ("a fragmented ping", masked(0x09, b"x"), 1002),
+        ("text that is not UTF-8", masked(0x81, &[0xff, 0xfe]), 1007),
+        ("a frame past MESSAGE_MAX", past, 1009),
+    ] {
+        let mut ws = socket_when_free(&r, &id);
+        let tungstenite::stream::MaybeTlsStream::Plain(raw) = ws.get_mut() else { panic!("plain") };
+        raw.write_all(&bytes).unwrap();
+        let closed = (0..10).map(|_| ws.read()).find(|m| !matches!(m, Ok(Message::Pong(_))));
+        assert!(matches!(&closed, Some(Ok(Message::Close(Some(f)))) if u16::from(f.code) == code), "{what}: {closed:?}");
+    }
+    let mut ws = socket_when_free(&r, &id);
+    ws.send(Message::Text(r#"{"id":5}"#.into())).unwrap();
+    assert_eq!(ws.read().unwrap(), Message::Text(r#"{"id":5}"#.into()), "the session outlives its broken clients");
+    drop(r);
     fs::remove_dir_all(&dir).unwrap();
 }
 
