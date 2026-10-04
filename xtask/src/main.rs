@@ -478,11 +478,14 @@ const E2E_BIN: &str = "target/release/fragment-e2e";
 /// What the e2e runs: the workers (build.rs: in parallel once worker-build
 /// has its tools), the CLI (the e2e drives it too) and the suite beside
 /// them, and the computer images the node's boot builds, built ahead
-/// beside them all so its build finds every layer cached.
+/// beside them all so its build finds every layer cached. A node on celld
+/// builds none (its computers are a sandcastle node's: docs/self-host.md,
+/// seam 2), so neither does its run, nor needs Docker.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
+    let celld = std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() == Ok("celld");
     let built = std::thread::scope(|s| {
-        let images = s.spawn(build::images);
+        let images = s.spawn(move || if celld { Ok(()) } else { build::images() });
         let native = s.spawn(build_native);
         let workers = build::workers();
         workers.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
