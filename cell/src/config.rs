@@ -98,9 +98,14 @@ pub struct Config {
     /// other branches' in one zone.
     host_label_suffix: Option<String>,
     /// `FRAGMENT_COMPUTER_IMAGE`: the image a new computer is pinned to (a
-    /// name in wrangler.jsonc's `containers` images). Unset, the deployment
-    /// makes no computers.
+    /// name in wrangler.jsonc's `containers` images, or in `FRAGMENT_NODES`'
+    /// images). Unset, the deployment makes no computers.
     pub computer_image: Option<String>,
+    /// `FRAGMENT_NODES`: the sandcastle nodes computers are placed on, and
+    /// their images by architecture (`fragment_core::placement`;
+    /// docs/self-host.md, seam 2). Unset, computers run in the runtime's
+    /// own containers (`ctx.container`).
+    pub nodes: Option<fragment_core::placement::Nodes>,
     /// `FRAGMENT_COMPUTER_SNAPSHOTS=off`: computers sleep without a
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
@@ -232,6 +237,20 @@ pub struct ModelUpstream {
 /// `FRAGMENT_MODEL_URL` with `FRAGMENT_MODELS`, a JSON object of catalog
 /// ids to the server's names. A URL without a map, a map naming no model,
 /// or a malformed one is refused at the first request.
+/// The nodes computers are placed on (`FRAGMENT_NODES`): a deployment
+/// whose list is malformed, or that still names one node the way the spike
+/// first did, is refused at its first request.
+fn nodes(env: &Env, computer_image: Option<&str>) -> Option<fragment_core::placement::Nodes> {
+    for gone in ["FRAGMENT_NODE_URL", "FRAGMENT_NODE_SECRET", "FRAGMENT_NODE_IMAGES"] {
+        assert!(var(env, gone).is_none(), "{gone} is gone: FRAGMENT_NODES lists the nodes, each one's secret in FRAGMENT_NODE_SECRET_<ID> (docs/self-host.md, seam 2)");
+    }
+    let nodes = fragment_core::placement::Nodes::parse(&var(env, "FRAGMENT_NODES")?).unwrap_or_else(|e| panic!("FRAGMENT_NODES: {e}"));
+    if let Some(image) = computer_image {
+        assert!(nodes.image_names().any(|n| n == image), "FRAGMENT_COMPUTER_IMAGE {image:?} is none of FRAGMENT_NODES' images");
+    }
+    Some(nodes)
+}
+
 fn model_upstream(env: &Env) -> Option<ModelUpstream> {
     let url = var(env, "FRAGMENT_MODEL_URL")?.trim_end_matches('/').to_string();
     assert!(url.starts_with("http://") || url.starts_with("https://"), "FRAGMENT_MODEL_URL is an http(s) URL, not {url:?}");
@@ -334,6 +353,7 @@ impl Config {
             legacy_host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
+            nodes: nodes(env, var(env, "FRAGMENT_COMPUTER_IMAGE").as_deref()),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))

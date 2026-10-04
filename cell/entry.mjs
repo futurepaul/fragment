@@ -10,13 +10,18 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
-import { NodeContainer, nodeEgress, nodeOf, routeNodeEgress } from "./node.mjs";
+import { NodeContainer, Placements, goneNode, nodeEgress, nodesOf, probe, routeNodeEgress, take } from "./node.mjs";
 import { Uplink, routeNodeUplink } from "./uplink.mjs";
 
 // The last `arm` of a computer on a node, its isolate's to repeat.
 const NODE_ARM = "node/arm";
+// The meta row computer.rs keeps the node a computer is placed on in.
+const NODE_META = "node";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
+
+// A computer on nodes that has not been placed: nothing runs.
+const UNPLACED = Object.freeze({ running: false, images: {} });
 
 // The router is Rust's, but for two routes of a sandcastle node's, on the
 // platform's own host: its intercepts (node.mjs), which go to their
@@ -25,8 +30,8 @@ export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 function routed(request, env, rust) {
   const url = new URL(request.url);
   const platform = env.FRAGMENT_PLATFORM_URL ? new URL(env.FRAGMENT_PLATFORM_URL).host : url.host;
-  if (url.pathname === "/api/nodes/egress" && url.host === platform && nodeOf(env)) return routeNodeEgress(request, env);
-  if (url.pathname === "/api/nodes/uplink" && url.host === platform && nodeOf(env)) return routeNodeUplink(request, env);
+  if (url.pathname === "/api/nodes/egress" && url.host === platform && nodesOf(env)) return routeNodeEgress(request, env);
+  if (url.pathname === "/api/nodes/uplink" && url.host === platform && nodesOf(env)) return routeNodeUplink(request, env);
   return rust();
 }
 
@@ -159,36 +164,77 @@ export class Job extends WorkflowEntrypoint {
 // names the start it is for (its generation): a late call for an earlier
 // start (a sleep that finishes after a wake started another) touches
 // nothing. The container is the runtime's (`ctx.container`), or, when the
-// deployment places computers on a sandcastle node, the node's
-// (`NodeContainer`, node.mjs: the same API).
+// deployment places computers on sandcastle nodes (FRAGMENT_NODES), the
+// node's it is placed on (`NodeContainer`, node.mjs: the same API).
+// Placing it is computer.rs's (`place`), through `probe`, `take` and `pin`.
 class ContainerHost {
   #ctx;
   #env;
   #report;
   #generation = 0;
-  #backups;
-  #node;
+  #backups = null;
+  // the deployment's nodes (null: the runtime's containers), and this
+  // computer's container on the one it is placed on (null: not yet placed)
+  #nodes;
+  #node = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    const node = nodeOf(env);
-    this.#node = node ? new NodeContainer(node, ctx.id.toString()) : null;
-    this.#backups = new DirectoryBackup(this.#c, ctx.exports.DirectoryBackupGateway, {
+    this.#nodes = nodesOf(env);
+    if (!this.#nodes) this.#backups = this.#backupsOf(ctx.container);
+  }
+
+  #backupsOf(container) {
+    return new DirectoryBackup(container, this.#ctx.exports.DirectoryBackupGateway, {
       binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+      prefix: `computers/${this.#ctx.id}/backups/`,
     });
   }
 
+  // The container: the runtime's, or its node's. Before a computer on
+  // nodes is placed, nothing runs and nothing may be started.
   get #c() {
-    return this.#node || this.#ctx.container;
+    if (!this.#nodes) return this.#ctx.container;
+    return this.#node || UNPLACED;
   }
 
-  // A new isolate's first look at a node's container (`running` is the
-  // node's to say), before any request.
+  // A new isolate's first look, before any request: the node computer.rs
+  // placed the computer on (its meta row; the schema is applied before
+  // this runs), and what that node says of its container.
   refresh() {
+    if (!this.#nodes) return Promise.resolve();
+    const row = [...this.#ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", NODE_META)][0];
+    if (row) this.pin(row.value);
     return this.#node ? this.#node.refresh() : Promise.resolve();
+  }
+
+  // Whether computers run on sandcastle nodes here.
+  nodes() {
+    return this.#nodes !== null;
+  }
+
+  // Each node as placing a computer needs it (node.mjs `probe`).
+  probe() {
+    return probe(this.#env, this.#nodes);
+  }
+
+  // Whether node `id` takes `computer` (its object counts what it holds).
+  take(id, computer) {
+    return take(this.#env, this.#nodes.byId.get(id), computer);
+  }
+
+  // This computer runs on node `id`, which computer.rs recorded, from now
+  // on: a node FRAGMENT_NODES no longer lists answers every call NodeDown.
+  pin(id) {
+    if (this.#node) {
+      if (this.#node.node !== id) throw new Error(`placed on ${this.#node.node}, never ${id}`);
+      return;
+    }
+    const node = this.#nodes.byId.get(id) || goneNode(id);
+    this.#node = new NodeContainer(node, this.#ctx.id.toString());
+    this.#backups = this.#backupsOf(this.#node);
   }
 
   // An intercepted request from the node (node.mjs). An isolate that
@@ -199,15 +245,19 @@ class ContainerHost {
       const a = await this.#ctx.storage.get(NODE_ARM);
       if (a && this.adopt(a.generation)) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
     };
-    return nodeEgress(request, this.#env, this.#node, rearm);
+    const node = this.#node && this.#nodes.byId.get(this.#node.node);
+    return nodeEgress(request, node, this.#node, rearm);
   }
 
   running() {
     return this.#c.running;
   }
 
-  // The images the deployment declares (wrangler.jsonc `containers`).
+  // The images a computer may be pinned to: the deployment's (wrangler.jsonc
+  // `containers`), or, on nodes, FRAGMENT_NODES' that its node can run
+  // (every one, before it is placed).
   images() {
+    if (this.#nodes && !this.#node) return this.#nodes.images;
     return Object.keys(this.#c.images || {});
   }
 
@@ -234,15 +284,18 @@ class ContainerHost {
   // Starts `image` (or a snapshot of it), then watches it: its exit, for
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
+    if (this.#nodes && !this.#node) throw new Error("a computer on nodes is placed before it starts (computer.rs `place`)");
     this.#generation = generation;
     const opts = { env, enableInternet: true };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
+    else if (this.#node) throw new Error(`its node ${this.#node.node} has no ${image} image for its architecture (FRAGMENT_NODES' images)`);
     this.#c.start(opts);
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
+      // a start that failed is reported as that, by the start (computer.rs)
+      (e) => e?.startFailed || this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
   }
 
@@ -403,6 +456,7 @@ class ContainerHost {
   // on left the other end open: a screen whose desktop restarted kept its
   // page's stream, frozen (p5, 2026-10-05). Those go on as 1000.
   async port(port, request) {
+    if (this.#nodes && !this.#node) throw new Error("a computer that has never started has no ports");
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
@@ -456,14 +510,19 @@ export class Computer extends DurableObject {
   webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
 }
 
-// A sandcastle node that dials in (uplink.mjs): one object per node id,
-// holding its uplink, through which `NodeContainer` calls the node.
+// A sandcastle node's object (node.mjs, uplink.mjs): one per node id. It
+// counts the computers placed on the node, and, when the node dials in,
+// holds its uplink, through which `NodeContainer` calls it.
 export class Node extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.uplink = new Uplink(ctx, env);
+    this.placements = new Placements(ctx);
   }
-  fetch(request) { return this.uplink.fetch(request); }
+  fetch(request) {
+    if (new URL(request.url).pathname.startsWith("/__node/")) return this.placements.fetch(request);
+    return this.uplink.fetch(request);
+  }
   webSocketMessage(ws, message) { return this.uplink.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.uplink.webSocketClose(ws, code, reason, clean); }
   webSocketError(ws, error) { return this.uplink.webSocketError(ws, error); }

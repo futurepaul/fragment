@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::placement;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
@@ -189,6 +190,13 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
+    /// The sandcastle node it is placed on, for its life (docs/self-host.md,
+    /// seam 2). entry.mjs's `ContainerHost` reads this row as an isolate
+    /// starts, so its container's calls go to that node.
+    Node,
+    /// Why its last start found no node to run on: its own down, or none
+    /// with room. A start that comes up clears it.
+    NodeNote,
 }
 
 impl MetaKey {
@@ -203,6 +211,8 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
+            MetaKey::Node => "node",
+            MetaKey::NodeNote => "node_note",
         }
     }
 }
@@ -246,6 +256,9 @@ pub struct ComputerCell {
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// The last start's failure, when its node did not answer or no node
+    /// could take it: the wake that asked answers with it, typed.
+    node_failure: RefCell<Option<CellError>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -254,7 +267,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default(), node_failure: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -438,6 +451,12 @@ fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
+/// Whether a start failed for its node (down, or none to place it on), not
+/// for itself (docs/self-host.md, seam 2).
+fn node_failed(e: &CellError) -> bool {
+    matches!(e.code, ErrorCode::NodeDown | ErrorCode::NoNode)
+}
+
 impl ComputerCell {
     fn sql(&self) -> SqlStorage {
         self.state.storage().sql()
@@ -463,6 +482,10 @@ impl ComputerCell {
 
     fn set_meta(&self, k: MetaKey, v: &str) -> CellResult<()> {
         self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![k.key().into(), v.into()])
+    }
+
+    fn del_meta(&self, k: MetaKey) -> CellResult<()> {
+        self.exec("DELETE FROM meta WHERE key = ?", vec![k.key().into()])
     }
 
     fn lifecycle(&self) -> CellResult<Lifecycle> {
@@ -507,8 +530,37 @@ impl ComputerCell {
         Ok(host)
     }
 
+    /// A `ContainerHost` call. A node that does not answer is `NodeDown`
+    /// (node.mjs), typed; any other failure is the host's.
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
         js::invoke(&self.host()?, method, args).await
+    }
+
+    /// Places a computer that runs on sandcastle nodes at its first start
+    /// (`fragment_core::placement`: the rule, and why a computer then
+    /// stays): every node probed, ranked, and the best that still has room
+    /// as its object counts takes it. Placed already, or on the runtime's
+    /// containers, nothing.
+    async fn place(&self, id: &str, image: &str) -> CellResult<()> {
+        let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
+        if self.meta(MetaKey::Node)?.is_some() {
+            return Ok(());
+        }
+        let probes = js::from_js(&self.call("probe", &[]).await?).map_err(CellError::host)?;
+        let probes: Vec<placement::Probe> = serde_json::from_value(probes).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
+        let ranked = placement::rank(nodes, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
+        assert!(!ranked.is_empty() && ranked.len() <= placement::NODES_MAX, "a ranking names a node or says why none");
+        for node in &ranked {
+            // the node's object counts what it holds: a place another computer
+            // took since the probe is not given twice
+            if self.call("take", &[node.as_str().into(), id.into()]).await?.as_bool() == Some(true) {
+                self.set_meta(MetaKey::Node, node)?;
+                self.call("pin", &[node.as_str().into()]).await?;
+                console_log!("{}", json!({ "computer": id, "placed": node, "probes": probes }));
+                return Ok(());
+            }
+        }
+        Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.join(", "))))
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -631,8 +683,14 @@ impl ComputerCell {
             }
             self.flush_awake().await;
         }
+        self.node_failure.borrow_mut().take();
         // a wake that started nothing says why
-        if let Some(why) = self.drive(Event::Wake { why }).await? {
+        let refused = self.drive(Event::Wake { why }).await?;
+        // as does one whose start found its node down, or no node at all
+        if let Some(e) = self.node_failure.borrow_mut().take() {
+            return Err(e);
+        }
+        if let Some(why) = refused {
             return Err(CellError::new(ErrorCode::WontWake, why));
         }
         Ok(())
@@ -710,12 +768,13 @@ impl ComputerCell {
     async fn start(&self, generation: u64) -> Event {
         let planned = match self.plan(generation).await {
             Ok(p) => p,
-            Err(e) => return Event::StartFailed { generation, why: e.message },
+            Err(e) => return self.start_failed(generation, e),
         };
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         match self.try_start(generation, &planned).await {
             Ok(()) => {
+                let _ = self.del_meta(MetaKey::NodeNote);
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
                 match self.update_saves(came_up) {
                     // one line per start that came up (lesson 14): what it restored
@@ -732,7 +791,8 @@ impl ComputerCell {
                 let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "its save would not restore".into()]).await;
                 Event::RestoreFailed { generation, why, older }
             }
-            Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
+            // a node that is down is no snapshot's failure
+            Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot && !node_failed(&e) => {
                 // forgotten before the destroy: the exit that reports is the
                 // start's own failure (`exit_of`), and any start after it
                 // restores the save
@@ -743,15 +803,30 @@ impl ComputerCell {
             }
             Err(Unstarted::Failed(e)) => {
                 let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the start failed".into()]).await;
-                Event::StartFailed { generation, why: e.message }
+                self.start_failed(generation, e)
             }
         }
+    }
+
+    /// A start that failed, as its event. Its node down, or no node to place
+    /// it on: kept, and the wake that asked says so, typed.
+    fn start_failed(&self, generation: u64, e: CellError) -> Event {
+        let why = e.message.clone();
+        if node_failed(&e) {
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "node": e.code, "why": e.message }));
+            let _ = self.set_meta(MetaKey::NodeNote, &e.message);
+            *self.node_failure.borrow_mut() = Some(e);
+        }
+        Event::StartFailed { generation, why }
     }
 
     /// What the start `generation` restores, recorded as the start under
     /// way. Nothing awaits between reading the saves and recording it.
     async fn plan(&self, generation: u64) -> CellResult<Planned> {
         let image = self.must(MetaKey::Image)?;
+        // on sandcastle nodes it is placed first (docs/self-host.md, seam
+        // 2): its image's reference is its node's
+        self.place(&self.must(MetaKey::Id)?, &image).await?;
         let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
         let (plan, save) = self.update_saves(|s| {
@@ -1210,19 +1285,21 @@ impl ComputerCell {
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host("a computer's origin needs FRAGMENT_HOST_SUFFIX"))?;
         let saves = self.saves()?;
-        // why it won't wake; else what its saves' failures say (a sleep that
-        // kept its container, or slept unsaved); else why a wake was refused
+        // why it won't wake; else why its node could not run it (seam 2);
+        // else what its saves' failures say (a sleep that kept its
+        // container, or slept unsaved); else why a wake was refused
         let why = match why {
             Some(why) => Some(why),
-            None => match self.meta(MetaKey::SaveNote)? {
-                Some(note) => Some(note),
-                None => self.meta(MetaKey::Note)?,
+            None => match (self.meta(MetaKey::NodeNote)?, self.meta(MetaKey::SaveNote)?) {
+                (Some(note), _) | (None, Some(note)) => Some(note),
+                (None, None) => self.meta(MetaKey::Note)?,
             },
         };
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
+            node: self.meta(MetaKey::Node)?,
             phase,
             why,
             agents: self.agents()?,
@@ -1928,6 +2005,24 @@ impl ComputerEgress {
         }
         let resp = answered.or_else(|e| e.response().map_err(CellError::from)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
         resp.into()
+    }
+}
+
+/// The deployment's nodes as entry.mjs's `ContainerHost` and node.mjs read
+/// them (`fragment_core::placement::Nodes::for_js`: each node's reach, its
+/// secret's name and its images), or `null` where computers run in the
+/// runtime's own containers. Checked here, so the JavaScript parses
+/// nothing. A class with a static method, as `InternalRoute` is.
+#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+pub struct NodesConfig;
+
+#[wasm_bindgen]
+impl NodesConfig {
+    pub fn read(env: Env) -> JsValue {
+        match &Config::from_env(&env).nodes {
+            Some(nodes) => js::to_js(&nodes.for_js()),
+            None => JsValue::NULL,
+        }
     }
 }
 
