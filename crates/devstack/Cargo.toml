@@ -17,3 +17,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 flate2 = "1"
 tar = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+# codestore.rs's tests make a fixed org key
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }
