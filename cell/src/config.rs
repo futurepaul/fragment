@@ -141,6 +141,11 @@ pub struct Config {
     /// the AI binding, the gateway and `FRAGMENT_AI_URL`; the rest go on to
     /// them.
     pub model_upstream: Option<ModelUpstream>,
+    /// `FRAGMENT_BROWSER_URL`: where preview cards are shot when it is
+    /// not the `BROWSER` binding (docs/self-host.md, seam 7): a service
+    /// answering the binding's routes (`/v1/devtools/browser…`) under this
+    /// base, without a trailing slash. Set, it wins over the binding.
+    pub browser_url: Option<String>,
     workos: Option<WorkOsConfig>,
     oidc: Option<OidcConfig>,
     /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
@@ -342,6 +347,9 @@ impl Config {
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
             model_upstream: model_upstream(env),
+            browser_url: var(env, "FRAGMENT_BROWSER_URL").map(|u| u.trim_end_matches('/').to_string()).inspect(|u| {
+                assert!(u.starts_with("http://") || u.starts_with("https://"), "FRAGMENT_BROWSER_URL is an http(s) URL, not {u:?}");
+            }),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())

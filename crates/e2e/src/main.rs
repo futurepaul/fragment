@@ -233,6 +233,10 @@ pub struct Suite {
     node: Option<devstack::AnyNode>,
     /// celld's tools when the node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
     celld: Option<devstack::celld::CelldTools>,
+    /// Where a node without the `BROWSER` binding (celld) shoots preview
+    /// cards: the renderer over the pinned chrome-headless-shell, its
+    /// pages let reach this run's fragments alone (docs/self-host.md, seam 7).
+    renderer: Option<devstack::rendering::Rendering>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
@@ -308,12 +312,6 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
-    }
-
-    /// Whether the node shoots preview cards: celld has no Browser
-    /// Rendering, and a deployment without it takes no shots.
-    pub fn shoots_cards(&self) -> bool {
-        self.rung != needs::Rung::Celld
     }
 
     /// Whether people sign in through the OpenID Connect fake
@@ -584,6 +582,7 @@ impl Suite {
             }),
             node: None,
             containers: true,
+            browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -1099,6 +1098,11 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(other) = std::env::var("FRAGMENT_E2E_SIGNIN").ok().filter(|s| s != "workos" && s != "oidc") {
         bail!("FRAGMENT_E2E_SIGNIN is workos or oidc, not {other}");
     }
+    let port = devstack::free_port()?;
+    let renderer = match &celld {
+        Some(_) => Some(renderer(&scratch, port)?),
+        None => None,
+    };
     let (rung, shared) = match rehearse {
         None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
@@ -1132,7 +1136,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         tools: Some(tools),
         node: None,
         celld,
-        port: devstack::free_port()?,
+        renderer,
+        port,
         run,
         fake: codestore.fake,
         store: codestore.store,
@@ -1172,6 +1177,20 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The renderer a celld node shoots preview cards with: the pinned
+/// chrome-headless-shell (fetched into `target/tools` on first use), its
+/// pages let through to the run's fragments' hosts (both sites' suffixes)
+/// on the node's port, and to nothing else.
+fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering> {
+    let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let origins = devstack::rendering::Origins::new(&[SUFFIX, BOATS], port, upstream);
+    let opts = devstack::rendering::Options { browser: browser.bin, state: scratch.join("renderer"), origins, ca_file: None, port: 0 };
+    let r = devstack::rendering::Rendering::start(opts)?;
+    println!("cards: {} (the renderer at {}; its pages reach this run's fragments alone)", browser.version, r.url);
+    Ok(r)
 }
 
 /// A local run's code store, as `codestore` started or found it.

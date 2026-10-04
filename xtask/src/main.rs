@@ -175,7 +175,7 @@ fn dev(args: &[String]) -> Result<()> {
         (None, Some(u)) => format!("{u} (the WorkOS fake)"),
         (None, None) => format!("WorkOS {}", workos.client_id),
     };
-    let fleet = devstack::Fleet {
+    let mut fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
         codestorage_key_pem: store.key_pem.clone(),
@@ -209,7 +209,15 @@ fn dev(args: &[String]) -> Result<()> {
         model_upstream,
         node,
         containers: docker,
+        browser_url: None,
     };
+    // preview cards: wrangler's workerd has Browser Rendering's local mode;
+    // on celld, which has no `browser` binding, the renderer shoots them
+    let renderer = match celld {
+        true => Some(dev_renderer(&fleet)?),
+        false => None,
+    };
+    fleet.browser_url = renderer.as_ref().map(|(r, _)| r.url.clone());
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
     // the agents' Worker runs beside it, as a deployment runs it, bound to
@@ -257,6 +265,10 @@ fn dev(args: &[String]) -> Result<()> {
         (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
+    match &renderer {
+        Some((r, said)) => println!("  cards:        {said} (the renderer at {})", r.url),
+        None => println!("  cards:        Browser Rendering's local mode (wrangler's Chrome for Testing)"),
+    }
     println!("  sign-in:      http://127.0.0.1:{port}/ via {signin_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
     // Ctrl-C stops the node, and xtask outlives it to remove the containers
@@ -278,6 +290,33 @@ fn dev(args: &[String]) -> Result<()> {
         m.stop()?;
     }
     Ok(())
+}
+
+/// The dev stack's renderer on celld (docs/self-host.md, seam 7): the
+/// pinned chrome-headless-shell (`target/tools`, fetched on first use, or
+/// `FRAGMENT_BROWSER_ZIP`), its pages let reach the fleet's fragments'
+/// origins alone, served on this box at the platform URL's port (the node,
+/// or an edge before it) unless `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`)
+/// names where. `FRAGMENT_BROWSER_CA_FILE` names a private CA's PEM the
+/// browser trusts, for fragments on https under it. With it, what the
+/// banner says the browser is.
+fn dev_renderer(fleet: &devstack::Fleet) -> Result<(devstack::rendering::Rendering, String)> {
+    let suffix = fleet.host_suffix.as_deref().context("cards need fragments on hosts of their own (a host suffix)")?;
+    let platform = fleet.platform_url.as_deref().context("cards need the platform's URL: its scheme and port are the fragments'")?;
+    let upstream = match std::env::var("FRAGMENT_BROWSER_UPSTREAM") {
+        Ok(u) => Some(u.parse().with_context(|| format!("FRAGMENT_BROWSER_UPSTREAM is ip:port, not {u:?}"))?),
+        Err(_) => None,
+    };
+    let origins = devstack::rendering::Origins::of_platform(suffix, platform, upstream).map_err(anyhow::Error::msg)?;
+    let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::rendering::Options {
+        browser: browser.bin,
+        state: devstack::repo_root().join(format!("target/devstack/renderer-{}", origins.port)),
+        origins,
+        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(std::path::PathBuf::from),
+        port: 0,
+    };
+    Ok((devstack::rendering::Rendering::start(opts)?, browser.version))
 }
 
 /// The dev stack's code store, as it runs (docs/self-host.md, seam 5).
