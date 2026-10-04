@@ -199,7 +199,7 @@ production uses.
 
 ### 4. Sign-in: OpenID Connect
 
-**Today.**
+**Master today.**
 
 - The sign-in is WorkOS-shaped: `/user_management/authorize`, then a JSON
   `authenticate` call.
@@ -209,24 +209,151 @@ production uses.
 - People are keyed by `(issuer, subject)`, with the issuer
   `workos:<client_id>`. That key is already right for OIDC.
 
-**Self-hosted.** Standard OIDC: discovery, an authorization code with
-PKCE, and an `id_token` verified against the provider's JWKS. The
-configuration is a discovery URL and a client-secret file. The claims
-map is configurable, and an email address is not assumed: the identity
-falls back to `preferred_username`, `upn`, then `sub`. Admins can come
-from a groups claim. SAML and LDAP go through a bridge the company
-already runs (Keycloak, Authentik, Dex), not into the cell.
+**Built (branch `selfhost-oidc`): any OpenID Connect provider, beside
+WorkOS.** Configuration says who signs people in: with
+`FRAGMENT_OIDC_ISSUER` set, OIDC does; else WorkOS, as before. WorkOS
+configured beside OIDC serves Pipes' connections alone.
 
-**One box, offline.** Dex with static users is one binary. The spike
-uses the WorkOS fake (any email, no password), labeled as the fake.
+| Setting | What |
+|---|---|
+| `FRAGMENT_OIDC_ISSUER` | the issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback). Its metadata is at `<issuer>/.well-known/openid-configuration` |
+| `FRAGMENT_OIDC_CLIENT_ID` | the client |
+| `FRAGMENT_OIDC_CLIENT_SECRET` | a Worker secret, read only by keys.rs (docs/secrets.md); absent, the client is public and PKCE is its only proof |
+| `FRAGMENT_OIDC_SCOPES` | default `openid email profile` |
+| `FRAGMENT_OIDC_CLAIMS` | JSON: `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. ADFS: `{"username": ["upn", "unique_name"]}` |
+| `FRAGMENT_OIDC_AUTH` | `client_secret_basic`, `client_secret_post` or `none`; default, with a secret, the first of the two the provider lists |
+
+How it works:
+
+- **The request.** The router reads the provider's metadata and sends the
+  browser to its `authorization_endpoint` with a state (bound to the
+  browser by a cookie, as for WorkOS), a nonce, and PKCE's S256
+  challenge. The registry keeps the verifier and the nonce with the state;
+  the verifier never leaves it.
+- **The callback.** The registry spends the state first, before anything
+  is awaited, so a callback sent again or raced finishes once. It
+  exchanges the code form-encoded (RFC 6749 4.1.3, with the verifier),
+  the client authenticated with Basic (id and secret form-encoded first,
+  2.3.1) or in the form.
+- **The id_token is verified** (`fragment_core::oidc`): its signature by
+  a key of the provider's JWKS only, RS256 (the `rsa` crate, public-key
+  operations only) or ES256 (`p256`); never `none`, an HMAC, an
+  algorithm the provider does not list, or a key the token names itself.
+  Then `iss` exactly, `aud` (and `azp` when there are several audiences),
+  `exp`, `iat` and `nbf` within two minutes of skew, an `iat` at most 15
+  minutes old, the nonce, and `sub`. A token that fails is 401, logged as
+  `signin.refused` with why.
+- **Who it is.** `(issuer URL, sub)`. The email, name and username are
+  attributes, refreshed at each sign-in and never matched. No email is
+  assumed: a sign-in is shown by its email, else its first username claim
+  (`preferred_username`, `upn`), else its `sub`.
+- **Caches.** The metadata and the JWKS are kept an hour per isolate. A
+  key the JWKS lacks fetches it again, at most once in 15 seconds: a
+  rotation is picked up within that, and a provider naming keys it never
+  published is not asked again and again. Only the provider's own token
+  endpoint hands the cell an id_token, so the bound is against a
+  misbehaving provider, not a stranger.
+- **Logout.** RP-initiated (RP-Initiated Logout 1.0) when the provider
+  advertises an `end_session_endpoint`: the session's id_token, kept
+  sealed for the registry, is the `id_token_hint` (Okta and ADFS require
+  one), with `client_id` and `post_logout_redirect_uri`. Otherwise (Dex),
+  logout ends the sessions here only.
+
+Where it lives: the rules in `crates/core/src/oidc.rs`; the metadata,
+keys and verification in `cell/src/oidc.rs`; the state, verifier, nonce
+and exchange in `cell/src/registry/signin.rs`; the secret and the token
+request in `cell/src/keys.rs`; the fake in `crates/fakes/src/oidc.rs`.
+
+**Private CAs.** A company's browsers already trust its CA. The cell's
+own fetches (metadata, JWKS, token) go through its runtime's TLS:
+
+- `wrangler dev`: Miniflare hands workerd the certificates in
+  `NODE_EXTRA_CA_CERTS` as trusted, so a private CA works.
+- celld: a Worker's `fetch` trusts the webpki (Mozilla) roots alone
+  (reqwest with rustls in `egress::client`), so a provider on a private
+  CA fails the TLS handshake. celld needs a setting for an extra CA
+  bundle, added to that client. **Not built**: it is celld's change.
+- Cloudflare: Workers trust public CAs. A provider on a private CA is
+  unreachable from Cloudflare anyway, unless it is fronted publicly.
+- On one box, the issuer may be plain http on loopback, as the fake and
+  Dex are here.
+
+**Offline providers.** Dex, Keycloak and Authentik serve discovery and
+a JWKS, and need no internet. ADFS 2016 and later does too, with `upn`
+and `unique_name` instead of an email. Entra needs the internet. SAML
+and LDAP go through a bridge the company already runs (Keycloak,
+Authentik, Dex), not into the cell.
+
+**Not built:**
+
+- admins from a groups claim. Operators stay `FRAGMENT_OPERATORS`. A
+  groups claim would need the registry to keep a role on the identity,
+  refreshed at each sign-in, and the signer's resolve to carry it.
+- `private_key_jwt`, the userinfo endpoint, refresh tokens, and back-
+  or front-channel logout. The platform's session is its own (30 days),
+  so **a person disabled at the provider keeps their sessions until they
+  end or sign out.** A company will ask for back-channel logout, or a
+  shorter session, next.
 
 **Connections** (WorkOS Pipes) are online by nature. With
-`FRAGMENT_CONNECTIONS` empty, a deployment offers none.
+`FRAGMENT_CONNECTIONS` empty, a deployment offers none. Under OIDC, a
+person has no WorkOS user, so they have no connections either.
+
+**Evidence, 2026-10-03:**
+
+- Host tests: 12 in `fragment_core::oidc`: valid tokens; bad signatures;
+  `none`, HS256 keyed by the secret and by the RSA key's bytes; wrong
+  `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, nonce and `sub`; a token
+  replayed into the next sign-in; a rotation and the refetch bound;
+  discovery; the token request; PKCE (RFC 7636's vector); the claim map.
+  The fake's own test runs the cell's half of the flow on those rules.
+- The e2e on celld, signing in through the OIDC fake
+  (`FRAGMENT_E2E_SIGNIN=oidc`): auth, identities and signin, 173 passed,
+  0 failed. Every WorkOS check of the signin section has an OIDC twin,
+  and OIDC adds:
+  - client_secret_basic used;
+  - a code injected under another sign-in's state is refused (PKCE);
+  - a spent code is refused at the provider;
+  - a person with no email is shown by their username;
+  - ES256 signs in;
+  - eight spoiled id_tokens are each refused with 401;
+  - a key rotation is picked up within the cooldown, with one JWKS fetch.
+- The restart section finishes a sign-in begun before the restart, on
+  either provider.
+- The whole suite on celld through the OIDC fake: 1273 passed, 1 failed,
+  12 skipped. The skips are the card checks, the container sections, and
+  the shell's Pipes checks, whose people are WorkOS's. The failure was
+  share's "the owner's list wakes no fragment", a race between the blank
+  template's install and a test hook, while another build loaded the
+  machine. Share alone then passed, 44 of 44.
+- The WorkOS lane, unchanged, on celld: auth, identities, signin,
+  levers, share, shell and restart, 314 passed, 0 failed.
+- **Dex v2.45.1** (the static binary from its release image, run
+  unprivileged in /tmp, memory storage, one static user) signed in on
+  the dev stack on celld (`FRAGMENT_DEV_PORT=9310`). curl drove the
+  browser's part.
+  - `/auth/login` went to Dex with S256, a state and a nonce. The
+    password form posted, and Dex redirected to the callback, which set
+    the session.
+  - The identity came back as `(http://127.0.0.1:5556/dex, <Dex's sub>)`,
+    with `admin@example.com` as its email. Dex's local users carry no
+    `preferred_username`, so the handle fell back to the `sub`.
+  - Signing in again was the same person. A wrong password signed no one
+    in.
+  - `fragment login` approved its key in that session, and `fragment
+    whoami` answered the same identity.
+  - Logout was local only (Dex advertises no `end_session_endpoint`), and
+    the session then answered 401.
+  - With Dex rotating its keys every 20 seconds (it signs with a new key
+    the moment it publishes it), sign-in still worked after a rotation:
+    the refetch picked up the new key.
 
 **Master:** sign-in on OIDC, verifying the `id_token`, is better on
-Cloudflare too. WorkOS AuthKit acts as an OAuth/OIDC authorization
-server (to verify for user sign-in), so it would be one provider among
-many, not the shape of the code.
+Cloudflare too. Nothing here is self-hosting-specific: it is a second
+provider beside WorkOS, chosen by configuration. If WorkOS AuthKit's
+OIDC endpoint serves user sign-in (to verify), WorkOS's own path could
+become one more issuer, and its unverified `sid` would go. Pipes would
+then still need the WorkOS user id, which AuthKit's `sub` is.
 
 ### 5. Files: the code-store contract
 
@@ -369,7 +496,8 @@ that also makes Cloudflare simpler or safer:
 2. **Computers reach a vendor directly.** Git behind an intercept means
    a computer needs no internet (seam 2).
 3. **Sign-in trusts an unverified access token.** OIDC with a verified
-   `id_token` fixes that, and makes WorkOS one provider (seam 4).
+   `id_token` fixes that, and makes WorkOS one provider (seam 4; built
+   beside WorkOS on `selfhost-oidc`).
 4. **A computer's placement is implicit in the `containers` binding.**
    As a field, it is decision 13's promise kept (seam 2).
 5. **Google Fonts** in the shell and the chat template (seam 11).
@@ -515,6 +643,9 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   - Not run: the engine jails each VM as root, and building the computer
     images needs Docker. Both are Paul's sudo.
 - **S6 and S7:** not started.
+- **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
+  beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
+  it signed in through a real Dex (seam 4, Evidence).
 
 ### Running it
 
@@ -539,12 +670,46 @@ Computers on a sandcastle node add three settings:
 - `FRAGMENT_NODE_IMAGES`: `{"stub": "<reference>"}`, the images the node
   holds, by the names computers are pinned to.
 
+Sign-in through OpenID Connect (seam 4): `FRAGMENT_SIGNIN=oidc` uses
+the fake (any email, or a username with no email). A real provider takes
+`FRAGMENT_OIDC_ISSUER`, `FRAGMENT_OIDC_CLIENT_ID` and
+`FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally `FRAGMENT_OIDC_SCOPES`,
+`FRAGMENT_OIDC_CLAIMS` and `FRAGMENT_OIDC_AUTH`. Its redirect URIs must
+include `http://127.0.0.1:<port>/auth/callback`. `FRAGMENT_DEV_PORT`
+moves the stack and its fakes, so it can run beside another on :8790.
+Dex on one box, as tried here:
+
+```sh
+# config.yaml: issuer http://127.0.0.1:5556/dex, storage memory, web.http 127.0.0.1:5556,
+# oauth2.skipApprovalScreen, a static client (fragment-dev, its secret, the redirect URI),
+# enablePasswordDB, and staticPasswords
+dex serve config.yaml &
+FRAGMENT_DEV_PORT=9310 FRAGMENT_OIDC_ISSUER=http://127.0.0.1:5556/dex \
+  FRAGMENT_OIDC_CLIENT_ID=fragment-dev FRAGMENT_OIDC_CLIENT_SECRET_FILE=client-secret \
+  CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+The e2e signs its people in through the OIDC fake with
+`FRAGMENT_E2E_SIGNIN=oidc`.
+
 To run offline, start the stack inside `unshare -rn` (bring `lo` up
 first). Give it the model through a unix socket: `socat` on the host from
 the socket to the model's port, and in the namespace from a loopback
 port to the socket.
 
 ## Open questions for Paul
+
+- **Sign-in's sessions against the provider's** (seam 4). A platform
+  session lasts 30 days whatever the provider says, so a person disabled
+  in the company's directory keeps their sessions until they end. The
+  choices are back-channel logout (the provider calls the platform), a
+  session no longer than the id_token's `auth_time` allows, or a fresh
+  sign-in every day.
+- **WorkOS through OIDC on master** (seam 4). If AuthKit's OIDC endpoint
+  serves user sign-in, WorkOS becomes one more issuer, and the
+  unverified `sid` path goes. It would change the issuer string of every
+  person fragment.club has (`workos:<client>` becomes a URL), so it needs
+  a migration of `subjects` or a mapping.
 
 - **Sandcastle as a node everywhere** (seam 2), rather than celld's
   `krun-engine` backend. This is recommended; it supersedes
