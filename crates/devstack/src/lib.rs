@@ -14,11 +14,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod browser;
+mod browser_release;
 pub mod celld;
 pub mod codestore;
 pub mod node;
 mod node_release;
+pub mod rendering;
 pub mod summary;
+
+/// Held by each test that writes an executable and runs it (node.rs,
+/// browser.rs, rendering): a process another test forks meanwhile would
+/// hold the file open for writing, and running it would fail (ETXTBSY).
+#[cfg(test)]
+pub(crate) static TEST_EXEC: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A running node, on either runtime.
 pub enum AnyNode {
@@ -358,6 +367,10 @@ pub struct Fleet {
     pub model_upstream: Option<ModelUpstreamVars>,
     /// A sandcastle node new computers run on (docs/self-host.md, seam 2).
     pub node: Option<NodeVars>,
+    /// Where preview cards are shot when the runtime has no `BROWSER`
+    /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering.rs;
+    /// docs/self-host.md, seam 7).
+    pub browser_url: Option<String>,
 }
 
 /// An OpenAI-compatible model server as the cell reads it.
@@ -499,6 +512,9 @@ impl Fleet {
             vars.push(("FRAGMENT_NODE_URL", n.url.as_str()));
             vars.push(("FRAGMENT_NODE_SECRET", n.secret.as_str()));
             vars.push(("FRAGMENT_NODE_IMAGES", n.images.as_str()));
+        }
+        if let Some(u) = &self.browser_url {
+            vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));
         }
         write_dev_vars(project, &vars)
     }
