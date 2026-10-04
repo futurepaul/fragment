@@ -217,11 +217,15 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     // each model call went through the model route, metered on the owner's ledger
     let calls = s.ai.calls()[calls_before..].to_vec();
     let paid = metered() - metered_before;
+    // through the gateway, its metadata names the agent, and the prefix
+    // cache keys on the same id; a self-hosted server gets the key alone
+    let opaque = |c: &fragment_fakes::workers_ai::AiCall| match s.openai_models() {
+        false => c.metadata["agent_id"].as_str().is_some_and(|a| a.len() == 16) && c.affinity.as_deref() == c.metadata["agent_id"].as_str(),
+        true => c.metadata.is_null() && c.affinity.as_deref().is_some_and(|a| a.len() == 16 && a.bytes().all(|b| b.is_ascii_hexdigit())),
+    };
     s.ok(
         "its turn's model calls went through the model route on its tier, each metered on its owner's ledger, its agent an opaque id",
-        calls.len() == 2
-            && paid == 2
-            && calls.iter().all(|c| c.model == "@cf/zai-org/glm-5.3-flash" && c.metadata["agent_id"].as_str().is_some_and(|a| a.len() == 16) && c.affinity.as_deref() == c.metadata["agent_id"].as_str()),
+        calls.len() == 2 && paid == 2 && calls.iter().all(|c| c.model == "@cf/zai-org/glm-5.3-flash" && opaque(c)),
         format!("{} calls, {paid} metered: {calls:?}", calls.len()),
     );
 

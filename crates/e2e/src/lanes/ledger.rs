@@ -246,10 +246,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
-    // a guest pays for nothing, so a deploy of theirs is not shot (decision 31)
+    // a guest pays for nothing, so a deploy of theirs is not shot (decision 31):
+    // a skip after this deploy (one before it, a node's with no browser, is not this one's)
+    let skips = || super::site::event_kinds(api, &guest, &guest_app).iter().filter(|k| *k == "card.skipped").count();
+    let before = skips();
     s.commit(&c, &[("notes/guest.md", Some(b"a guest deploys"))]);
     s.deploy(&c);
-    let skipped = s.eventually(wait, || super::site::event_kinds(api, &guest, &guest_app).iter().any(|k| k == "card.skipped"));
+    let skipped = s.eventually(wait, || skips() > before);
     s.ok(
         "a guest's deploy gets no preview card: its ledger takes no shot",
         skipped && super::site::cards(api, &guest_app)["cards"]["wanted"].is_null() && super::site::cards(api, &guest_app)["cards"]["flight"].is_null(),
@@ -294,11 +297,19 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "before": before, "after": after, "charge": paid }),
     );
     let call = s.ai.calls().last().cloned();
-    s.ok(
-        "the gateway's metadata names the payer by an opaque id, never a name",
-        call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
-        format!("{:?}", call.map(|c| c.metadata)),
-    );
+    match s.openai_models() {
+        false => s.ok(
+            "the gateway's metadata names the payer by an opaque id, never a name",
+            call.as_ref().is_some_and(|c| c.metadata["user_id"].as_str().is_some_and(|u| u.len() == 16 && u.bytes().all(|b| b.is_ascii_hexdigit()) && !owner_id.contains(u)) && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| c.metadata)),
+        ),
+        // a self-hosted model server has no gateway, and hears of no payer
+        true => s.ok(
+            "a self-hosted model server gets no gateway metadata: the payer is named nowhere",
+            call.as_ref().is_some_and(|c| c.metadata.is_null() && c.body["reasoning_effort"] == "low"),
+            format!("{:?}", call.map(|c| c.metadata)),
+        ),
+    }
 
     // ---- bug 3: a call that fails for good gives its reservation back
     s.ai.fail_next(&[400]);
@@ -585,7 +596,7 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let live = ship(s, &c, LEDGER_APP, LEDGER_JSON);
     landed(s, api, &owner, &name, wait);
     // the deploy's preview card, whose browser time is metered too
-    let card = super::site::card_showing(s, api, &owner, &name, &live);
+    let card = if s.shoots_cards() { super::site::card_showing(s, api, &owner, &name, &live) } else { None };
     for _ in 0..5 {
         api.op(&owner, &name, "notes", "q", json!({}))?;
     }
@@ -613,15 +624,23 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         matches!(usage, Some(Usage::Browser { ms }) if ms > 0) && usage.as_ref().is_some_and(|u| e["entry"]["charge"] == charge(u)) && e["entry"]["row"]["fragment"] == name.as_str()
     };
     let shots = || rows("card");
-    let metered = s.eventually(wait, || {
-        let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
-        shots().iter().any(shot)
-    });
-    s.ok(
-        "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
-        card.is_some() && metered && shots().iter().all(shot),
-        json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
-    );
+    match s.shoots_cards() {
+        true => {
+            let metered = s.eventually(wait, || {
+                let _ = lever(api, &name, "meter-now", json!({ "sample": false }));
+                shots().iter().any(shot)
+            });
+            s.ok(
+                "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+                card.is_some() && metered && shots().iter().all(shot),
+                json!({ "card": super::site::card_detail(&card), "ledger": shots() }),
+            );
+        }
+        false => s.skip(
+            "its preview card's shot reaches the owner's ledger: its browser time, priced at Browser Rendering's hour",
+            "this node has no browser (celld: no Browser Rendering), so it shoots no cards",
+        ),
+    }
     s.ok(
         "a storage sample bills its SQLite as byte-hours",
         rows("store").iter().any(|e| e["entry"]["row"]["usage"]["class"] == "sqlite" && e["entry"]["row"]["usage"]["byte_hours"].as_u64().is_some_and(|b| b > 0)),
