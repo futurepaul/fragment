@@ -29,19 +29,19 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let call = |op: &str, id: &str, input: Value| api.op(&owner, &name, op, id, input);
 
     // a mutation writes a file to main, once
-    let before = s.fake.commit_pack_count();
+    let before = s.mark(&repo);
     let r = call("add_note", "n1", json!({ "slug": "hello", "text": "# Hello\n" }))?;
     s.ok("a mutation's file write answers once it is committed", r.status == 200 && r.body["result"]["path"] == "notes/hello.md", &r);
-    s.ok("the file is on main", s.fake.file_at(&repo, "main", "notes/hello.md").as_deref() == Some(&b"# Hello\n"[..]), "");
+    s.ok("the file is on main", s.file_at(&repo, "main", "notes/hello.md").as_deref() == Some(&b"# Hello\n"[..]), "");
     let r = call("add_note", "n1", json!({ "slug": "hello", "text": "# Hello\n" }))?;
-    s.ok("a replay commits nothing again", r.body["replayed"] == true && s.fake.commit_pack_count() == before + 1, &r);
+    s.ok("a replay commits nothing again", r.body["replayed"] == true && s.commits_since(&repo, &before) == 1, &r);
     let r = call("read", "q1", json!({ "path": "notes/hello.md" }))?;
     s.ok("a query reads it at once (the pin followed the commit)", r.body["result"]["text"] == "# Hello\n", &r);
     let r = call("read", "q2", json!({ "path": "notes/none.md" }))?;
     s.ok("reading an absent file is null", r.status == 200 && r.body["result"]["text"].is_null(), &r);
     let r = call("pair", "p1", json!({ "a": "A" }))?;
-    let after_pair = s.fake.commit_pack_count();
-    s.ok("two files in one mutation are one commit", r.status == 200 && after_pair == before + 2, format!("{before} → {after_pair}"));
+    let after_pair = s.commits_since(&repo, &before);
+    s.ok("two files in one mutation are one commit", r.status == 200 && after_pair == 2, format!("{after_pair} commits since the first note's"));
     let r = call("bytes", "q3", json!({ "path": "pair/b.bin" }))?;
     s.ok("binary files round-trip", r.body["result"]["bytes"] == json!([0, 159, 146, 150]), &r);
     let r = call("list", "q4", json!({ "prefix": "pair/" }))?;
@@ -51,7 +51,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let r = call("bad_path", "b1", json!({}))?;
     s.ok("a path that climbs out is refused in the mutation", r.status == 422 && r.message().contains("not a file path"), &r);
     let r = call("drop_note", "d1", json!({ "slug": "hello" }))?;
-    s.ok("a mutation removes a file", r.status == 200 && s.fake.file_at(&repo, "main", "notes/hello.md").is_none(), &r);
+    s.ok("a mutation removes a file", r.status == 200 && s.file_at(&repo, "main", "notes/hello.md").is_none(), &r);
     s.commit(&c, &[("edge.bin", Some(&vec![7u8; limits::FILE_READ_MAX_BYTES])), ("big.bin", Some(&vec![7u8; limits::FILE_READ_MAX_BYTES + 1]))]);
     let r = call("measure", "q6", json!({ "path": "edge.bin" }))?;
     s.ok("a file of exactly the read limit is read into the app", r.body["result"]["length"] == limits::FILE_READ_MAX_BYTES, &r);
@@ -66,7 +66,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let two = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok(
         "a job reads, then writes what it read with a compare-and-swap",
-        one["output"]["lines"] == 1 && two["output"]["lines"] == 2 && s.fake.file_at(&repo, "main", "log.txt").as_deref() == Some(&b"one\ntwo\n"[..]),
+        one["output"]["lines"] == 1 && two["output"]["lines"] == 2 && s.file_at(&repo, "main", "log.txt").as_deref() == Some(&b"one\ntwo\n"[..]),
         format!("{one} {two}"),
     );
     let r = call("stale", "s1", json!({ "expect": "0000000000000000000000000000000000000000" }))?;
@@ -79,7 +79,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let r = call("stale", "s2", json!({ "expect": null }))?;
     let exists = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok("a create-only write (expect null) of an existing file conflicts", exists["output"]["conflict"].as_str().is_some_and(|m| m.contains("expected absent")), &exists);
-    s.ok("the conflicts wrote nothing", s.fake.file_at(&repo, "main", "log.txt").as_deref() == Some(&b"one\ntwo\n"[..]), "");
+    s.ok("the conflicts wrote nothing", s.file_at(&repo, "main", "log.txt").as_deref() == Some(&b"one\ntwo\n"[..]), "");
 
     // a step's file write refused by the cell (a pointer, past an in-app
     // check the author's code broke) fails the step for good: the job
@@ -92,7 +92,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
         sneaky["status"] == "succeeded"
             && sneaky["output"]["name"] == "StepError"
             && sneaky["output"]["refused"].as_str().is_some_and(|m| m.contains("blob pointers"))
-            && s.fake.file_at(&repo, "main", "sneaky.bin").is_none()
+            && s.file_at(&repo, "main", "sneaky.bin").is_none()
             && r.status == 200,
         &sneaky,
     );
@@ -135,18 +135,18 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
 
     // a replay never applies its effects again, even once the keys that
     // made its commit happen once are forgotten (a test hook ages them)
-    let kept = |s: &Suite| s.fake.file_at(&repo, "main", "notes/kept.md");
+    let kept = |s: &Suite| s.file_at(&repo, "main", "notes/kept.md");
     let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
     let r2 = call("add_note", "k2", json!({ "slug": "kept", "text": "new\n" }))?;
     s.ok("(two writes to one note)", r.status == 200 && r2.status == 200 && kept(s).as_deref() == Some(&b"new\n"[..]), format!("{r} {r2}"));
     let week = 7 * 24 * 3600 * 1000;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age", "ms": week + 3_600_000 })))?;
     s.ok("(a test hook ages the write keys past their week)", r.status == 200, &r);
-    let packs = s.fake.commit_pack_count();
+    let packs = s.mark(&repo);
     let r = call("add_note", "k1", json!({ "slug": "kept", "text": "old\n" }))?;
     s.ok(
         "a replay after its write keys are gone commits nothing: no stale overwrite",
-        r.body["replayed"] == true && kept(s).as_deref() == Some(&b"new\n"[..]) && s.fake.commit_pack_count() == packs,
+        r.body["replayed"] == true && kept(s).as_deref() == Some(&b"new\n"[..]) && s.commits_since(&repo, &packs) == 0,
         &r,
     );
 
@@ -166,7 +166,7 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     let r = call("add_note", "w1", json!({ "slug": "window", "text": "second\n" }))?;
     s.ok(
         "past the window the same id runs again, as a new run whose effects apply",
-        r.status == 200 && r.body["replayed"] == false && changes() == 2 && s.fake.file_at(&repo, "main", "notes/window.md").as_deref() == Some(&b"second\n"[..]),
+        r.status == 200 && r.body["replayed"] == false && changes() == 2 && s.file_at(&repo, "main", "notes/window.md").as_deref() == Some(&b"second\n"[..]),
         &r,
     );
     let r = call("add_note", "w1", json!({ "slug": "window", "text": "second\n" }))?;

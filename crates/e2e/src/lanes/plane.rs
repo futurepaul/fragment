@@ -59,7 +59,7 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("it lives exactly a storage token's lifetime", claims["exp"].as_i64().unwrap_or(0) - claims["iat"].as_i64().unwrap_or(0) == limits::STORAGE_TOKEN_TTL_S, &claims);
     s.ok("it names who minted it (their identity)", claims["sub"] == format!("editor:{}", api.identity(&owner)?), &claims);
     let http = reqwest::blocking::Client::new();
-    let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.fake.url)).bearer_auth(&token).send()?;
+    let r = http.get(format!("{}/api/repos/{repo}/branch?name=main", s.store_url())).bearer_auth(&token).send()?;
     let (st, why) = (r.status().as_u16(), r.json::<Value>().map(|b| b["detail"].clone()).unwrap_or_default());
     s.ok("code.storage accepts it (a fresh repo has no main: 404, branch not found)", st == 404 && why == "branch not found", format!("{st} {why}"));
 
@@ -118,11 +118,11 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("other events are ignored", r.status == 200 && r.body["ignored"] == "repo.created", &r);
 
     // lost webhooks
-    s.fake.silent_commit(&repo, "main", &[("quiet.md", Some(b"no webhook"))], "silent");
+    s.silent_commit(&c, &[("quiet.md", Some(b"no webhook"))]);
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     s.ok("refresh moves main at once", r.status == 200 && r.body["refs"]["main"]["moved"] == true && r.body["refs"]["live"]["absent"] == true, &r);
     s.ok("refresh made the file visible", read(api, &owner, &name, "quiet.md").as_deref() == Some("no webhook"), "");
-    s.fake.silent_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "silent");
+    s.silent_commit(&c, &[("polled.md", Some(b"found by the poll"))]);
     let polled = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || read(api, &owner, &name, "polled.md").is_some());
     s.ok("the poll backstop finds a commit no webhook announced", polled, "");
     let stranger = api.person()?;
@@ -162,7 +162,8 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let created = s.cli_json(api, &home, &["create", &s.name("deploy"), "--show-tokens", "--json"])?;
     s.ok("--show-tokens shows them", created["viewToken"].is_string() && created["webhookSecret"].is_string(), &created);
     let name = created["name"].as_str().unwrap_or("").to_string();
-    s.hook(api, &created);
+    let keys = s.cli_keys(&home).unwrap_or_else(Keys::generate);
+    s.hook(api, &keys, &created);
     let view = created["viewToken"].as_str().unwrap_or("").to_string();
     let cookie = format!("fragview={view}");
     let page = |api: &Api| api.page(&name, "", Some(&cookie)).map(|r| r.text).unwrap_or_default();
@@ -175,7 +176,6 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the site serves the deploy", page(api).contains("v1 marker"), page(api));
 
     // the deploy's preview card, shot after it, never in its request (decision 31)
-    let keys = s.cli_keys(&home).unwrap_or_else(Keys::generate);
     let live1 = st["pins"]["live"].as_str().unwrap_or("").to_string();
     let cards = s.shoots_cards();
     let first = match cards {
@@ -225,7 +225,7 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let repo = created["repo"].as_str().unwrap_or("");
     match s.hosted() {
         true => s.skip("code.storage holds live where the CLI moved it", "it reads the code.storage fake's branches (a preview's git is real)"),
-        false => s.ok("code.storage holds live where the CLI moved it", s.fake.branch(repo, "live").as_deref() == st2["pins"]["live"].as_str(), ""),
+        false => s.ok("code.storage holds live where the CLI moved it", s.head(repo, "live").as_deref() == st2["pins"]["live"].as_str(), ""),
     }
 
     let out = s.cli(api, &home, &["drafts", &name]);
@@ -240,9 +240,17 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--preview"]);
     let slug = text(&out).split_whitespace().find(|w| w.starts_with("preview/")).map(str::to_string).unwrap_or_default();
     s.ok("a preview names its ephemeral ref", !slug.is_empty(), text(&out));
-    match s.hosted() {
-        true => s.skip("the preview ref is ephemeral at main's tip", "it reads the code.storage fake's refs (a preview's git is real)"),
-        false => s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug),
+    match (s.hosted(), s.store_levers()) {
+        (true, _) => s.skip("the preview ref is ephemeral at main's tip", "it reads the code.storage fake's refs (a preview's git is real)"),
+        (false, true) => s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug),
+        // an external store's API reads an ephemeral ref as the service
+        // does (with ephemeral=true: macrofiche's contract, 5.9); whether a
+        // plain read misses it is the store's conformance, not the cell's
+        (false, false) => {
+            let preview = s.head_ephemeral(repo, &slug);
+            s.ok("the preview ref is at main's tip, read as an ephemeral ref", preview.is_some() && preview == s.head(repo, "main"), format!("{slug}: {preview:?}"));
+            s.skip_lever("the preview ref is ephemeral", "flag on its refs");
+        }
     }
     let st4 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("a preview leaves live alone", st4["pins"]["live"] == st3["pins"]["live"] && page(api).contains("v1 marker"), &st4);

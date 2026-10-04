@@ -28,7 +28,7 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let c = s.cli_json(api, &home, &["create", &s.name("blobs"), "--show-tokens", "--json"])?;
     let name = c["name"].as_str().unwrap_or("").to_string();
-    s.hook(api, &c);
+    s.hook(api, &keys, &c);
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     let dir = s.dir("blobs");
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();
@@ -42,13 +42,13 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::write(dir.join("site/index.html"), "<p>clips</p>")?;
     std::fs::write(dir.join("small.txt"), "small")?;
     let out = s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&dir)]);
-    let in_git = s.fake.file_at(&repo, "main", "site/clip.bin").unwrap_or_default();
+    let in_git = s.file_at(&repo, "main", "site/clip.bin").unwrap_or_default();
     s.ok(
         "a large file is a pointer in git",
         out.status.success() && blob::parse(&in_git) == Some(blob::Pointer { sha256: sha.clone(), size: video.len() as u64 }),
         String::from_utf8_lossy(&in_git),
     );
-    s.ok("a small file stays in git", s.fake.file_at(&repo, "main", "small.txt").as_deref() == Some(&b"small"[..]), "");
+    s.ok("a small file stays in git", s.file_at(&repo, "main", "small.txt").as_deref() == Some(&b"small"[..]), "");
     let r = api.signed(&keys, "GET", &blob_path(&sha), None)?;
     s.ok("the blob store holds the bytes", r.status == 200 && r.bytes == video, format!("{} ({} bytes)", r.status, r.bytes.len()));
     let r = api.signed(&keys, "GET", &format!("/api/f/{name}/files"), None)?;
@@ -57,7 +57,7 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
 
     // another folder pulls the real bytes; a folder that has them adopts them
     let other = s.dir("blobs-pull");
-    let before = s.fake.commit_pack_count();
+    let before = s.mark(&repo);
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&other)]);
     s.ok("a pull writes the pointer's bytes", std::fs::read(other.join("site/clip.bin")).is_ok_and(|b| b == video), "");
     let out = s.cli(api, &home, &["verify", &name, "--dir", &dir_of(&other), "--json"]);
@@ -67,7 +67,8 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     std::fs::create_dir_all(fresh.join("site"))?;
     std::fs::write(fresh.join("site/clip.bin"), &video)?;
     s.cli(api, &home, &["sync", &name, "--dir", &dir_of(&fresh)]);
-    s.ok("a folder holding the same bytes adopts them (nothing committed)", s.fake.commit_pack_count() == before, s.fake.commit_pack_count() - before);
+    let committed = s.commits_since(&repo, &before);
+    s.ok("a folder holding the same bytes adopts them (nothing committed)", committed == 0, committed);
 
     // the site serves a pointer's bytes, and ranges of them
     let dir_s = dir_of(&dir);

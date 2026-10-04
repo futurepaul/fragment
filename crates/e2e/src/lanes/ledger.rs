@@ -353,7 +353,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "an image step whose commit failed after it was paid commits from its kept bytes: one image bought (bug 2), charged its 4 tiles and 4 steps in neurons",
         run["status"] == "succeeded"
-            && s.fake.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
+            && s.file_at(c["repo"].as_str().unwrap_or(""), "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse"))
             && images() == drawn + 1
             && run_charged(api, &owner_id, &name, &run) == image(4, 4),
         json!({ "run": run, "images": images() - drawn }),
