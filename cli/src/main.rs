@@ -1268,7 +1268,7 @@ fn run(cli: Cli) -> Result<()> {
                 (Visibility::Link, Some(tok)) => Some(share_link(&canon, tok)),
                 _ => None,
             };
-            let webhook = st.inbox_token.as_ref().map(|tok| format!("{}/api/f/{}/inbox?t={tok}", platform_of(&c, &st), name));
+            let webhook = st.inbox_token.as_ref().map(|tok| format!("{}/api/f/{}/inbox?t={tok}", platform_of(&c, &st), st.name));
             if j {
                 let mut data = json!({
                     "canonical": canon,
