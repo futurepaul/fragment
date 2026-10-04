@@ -174,16 +174,31 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     let read = |path: &str| api.signed(&owner, "GET", &format!("/api/f/{name}/file?path={path}"), None).is_ok_and(|r| r.status == 200);
     // the first request reads the branches once: made now, nothing after it
     // reads them but the poll
+    let requested_minute = crate::api::now_s() / 60;
     api.signed(&owner, "GET", &format!("/api/f/{name}/files"), None)?;
 
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
-    // the alarm also wakes for the request just counted: its minute closes,
-    // its meter batch goes to the ledger and is acknowledged (cell/src/meter.rs)
-    let idle = s.eventually(Duration::from_secs(150), || ahead(&hook("alarm", None), "alarmAt") > day_ms - 180_000);
+    // the alarm also wakes for the request just counted: at its minute's end
+    // at the latest (cell/src/meter.rs `meter_soon`), when the minute closes
+    // into a meter row on its own. The alarm is read first, then the meter:
+    // a minute still open at the second read was open at the first.
+    let alarm = hook("alarm", None);
+    let meter = hook("meter", None);
+    let open = meter["counted"].as_array().and_then(|c| c.iter().filter_map(|m| m["minute"].as_i64()).min());
+    let armed = match open {
+        Some(minute) => alarm["alarmAt"].as_i64().is_some_and(|at| at <= (minute + 1) * 60_000),
+        // closed already, on its own: its minute is over
+        None => crate::api::now_s() >= (requested_minute + 1) * 60,
+    };
+    s.ok("its request's minute is counted, and its alarm set to close it at the minute's end", armed, json!({ "alarm": alarm, "meter": meter }));
+    // the minute closed now (the `meter-now` lever, docs/api.md) rather than
+    // waited out: its meter batch goes to the ledger and is acknowledged
+    let closed = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "meter-now", "sample": false })))?;
+    let idle = s.eventually(Duration::from_secs(30), || ahead(&hook("alarm", None), "alarmAt") > day_ms - 180_000);
     let alarm = hook("alarm", None);
     s.ok(
         "a fragment nothing outside the platform writes is polled once a day: its next pass and its alarm are a day away",
-        quiet && idle,
+        quiet && closed.status == 200 && idle,
         &alarm,
     );
     let reads = s.fake.requests(&repo, "GET branch");
