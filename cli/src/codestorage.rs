@@ -8,7 +8,7 @@
 // the wire and what comes back is fragment_core::codestorage's, the same
 // encoder and decoders the cell uses; this file is the transport.
 use crate::api::{encode_q, send_retrying, timeout_for, Client as HostClient, CodedError, Failed, Replay, CONNECT_TIMEOUT};
-use fragment_core::codestorage::{self as core_cs, FileChange, Promotion, TreeEntry};
+use fragment_core::codestorage::{self as core_cs, FileChange, TreeEntry};
 use fragment_proto::StorageToken;
 use serde_json::Value;
 use std::fmt;
@@ -322,61 +322,6 @@ impl CodeStorage {
         sha_at(&v["commit_sha"]).ok_or_else(|| CsError::Malformed(format!("branches/create without a commit sha: {v}")))
     }
 
-    /// Make `live` serve `main`'s tip, by the steps a merge preview of
-    /// main into live calls for (`core_cs::Promotion`): a fast-forward, a
-    /// restore commit of main's tip, or a restore commit of their merge
-    /// base and then the merge. Each step is guarded by the `live` the
-    /// preview read: `CasRejected` when live moved meanwhile (the caller
-    /// retries). Returns the new live tip.
-    pub fn promote_live(&self, message: &str, author: &Author) -> Result<String, CsError> {
-        let (status, body) = self.req("GET", &format!("/merge/preview?{}", core_cs::DEPLOY_PREVIEW_QUERY), None, None)?;
-        self.check(status, &body)?;
-        let v = Self::json(&body)?;
-        match core_cs::promotion(&v).ok_or_else(|| CsError::Malformed(format!("a merge preview that names no deploy: {v}")))? {
-            Promotion::Current { live } => Ok(live),
-            Promotion::FastForward { live } => self.merge_live(&live, message, author),
-            Promotion::Restore { live, main } => match self.restore_live(&main, &live, message, author) {
-                // no change: live's files are main's already, if live is
-                // still where the preview saw it
-                Err(CsError::Precondition(why)) => match self.branch_head(LIVE)? {
-                    Some(tip) if tip == live => Ok(live),
-                    _ => Err(CsError::CasRejected { detail: why }),
-                },
-                other => other,
-            },
-            Promotion::RestoreThenMerge { live, base } => {
-                let live = match self.restore_live(&base, &live, &core_cs::back_to_base_message(message, &base), author) {
-                    Ok(tip) => tip,
-                    // no change: live's files are the base's already (the
-                    // merge's guard catches a live that moved)
-                    Err(CsError::Precondition(_)) => live,
-                    Err(e) => return Err(e),
-                };
-                self.merge_live(&live, message, author)
-            }
-        }
-    }
-
-    /// Merge `main` into `live` (a fast-forward when it can), guarded by
-    /// `expected_live`. A conflict is no moved live: it fails as one.
-    fn merge_live(&self, expected_live: &str, message: &str, author: &Author) -> Result<String, CsError> {
-        let body = serde_json::json!({
-            "target_branch": LIVE,
-            "source_ref": MAIN,
-            "strategy": "ff_prefer",
-            "expected_target_sha": expected_live,
-            "commit_message": message,
-            "author": { "name": author.name, "email": author.email },
-        });
-        let (status, rbody) = self.req("POST", "/merge", Some(body.to_string().into_bytes()), Some("application/json"))?;
-        if status == 409 && core_cs::merge_conflicted(&rbody) {
-            return Err(CsError::Http { status, detail: format!("main does not merge into live: {}", String::from_utf8_lossy(&rbody).chars().take(200).collect::<String>()) });
-        }
-        self.check(status, &rbody)?;
-        let v = Self::json(&rbody)?;
-        sha_at(&v["target"]["new_sha"]).ok_or_else(|| CsError::Malformed(format!("merge without a target sha: {v}")))
-    }
-
     /// Rollback: append a restore commit on `live` whose tree matches
     /// `base_ref` (must be an ancestor of the current tip, else 412, as is
     /// a restore that changes nothing).
@@ -566,19 +511,16 @@ mod tests {
     }
 
     #[test]
-    fn promote_and_rollback_flow() {
+    fn preview_and_rollback_flow() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
-        // first deploy: create live at main's tip
+        // live at main's second commit, where a deploy leaves it (the
+        // platform moves live: POST …/deploy)
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
-        let live1 = cs.create_branch(&tip1, LIVE, false).unwrap();
-        assert_eq!(live1, tip1);
-        // second deploy: main moves, live fast-forwards via merge (CAS-guarded)
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        let live2 = cs.promote_live("deploy v2", &author()).unwrap();
+        let live2 = cs.create_branch(&tip2, LIVE, false).unwrap();
         assert_eq!(live2, tip2);
-        assert_eq!(cs.promote_live("deploy again", &author()).unwrap(), tip2, "live at main's tip moves nowhere");
         // preview: ephemeral ref at main's tip
         let p = cs.create_branch(&tip2, "preview/abc123", true).unwrap();
         assert_eq!(p, tip2);
@@ -597,87 +539,18 @@ mod tests {
     }
 
     #[test]
-    fn promote_with_stale_expected_live_is_cas_rejected() {
-        // deploy's bounded retry loop keys off this rejection: live moved
-        // since the SHA we pinned -> 409 target_moved, nothing applied
+    fn a_rollback_with_a_stale_expected_live_is_cas_rejected() {
+        // live moved since the SHA the rollback read -> 409 target_moved,
+        // nothing applied
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
-        cs.create_branch(&tip1, LIVE, false).unwrap();
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        // someone already moved live to tip2; we pinned tip1 (stale)
-        cs.merge_live(&tip1, "first deploy", &author()).unwrap();
-        let err = cs.merge_live(&tip1, "second deploy", &author()).unwrap_err();
+        cs.create_branch(&tip2, LIVE, false).unwrap();
+        let err = cs.restore_live(&tip1, &tip1, "rollback", &author()).unwrap_err();
         assert!(matches!(err, CsError::CasRejected { .. }), "got: {err}");
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
-    }
-
-    /// Goal: a deploy after a rollback serves main. code.storage merges
-    /// three ways, as git does: after a rollback, merging main into live
-    /// does nothing while main is unchanged, keeps what the rollback
-    /// reverted once main moves on, and conflicts where main changed a
-    /// file it reverted. Method: the fake merges three ways; each deploy
-    /// follows a rollback to v1 (and the last, a deploy after one), and
-    /// live must hold main's files after it.
-    #[test]
-    fn a_deploy_after_a_rollback_serves_main() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("index.html", b"v1")]);
-        let cs = cs_for(&mock, "t");
-        let v1 = cs.branch_head(MAIN).unwrap().unwrap();
-        cs.create_branch(&v1, LIVE, false).unwrap();
-        let serves_main = || {
-            let paths = mock.paths("t", MAIN);
-            paths == mock.paths("t", LIVE) && paths.iter().all(|p| mock.file_at("t", LIVE, p) == mock.file_at("t", MAIN, p))
-        };
-        let rollback = || {
-            let live = cs.branch_head(LIVE).unwrap().unwrap();
-            cs.restore_live(&v1, &live, "rollback", &author()).unwrap();
-            assert_eq!(mock.file_at("t", LIVE, "index.html").unwrap(), b"v1", "rolled back");
-        };
-        let edit = |path: &str, bytes: &[u8]| {
-            let main = cs.branch_head(MAIN).unwrap().unwrap();
-            cs.commit(Some(&main), "edit", &author(), &[upsert(path, bytes)]).unwrap();
-        };
-
-        edit("index.html", b"v2");
-        cs.promote_live("deploy v2", &author()).unwrap();
-        assert!(serves_main(), "a fast-forward");
-
-        rollback();
-        cs.promote_live("deploy, main unchanged", &author()).unwrap();
-        assert!(serves_main(), "main unchanged since the rollback: a restore of main's tip");
-
-        rollback();
-        edit("new.txt", b"new");
-        cs.promote_live("deploy, main moved on", &author()).unwrap();
-        assert!(serves_main(), "main moved on: live back to the merge base, then the merge");
-
-        rollback();
-        edit("other.txt", b"other");
-        let live = cs.branch_head(LIVE).unwrap().unwrap();
-        cs.merge_live(&live, "a merge alone", &author()).unwrap();
-        assert_eq!(mock.file_at("t", LIVE, "index.html").unwrap(), b"v1", "a merge alone keeps what the rollback reverted");
-        cs.promote_live("deploy after the merge", &author()).unwrap();
-        assert!(serves_main(), "and a deploy then serves main");
-
-        rollback();
-        edit("index.html", b"v3");
-        let live = cs.branch_head(LIVE).unwrap().unwrap();
-        let err = cs.merge_live(&live, "a merge alone", &author()).unwrap_err();
-        assert!(matches!(err, CsError::Http { status: 409, .. }), "a conflict fails as one, not as a moved live: {err}");
-        cs.promote_live("deploy, a reverted file changed", &author()).unwrap();
-        assert!(serves_main(), "main changed the file the rollback reverted");
-
-        edit("index.html", b"v4");
-        let before = mock.branch("t", LIVE);
-        cs.promote_live("deploy after a deploy after a rollback", &author()).unwrap();
-        assert!(serves_main() && mock.branch("t", LIVE) != before, "the deploy after (its restore a no-op)");
-        assert_eq!(mock.file_at("t", LIVE, "index.html").unwrap(), b"v4");
-        let history: Vec<String> = cs.list_commits(LIVE, 3).unwrap().into_iter().map(|c| c.message).collect();
-        assert_eq!(&history[..2], ["deploy after a deploy after a rollback", "deploy, a reverted file changed"], "one commit: its restore changed nothing");
-        assert!(history[2].starts_with("deploy, a reverted file changed (first, live back to "), "the deploy before took two: {history:?}");
     }
 
     /// Goal: a held client mints again when its token nears its expiry or

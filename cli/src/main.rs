@@ -11,7 +11,7 @@ mod mockcs;
 use fragment_templates::ALL as TEMPLATES;
 
 use crate::api::{encode_q, Code, CodedError};
-use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
+use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN};
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
@@ -1748,7 +1748,6 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, p
         None => (storage.branch_head(MAIN).map_err(cs_anyhow)?, false),
     };
     let main_tip = main_tip.ok_or_else(|| anyhow!("nothing to deploy: main has no commits (sync a folder with --dir first)"))?;
-    let author = Author::writer(&writer);
     if preview {
         // ephemeral ref at main's tip: unguessable, invisible to clones,
         // promoted by deploying. There is no served URL — the ref IS the
@@ -1761,26 +1760,12 @@ fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, p
         }
         return Ok(Deployed::Preview { synced, slug, sha });
     }
-    let msg = format!("deploy {name}{}", note.map(|n| format!(": {n}")).unwrap_or_default());
-    let live_tip = match storage.branch_head(LIVE).map_err(cs_anyhow)? {
-        None => storage.create_branch(&main_tip, LIVE, false).map_err(cs_anyhow)?,
-        Some(t) if t == main_tip => t,
-        Some(_) => {
-            let mut landed: Option<String> = None;
-            // each attempt previews afresh: it reads where live is now
-            for _attempt in 0..MAX_CAS_ATTEMPTS {
-                match storage.promote_live(&msg, &author) {
-                    Ok(new_tip) => {
-                        landed = Some(new_tip);
-                        break;
-                    }
-                    Err(CsError::CasRejected { .. }) => continue,
-                    Err(e) => return Err(cs_anyhow(e)),
-                }
-            }
-            landed.ok_or_else(|| anyhow!("live kept moving under {MAX_CAS_ATTEMPTS} deploy attempts; re-run"))?
-        }
-    };
+    // the platform moves live (POST …/deploy), under the fragment's plane
+    // lock: after a rollback that takes two steps (docs/api.md), and no
+    // pin ever serves the files live holds between them
+    let r = c.post_json(&format!("/api/f/{name}/deploy"), &json!({ "note": note }))?;
+    let v: Value = c.call_as(r)?;
+    let live_tip = v["live"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("the platform's deploy named no live commit: {v}"))?.to_string();
     // the sync's commit and the live move, in one nudge: serving sees THIS
     // deploy now, not at the next poll backstop
     sync::refresh_pins(c, name);
@@ -2071,8 +2056,8 @@ mod tests {
         assert_eq!((Some(&live_tip), Some(&main_tip)), (mock.branch("t", "live").as_ref(), mock.branch("t", "main").as_ref()));
         assert_eq!(
             mock.take_requests(""),
-            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST branches/create", 1), ("POST refresh", 1)]),
-            "main's head and live's, one listing, one token, one nudge"
+            count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)]),
+            "main's head, one listing, one token, the platform's deploy, one nudge"
         );
 
         std::fs::write(dir.join("site/index.html"), "<h1>two</h1>").unwrap();
@@ -2081,7 +2066,7 @@ mod tests {
         assert_eq!(Some(live_tip), mock.branch("t", "live"));
         assert_eq!(
             mock.take_requests(""),
-            count(&[("GET storage-token", 1), ("GET branch", 2), ("GET files/metadata", 1), ("POST commit-pack", 1), ("GET merge/preview", 1), ("POST merge", 1), ("POST refresh", 1)])
+            count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)])
         );
         std::fs::remove_dir_all(&dir).ok();
     }

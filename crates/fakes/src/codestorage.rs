@@ -475,6 +475,25 @@ impl Inner {
                 st.refreshes += 1;
                 return Response::json(200, &json!({ "ok": true }));
             }
+            // the host's deploy (`POST /api/f/{name}/deploy`): live serves
+            // main's tip, as the cell's `go_live` leaves it; its steps after
+            // a rollback are the cell's, proven by the e2e's deploy lane
+            if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/deploy")).filter(|_| m == "POST") {
+                let Some(url) = st.url_of(name) else { return problem(404, &format!("no fragment {name}")) };
+                let Some(main) = st.repos[&url].branches.get("main").cloned() else { return problem(400, "nothing to deploy: main has no commits") };
+                let live = match st.repos[&url].branches.get("live").cloned() {
+                    Some(live) if live == main => live,
+                    Some(live) if !st.repos[&url].is_ancestor(&live, &main) => {
+                        let tree = st.repos[&url].commits[&main].tree.clone();
+                        st.commit(&url, Write { branch: "live", message: "deploy", author: "host", changes: &[], from: Some((&main, tree)) }, out).1
+                    }
+                    _ => {
+                        st.move_branch(&url, "live", &main, out);
+                        main
+                    }
+                };
+                return Response::json(200, &json!({ "live": live }));
+            }
         }
         if path == "/api/repos" && m == "POST" {
             // the service names a new repo by the token's repo claim; the
