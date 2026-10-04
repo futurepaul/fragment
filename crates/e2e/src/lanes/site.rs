@@ -123,11 +123,17 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a signed stranger without the link is 403", r.status == 403, &r);
 
     // its preview card: shot as a link holder sees the page, for its members
-    let card = card_showing(s, api, &owner, &name, &live);
-    s.ok("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", card.as_ref().is_some_and(is_card), card_detail(&card));
-    let etag = card.as_ref().map(|r| r.header("etag")).unwrap_or_default();
-    let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/card"), None)?;
-    s.ok("a viewer gets the card", is_card(&r) && r.header("etag") == etag, card_detail(&Some(r)));
+    if s.shoots_cards() {
+        let card = card_showing(s, api, &owner, &name, &live);
+        s.ok("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", card.as_ref().is_some_and(is_card), card_detail(&card));
+        let etag = card.as_ref().map(|r| r.header("etag")).unwrap_or_default();
+        let r = api.signed(&viewer, "GET", &format!("/api/f/{name}/card"), None)?;
+        s.ok("a viewer gets the card", is_card(&r) && r.header("etag") == etag, card_detail(&Some(r)));
+    } else {
+        let why = "this node has no browser (celld: no Browser Rendering), so it shoots no cards";
+        s.skip("a deploy makes the fragment's preview card: a 1280×800 JPEG of its page, tagged by its bytes", why);
+        s.skip("a viewer gets the card", why);
+    }
     let r = api.signed(&stranger, "GET", &format!("/api/f/{name}/card"), None)?;
     let anon = api.unsigned("GET", &format!("/api/f/{name}/card"), None)?;
     s.ok("a stranger does not (403), nor anyone unsigned (401)", r.status == 403 && anon.status == 401 && r.bytes.len() < 1000, format!("{r} | {anon}"));
@@ -311,6 +317,12 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         json!({ "card": r.status, "cards": cards(api, &name), "events": event_kinds(api, owner, &name) }),
     );
 
+    if !s.shoots_cards() {
+        let why = "this node has no browser (celld: no Browser Rendering), so it shoots no cards";
+        s.skip("a shot that fails is tried again: two failed tries, then the card, from the third", why);
+        s.skip("a shot that keeps failing gives up after five tries: one card.failed event, no card, and no more tries", why);
+        return Ok(());
+    }
     // a shot that fails is tried again, with a wait between, and the card comes
     let name = s.named(api, owner, "site-retry")?;
     let c = s.create(api, owner, &name)?;

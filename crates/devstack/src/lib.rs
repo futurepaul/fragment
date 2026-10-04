@@ -19,6 +19,28 @@ pub mod node;
 mod node_release;
 pub mod summary;
 
+/// A running node, on either runtime.
+pub enum AnyNode {
+    Wrangler(Node),
+    Celld(celld::CelldNode),
+}
+
+impl AnyNode {
+    pub fn stop(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.stop(),
+            AnyNode::Celld(n) => n.stop(),
+        }
+    }
+
+    pub fn crash(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.crash(),
+            AnyNode::Celld(n) => n.crash(),
+        }
+    }
+}
+
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
 pub const READY_TIMEOUT: Duration = Duration::from_secs(900);
