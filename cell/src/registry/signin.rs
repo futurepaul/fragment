@@ -1,6 +1,9 @@
-//! Sign-in (phase 4 slice B): people come from WorkOS, or from any OpenID
-//! Connect provider (docs/self-host.md, seam 4), keyed by their verified
-//! `(issuer, subject)`, never by email; browsers hold sessions.
+//! Sign-in (phase 4 slice B): people come from one OpenID Connect provider
+//! (docs/self-host.md, seam 4), WorkOS AuthKit's or any other, keyed by
+//! their verified `(issuer, subject)`, never by email; browsers hold
+//! sessions. The issuer is as the deployment keys its people
+//! (`OidcConfig::keyed_as`): AuthKit's keep `workos:<client id>`, the name
+//! they had before sign-in was OpenID Connect.
 //! A platform session lives on the platform origin; each fragment origin
 //! gets its own site session through a single-use redemption the platform
 //! mints (finite-sites ADR 0025), so one fragment's cookie means nothing on
@@ -12,10 +15,9 @@
 //! waits until its key works.
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
-//! An OpenID Connect sign-in also keeps its PKCE verifier and its nonce
-//! with its state (the verifier never leaves the registry), and its
-//! session keeps the id_token, sealed, as the hint its provider's logout
-//! takes.
+//! A sign-in also keeps its PKCE verifier and its nonce with its state
+//! (the verifier never leaves the registry), and its session keeps the
+//! id_token, sealed, as the hint its provider's logout takes.
 //!
 //! A frame's session (docs/fragment-boats.md) is a site session bound to
 //! the origin of the page that framed it (`embedder`): minted from the
@@ -38,14 +40,14 @@
 //! request waits on.
 
 use fragment_core::levers;
-use fragment_core::oidc::{self, OidcError};
+use fragment_core::oidc::{self, KeyedAs, OidcError};
 use fragment_proto::Subject;
 use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, Exchange, Exchanged, LiveSession, LoggedOut, Logout, Mint,
-    Minted, OidcBegan, OidcExchange, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -73,14 +75,16 @@ const _: () = assert!(limits::SIGNINS_PENDING_MAX_DEFAULT >= 1 && limits::SITE_S
 /// The expiry columns are indexed for the sweep, and a site session's
 /// `(parent, fragment, created_at)` for its bound (that index replaced the
 /// parent-only one the fleet made first). `embedder` is a frame's; a
-/// login's `verifier` and `nonce` and a session's sealed `id_token` are an
-/// OpenID Connect sign-in's (`migrate` adds each to tables from before it).
+/// login's `verifier` and `nonce` and a session's sealed `id_token` are
+/// OpenID Connect's (`migrate` adds each to tables from before it: their
+/// rows from before hold none). A `sessions` table from before sign-in was
+/// OpenID Connect also holds `workos_sid`, which nothing reads.
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logins (
   state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL, verifier TEXT, nonce TEXT);
 CREATE INDEX IF NOT EXISTS logins_created ON logins (created_at);
 CREATE TABLE IF NOT EXISTS sessions (
-  hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT,
+  hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT, id_token TEXT);
 DROP INDEX IF EXISTS sessions_parent;
 CREATE INDEX IF NOT EXISTS sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL;
@@ -98,9 +102,9 @@ CREATE TABLE IF NOT EXISTS e2e_days (
 ";
 
 /// The columns added since each table was first made, by table: a frame's
-/// `embedder` (every row made before is a top-level one), an OpenID Connect
-/// sign-in's `verifier`, `nonce` and sealed `id_token`, and its person's
-/// `name` and `handle` (the registry's `subjects`).
+/// `embedder` (every row made before is a top-level one), a sign-in's
+/// `verifier`, `nonce` and sealed `id_token`, and its person's `name` and
+/// `handle` (the registry's `subjects`).
 const ADDED: [(&str, &[&str]); 4] =
     [("sessions", &["embedder", "id_token"]), ("redemptions", &["embedder"]), ("logins", &["verifier", "nonce"]), ("subjects", &["name", "handle"])];
 
@@ -126,41 +130,6 @@ fn not_signed_in() -> CellError {
     CellError::new(ErrorCode::Unauthenticated, "not signed in (the session ended or never began)")
 }
 
-/// What the sign-in reads of WorkOS's answer to a code.
-#[derive(Deserialize)]
-struct Authenticated {
-    user: WorkOsUser,
-    access_token: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkOsUser {
-    id: String,
-    email: Option<String>,
-}
-
-/// WorkOS's refusal, as far as it says why.
-#[derive(Deserialize)]
-struct Refusal {
-    error_description: Option<String>,
-    message: Option<String>,
-}
-
-/// The claim of WorkOS's access token the sign-out needs.
-#[derive(Deserialize)]
-struct Claims {
-    sid: Option<String>,
-}
-
-/// The `sid` claim of an access token WorkOS answered the exchange with
-/// (read, not trusted from a browser: it came from WorkOS over TLS).
-fn sid_of(access_token: &str) -> Option<String> {
-    use base64::Engine;
-    let payload = access_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
-    serde_json::from_slice::<Claims>(&bytes).ok()?.sid
-}
-
 /// A live session's row, with whether its parent is live, its identity
 /// with its username, and their first sign-in's email, all in one
 /// statement (`live_session`).
@@ -184,7 +153,8 @@ struct SessionRow {
 struct LoginRow {
     return_to: String,
     link_to: Option<String>,
-    /// An OpenID Connect sign-in's PKCE verifier and nonce.
+    /// Its PKCE verifier and nonce (none in a row begun before sign-in was
+    /// OpenID Connect).
     verifier: Option<String>,
     nonce: Option<String>,
 }
@@ -194,17 +164,8 @@ struct LoginRow {
 struct Attributes<'a> {
     email: Option<&'a str>,
     name: Option<&'a str>,
-    /// A username, else the subject (an OpenID Connect provider's).
+    /// A username, else the subject.
     handle: Option<&'a str>,
-}
-
-/// A provider's own handle on a platform session, which its logout takes.
-#[derive(Clone, Copy)]
-enum IdpSession<'a> {
-    /// WorkOS's session id.
-    WorkOs(&'a str),
-    /// An OpenID Connect provider's id_token, sealed for the registry.
-    Oidc(&'a str),
 }
 
 /// `redemptions` (one spent).
@@ -229,8 +190,7 @@ struct ParentRow {
 }
 
 #[derive(Deserialize)]
-struct SidRow {
-    workos_sid: Option<String>,
+struct IdTokenRow {
     id_token: Option<String>,
 }
 
@@ -380,22 +340,19 @@ impl RegistryCell {
         Ok(Live { hash, session: LiveSession { identity, email: row.email, embedder: row.embedder } })
     }
 
-    fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, idp: Option<IdpSession<'_>>, embedder: Option<&str>, expires_at: i64) -> CellResult<String> {
+    /// A new session: `id_token` is a platform session's provider's
+    /// id_token, sealed for the registry (its logout's hint).
+    fn new_session(&self, identity: &str, fragment: Option<&str>, parent: Option<&str>, id_token: Option<&str>, embedder: Option<&str>, expires_at: i64) -> CellResult<String> {
+        assert!(id_token.is_none() || (fragment.is_none() && parent.is_none()), "only a platform session keeps its provider's id_token");
         let token = fresh_token();
         let opt = |v: Option<&str>| v.map_or(SqlStorageValue::Null, |s| s.into());
-        let (sid, id_token) = match idp {
-            Some(IdpSession::WorkOs(sid)) => (Some(sid), None),
-            Some(IdpSession::Oidc(sealed)) => (None, Some(sealed)),
-            None => (None, None),
-        };
         self.exec(
-            "INSERT INTO sessions (hash, identity, fragment, parent, workos_sid, id_token, embedder, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO sessions (hash, identity, fragment, parent, id_token, embedder, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 sha(&token).into(),
                 identity.into(),
                 opt(fragment),
                 opt(parent),
-                opt(sid),
                 opt(id_token),
                 opt(embedder),
                 SqlStorageValue::Integer(js::now_ms()),
@@ -413,9 +370,8 @@ impl RegistryCell {
         let now = js::now_ms();
         self.sweep_by(now + LOGIN_TTL_MS).await?;
         let state = fresh_token();
-        // an OpenID Connect sign-in's verifier (64 hex) and nonce, kept with its state
-        let pkce = b.oidc.then(|| (fresh_token(), fresh_token()));
-        let opt = |v: Option<&String>| v.map_or(SqlStorageValue::Null, |s| s.as_str().into());
+        // its PKCE verifier (64 hex) and nonce, kept with its state
+        let (verifier, nonce) = (fresh_token(), fresh_token());
         let n = self
             .row::<RowidRow>(
                 "INSERT INTO logins (state, return_to, link_to, created_at, verifier, nonce) VALUES (?, ?, ?, ?, ?, ?) RETURNING rowid AS n",
@@ -424,8 +380,8 @@ impl RegistryCell {
                     b.return_to.as_str().into(),
                     link_to.map_or(SqlStorageValue::Null, |p| p.id.into()),
                     SqlStorageValue::Integer(now),
-                    opt(pkce.as_ref().map(|(v, _)| v)),
-                    opt(pkce.as_ref().map(|(_, n)| n)),
+                    verifier.as_str().into(),
+                    nonce.as_str().into(),
                 ],
             )?
             .ok_or_else(|| CellError::host("a sign-in's insert answered no rowid"))?
@@ -438,41 +394,7 @@ impl RegistryCell {
         // filled the table.
         let cap = i64::try_from(self.cfg.signins_pending_max).expect("the cap fits a rowid");
         self.exec("DELETE FROM logins WHERE rowid <= ?", vec![SqlStorageValue::Integer(n.saturating_sub(cap))])?;
-        let oidc = pkce.map(|(verifier, nonce)| OidcBegan { challenge: oidc::challenge(&verifier), nonce });
-        Ok(Began { state, oidc })
-    }
-
-    /// WorkOS's code, exchanged with the deployment's API key, then the sign-in
-    /// finished. A code is single-use at WorkOS; the state here.
-    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
-        if b.state.is_empty() || b.code.is_empty() || b.client_id.is_empty() {
-            return Err(CellError::invalid("an exchange names its state, code, and client"));
-        }
-        let (status, answer) = crate::keys::workos_authenticate(&self.env, &self.cfg.workos()?.api, &b.client_id, &b.code).await?;
-        if status != 200 {
-            let refusal = serde_json::from_value::<Refusal>(answer).ok();
-            let why = refusal.and_then(|r| r.error_description.or(r.message)).unwrap_or_else(|| "no reason given".into());
-            // a 400 is the code's: used (a callback sent again), expired, or
-            // never WorkOS's. The browser starts again; the Registry answered,
-            // so this is no outage. Anything else is WorkOS failing.
-            let code = if status == 400 { ErrorCode::InvalidRequest } else { ErrorCode::UpstreamFailed };
-            return Err(CellError::new(code, format!("WorkOS refused the sign-in ({status}): {why}")));
-        }
-        let signed_in = serde_json::from_value::<Authenticated>(answer)
-            .ok()
-            .filter(|a| !a.user.id.is_empty())
-            .ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no user id"))?;
-        self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
-        let email = signed_in.user.email.unwrap_or_default();
-        let sid = signed_in.access_token.as_deref().and_then(sid_of);
-        if b.issuer.is_empty() || email.len() > EMAIL_MAX {
-            return Err(CellError::invalid("a sign-in names its issuer and subject"));
-        }
-        let login = self.take_login(&b.state)?;
-        let attributes = Attributes { email: Some(&email), name: None, handle: None };
-        let (id, _) = self.person_for(&b.issuer, &signed_in.user.id, &attributes, login.link_to.as_deref())?;
-        let token = self.new_session(&id, None, None, sid.as_deref().map(IdpSession::WorkOs), None, js::now_ms() + SESSION_TTL_MS)?;
-        Ok(Exchanged { token, return_to: login.return_to })
+        Ok(Began { state, challenge: oidc::challenge(&verifier), nonce })
     }
 
     /// A pending sign-in, spent: refused when it expired, was used, or was
@@ -491,21 +413,21 @@ impl RegistryCell {
         crate::keys::scope("Registry", &self.state)
     }
 
-    /// An OpenID Connect provider's code, exchanged with the verifier this
-    /// sign-in began with (keys.rs adds the client's secret), its id_token
-    /// verified (cell/src/oidc.rs: the provider's keys, the issuer, this
-    /// client, the times, this sign-in's nonce), then the sign-in finished.
-    /// The state is spent first, before anything is awaited: a callback
-    /// sent again, or two raced, finish it once; the provider spends the
-    /// code too.
-    pub(super) async fn oidc_exchange(&self, b: OidcExchange) -> CellResult<Exchanged> {
-        let cfg = self.cfg.oidc()?;
+    /// The provider's code, exchanged with the verifier this sign-in began
+    /// with (keys.rs adds the client's secret), its id_token verified
+    /// (cell/src/oidc.rs: the provider's keys, the issuer, this client, the
+    /// times, this sign-in's nonce), then the sign-in finished as the
+    /// person `(keyed_as, sub)` names. The state is spent first, before
+    /// anything is awaited: a callback sent again, or two raced, finish it
+    /// once; the provider spends the code too.
+    pub(super) async fn exchange(&self, b: Exchange) -> CellResult<Exchanged> {
+        let cfg = self.cfg.signin()?;
         if b.state.is_empty() || b.code.is_empty() || b.code.len() > CODE_MAX || b.redirect_uri.is_empty() || b.redirect_uri.len() > REDIRECT_MAX {
             return Err(CellError::invalid("an exchange names its state, its code, and the redirect it was sent to"));
         }
         let login = self.take_login(&b.state)?;
         let (Some(verifier), Some(nonce)) = (login.verifier.as_deref(), login.nonce.as_deref()) else {
-            return Err(CellError::invalid("this sign-in did not begin with OpenID Connect; start again"));
+            return Err(CellError::invalid("this sign-in began before sign-in was OpenID Connect; start again"));
         };
         let provider = crate::oidc::provider(cfg).await?;
         let (status, answer) = crate::keys::oidc_token(&self.env, &provider, cfg, &b.code, &b.redirect_uri, verifier).await?;
@@ -519,9 +441,14 @@ impl RegistryCell {
         let person = cfg.claims.person(&verified);
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
         let attributes = Attributes { email: person.email.as_deref(), name: person.name.as_deref(), handle: Some(&person.handle) };
-        let (id, _) = self.person_for(&cfg.issuer, &person.subject, &attributes, login.link_to.as_deref())?;
+        let keyed_as = match &cfg.keyed_as {
+            KeyedAs::Named(k) => k.clone(),
+            // the bound WorkOS environment's name, its client id a store secret
+            KeyedAs::WorkOs => crate::keys::workos(&self.env, &self.cfg).await?.issuer(),
+        };
+        let (id, _) = self.person_for(&keyed_as, &person.subject, &attributes, login.link_to.as_deref())?;
         let hint = crate::keys::seal(&self.env, &self.scope(), id_token.as_bytes()).await?;
-        let token = self.new_session(&id, None, None, Some(IdpSession::Oidc(&hint)), None, js::now_ms() + SESSION_TTL_MS)?;
+        let token = self.new_session(&id, None, None, Some(&hint), None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged { token, return_to: login.return_to })
     }
 
@@ -573,8 +500,8 @@ impl RegistryCell {
 
     /// An e2e person signed in (the levers' `TestHook::E2eSignIn`): their
     /// email is their subject under the e2e issuer, which no real sign-in
-    /// has, so they are never a person WorkOS signs in; the first sign-in
-    /// makes them. A platform session like any other.
+    /// has, so they are never a person a provider signs in; the first
+    /// sign-in makes them. A platform session like any other.
     pub(super) fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> CellResult<E2eSignedIn> {
         assert!(self.cfg.test_hooks, "e2e people sign in only on a fleet with levers");
         if !levers::valid_e2e_email(email) {
@@ -615,6 +542,20 @@ impl RegistryCell {
         )?;
         self.exec("DELETE FROM e2e_days WHERE day < ?", vec![SqlStorageValue::Integer(day - 7)])?;
         Ok(())
+    }
+
+    /// A person as a sign-in keeps them, made without one (the levers'
+    /// `TestHook::Person`): their `(issuer, subject)`, written as a sign-in
+    /// writes it (`person_for`). A test fleet's alone: the e2e's stand-in
+    /// for people a sign-in made before it changed.
+    pub(super) fn kept_person(&self, kept: super::calls::KeptPerson) -> CellResult<Value> {
+        assert!(self.cfg.test_hooks, "a person is made without a sign-in only on a fleet with levers");
+        let bounded = |v: &str| !v.is_empty() && v.len() <= oidc::SUBJECT_MAX;
+        if !bounded(&kept.issuer) || !bounded(&kept.subject) || kept.email.len() > EMAIL_MAX || kept.issuer == levers::E2E_ISSUER {
+            return Err(CellError::invalid(format!("a kept person names an issuer (not the e2e one) and a subject of 1 to {} bytes, and an email", oidc::SUBJECT_MAX)));
+        }
+        let (identity, created) = self.person_for(&kept.issuer, &kept.subject, &Attributes { email: Some(&kept.email), name: None, handle: None }, None)?;
+        Ok(json!({ "identity": identity, "created": created }))
     }
 
     /// Whether `identity` is an e2e person (signed in under the e2e issuer).
@@ -658,15 +599,15 @@ impl RegistryCell {
         Ok(())
     }
 
-    /// The platform session ends, and every site session made from it; the
-    /// provider's handle on it comes back for its logout (an id_token that
-    /// no longer opens, its host secret rotated away, is logged and
-    /// skipped: the session ends here all the same).
+    /// The platform session ends, and every site session made from it; its
+    /// id_token comes back as the provider's logout's hint (one that no
+    /// longer opens, its host secret rotated away, is logged and skipped:
+    /// the session ends here all the same).
     pub(super) async fn logout(&self, b: Logout) -> CellResult<LoggedOut> {
         let Live { hash, .. } = self.live_session(&b.token, None, false)?;
         let now = SqlStorageValue::Integer(js::now_ms());
         let row = self
-            .row::<SidRow>("SELECT workos_sid, id_token FROM sessions WHERE hash = ?", vec![hash.as_str().into()])?
+            .row::<IdTokenRow>("SELECT id_token FROM sessions WHERE hash = ?", vec![hash.as_str().into()])?
             .ok_or_else(|| CellError::host("a live session went missing during its logout"))?;
         self.exec("UPDATE sessions SET revoked_at = ? WHERE (hash = ? OR parent = ?) AND revoked_at IS NULL", vec![now, hash.as_str().into(), hash.as_str().into()])?;
         // opened after the session is revoked: the await writes nothing
@@ -680,7 +621,7 @@ impl RegistryCell {
             },
             None => None,
         };
-        Ok(LoggedOut { workos_sid: row.workos_sid, id_token })
+        Ok(LoggedOut { id_token })
     }
 
     /// A platform session's redemption for a fragment, when the person may

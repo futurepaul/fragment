@@ -201,12 +201,39 @@ struct CodeStorage {
     api: Option<String>,
 }
 
+/// The WorkOS environment: Pipes' connections (its client id and API
+/// key), and sign-in through its AuthKit, an OAuth application's OpenID
+/// Connect provider at the AuthKit domain (docs/self-host.md, seam 4).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkOs {
     /// The environment's client id and API key: their names in the store.
     client_id: String,
     api_key: String,
+    /// The AuthKit domain (`<name>.authkit.app`, or the custom domain):
+    /// the issuer is `https://<it>`.
+    authkit_domain: String,
+    /// The OAuth application's client id (WorkOS Connect, first-party, its
+    /// redirect URI `<platform>/auth/callback`; no secret: every authorize
+    /// URL carries it), and its secret's name in the store.
+    oauth_client_id: String,
+    oauth_client_secret: String,
+}
+
+/// AuthKit's issuer for a domain: a bare host name, nothing else.
+fn authkit_issuer(domain: &str) -> Result<String> {
+    let host = domain.trim();
+    anyhow::ensure!(
+        !host.is_empty() && host.len() <= 253 && host.contains('.') && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'),
+        "workos.authkit_domain is the AuthKit domain's host name alone (e.g. example.authkit.app), not {domain:?}"
+    );
+    Ok(format!("https://{host}"))
+}
+
+/// Sign-in: AuthKit's OpenID Connect provider, for the OAuth application,
+/// its secret bound by name (`bound`).
+fn signin_of(d: &Deployment) -> Result<devstack::OidcVars> {
+    Ok(devstack::OidcVars::authkit(&authkit_issuer(&d.workos.authkit_domain)?, &d.workos.oauth_client_id, None))
 }
 
 /// The store secrets the deployment's Workers are bound to, by name.
@@ -218,7 +245,7 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
         codestorage_key: d.codestorage.private_key.clone(),
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
         operator_keys,
-        oidc_client_secret: None,
+        oidc_client_secret: Some(d.workos.oauth_client_secret.clone()),
         model_key: None,
     })
 }
@@ -233,6 +260,9 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     if let Some((client, key)) = &b.workos {
         named.push(("workos.client_id".into(), client.as_str()));
         named.push(("workos.api_key".into(), key.as_str()));
+    }
+    if let Some(secret) = &b.oidc_client_secret {
+        named.push(("workos.oauth_client_secret".into(), secret.as_str()));
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -674,6 +704,9 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
+    for (k, value) in signin_of(d)?.vars() {
+        v.insert(k.into(), json!(value));
+    }
     c.insert("vars".into(), vars);
     anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
     c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
@@ -755,7 +788,13 @@ mod tests {
             host_secret: "fragment-host-secret".into(),
             host_secret_previous: None,
             codestorage: CodeStorage { org: "o".into(), private_key: "fragment-codestorage-private-key".into(), api: None },
-            workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
+            workos: WorkOs {
+                client_id: "fragment-workos-client-id".into(),
+                api_key: "fragment-workos-api-key".into(),
+                authkit_domain: "example.authkit.app".into(),
+                oauth_client_id: "client_app".into(),
+                oauth_client_secret: "fragment-workos-oauth-client-secret".into(),
+            },
             operators: vec![],
             ai_gateway: None,
             vision_model: None,
@@ -1028,6 +1067,29 @@ mod tests {
         for old in ["FRAGMENT_HOST_SECRET", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "FRAGMENT_KEY_", "key_file", "secrets/"] {
             assert!(!whole.contains(old), "{old} is in a rendered config");
         }
+    }
+
+    /// Sign-in is AuthKit's OpenID Connect provider at the AuthKit domain,
+    /// its people keyed as the environment's, as before; a domain that is
+    /// more than a host name is refused.
+    #[test]
+    fn workos_signs_in_through_authkit_keyed_as_before() {
+        assert_eq!(authkit_issuer("example.authkit.app").unwrap(), "https://example.authkit.app");
+        assert_eq!(authkit_issuer(" auth.example.com ").unwrap(), "https://auth.example.com");
+        for bad in ["", "https://example.authkit.app", "example.authkit.app/", "authkit", "exa mple.authkit.app", "example.authkit.app?x"] {
+            assert!(authkit_issuer(bad).is_err(), "{bad:?}");
+        }
+        let d = deployment(None, None);
+        let signin = signin_of(&d).unwrap();
+        let vars: BTreeMap<&str, &str> = signin.vars().into_iter().collect();
+        assert_eq!(vars["FRAGMENT_OIDC_ISSUER"], "https://example.authkit.app");
+        assert_eq!(vars["FRAGMENT_OIDC_CLIENT_ID"], "client_app");
+        assert_eq!(vars["FRAGMENT_OIDC_AUTH"], "client_secret_post", "the client in the body, as WorkOS's reference has it");
+        assert_eq!(vars["FRAGMENT_OIDC_KEYED_AS"], "workos", "the people WorkOS signed in before keep their key: the bound environment's");
+        assert!(!vars.contains_key("FRAGMENT_OIDC_CLIENT_SECRET") && !vars.values().any(|v| v.contains("fragment-workos-oauth-client-secret")), "the secret is a store secret, never a variable");
+        // its secret is bound by name, beside WorkOS's own
+        let bound = bound(&d).unwrap();
+        assert!(bound.cell().iter().any(|(b, n)| b == fragment_core::secrets_store::OIDC_CLIENT_SECRET && *n == "fragment-workos-oauth-client-secret"));
     }
 
     /// OpenRouter went (a hard cut): a config that still names its key is

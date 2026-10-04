@@ -1,8 +1,8 @@
 //! The deployment's keys, held in its Cloudflare Secrets Store and bound to
 //! the platform Worker by name (docs/secrets.md; the bindings' names are
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
-//! rest, the code.storage org key, WorkOS's client id and API key, the
-//! OpenID Connect client's secret, and the operator's keys a computer's
+//! rest, the code.storage org key, WorkOS's client id and API key (Pipes'),
+//! the sign-in client's secret, and the operator's keys a computer's
 //! swap sends; and what is derived from the host secret: the key
 //! placeholders' tags are made with (`tag_keys`). This file is the one
 //! place the cell reads them (`secret`), through a per-isolate cache that
@@ -154,23 +154,26 @@ pub async fn codestorage_token(env: &Env, org: &str, repo: &str, sub: &str, scop
     Ok((token, (iat + ttl_s) * 1000))
 }
 
-/// The WorkOS environment this fleet signs people in with: its client id
-/// (bound as `WORKOS_CLIENT`) and its API's base (`WORKOS_API_URL`).
+/// The fleet's WorkOS environment, Pipes': its client id (bound as
+/// `WORKOS_CLIENT`) and its API's base (`WORKOS_API_URL`).
 pub struct WorkOs<'a> {
     pub client_id: String,
     pub api: &'a str,
 }
 
 impl WorkOs<'_> {
-    /// Who vouches for a person's subject: this environment. A person is
-    /// keyed by `(issuer, subject)`, so finite.computer's login (another
-    /// environment) is another issuer (docs/finite-integration.md).
+    /// The issuer this environment's people are keyed under, whose
+    /// subjects are its user ids, which Pipes takes. finite.computer's
+    /// login (another environment) is another issuer
+    /// (docs/finite-integration.md). Sign-in through AuthKit keys them so
+    /// (`FRAGMENT_OIDC_KEYED_AS=workos`), as they were before it was OpenID
+    /// Connect.
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
     }
 }
 
-/// The fleet's WorkOS environment, when sign-in is configured (`cfg.workos`).
+/// The fleet's WorkOS environment, when it is configured (`cfg.workos`).
 pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
     let api = &cfg.workos()?.api;
     let client_id = required(env, store::WORKOS_CLIENT).await?;
@@ -195,18 +198,6 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     let status = resp.status_code();
     let text = resp.text().await.unwrap_or_default();
     Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
-}
-
-/// WorkOS's code exchange with the API key added: (status, WorkOS's
-/// answer, its refresh token dropped: the platform keeps its own session).
-pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {
-    let key = required(env, store::WORKOS_KEY).await?;
-    let payload = json!({ "client_id": client_id, "client_secret": key, "grant_type": "authorization_code", "code": code });
-    let (status, mut answer) = post_json(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await?;
-    if let Some(o) = answer.as_object_mut() {
-        o.remove("refresh_token");
-    }
-    Ok((status, answer))
 }
 
 /// The OpenID Connect code exchange (RFC 6749 4.1.3, with PKCE's

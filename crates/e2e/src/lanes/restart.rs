@@ -23,6 +23,8 @@ const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
+/// A person WorkOS signed in before sign-in was OpenID Connect.
+const KEPT_EMAIL: &str = "restart-kept@e2e.test";
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -100,9 +102,15 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
     anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
 
+    // a person WorkOS signed in before sign-in was OpenID Connect, kept as
+    // that sign-in kept them (docs/self-host.md, seam 4): AuthKit's runs
+    let kept = match s.oidc_signin() || s.hosted() {
+        false => Some(super::signin::kept_workos_person(s, &api, KEPT_EMAIL)?),
+        true => None,
+    };
     // a sign-in begun and answered by the provider, finished only after the
-    // restart (an OpenID Connect one keeps its verifier and nonce in the
-    // registry; its provider's metadata and keys are fetched again)
+    // restart (it keeps its verifier and nonce in the registry; its
+    // provider's metadata and keys are fetched again)
     let pending = api.unsigned("GET", "/auth/login?return=/after-restart&login_hint=restart-pending@e2e.test", None)?;
     let pending_cookie = pending.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
     let pending_back = api.external(&pending.header("location"))?;
@@ -121,6 +129,17 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
         r.status == 302 && r.header("location").ends_with("/after-restart") && shown.to_string().contains("restart-pending@e2e.test"),
         format!("{r} / {shown}"),
     );
+    match &kept {
+        Some(kept) => {
+            let session = api.sign_in(KEPT_EMAIL)?;
+            let me = who(&api, &session)?;
+            s.ok("after a restart a person kept from before sign-in was OpenID Connect signs in through AuthKit as themselves", me["id"] == kept.as_str(), &me);
+        }
+        None => s.skip(
+            "after a restart a person kept from before sign-in was OpenID Connect signs in as themselves",
+            "they are WorkOS's, made by the registry's levers: this run signs people in through the strict OpenID Connect fake, or keeps the hosted lane's rules",
+        ),
+    }
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
