@@ -13,7 +13,6 @@
 # Caches are restored on every run and saved only from master's pushes
 # (a PR reads master's): each key names what it holds below. A save comes
 # right after the step that fills it, so a red e2e still saves its build.
-# (TEMPORARY, until this PR's warm run is proven: its own runs save too.)
 name: ci
 
 on:
@@ -51,7 +50,7 @@ jobs:
           key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       - run: cargo xtask check
-      - if: (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.cache.outputs.cache-hit != 'true'
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -124,7 +123,7 @@ jobs:
       # the Workers, the CLI and the suite, and the computer images the
       # node's boot builds (xtask/src/build.rs), all at once
       - run: cargo xtask e2e --build-only
-      - if: matrix.shard == 1 && (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.cargo.outputs.cache-hit != 'true'
+      - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
@@ -136,14 +135,14 @@ jobs:
             cell/target
             agent/target
           key: ${{ steps.cargo.outputs.cache-primary-key }}
-      - if: matrix.shard == 1 && (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.worker-build.outputs.cache-hit != 'true'
+      - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.worker-build.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: |
             ~/.cargo/bin/worker-build
             ~/.cache/worker-build
           key: ${{ steps.worker-build.outputs.cache-primary-key }}
-      - if: matrix.shard == 1 && (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.node.outputs.cache-hit != 'true'
+      - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.node.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: target/tools
@@ -164,7 +163,7 @@ jobs:
       # after the run, from any shard that shot a preview card: miniflare
       # fetches its Chrome for the first one during the run (the first
       # shard to save wins; the others find the key taken)
-      - if: always() && (github.event_name == 'push' && github.ref == 'refs/heads/master' || github.event_name == 'pull_request') && steps.js.outputs.cache-hit != 'true' && hashFiles('target/cache/.wrangler/chrome/**/.miniflare-install-complete') != ''
+      - if: always() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.js.outputs.cache-hit != 'true' && hashFiles('target/cache/.wrangler/chrome/**/.miniflare-install-complete') != ''
         uses: actions/cache/save@v4
         with:
           path: target/cache
@@ -184,10 +183,11 @@ jobs:
 
   # the check named `e2e`: the shards together ran every section exactly
   # once, their counts add up, and every check passed. It runs whatever the
-  # shards did, so a red shard makes it red, never skipped.
+  # shards did (unless the run was cancelled), so a red shard makes it
+  # red, never skipped.
   e2e:
     needs: e2e-shard
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
