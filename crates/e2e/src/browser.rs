@@ -324,7 +324,9 @@ impl Browser {
     }
 
     /// Waits until `expr` is truthy in the page.
+    #[track_caller]
     pub fn until(&mut self, page: &Page, expr: &str, timeout: Duration) -> bool {
+        let at = std::panic::Location::caller();
         let t0 = Instant::now();
         while t0.elapsed() < timeout {
             if self.eval(page, &format!("!!({expr})")).ok() == Some(Value::Bool(true)) {
@@ -332,6 +334,8 @@ impl Browser {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        // as `Suite::eventually` says it: a wait that ran out, and where
+        println!("      (a wait ran out its {timeout:.0?} at {}:{})", at.file(), at.line());
         false
     }
 

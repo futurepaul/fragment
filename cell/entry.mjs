@@ -179,14 +179,14 @@ class ContainerHost {
     if (!this.#c.running) return false;
     this.#generation = generation;
     this.#c.monitor().then(
-      () => this.#report("container/exited", { generation }),
-      (e) => this.#report("container/exited", { generation, why: String((e && e.message) || e) }),
+      () => this.#report("computer/exited", { generation }),
+      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
     return true;
   }
 
   // Starts `image` (or a snapshot of it), then watches it: its exit, for
-  // any reason, is reported as `container/exited` for this generation.
+  // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
     this.#generation = generation;
     const opts = { env, enableInternet: true };
@@ -195,8 +195,8 @@ class ContainerHost {
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     this.#c.start(opts);
     this.#c.monitor().then(
-      () => this.#report("container/exited", { generation }),
-      (e) => this.#report("container/exited", { generation, why: String((e && e.message) || e) }),
+      () => this.#report("computer/exited", { generation }),
+      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
   }
 
@@ -299,7 +299,7 @@ class ContainerHost {
   // A request to one of the container's ports. A WebSocket is bridged
   // through this Durable Object (both ends accepted here, so an open tab
   // keeps the computer awake), its opening and closing reported as
-  // `container/tab`.
+  // `computer/tab`.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
@@ -307,7 +307,7 @@ class ContainerHost {
     const [client, server] = Object.values(new WebSocketPair());
     upstream.accept();
     server.accept();
-    await this.#report("container/tab", { open: true });
+    await this.#report("computer/tab", { open: true });
     let closed = false;
     const close = (code, reason) => {
       if (closed) return;
@@ -317,7 +317,7 @@ class ContainerHost {
           ws.close(code || 1000, reason || "");
         } catch {}
       }
-      this.#report("container/tab", { open: false });
+      this.#report("computer/tab", { open: false });
     };
     upstream.addEventListener("message", (e) => server.send(e.data));
     server.addEventListener("message", (e) => upstream.send(e.data));

@@ -28,7 +28,7 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None });
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, summary: None });
     let only = parse(&strings(&["--only", "agents,addon"])).unwrap();
     assert_eq!((only.only, only.hosted), (Some(strings(&["agents", "addon"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
@@ -36,6 +36,35 @@ fn a_local_run_reads_as_before() {
     assert_eq!(parse(&strings(&["--rehearse", "--max-paid-calls", "3", "--only", "computers"])).unwrap().rehearse, Some(3));
     for bad in [&["--only", "a", "--except", "b"][..], &["--only"], &["--max-paid-calls", "3"], &["--dry-run"], &["--zone", "finite.place"], &["--nope"], &["--only", ""]] {
         assert!(parse(&strings(bad)).is_err(), "{bad:?}");
+    }
+}
+
+/// A local run takes one shard of the table's split, as CI runs it, and
+/// a file for its summary; a shard is never beside `--only`, `--except`,
+/// a rehearsal, a hosted run, or a split the table does not have.
+#[test]
+fn a_local_run_takes_one_shard_and_a_summary_file() {
+    let n = crate::lanes::SHARDS.len();
+    let args = parse(&strings(&["--shard", &format!("2/{n}"), "--summary", "target/e2e-summary/shard-2.json"])).unwrap();
+    assert_eq!(args.shard, Some(Shard { k: 2, n: n as u32 }));
+    assert_eq!(args.summary.as_deref(), Some(Path::new("target/e2e-summary/shard-2.json")));
+    assert_eq!((args.only, args.except, args.hosted, args.rehearse), (None, vec![], None, None));
+    assert_eq!(parse(&strings(&["--summary", "s.json"])).unwrap().summary.as_deref(), Some(Path::new("s.json")), "a whole run writes one too");
+    let split = format!("1/{n}");
+    for bad in [
+        strings(&["--shard", &split, "--only", "auth"]),
+        strings(&["--except", "auth", "--shard", &split]),
+        strings(&["--shard", &split, "--shard", &split]),
+        strings(&["--shard", &split, "--rehearse"]),
+        strings(&["--shard", &format!("1/{}", n + 1)]),
+        strings(&["--shard", &format!("{}/{n}", n + 1)]),
+        strings(&["--shard", "0/4"]),
+        strings(&["--shard"]),
+        strings(&["--summary", "a.json", "--summary", "b.json"]),
+        strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--shard", &split]),
+        strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--summary", "s.json"]),
+    ] {
+        assert!(parse(&bad).is_err(), "{bad:?}");
     }
 }
 
