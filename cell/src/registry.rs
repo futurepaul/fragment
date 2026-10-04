@@ -54,7 +54,7 @@ mod signin;
 use calls::{
     Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
+    OidcExchange, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -699,6 +699,7 @@ impl RegistryCell {
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
             Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
+            OidcExchange::PATH => reply::<OidcExchange>(self.oidc_exchange(body(&bytes)?).await),
             Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),

@@ -23,7 +23,8 @@
 //! - **Caches**: the cell keeps the metadata and the JWKS per isolate for
 //!   at most `METADATA_TTL_MS`, and fetches the JWKS again for a key it
 //!   does not hold at most once per `JWKS_REFETCH_MIN_MS` (`may_refetch`),
-//!   so a flood of forged `kid`s cannot make it hammer the provider.
+//!   so a provider naming keys it never published is not asked again and
+//!   again.
 
 use base64::Engine;
 use serde::Deserialize;
@@ -53,7 +54,12 @@ pub const USERNAME_CLAIMS_MAX: usize = 8;
 /// How long the cell keeps the provider's metadata and keys.
 pub const METADATA_TTL_MS: i64 = 60 * 60 * 1000;
 /// The shortest wait between two fetches of the JWKS for a key it lacks.
-pub const JWKS_REFETCH_MIN_MS: i64 = 60 * 1000;
+/// Only the provider's own token endpoint hands the cell an id_token (for a
+/// code and a verifier), so a `kid` the cell lacks is the provider's doing:
+/// this bounds a provider misbehaving to four fetches a minute per isolate,
+/// and a rotation (Dex signs with a new key the moment it publishes it) is
+/// picked up within as long.
+pub const JWKS_REFETCH_MIN_MS: i64 = 15 * 1000;
 /// The scopes asked for when the deployment names none.
 pub const DEFAULT_SCOPES: &str = "openid email profile";
 const SCOPES_MAX: usize = 512;
@@ -311,7 +317,9 @@ pub struct Authorize<'a> {
     pub scopes: &'a str,
     pub state: &'a str,
     pub nonce: &'a str,
-    pub verifier: &'a str,
+    /// PKCE's S256 challenge (`challenge`): the verifier stays with the
+    /// registry, which alone exchanges the code.
+    pub challenge: &'a str,
     /// Who the person says they are, passed on (Core 1.0's `login_hint`).
     pub login_hint: Option<&'a str>,
 }
@@ -319,6 +327,7 @@ pub struct Authorize<'a> {
 /// Where the browser goes to sign in.
 pub fn authorize_url(a: &Authorize<'_>) -> String {
     assert!(!a.state.is_empty() && !a.nonce.is_empty(), "a sign-in carries a state and a nonce");
+    assert!(a.challenge.len() == 43, "an S256 challenge is 43 base64url characters");
     let mut u = url::Url::parse(&a.provider.authorization_endpoint).expect("Provider::parse checked the endpoint");
     {
         let mut q = u.query_pairs_mut();
@@ -328,7 +337,7 @@ pub fn authorize_url(a: &Authorize<'_>) -> String {
             .append_pair("scope", a.scopes)
             .append_pair("state", a.state)
             .append_pair("nonce", a.nonce)
-            .append_pair("code_challenge", &challenge(a.verifier))
+            .append_pair("code_challenge", a.challenge)
             .append_pair("code_challenge_method", "S256");
         if let Some(hint) = a.login_hint {
             q.append_pair("login_hint", hint);
@@ -981,7 +990,7 @@ mod tests {
     }
 
     // Goal: a token signed by a key the cell has not seen asks for a fresh
-    // JWKS, at most once a minute, and a fresh set with the new key
+    // JWKS, at most once a cooldown, and a fresh set with the new key
     // verifies it (the provider rotated). Method: a set without the kid,
     // then a set with it; the refetch clock.
     #[test]
@@ -990,7 +999,7 @@ mod tests {
         let old = jwks();
         assert_eq!(verify(&token, &old, &expect()).unwrap_err(), IdTokenError::UnknownKey(Some("r2".into())));
         let fetched_at = 1_000_000;
-        assert!(!may_refetch(fetched_at, fetched_at + JWKS_REFETCH_MIN_MS - 1), "not again within the minute");
+        assert!(!may_refetch(fetched_at, fetched_at + JWKS_REFETCH_MIN_MS - 1), "not again within the cooldown");
         assert!(may_refetch(fetched_at, fetched_at + JWKS_REFETCH_MIN_MS));
         let rotated = Jwks::parse(json!({ "keys": [rsa_jwk("r2", rsa_key())] }).to_string().as_bytes()).unwrap();
         assert!(verify(&token, &rotated, &expect()).is_ok());
@@ -1134,7 +1143,7 @@ mod tests {
             scopes: "openid email",
             state: "s1",
             nonce: NONCE,
-            verifier: &verifier,
+            challenge: &challenge(&verifier),
             login_hint: Some("jane@corp.example"),
         });
         let u = url::Url::parse(&to).unwrap();
