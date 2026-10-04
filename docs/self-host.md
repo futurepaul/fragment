@@ -391,7 +391,87 @@ mutex, bound to loopback.
 - reachable by the cell, the CLI and, through an intercept, computers;
 - named in configuration, as `CODESTORAGE_API_URL` already is.
 
-**The spike** runs the fake, labeled as the fake.
+**The store: macrofiche** (`github.com/futurepaul/macrofiche`, a
+sibling project as sandcastle is): git itself, pinned and driven as
+jailed processes, answering the contract (its `docs/contract.md`, read
+from this repo, and `docs/design.md`).
+
+**Built (branch `selfhost-macrofiche`): the stack and the e2e on a code
+store outside them,** chosen by configuration:
+
+| Where the git lives | dev (`cargo xtask dev`) | the e2e |
+|---|---|---|
+| the fake in the process (the default) | nothing set | `FRAGMENT_E2E_CODESTORE` unset or `fake` |
+| a store already running | `CODESTORAGE_API_URL`, `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY_FILE` (the variables the cell reads in production; the key by its file) | the same, with `FRAGMENT_E2E_CODESTORE=external` |
+| macrofiche, started for the stack | `MACROFICHE_BIN` | `FRAGMENT_E2E_CODESTORE=macrofiche` and `MACROFICHE_BIN` |
+
+- `devstack::codestore` holds the choice and macrofiche's start-up: its
+  state directory (`target/devstack/macrofiche` in dev, the run's scratch
+  in the e2e), a config file naming its listener and the org with its
+  public key (SPKI PEM, `OrgKey::public_pem` from the private key the
+  cell signs with), started on the fake's port in dev, and stopped with
+  the stack. That shape follows macrofiche's design before it had a
+  binary, and lives in one function.
+- `fake-codestorage` (`crates/fakes`) is the fake as a process of its
+  own, with an org key: a store outside the node whose levers nothing can
+  reach. It proves the external mode without macrofiche.
+- On an external store the e2e reads git only through the contract's
+  routes, with tokens it signs with the org key (`crates/e2e/src/store.rs`):
+  a file, a head, the org's repos, main's history. Its own writes are
+  another writer's: a commit pack, and a deploy's ref move (live created
+  at main's tip, else merged to it).
+- **No store registers the cell's webhook.** macrofiche configures one
+  webhook per org (its design, question 2), and the cell's are per
+  fragment (`/api/f/<name>/webhook`, each with its own secret). So, as on
+  the hosted fleet, `refresh` and the poll move the pins: the e2e follows
+  each of its writes with the owner's `refresh`, as the CLI does.
+- A check that pulls one of the fake's levers is a skip that says which:
+  an outage of file reads, sabotaged commit packs, counts of the requests
+  it answered, and its refs' ephemeral flag. Beside each, the part a real
+  store can show is checked: a replay commits nothing (main's history, in
+  place of the fake's count of packs), two saves are two commits, a
+  preview ref is at main's tip read with `ephemeral=true`.
+- e2e `create` asserted the fake's UUID-shaped url form; on an external
+  store the url form is the store's own (the service's, and macrofiche's,
+  is the repo's name).
+
+Running it:
+
+```sh
+# the fake as a process of its own
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out org-key.pem
+target/release/fake-codestorage --org fragment-ext --key-file org-key.pem --port 9450 &
+FRAGMENT_E2E_CODESTORE=external CODESTORAGE_API_URL=http://127.0.0.1:9450 \
+  CODESTORAGE_ORG=fragment-ext CODESTORAGE_PRIVATE_KEY_FILE=$PWD/org-key.pem \
+  FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=../celld/target/release/celld cargo xtask e2e
+# macrofiche, started by the run
+FRAGMENT_E2E_CODESTORE=macrofiche MACROFICHE_BIN=../macrofiche/target/release/macrofiche cargo xtask e2e
+# dev on either
+MACROFICHE_BIN=../macrofiche/target/release/macrofiche cargo xtask dev --clean
+```
+
+A cell remembers each fragment's repo, so a dev stack moved to another
+store takes `--clean`.
+
+**Evidence, 2026-10-03:**
+
+- The whole suite on celld, its git in the fake run as a process of its
+  own (`fake-codestorage`, `FRAGMENT_E2E_CODESTORE=external`), none of
+  its levers reachable: 1293 passed, 0 failed, 22 skipped. Eleven skips
+  are the fake's levers, each naming which; four are the container
+  sections, seven the card checks (celld shoots no cards). The store
+  held 158 repos after `create` alone: its 150 fillers were made through
+  `POST /api/repos`, and the name made again was found past the list's
+  first page.
+- The sections the change touches, on the fake in the process as
+  before (create, files, deploy, templates, ops, effects, site,
+  appfiles, blobs, notes, brain, ai, ledger, sync, restart, addon): 471
+  passed, 0 failed, 7 skipped (cards).
+- `cargo xtask dev --runtime celld` on the same store
+  (`FRAGMENT_DEV_PORT=9100`): ready in 4.6 s, its banner and the cell's
+  variables naming the store.
+- macrofiche: not yet run. Its design is done and its engine phase under
+  way; it has no binary to start yet.
 
 **Master:** none now. Cloudflare Artifacts may replace code.storage
 (decision 1). If it does, the self-hosted code store implements whatever
@@ -715,6 +795,10 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   - Still to do: S2's checks on a real engine, which needs root, and
     the same against a Cloudflare preview. Both are Paul's.
 - **S6:** not started.
+- **Seam 5, git in a code store outside the stack: built** (branch
+  `selfhost-macrofiche`): the dev stack and the e2e on the fake, a store
+  already running, or macrofiche started for them. The whole suite
+  passed on the fake as a process of its own (seam 5, Evidence).
 - **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
   beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
   it signed in through a real Dex (seam 4, Evidence).
