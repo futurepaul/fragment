@@ -299,9 +299,12 @@ fn build_e2e() -> Result<()> {
 
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
+    let t0 = std::time::Instant::now();
     let manifest = devstack::repo_root().join("Cargo.toml");
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
-    build_suite()
+    build_suite()?;
+    println!("built the CLI and the suite in {:.1?}", t0.elapsed());
+    Ok(())
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a

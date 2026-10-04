@@ -53,7 +53,10 @@ fn worker_build_installed() -> Result<()> {
 
 /// One Worker project (`cell/` or `agent/`) for wasm32, into its `build/`.
 fn worker(dir: &Path) -> Result<()> {
-    run(Command::new("worker-build").arg("--release").current_dir(dir))
+    let t0 = Instant::now();
+    run(Command::new("worker-build").arg("--release").current_dir(dir))?;
+    println!("built {} for wasm32 in {:.1?}", dir.file_name().unwrap_or_default().to_string_lossy(), t0.elapsed());
+    Ok(())
 }
 
 /// Where worker-build keeps its tools: `dirs_next::cache_dir()`'s
