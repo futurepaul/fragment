@@ -25,10 +25,10 @@ the cell stores.
 |---|---|
 | A person's GitHub token, other personal keys | the person's own cell |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, the WorkOS API key, the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37), a preview's test secret (`FRAGMENT_TEST_SECRET`, below) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
+| The deployment's host secret, the code.storage org key, the WorkOS API key, an OpenID Connect client's secret (`FRAGMENT_OIDC_CLIENT_SECRET`, docs/self-host.md seam 4), the operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`, decision 37), a preview's test secret (`FRAGMENT_TEST_SECRET`, below) | Worker secrets of the platform Worker (`cargo xtask deploy` uploads them from files named in the deployment's config; `.dev.vars` in dev), never a Worker variable or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A person's connections (Google, GitHub, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
-| A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
+| A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies. An OpenID Connect sign-in's PKCE verifier waits beside its state there (ten minutes at most), and its session's id_token is kept sealed for the registry, as the provider's logout hint |
 
 Never in git, a log, a command line, or a channel record. Rotating a secret means changing it in its home; everything that
 uses it reads it from there.

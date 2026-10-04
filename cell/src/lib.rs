@@ -52,6 +52,7 @@ mod live;
 mod members;
 mod meter;
 mod models;
+mod oidc;
 mod ops;
 mod plane;
 mod principal;

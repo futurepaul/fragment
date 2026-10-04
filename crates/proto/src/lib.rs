@@ -785,14 +785,23 @@ pub struct Identity {
     pub held: Option<Role>,
 }
 
-/// One of a person's sign-ins, as their identity shows it: the email is an
-/// attribute, refreshed at each sign-in and never the key.
+/// One of a person's sign-ins, as their identity shows it: the email (and
+/// an OpenID Connect provider's name and username) are attributes,
+/// refreshed at each sign-in and never the key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Subject {
-    /// `workos:<client id>`: the environment that vouches for it.
+    /// Who vouches for it: `workos:<client id>` (a WorkOS environment), or
+    /// an OpenID Connect provider's issuer URL.
     pub issuer: String,
     pub email: Option<String>,
+    /// The person's name, as an OpenID Connect provider gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What an OpenID Connect provider calls them where it gives no email:
+    /// a username claim (`preferred_username`, `upn`), else the subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
     pub linked_at: i64,
 }
 
@@ -1402,8 +1411,13 @@ mod tests {
         for kind in [IdentityKind::Person, IdentityKind::Agent] {
             assert_eq!(IdentityKind::parse(kind.as_str()), Some(kind), "a kind's column reads back as itself");
         }
-        let subject = Subject { issuer: "workos:client_1".into(), email: None, linked_at: 7 };
+        let subject = Subject { issuer: "workos:client_1".into(), email: None, name: None, handle: None, linked_at: 7 };
         assert_eq!(serde_json::to_value(&subject).unwrap(), serde_json::json!({ "issuer": "workos:client_1", "email": null, "linkedAt": 7 }));
+        // an OpenID Connect sign-in with no email still says who it is
+        let oidc = Subject { issuer: "https://idp.example/realms/corp".into(), email: None, name: Some("Jane".into()), handle: Some("jane".into()), linked_at: 7 };
+        let shown = serde_json::json!({ "issuer": "https://idp.example/realms/corp", "email": null, "name": "Jane", "handle": "jane", "linkedAt": 7 });
+        assert_eq!(serde_json::to_value(&oidc).unwrap(), shown);
+        assert_eq!(serde_json::from_value::<Subject>(shown).unwrap(), oidc);
     }
 
     #[test]
