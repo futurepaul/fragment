@@ -516,10 +516,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let fits = b.eval(&page, "document.documentElement.scrollWidth <= innerWidth + 1")?;
     s.ok("on a phone it fits its width, a chat open", phone && fits == true, &fits);
     // the open chat names its agent once `__people` answers, in its
-    // composer's placeholder ("Message Reader", which no innerText holds):
-    // the picture waits for it
-    // the frame the shell shows names its fragment (`data-fragment`), whose
-    // flat host its page is on once the frame's sign-in redirects there
+    // composer's placeholder ("Message Reader", which no innerText holds),
+    // and the picture waits for it; the frame the shell shows names its
+    // fragment (`data-fragment`), whose flat host its page is on
     let open = b.eval(&page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null")?;
     let host = open.as_str().and_then(fragment_proto::flat_name).unwrap_or_default();
     let names = |p: &Value| p.as_str().is_some_and(|p| p.len() > "Message ".len() && p.starts_with("Message "));
