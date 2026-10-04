@@ -134,11 +134,31 @@ struct CodeStorage {
     api: Option<String>,
 }
 
+/// The WorkOS environment: Pipes' connections (its client id and API
+/// key), and sign-in through its AuthKit, an OAuth application's OpenID
+/// Connect provider at the AuthKit domain (docs/self-host.md, seam 4).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkOs {
     client_id_file: PathBuf,
     api_key_file: PathBuf,
+    /// The AuthKit domain (`<name>.authkit.app`, or the custom domain):
+    /// the issuer is `https://<it>`.
+    authkit_domain: String,
+    /// The OAuth application's client id and secret (WorkOS Connect,
+    /// first-party, its redirect URI `<platform>/auth/callback`).
+    oauth_client_id_file: PathBuf,
+    oauth_client_secret_file: PathBuf,
+}
+
+/// AuthKit's issuer for a domain: a bare host name, nothing else.
+fn authkit_issuer(domain: &str) -> Result<String> {
+    let host = domain.trim();
+    anyhow::ensure!(
+        !host.is_empty() && host.len() <= 253 && host.contains('.') && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'),
+        "workos.authkit_domain is the AuthKit domain's host name alone (e.g. example.authkit.app), not {domain:?}"
+    );
+    Ok(format!("https://{host}"))
 }
 
 use devstack::valid_branch;
@@ -329,6 +349,12 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let org_key = read_secret(&d.codestorage.private_key_file)?;
     let workos_client = read_secret(&d.workos.client_id_file)?;
     let workos_key = read_secret(&d.workos.api_key_file)?;
+    let signin = devstack::OidcVars::authkit(
+        &authkit_issuer(&d.workos.authkit_domain)?,
+        &read_secret(&d.workos.oauth_client_id_file)?,
+        &read_secret(&d.workos.oauth_client_secret_file)?,
+        &workos_client,
+    );
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
     if let Some(p) = &d.default_plan {
@@ -437,6 +463,9 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if let Some(version) = d.price_book_version {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
+    for (k, value) in signin.vars() {
+        v.insert(k.into(), json!(value));
+    }
     c.insert("vars".into(), vars);
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
@@ -457,6 +486,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         "FRAGMENT_HOST_SECRET": host_secret,
         "CODESTORAGE_PRIVATE_KEY": org_key,
         "WORKOS_API_KEY": workos_key,
+        "FRAGMENT_OIDC_CLIENT_SECRET": signin.client_secret.as_deref().expect("AuthKit's application has a secret"),
     });
     for (name, key) in operator_keys {
         secrets[name] = json!(key);
@@ -553,7 +583,13 @@ mod tests {
             dns_token_file: None,
             host_secret_file: "h".into(),
             codestorage: CodeStorage { org: "o".into(), private_key_file: "k".into(), api: None },
-            workos: WorkOs { client_id_file: "c".into(), api_key_file: "a".into() },
+            workos: WorkOs {
+                client_id_file: "c".into(),
+                api_key_file: "a".into(),
+                authkit_domain: "example.authkit.app".into(),
+                oauth_client_id_file: "o".into(),
+                oauth_client_secret_file: "s".into(),
+            },
             operators: vec![],
             ai_gateway: None,
             default_plan: None,
@@ -690,6 +726,25 @@ mod tests {
             assert_eq!(files.len(), 4, "{file}: each operator key's file");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
         }
+    }
+
+    /// Sign-in is AuthKit's OpenID Connect provider at the AuthKit domain,
+    /// its people keyed as the environment's, as before; a domain that is
+    /// more than a host name is refused.
+    #[test]
+    fn workos_signs_in_through_authkit_keyed_as_before() {
+        assert_eq!(authkit_issuer("example.authkit.app").unwrap(), "https://example.authkit.app");
+        assert_eq!(authkit_issuer(" auth.example.com ").unwrap(), "https://auth.example.com");
+        for bad in ["", "https://example.authkit.app", "example.authkit.app/", "authkit", "exa mple.authkit.app", "example.authkit.app?x"] {
+            assert!(authkit_issuer(bad).is_err(), "{bad:?}");
+        }
+        let signin = devstack::OidcVars::authkit("https://example.authkit.app", "client_app", "sk_app", "client_env");
+        let vars: BTreeMap<&str, &str> = signin.vars().into_iter().collect();
+        assert_eq!(vars["FRAGMENT_OIDC_ISSUER"], "https://example.authkit.app");
+        assert_eq!(vars["FRAGMENT_OIDC_CLIENT_ID"], "client_app");
+        assert_eq!(vars["FRAGMENT_OIDC_AUTH"], "client_secret_post", "the client in the body, as WorkOS's reference has it");
+        assert_eq!(vars["FRAGMENT_OIDC_KEYED_AS"], "workos:client_env", "the people WorkOS signed in before keep their key");
+        assert!(!vars.contains_key("FRAGMENT_OIDC_CLIENT_SECRET") && !vars.values().any(|v| v.contains("sk_app")), "the secret is a secret, never a variable");
     }
 
     /// OpenRouter went (a hard cut): a config that still names its key is

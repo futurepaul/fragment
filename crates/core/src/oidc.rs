@@ -1,5 +1,7 @@
 //! Sign-in on OpenID Connect (docs/self-host.md, seam 4): the rules, with
-//! no I/O. The cell (`cell/src/oidc.rs`, `registry/signin.rs`) fetches the
+//! no I/O. Every sign-in is this one flow, whoever the provider is: WorkOS
+//! AuthKit (its OAuth application's provider), Keycloak, Dex, ADFS, Entra.
+//! The cell (`cell/src/oidc.rs`, `registry/signin.rs`) fetches the
 //! provider's metadata and keys and asks these functions what they mean.
 //!
 //! - **Discovery** (OpenID Connect Discovery 1.0): `<issuer>/.well-known/
@@ -16,7 +18,8 @@
 //!   provider's JWKS (never a key the token names itself, never `none` or an
 //!   HMAC), then `iss`, `aud` (with `azp`), `exp`, `iat` and `nbf` within
 //!   `SKEW_S`, `nonce`, and `sub` (OpenID Connect Core 1.0, 3.1.3.7).
-//! - **Who it is**: `(issuer URL, sub)`; the claim map says which claims
+//! - **Who it is**: `(issuer, sub)`, the issuer as the deployment keys its
+//!   people (`check_keyed_as`: the URL, or the name they had); the claim map says which claims
 //!   are the email, the name and the username shown, and an email is never
 //!   assumed: the label falls back to `preferred_username`, `upn`, then
 //!   `sub`.
@@ -117,6 +120,47 @@ pub fn check_issuer(issuer: &str) -> Result<(), OidcError> {
         ("http", Some(h)) if loopback(h) => Ok(()),
         _ => bad("is not https (http only on loopback)"),
     }
+}
+
+/// The issuer a deployment keys its people under (`FRAGMENT_OIDC_KEYED_AS`,
+/// default the issuer URL itself): a person's sign-in is `(keyed_as, sub)`.
+/// A deployment whose people were kept under another name keeps that name,
+/// so every one of them still matches: a WorkOS environment's people are
+/// `workos:<client id>`, from before sign-in was OpenID Connect
+/// (docs/self-host.md, seam 4). Printable ASCII with no space, at most
+/// `SUBJECT_MAX` bytes, and never the e2e people's issuer, which no real
+/// sign-in may share.
+pub fn check_keyed_as(keyed_as: &str) -> Result<(), OidcError> {
+    if keyed_as.is_empty() || keyed_as.len() > SUBJECT_MAX || !keyed_as.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(OidcError::Config(format!("FRAGMENT_OIDC_KEYED_AS is 1 to {SUBJECT_MAX} printable ASCII characters with no space, not {keyed_as:?}")));
+    }
+    if keyed_as == crate::levers::E2E_ISSUER {
+        return Err(OidcError::Config(format!("FRAGMENT_OIDC_KEYED_AS may not be {:?}: that issuer is the e2e people's alone", crate::levers::E2E_ISSUER)));
+    }
+    Ok(())
+}
+
+/// Whom sign-in keys people as: `configured` (`FRAGMENT_OIDC_KEYED_AS`),
+/// else the issuer. Beside WorkOS (`workos`: its environment's name,
+/// `workos:<client id>`), whose people a deployment may already hold, it
+/// is said and never defaulted: the issuer URL would make each of them
+/// someone new at their next sign-in. A WorkOS name must be that
+/// environment's, else Pipes would find none of them.
+pub fn keyed_as(issuer: &str, configured: Option<&str>, workos: Option<&str>) -> Result<String, OidcError> {
+    let keyed_as = match (configured, workos) {
+        (Some(k), _) => k.to_string(),
+        (None, None) => issuer.to_string(),
+        (None, Some(w)) => {
+            return Err(OidcError::Config(format!(
+                "beside WORKOS_CLIENT_ID, FRAGMENT_OIDC_KEYED_AS says whom sign-in keys people as: {w} through WorkOS AuthKit, whose people they are, or the issuer for another provider"
+            )))
+        }
+    };
+    check_keyed_as(&keyed_as)?;
+    if let Some(w) = workos.filter(|w| keyed_as.starts_with("workos:") && keyed_as != *w) {
+        return Err(OidcError::Config(format!("FRAGMENT_OIDC_KEYED_AS {keyed_as:?} is WorkOS's name for another environment than WORKOS_CLIENT_ID's ({w})")));
+    }
+    Ok(keyed_as)
 }
 
 /// Where an issuer's metadata is: its URL less a trailing `/`, then
@@ -1091,6 +1135,28 @@ mod tests {
         for bad in ["http://idp.example", "https://idp.example?x=1", "https://u:p@idp.example", "ftp://idp.example", "idp.example"] {
             assert!(check_issuer(bad).is_err(), "{bad}");
         }
+    }
+
+    // Goal: the name a deployment keys its people under keeps the people
+    // it had (a WorkOS environment's `workos:<client id>`), and is never
+    // one that would let a real sign-in be someone it is not. Method: good
+    // names, then each fault.
+    #[test]
+    fn the_issuer_people_are_keyed_under_is_checked() {
+        for good in ["workos:client_01J8X2Y3Z4", ISSUER, "https://idp.example/"] {
+            assert_eq!(check_keyed_as(good), Ok(()), "{good}");
+        }
+        let long = "x".repeat(SUBJECT_MAX + 1);
+        for bad in ["", "workos: client", "workos:client\n", "wörkos:client", long.as_str(), crate::levers::E2E_ISSUER] {
+            assert!(matches!(check_keyed_as(bad), Err(OidcError::Config(_))), "{bad:?}");
+        }
+        let (authkit, env) = ("https://example.authkit.app", Some("workos:client_env"));
+        assert_eq!(keyed_as(ISSUER, None, None), Ok(ISSUER.into()), "alone, a provider's people are its URL's");
+        assert_eq!(keyed_as(authkit, Some("workos:client_env"), env), Ok("workos:client_env".into()), "AuthKit's people keep their key");
+        assert_eq!(keyed_as(ISSUER, Some(ISSUER), env), Ok(ISSUER.into()), "another provider beside WorkOS, said so");
+        assert!(matches!(keyed_as(authkit, None, env), Err(OidcError::Config(_))), "beside WorkOS, the URL is never a default: it would orphan its people");
+        assert!(matches!(keyed_as(authkit, Some("workos:client_other"), env), Err(OidcError::Config(_))), "another environment's name");
+        assert!(matches!(keyed_as(ISSUER, Some(crate::levers::E2E_ISSUER), None), Err(OidcError::Config(_))));
     }
 
     // Goal: the client authenticates as configured, else as the provider

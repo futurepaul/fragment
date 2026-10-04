@@ -1,6 +1,6 @@
 //! The deployment's keys, held as Worker secrets (docs/secrets.md): the
 //! host secret that seals values at rest, the code.storage org key,
-//! WorkOS's API key, the OpenID Connect client's secret, and the
+//! WorkOS's API key (Pipes'), the sign-in client's secret, and the
 //! operator's keys a computer's swap sends (`FRAGMENT_KEY_<NAME>`); and what is derived from the host secret: the
 //! key placeholders' tags are made with (`tag_keys`). Only the platform
 //! Worker's env holds them. An app runs in an isolate of its own from the
@@ -28,8 +28,9 @@ pub const HOST_SECRET: &str = "FRAGMENT_HOST_SECRET";
 pub const HOST_SECRET_PREVIOUS: &str = "FRAGMENT_HOST_SECRET_PREVIOUS";
 pub const CODESTORAGE_PRIVATE_KEY: &str = "CODESTORAGE_PRIVATE_KEY";
 pub const WORKOS_API_KEY: &str = "WORKOS_API_KEY";
-/// An OpenID Connect client's secret (docs/self-host.md, seam 4); a public
-/// client has none, and proves itself with PKCE alone.
+/// The sign-in client's secret (docs/self-host.md, seam 4: AuthKit's OAuth
+/// application's, or another provider's client's); a public client has
+/// none, and proves itself with PKCE alone.
 pub const OIDC_CLIENT_SECRET: &str = "FRAGMENT_OIDC_CLIENT_SECRET";
 /// The largest answer read from a token endpoint.
 const TOKEN_ANSWER_MAX_BYTES: usize = 64 * 1024;
@@ -134,18 +135,6 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     let status = resp.status_code();
     let text = resp.text().await.unwrap_or_default();
     Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
-}
-
-/// WorkOS's code exchange with the API key added: (status, WorkOS's
-/// answer, its refresh token dropped: the platform keeps its own session).
-pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {
-    let key = secret(env, WORKOS_API_KEY).ok_or_else(|| CellError::host(format!("{WORKOS_API_KEY} is not set")))?;
-    let payload = json!({ "client_id": client_id, "client_secret": key, "grant_type": "authorization_code", "code": code });
-    let (status, mut answer) = post_json(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await?;
-    if let Some(o) = answer.as_object_mut() {
-        o.remove("refresh_token");
-    }
-    Ok((status, answer))
 }
 
 /// The OpenID Connect code exchange (RFC 6749 4.1.3, with PKCE's

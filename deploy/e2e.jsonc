@@ -16,10 +16,13 @@
     "private_key_file": "~/.config/fragment/secrets/codestorage-private-key.pem"
   },
   // WorkOS staging, with Pipes' google provider on Finite's OAuth client
-  // (spike S5)
+  // (spike S5), and sign-in through its AuthKit's OAuth application
   "workos": {
     "client_id_file": "~/.config/fragment/secrets/workos-client-id",
-    "api_key_file": "~/.config/fragment/secrets/workos-api-key"
+    "api_key_file": "~/.config/fragment/secrets/workos-api-key",
+    "authkit_domain": "your-environment.authkit.app",
+    "oauth_client_id_file": "~/.config/fragment/secrets/workos-oauth-client-id",
+    "oauth_client_secret_file": "~/.config/fragment/secrets/workos-oauth-client-secret"
   },
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",

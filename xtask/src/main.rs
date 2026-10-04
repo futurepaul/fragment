@@ -72,14 +72,19 @@ mod summary;
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_OFFSET: u16 = 2;
 const DEV_WORKOS_OFFSET: u16 = 4;
+/// The WorkOS fake's AuthKit (its OpenID Connect provider), at a domain of
+/// its own as AuthKit's is.
+const DEV_AUTHKIT_OFFSET: u16 = 5;
 /// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
 /// never calls real models.
 const DEV_AI_OFFSET: u16 = 6;
 /// The OpenID Connect fake (`FRAGMENT_SIGNIN=oidc`).
 const DEV_OIDC_OFFSET: u16 = 8;
-/// The WorkOS fake's environment in dev.
+/// The WorkOS fake's environment in dev, and its OAuth application.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
+const DEV_WORKOS_APP: &str = "client_fragment_dev_app";
+const DEV_WORKOS_APP_SECRET: &str = "sk_app_fragment_dev";
 /// The OpenID Connect fake's client in dev.
 const DEV_OIDC_CLIENT: &str = "fragment-dev";
 const DEV_OIDC_SECRET: &str = "oidc-secret-fragment-dev";
@@ -132,35 +137,21 @@ fn dev(args: &[String]) -> Result<()> {
     build()?;
     let clean = args.iter().any(|a| a == "--clean");
     let store = dev_codestore(port, clean)?;
-    // sign-in: a real WorkOS environment when its files are named (its
-    // redirect URI must include http://127.0.0.1:8790/auth/callback), else the fake
     let read = |var: &str| -> Result<Option<String>> {
         match std::env::var_os(var) {
             Some(path) => Ok(Some(std::fs::read_to_string(&path).with_context(|| format!("reading {}", Path::new(&path).display()))?.trim().to_string())),
             None => Ok(None),
         }
     };
-    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
-        (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
-        _ => {
-            let fake = fragment_fakes::workos::WorkOs::start_on(port + DEV_WORKOS_OFFSET, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
-            (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
-        }
-    };
+    let (workos, authkit, _workos_fake) = dev_workos(port, &read)?;
     let ai = fragment_fakes::workers_ai::WorkersAi::start(port + DEV_AI_OFFSET)?;
-    let (oidc, oidc_fake) = dev_oidc(port, &read)?;
+    let (oidc, signin_label, _oidc_fake) = dev_signin(port, &read, authkit)?;
     let (model_upstream, node) = self_host(&read)?;
     // computers run on the node when there is one, else in local Docker;
     // with neither, the stack runs without computers, and says so
     // (celld runs no containers of its own: its computers are a node's)
     let docker = !celld && node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     let computers = node.is_some() || docker;
-    let signin_label = match (&oidc, &workos.api_url) {
-        (Some(o), _) if oidc_fake.is_some() => format!("{} (the OpenID Connect fake)", o.issuer),
-        (Some(o), _) => format!("the OpenID Connect provider {}", o.issuer),
-        (None, Some(u)) => format!("{u} (the WorkOS fake)"),
-        (None, None) => format!("WorkOS {}", workos.client_id),
-    };
     let mut fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
@@ -181,7 +172,7 @@ fn dev(args: &[String]) -> Result<()> {
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
-        oidc,
+        oidc: Some(oidc),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: Some(format!("http://127.0.0.1:{port}")),
         operators: None,
@@ -355,29 +346,63 @@ fn dev_codestore(port: u16, clean: bool) -> Result<DevStore> {
     }
 }
 
-/// Sign-in on OpenID Connect for dev (docs/self-host.md, seam 4), when
-/// asked for: a real provider (`FRAGMENT_OIDC_ISSUER`, with
+/// WorkOS for dev: a real environment when its files are named
+/// (`WORKOS_CLIENT_ID_FILE`, `WORKOS_API_KEY_FILE`), with its AuthKit for
+/// sign-in when its domain and OAuth application are named too
+/// (`WORKOS_AUTHKIT_DOMAIN`, `WORKOS_OAUTH_CLIENT_ID_FILE`,
+/// `WORKOS_OAUTH_CLIENT_SECRET_FILE`; the application's redirect URIs must
+/// include `http://127.0.0.1:<port>/auth/callback`); else the fake, Pipes
+/// and AuthKit both. Answers Pipes' settings, and AuthKit's as sign-in.
+fn dev_workos(port: u16, read: ReadFile) -> Result<(devstack::WorkOsVars, AuthKit, Option<fragment_fakes::workos::WorkOs>)> {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+        (Some(client_id), Some(api_key)) => {
+            let authkit = match (var("WORKOS_AUTHKIT_DOMAIN"), read("WORKOS_OAUTH_CLIENT_ID_FILE")?, read("WORKOS_OAUTH_CLIENT_SECRET_FILE")?) {
+                (Some(domain), Some(app), Some(secret)) => Some((devstack::OidcVars::authkit(&format!("https://{domain}"), &app, &secret, &client_id), format!("WorkOS AuthKit at https://{domain}"))),
+                (None, None, None) => None,
+                _ => bail!("AuthKit's sign-in names WORKOS_AUTHKIT_DOMAIN, WORKOS_OAUTH_CLIENT_ID_FILE and WORKOS_OAUTH_CLIENT_SECRET_FILE together"),
+            };
+            Ok((devstack::WorkOsVars { client_id, api_key, api_url: None }, authkit, None))
+        }
+        _ => {
+            let fake = fragment_fakes::workos::WorkOs::start_on(port + DEV_WORKOS_OFFSET, port + DEV_AUTHKIT_OFFSET, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY, DEV_WORKOS_APP, DEV_WORKOS_APP_SECRET)?;
+            let authkit = devstack::OidcVars::authkit(&fake.authkit.url, DEV_WORKOS_APP, DEV_WORKOS_APP_SECRET, DEV_WORKOS_CLIENT);
+            let label = format!("{} (the WorkOS fake's AuthKit: any email)", fake.authkit.url);
+            Ok((devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some((authkit, label)), Some(fake)))
+        }
+    }
+}
+
+/// Sign-in for dev (docs/self-host.md, seam 4), one OpenID Connect
+/// provider: a real one (`FRAGMENT_OIDC_ISSUER`, with
 /// `FRAGMENT_OIDC_CLIENT_ID`, the secret's file
 /// `FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally `FRAGMENT_OIDC_SCOPES`,
-/// `FRAGMENT_OIDC_CLAIMS`, `FRAGMENT_OIDC_AUTH`; its redirect URIs must
-/// include `http://127.0.0.1:<port>/auth/callback`), else with
-/// `FRAGMENT_SIGNIN=oidc` the fake (any email or username), else none:
-/// WorkOS signs people in.
-fn dev_oidc(port: u16, read: ReadFile) -> Result<(Option<devstack::OidcVars>, Option<fragment_fakes::oidc::Oidc>)> {
+/// `FRAGMENT_OIDC_CLAIMS`, `FRAGMENT_OIDC_AUTH`, `FRAGMENT_OIDC_KEYED_AS`;
+/// its redirect URIs must include `http://127.0.0.1:<port>/auth/callback`),
+/// else with `FRAGMENT_SIGNIN=oidc` the strict fake (any email or
+/// username), else WorkOS's AuthKit (`authkit`: the fake's, or a real
+/// environment's). Answers the settings, and how the summary names them.
+fn dev_signin(port: u16, read: ReadFile, authkit: AuthKit) -> Result<(devstack::OidcVars, String, Option<fragment_fakes::oidc::Oidc>)> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     if let Some(issuer) = var("FRAGMENT_OIDC_ISSUER") {
         let vars = devstack::OidcVars {
-            issuer,
             client_id: var("FRAGMENT_OIDC_CLIENT_ID").context("FRAGMENT_OIDC_ISSUER needs FRAGMENT_OIDC_CLIENT_ID")?,
             client_secret: read("FRAGMENT_OIDC_CLIENT_SECRET_FILE")?,
             scopes: var("FRAGMENT_OIDC_SCOPES"),
             claims: var("FRAGMENT_OIDC_CLAIMS"),
             auth: var("FRAGMENT_OIDC_AUTH"),
+            // dev's people are dev's: beside WorkOS's Pipes, they are the issuer's unless said
+            keyed_as: var("FRAGMENT_OIDC_KEYED_AS").or_else(|| Some(issuer.clone())),
+            issuer,
         };
-        return Ok((Some(vars), None));
+        let label = format!("the OpenID Connect provider {}", vars.issuer);
+        return Ok((vars, label, None));
     }
     match var("FRAGMENT_SIGNIN").as_deref() {
-        None | Some("workos") => Ok((None, None)),
+        None | Some("workos") => {
+            let (vars, label) = authkit.context("a real WorkOS environment signs people in through its AuthKit: name WORKOS_AUTHKIT_DOMAIN, WORKOS_OAUTH_CLIENT_ID_FILE and WORKOS_OAUTH_CLIENT_SECRET_FILE")?;
+            Ok((vars, label, None))
+        }
         Some("oidc") => {
             let fake = fragment_fakes::oidc::Oidc::start_on(port + DEV_OIDC_OFFSET, DEV_OIDC_CLIENT, DEV_OIDC_SECRET)?;
             let vars = devstack::OidcVars {
@@ -387,8 +412,10 @@ fn dev_oidc(port: u16, read: ReadFile) -> Result<(Option<devstack::OidcVars>, Op
                 scopes: None,
                 claims: None,
                 auth: None,
+                keyed_as: Some(fake.url.clone()),
             };
-            Ok((Some(vars), Some(fake)))
+            let label = format!("{} (the OpenID Connect fake)", fake.url);
+            Ok((vars, label, Some(fake)))
         }
         Some(other) => bail!("FRAGMENT_SIGNIN is workos or oidc, not {other:?}"),
     }
@@ -400,6 +427,9 @@ fn dev_oidc(port: u16, read: ReadFile) -> Result<(Option<devstack::OidcVars>, Op
 /// a sandcastle node for computers (`FRAGMENT_NODE_URL`,
 /// `FRAGMENT_NODE_SECRET_FILE`, `FRAGMENT_NODE_IMAGES`).
 type ReadFile<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
+
+/// AuthKit's settings as sign-in, and how the dev summary names them.
+type AuthKit = Option<(devstack::OidcVars, String)>;
 
 fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Option<devstack::NodeVars>)> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());

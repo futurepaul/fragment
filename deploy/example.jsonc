@@ -25,11 +25,18 @@
     "org": "your-org",
     "private_key_file": "~/.config/fragment/secrets/codestorage-private-key.pem"
   },
-  // Sign-in: a WorkOS environment with AuthKit on, its redirect URI
-  // https://<platform>/auth/callback.
+  // A WorkOS environment: Pipes' connections (its client id and API key),
+  // and sign-in through AuthKit's OpenID Connect provider at the AuthKit
+  // domain, for an OAuth application (Applications, first-party: its own
+  // client id and secret, its redirect URI https://<platform>/auth/callback).
+  // Its people are keyed `workos:<client id>` as before (docs/self-host.md,
+  // seam 4).
   "workos": {
     "client_id_file": "~/.config/fragment/secrets/workos-client-id",
-    "api_key_file": "~/.config/fragment/secrets/workos-api-key"
+    "api_key_file": "~/.config/fragment/secrets/workos-api-key",
+    "authkit_domain": "your-environment.authkit.app",
+    "oauth_client_id_file": "~/.config/fragment/secrets/workos-oauth-client-id",
+    "oauth_client_secret_file": "~/.config/fragment/secrets/workos-oauth-client-secret"
   },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
