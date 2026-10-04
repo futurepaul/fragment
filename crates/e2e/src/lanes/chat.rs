@@ -276,10 +276,20 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the member's card closes too", chrome.until(&theirs, "!!document.querySelector('.prompt.closed .outcome.answered')", TURN), "");
     chrome.close(theirs)?;
 
-    // Stop: the send circle becomes Stop while the owner's turn runs
-    say(&mut chrome, "slow, then stopped")?;
-    let stoppable = chrome.until(&page, "!document.getElementById('stop').hidden && !document.getElementById('stop').disabled", TURN);
-    let turn = chrome.eval(&page, "document.getElementById('stop').dataset.turn")?.as_str().unwrap_or("").to_string();
+    // Stop: the send circle becomes Stop while the owner's turn runs. The
+    // turn is the message's own (docs/chat-records.md): the page may still
+    // show Stop for the turn before, whose end it has not heard yet, and a
+    // click then stops nothing
+    let slow = "slow, then stopped";
+    say(&mut chrome, slow)?;
+    let sent_at = |r: &Value| (r["body"]["text"] == slow).then(|| r["seq"].as_i64()).flatten();
+    let mut seq = None;
+    s.eventually(TURN, || {
+        seq = records(api, &owner, &chat_name, "chat").iter().find_map(sent_at);
+        seq.is_some()
+    });
+    let turn = turn_of(&agent_name, &chat_name, "chat", seq.unwrap_or(0));
+    let stoppable = chrome.until(&page, &format!("(() => {{ const b = document.getElementById('stop'); return !b.hidden && !b.disabled && b.dataset.turn === {}; }})()", js(&turn)), TURN);
     s.ok("while the owner's turn runs, the send circle is Stop", stoppable && document_hidden(&mut chrome, &page, "send")?, &turn);
     chrome.click(&page, "#stop")?;
     let notice = shows(&mut chrome, &page, &format!("document.querySelector('.msg.notice.stopped[data-turn={}]') && document.getElementById('stop').hidden", js(&turn)));
