@@ -2,7 +2,7 @@
 //!
 //!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
 //!                    parallel once worker-build has fetched its tools: build.rs)
-//!   dev [--clean] [--port <p>]
+//!   dev [--clean] [--runtime wrangler|celld] [--lan]
 //!                    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
@@ -15,7 +15,10 @@
 //!                    WorkOS fake on :8794, or with FRAGMENT_SIGNIN=oidc the
 //!                    OpenID Connect fake on :8798, or a real provider
 //!                    (FRAGMENT_OIDC_ISSUER: `dev_oidc`). FRAGMENT_DEV_PORT
-//!                    moves the cell and its fakes (`dev_ports`)
+//!                    moves the cell and its fakes (`dev_ports`). --lan serves
+//!                    it to the home network as an intranet (on celld; lan.rs,
+//!                    docs/self-host-lan.md): https://<zone> through a TLS
+//!                    front door, DNS for the zone, a private CA, Dex
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -65,6 +68,7 @@ mod build;
 mod deploy;
 mod dns;
 mod js_syntax;
+mod lan;
 mod summary;
 
 /// The dev stack's ports (`FRAGMENT_DEV_PORT` moves them all, so two stacks
@@ -119,12 +123,20 @@ fn build() -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
+    // the home network as an intranet (lan.rs): its front door is before celld
+    let lan_mode = args.iter().any(|a| a == "--lan");
     // the runtime: wrangler's local workerd, or celld (docs/self-host.md, seam 1)
     let celld = match args.iter().position(|a| a == "--runtime").and_then(|i| args.get(i + 1)).map(String::as_str) {
-        None | Some("wrangler") => false,
+        None => lan_mode,
+        Some("wrangler") if lan_mode => bail!("--lan runs on celld: drop --runtime wrangler"),
+        Some("wrangler") => false,
         Some("celld") => true,
         Some(other) => bail!("--runtime is wrangler or celld, not {other}"),
     };
+    if celld {
+        // before the build: a missing CELLD_BIN stops the run at once
+        devstack::celld::CelldTools::locate()?;
+    }
     let port = dev_port()?;
     // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
     // the run before a build
@@ -140,33 +152,40 @@ fn dev(args: &[String]) -> Result<()> {
             None => Ok(None),
         }
     };
-    let (workos, _workos_fake) = match (read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
-        (Some(client_id), Some(api_key)) => (devstack::WorkOsVars { client_id, api_key, api_url: None }, None),
-        _ => {
+    // on the LAN, Dex signs people in, and nothing stands in for WorkOS
+    let lan = if lan_mode { Some(lan::start(port)?) } else { None };
+    let (workos, _workos_fake) = match (&lan, read("WORKOS_CLIENT_ID_FILE")?, read("WORKOS_API_KEY_FILE")?) {
+        (Some(_), _, _) => (None, None),
+        (None, Some(client_id), Some(api_key)) => (Some(devstack::WorkOsVars { client_id, api_key, api_url: None }), None),
+        (None, _, _) => {
             let fake = fragment_fakes::workos::WorkOs::start_on(port + DEV_WORKOS_OFFSET, DEV_WORKOS_CLIENT, DEV_WORKOS_KEY)?;
-            (devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }, Some(fake))
+            (Some(devstack::WorkOsVars { client_id: DEV_WORKOS_CLIENT.into(), api_key: DEV_WORKOS_KEY.into(), api_url: Some(fake.url.clone()) }), Some(fake))
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(port + DEV_AI_OFFSET)?;
-    let (oidc, oidc_fake) = dev_oidc(port, &read)?;
+    let (oidc, oidc_fake) = match &lan {
+        Some(l) => (Some(l.oidc.clone()), None),
+        None => dev_oidc(port, &read)?,
+    };
     let (model_upstream, node) = self_host(&read)?;
     // computers run on the node when there is one, else in local Docker;
     // with neither, the stack runs without computers, and says so
     // (celld runs no containers of its own: its computers are a node's)
     let docker = !celld && node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     let computers = node.is_some() || docker;
-    let signin_label = match (&oidc, &workos.api_url) {
+    let signin_label = match (&oidc, workos.as_ref().map(|w| (&w.client_id, &w.api_url))) {
         (Some(o), _) if oidc_fake.is_some() => format!("{} (the OpenID Connect fake)", o.issuer),
         (Some(o), _) => format!("the OpenID Connect provider {}", o.issuer),
-        (None, Some(u)) => format!("{u} (the WorkOS fake)"),
-        (None, None) => format!("WorkOS {}", workos.client_id),
+        (None, Some((_, Some(u)))) => format!("{u} (the WorkOS fake)"),
+        (None, Some((id, None))) => format!("WorkOS {id}"),
+        (None, None) => "no one".into(),
     };
     devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
         codestorage_key_pem: store.key_pem.clone(),
         codestorage_url: store.url.clone(),
-        host_suffix: Some("fragment.localhost".into()),
+        host_suffix: Some(lan.as_ref().map_or_else(|| "fragment.localhost".to_string(), |l| l.settings.zone.clone())),
         legacy_host_suffix: None,
         host_label_suffix: None,
         // No webhooks reach dev fragments (the CLI's refresh and this poll do).
@@ -180,10 +199,11 @@ fn dev(args: &[String]) -> Result<()> {
         // a dev person is a seat, with the month's included credit
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
-        workos: Some(workos),
+        workos,
         oidc,
-        // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{port}")),
+        // the CLI's host: sign-in and approvals happen where it points (on
+        // the LAN, the front door's https origin)
+        platform_url: Some(lan.as_ref().map_or_else(|| format!("http://127.0.0.1:{port}"), |l| l.settings.platform_url())),
         operators: None,
         signins_pending_max: None,
         test_secret: None,
@@ -220,7 +240,17 @@ fn dev(args: &[String]) -> Result<()> {
     }
     let (running, base, log, took) = if celld {
         let tools = devstack::celld::CelldTools::locate()?;
-        let copts = devstack::celld::CelldOptions { project: opts.project.clone(), with: opts.with.clone(), port: opts.port, clean: opts.clean, log_dir: opts.log_dir.clone() };
+        let copts = devstack::celld::CelldOptions {
+            project: opts.project.clone(),
+            with: opts.with.clone(),
+            port: opts.port,
+            clean: opts.clean,
+            log_dir: opts.log_dir.clone(),
+            // the cell's own fetches (Dex's discovery, keys, token) trust the LAN's root
+            extra_ca_file: lan.as_ref().map(|l| l.ca_file.clone()),
+            // in the terminal's group: Ctrl-C stops it with xtask
+            own_group: false,
+        };
         let (n, took) = devstack::celld::CelldNode::start(&tools, &copts)?;
         let (base, log) = (n.base.clone(), n.log.clone());
         (Running::Celld(n), base, log, took)
@@ -232,7 +262,10 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {base} (ready in {took:.1?}; Ctrl-C stops it)");
     println!("  runtime:      {}", if celld { "celld (CELLD_BIN)" } else { "wrangler dev (workerd)" });
     println!("  node log:     {}", log.display());
-    println!("  fragments:    http://<label>--<username>.fragment.localhost:{port}/");
+    match &lan {
+        Some(l) => lan::banner(l).iter().for_each(|line| println!("{line}")),
+        None => println!("  fragments:    http://<label>--<username>.fragment.localhost:{port}/"),
+    }
     println!("  agents:       {base}/api/agents (beside it; signed)");
     println!("  code.storage: {} ({})", store.url, store.label);
     match std::env::var("FRAGMENT_MODEL_URL") {
@@ -245,8 +278,16 @@ fn dev(args: &[String]) -> Result<()> {
         (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
-    println!("  sign-in:      http://127.0.0.1:{port}/ via {signin_label}");
-    println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+    match &lan {
+        Some(l) => {
+            println!("  sign-in:      {}/ via {signin_label}", l.settings.platform_url());
+            println!("  the CLI:      FRAGMENT_HOST={} fragment login   (it trusts the root once this machine does)", l.settings.platform_url());
+        }
+        None => {
+            println!("  sign-in:      http://127.0.0.1:{port}/ via {signin_label}");
+            println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+        }
+    }
     let status = match running {
         Running::Wrangler(n) => n.wait()?,
         Running::Celld(n) => n.wait()?,
@@ -595,7 +636,7 @@ fn main() -> Result<()> {
         Some("check") => check(),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] [--lan] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 
