@@ -35,6 +35,11 @@ pub fn celld_config(project: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Where `celld dev` keeps a project's local state.
+pub fn state_dir(project: &Path) -> PathBuf {
+    project.join(".celld/dev")
+}
+
 /// The tools a celld stack needs: celld itself (`CELLD_BIN`), and the
 /// esbuild it bundles with (`CELLD_ESBUILD`, else the one worker-build
 /// keeps in its cache).
@@ -75,12 +80,13 @@ fn worker_build_esbuild() -> Result<PathBuf> {
 }
 
 pub struct CelldOptions {
-    /// The platform Worker's project; its state lives in `.celld/dev` there.
+    /// The platform Worker's project; its state lives in `.celld/dev` there
+    /// (`state_dir`; `crate::clear_state` discards it before the fleet is
+    /// configured).
     pub project: PathBuf,
     /// Projects co-hosted for its service bindings: the agents' Worker.
     pub with: Vec<PathBuf>,
     pub port: u16,
-    pub clean: bool,
     pub log_dir: PathBuf,
 }
 
@@ -101,9 +107,6 @@ impl CelldNode {
         cmd.arg("dev").arg(&config).args(["--host", "127.0.0.1", "--port", &opts.port.to_string(), "--logs", "--no-watch"]);
         for w in &opts.with {
             cmd.arg("--with").arg(w);
-        }
-        if opts.clean {
-            cmd.arg("--clean");
         }
         // the fork's hardening (docs/hardening.md): a facet's database
         // capped past the cell's own 16 MiB, and loaded code locked down
@@ -133,13 +136,40 @@ impl CelldNode {
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         Ok(self.child.wait()?)
     }
+
+    fn signal_group(&self, signal: &str) {
+        let _ = Command::new("kill").args([signal, "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+    }
+
+    /// A graceful stop, as Ctrl-C stops it (celld dev answers SIGINT): its
+    /// state kept for the next start.
+    pub fn stop(mut self) -> Result<()> {
+        self.signal_group("-INT");
+        let t0 = Instant::now();
+        // Bounded by STOP_TIMEOUT.
+        while self.child.try_wait()?.is_none() {
+            if t0.elapsed() > crate::STOP_TIMEOUT {
+                self.signal_group("-KILL");
+                bail!("celld dev did not stop within {:?}", crate::STOP_TIMEOUT);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    /// A crash: the whole group killed at once, nothing flushed.
+    pub fn crash(mut self) -> Result<()> {
+        self.signal_group("-KILL");
+        self.child.wait()?;
+        Ok(())
+    }
 }
 
 impl Drop for CelldNode {
     /// An early error must not leave celld holding the port: its group
     /// (the supervisor and its node) goes with it.
     fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        let _ = Command::new("kill").args(["-INT", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
     }
 }
 

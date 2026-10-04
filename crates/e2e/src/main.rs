@@ -209,7 +209,9 @@ pub struct Suite {
     chrome: browser::Shared,
     /// The local node's tools (`None`: a hosted run, which starts no node).
     tools: Option<devstack::Tools>,
-    node: Option<devstack::Node>,
+    node: Option<devstack::AnyNode>,
+    /// celld's tools when the node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+    celld: Option<devstack::celld::CelldTools>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
@@ -274,6 +276,26 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// Whether the node shoots preview cards: celld has no Browser
+    /// Rendering, and a deployment without it takes no shots.
+    pub fn shoots_cards(&self) -> bool {
+        self.rung != needs::Rung::Celld
+    }
+
+    /// Whether the text models go through an OpenAI-compatible server's
+    /// route (`FRAGMENT_E2E_MODELS=openai`: docs/self-host.md, seam 3), not
+    /// the binding's through the gateway.
+    pub fn openai_models(&self) -> bool {
+        std::env::var("FRAGMENT_E2E_MODELS").as_deref() == Ok("openai")
+    }
+
+    /// Whether a job's sleep outlives a crash of the node: celld's
+    /// Workflows keep it (each instance a cell, its sleep an alarm); local
+    /// workerd's hold it as a timer in the process.
+    pub fn durable_workflows(&self) -> bool {
+        self.rung == needs::Rung::Celld
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -505,7 +527,15 @@ impl Suite {
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
-            model_upstream: None,
+            // FRAGMENT_E2E_MODELS=openai: the text models through an
+            // OpenAI-compatible server's route (docs/self-host.md, seam 3),
+            // the same fake answering in OpenAI's shape; images go on to it
+            // as the binding's input
+            model_upstream: (std::env::var("FRAGMENT_E2E_MODELS").as_deref() == Ok("openai")).then(|| devstack::ModelUpstreamVars {
+                url: format!("{}/v1", self.ai.node().url),
+                models: json!({ fragment_core::models::CHEAP_MODEL: fragment_core::models::CHEAP_MODEL, fragment_core::models::MEDIUM_MODEL: fragment_core::models::MEDIUM_MODEL }).to_string(),
+                key: None,
+            }),
             node: None,
             containers: true,
         };
@@ -528,7 +558,13 @@ impl Suite {
             // a crash kills wrangler and workerd as one
             own_group: true,
         };
-        let (node, _) = devstack::Node::start(tools, &opts)?;
+        let node = match &self.celld {
+            None => devstack::AnyNode::Wrangler(devstack::Node::start(tools, &opts)?.0),
+            Some(celld) => {
+                let copts = devstack::celld::CelldOptions { project: opts.project, with: opts.with, port: opts.port, log_dir: opts.log_dir };
+                devstack::AnyNode::Celld(devstack::celld::CelldNode::start(celld, &copts)?.0)
+            }
+        };
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(self.suffix()), &self.shared))
     }
@@ -846,7 +882,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let test_secret = devstack::random_hex(32);
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
+    // the runtime: wrangler dev's workerd, or celld (docs/self-host.md)
+    let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
+        Err(_) | Ok("wrangler") => None,
+        Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
+        Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
+    };
     let (rung, shared) = match rehearse {
+        None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some() };
@@ -878,6 +921,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
         node: None,
+        celld,
         port: devstack::free_port()?,
         run,
         fake: Fake::of(hidden, "code.storage", fake),
