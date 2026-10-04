@@ -265,6 +265,7 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // a deploy whose code the platform refuses says so and fails
+    let good = s.cli_json(api, &home, &["status", &name, "--json"])?;
     std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json").replacen("\"add_todo\"", "\"Add-Todo\"", 1))?;
     let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
     s.ok(
@@ -273,6 +274,6 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
         text(&out),
     );
     let st6 = s.cli_json(api, &home, &["status", &name, "--json"])?;
-    s.ok("and the last good code keeps serving", st6["code"]["sha"] == st5["code"]["sha"] && st6["pins"]["live"] != st5["pins"]["live"], &st6["code"]);
+    s.ok("and the last good code keeps serving", st6["code"]["sha"] == good["code"]["sha"] && st6["pins"]["live"] != good["pins"]["live"], &st6["code"]);
     Ok(())
 }
