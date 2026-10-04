@@ -804,8 +804,8 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     `MACROFICHE_BIN`).
   - **The whole suite on celld against macrofiche: 1316 passed, 0
     failed, 22 skipped, in 5 m 50 s (2026-10-04).** Each skip says why:
-    - 11 skips pull the fake's own levers or count its requests;
-    - 6 are card checks, as celld has no browser;
+    - 10 skips pull the fake's own levers or count its requests;
+    - 7 are card checks, as celld has no browser;
     - 4 are the container sections, which are the node's lane;
     - 1 is the webhook-announced poll, as the harness does not yet
       register macrofiche's per-repo webhook.
