@@ -25,6 +25,7 @@ pub mod containers;
 pub mod node;
 mod node_release;
 pub mod rendering;
+pub mod sandcastle;
 pub mod signals;
 pub mod store;
 pub mod summary;
@@ -402,10 +403,11 @@ pub struct Fleet {
     /// A self-hosted model upstream (docs/self-host.md, seam 3), in place
     /// of `ai_url` and the gateway.
     pub model_upstream: Option<ModelUpstreamVars>,
-    /// A sandcastle node new computers run on (docs/self-host.md, seam 2).
-    pub node: Option<NodeVars>,
+    /// The sandcastle nodes computers are placed on (docs/self-host.md,
+    /// seam 2), in place of the runtime's containers.
+    pub nodes: Option<sandcastle::NodesVars>,
     /// The runtime's own containers (Docker under `wrangler dev`): `false`
-    /// when computers run on a sandcastle node instead, or nowhere.
+    /// when computers run on sandcastle nodes instead, or nowhere.
     pub containers: bool,
     /// Where preview cards are shot when the runtime has no `BROWSER`
     /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering.rs;
@@ -421,14 +423,6 @@ pub struct ModelUpstreamVars {
     pub models: String,
     /// Its key, bound as `MODEL_KEY` (`Fleet::bound`), when it takes one.
     pub key: Option<String>,
-}
-
-/// A sandcastle node as the cell reads it.
-pub struct NodeVars {
-    pub url: String,
-    pub secret: String,
-    /// `FRAGMENT_NODE_IMAGES`' JSON: an image's name to its reference.
-    pub images: String,
 }
 
 /// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`).
@@ -604,10 +598,11 @@ impl Fleet {
             vars.push(("FRAGMENT_MODEL_URL", m.url.as_str()));
             vars.push(("FRAGMENT_MODELS", m.models.as_str()));
         }
-        if let Some(n) = &self.node {
-            vars.push(("FRAGMENT_NODE_URL", n.url.as_str()));
-            vars.push(("FRAGMENT_NODE_SECRET", n.secret.as_str()));
-            vars.push(("FRAGMENT_NODE_IMAGES", n.images.as_str()));
+        if let Some(n) = &self.nodes {
+            vars.push(("FRAGMENT_NODES", n.nodes.as_str()));
+            for (name, secret) in &n.secrets {
+                vars.push((name.as_str(), secret.as_str()));
+            }
         }
         if let Some(u) = &self.browser_url {
             vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));

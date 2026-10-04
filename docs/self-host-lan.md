@@ -226,10 +226,12 @@ fragment whoami
 
 **Its sandcastle node, later** (the Mac runner): it dials the box, so the
 Mac needs no open port. In its config, `"uplink": {"url":
-"wss://fragment.home.arpa/api/nodes/uplink", "id": "<id>"}` and
-`"ca_file": "<the fragment-ca PEM>"`; on the box, `FRAGMENT_NODE_URL=uplink:<id>`
-and the node's secret (docs/self-host.md, Running it). The uplink through
-the front door was tested (below).
+"wss://fragment.home.arpa/api/nodes/uplink", "id": "mac"}`, `"platform":
+"https://fragment.home.arpa"` and `"ca_file": "<the fragment-ca PEM>"`. On
+the box, a row in the node list (step 8): `{"id": "mac", "uplink": true,
+"arch": "aarch64", "capacity": 8, "secret_file": "<its secret>"}`, with
+the images' arm64 references (docs/self-host.md, seam 2, Placement). The
+uplink through the front door was tested (below).
 
 ## 6. Sign in from the iPhone
 
@@ -275,15 +277,24 @@ It shows the whole loop needs nothing outside the house.
 ## 8. Computers on this box
 
 The local sandcastle node (`~/.local/opt/sandcastle/node.json`, on
-127.0.0.1:8798, its `platform` the cell's port 8790) joins with:
+127.0.0.1:8798) joins through a node list, `FRAGMENT_NODES_FILE`
+(docs/self-host.md, seam 2, Placement):
 
 ```sh
-export FRAGMENT_NODE_URL=http://127.0.0.1:8798
-export FRAGMENT_NODE_SECRET_FILE=$HOME/.local/opt/sandcastle/node.secret
-export FRAGMENT_NODE_IMAGES='{"stub": "<the reference the node holds>"}'
+cat > ~/.local/opt/sandcastle/nodes.json <<'JSON'
+{ "nodes": [
+    { "id": "box", "url": "http://127.0.0.1:8798", "arch": "x86_64", "capacity": 32,
+      "secret_file": "/home/futurepaul/.local/opt/sandcastle/node.secret" } ],
+  "images": { "stub": "<the reference the node holds>" } }
+JSON
+export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
 ```
 
-before `cargo xtask dev --lan`. Today its engine's VMs die before they are
+before `cargo xtask dev --lan`. The node's own `platform` is the front door,
+`https://fragment.home.arpa`, with `"ca_file"` the root's PEM. The platform
+takes a node's intercepts (`/api/nodes/egress`) on its own host alone, so
+the cell's loopback port is not enough. The Mac's row (step 5) joins the
+same list, and computers are placed on either. Today its engine's VMs die before they are
 ready (the engine fix waits on its restart, which needs root); until then a
 computer's wake fails and says so, and nothing else changes. A computer's
 own origin is `https://<id>--computer.fragment.home.arpa`, under the same

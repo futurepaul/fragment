@@ -25,6 +25,7 @@ mod ledger;
 mod limits;
 mod members;
 mod notes;
+mod placement;
 mod plane;
 mod posts;
 mod restart;
@@ -103,6 +104,7 @@ const LANES: &[Lane] = &[
     computers::computers,
     chat::chat,
     shell::shell_ui,
+    placement::placement,
     hermes::hermes,
     sync::folder_sync,
     restart::restart,
@@ -125,7 +127,7 @@ const LANES: &[Lane] = &[
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "sync", "restart", "pathmode"],
+    &["shell", "computers", "chat", "placement", "hermes", "sync", "restart", "pathmode"],
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
