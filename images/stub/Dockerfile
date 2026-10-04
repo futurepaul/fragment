@@ -5,6 +5,23 @@
 # Hermes-specific (docs/cloudflare-v1.md, the rule).
 #
 # Build from images/: docker build --platform linux/amd64 -f stub/Dockerfile .
+# (or linux/arm64, for a node on an aarch64 machine: every stage is built
+# for the platform asked for; docs/self-host.md, seam 2).
+
+
+# sandbox-shim, the helper the Sandbox SDK's DirectoryBackup execs:
+# Cloudflare's own build for amd64 (its image is amd64 alone), and for arm64
+# built from the same source, cloudflare/sandbox-sdk at
+# @cloudflare/sandbox@1.0.0 (its crates/sandbox-tools, Apache-2.0), as its
+# images/sandbox-tools builds it.
+FROM docker.io/cloudflare/sandbox:1.0.0 AS shim-amd64
+FROM rust:1.99-alpine AS shim-arm64
+RUN apk add --no-cache build-base
+ADD https://github.com/cloudflare/sandbox-sdk.git#f9e972a14123bef3b93e9bb337bab6e83419fe7e /src
+WORKDIR /src
+RUN cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && mkdir -p /usr/local/bin && cp target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM shim-${TARGETARCH} AS shim
 
 # The bridge, static (Alpine's Rust targets musl), built where it runs.
 FROM rust:1.99-alpine AS build
@@ -21,7 +38,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # while it polls, `touch` for the restore marker); sandbox-shim for its
 # DirectoryBackup.
 FROM busybox:1.37-musl
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=build /fragment-bridge /usr/local/bin/fragment-bridge
 COPY stub/screen /opt/fragment/screen
 # which build this is, served beside the screen (the platform's upgrade and
