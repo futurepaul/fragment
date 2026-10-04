@@ -408,6 +408,9 @@ pub struct Bound {
     pub workos: Option<(String, String)>,
     /// Each operator key's provider and its secret's name.
     pub operator_keys: Vec<(String, String)>,
+    /// The OpenID Connect client's secret sign-in authenticates with
+    /// (docs/self-host.md, seam 4), when it has one.
+    pub oidc_client_secret: Option<String>,
     /// A self-hosted model upstream's key (docs/self-host.md, seam 3), when
     /// it takes one.
     pub model_key: Option<String>,
@@ -424,6 +427,7 @@ impl Bound {
             codestorage_key: "fragment-codestorage-private-key".into(),
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
+            oidc_client_secret: None,
             model_key: None,
         }
     }
@@ -447,6 +451,9 @@ impl Bound {
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));
+        }
+        if let Some(name) = &self.oidc_client_secret {
+            bound.push((bindings::OIDC_CLIENT_SECRET.to_string(), name.as_str()));
         }
         if let Some(name) = &self.model_key {
             bound.push((bindings::MODEL_KEY.to_string(), name.as_str()));

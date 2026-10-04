@@ -76,6 +76,9 @@ pub const DEFAULT_PLAN: &str = "seat";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The OpenID Connect fake's client (`FRAGMENT_E2E_SIGNIN=oidc`).
+pub const OIDC_CLIENT: &str = "fragment-e2e";
+const OIDC_SECRET: &str = "oidc-secret-fragment-e2e";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
@@ -226,6 +229,9 @@ pub struct Suite {
     /// Sign-in's stand-in: people sign in through it (`Api::person`), and
     /// Pipes', which hands out connections' tokens.
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
+    /// An OpenID Connect provider: people sign in through it in WorkOS's
+    /// place when the run says so (`oidc_signin`); WorkOS then serves Pipes.
+    pub oidc: Fake<fragment_fakes::oidc::Oidc>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
@@ -267,6 +273,7 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
     }
@@ -282,6 +289,12 @@ impl Suite {
     /// Rendering, and a deployment without it takes no shots.
     pub fn shoots_cards(&self) -> bool {
         self.rung != needs::Rung::Celld
+    }
+
+    /// Whether people sign in through the OpenID Connect fake
+    /// (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4), not WorkOS's.
+    pub fn oidc_signin(&self) -> bool {
+        std::env::var("FRAGMENT_E2E_SIGNIN").as_deref() == Ok("oidc")
     }
 
     /// Whether the text models go through an OpenAI-compatible server's
@@ -513,6 +526,14 @@ impl Suite {
                 client_id: self.workos.node().client_id.clone(),
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
+            }),
+            oidc: self.oidc_signin().then(|| devstack::OidcVars {
+                issuer: self.oidc.node().url.clone(),
+                client_id: OIDC_CLIENT.into(),
+                client_secret: Some(OIDC_SECRET.into()),
+                scopes: None,
+                claims: None,
+                auth: None,
             }),
             platform_url: Some(match (self.shape, suffix) {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
@@ -888,6 +909,10 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // who signs people in: the WorkOS fake, or the OpenID Connect fake (docs/self-host.md, seam 4)
+    if let Some(other) = std::env::var("FRAGMENT_E2E_SIGNIN").ok().filter(|s| s != "workos" && s != "oidc") {
+        bail!("FRAGMENT_E2E_SIGNIN is workos or oidc, not {other}");
+    }
     let (rung, shared) = match rehearse {
         None if celld.is_some() => (needs::Rung::Celld, api::Run::new(test_secret.clone(), 0)),
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
@@ -931,6 +956,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         host_secret: devstack::random_hex(32),
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        oidc: Fake::of(hidden, "OpenID Connect", fragment_fakes::oidc::Oidc::start(OIDC_CLIENT, OIDC_SECRET)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
         operator: Keys::generate(),
         cli,

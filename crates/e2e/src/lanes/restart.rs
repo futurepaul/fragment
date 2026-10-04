@@ -100,8 +100,27 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
     anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
 
+    // a sign-in begun and answered by the provider, finished only after the
+    // restart (an OpenID Connect one keeps its verifier and nonce in the
+    // registry; its provider's metadata and keys are fetched again)
+    let pending = api.unsigned("GET", "/auth/login?return=/after-restart&login_hint=restart-pending@e2e.test", None)?;
+    let pending_cookie = pending.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
+    let pending_back = api.external(&pending.header("location"))?;
+    anyhow::ensure!(pending.status == 302 && pending_back.status == 302, "a pending sign-in: {pending} / {pending_back}");
+
     s.stop()?;
     let api = s.start(false, true)?;
+    let r = api.call(Call { method: "GET", url: pending_back.header("location"), cookie: Some(pending_cookie), ..Call::default() })?;
+    let signed = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string));
+    let shown = match &signed {
+        Some(session) => who(&api, session)?,
+        None => Value::Null,
+    };
+    s.ok(
+        "a sign-in begun before a restart finishes after it, as the person it began for",
+        r.status == 302 && r.header("location").ends_with("/after-restart") && shown.to_string().contains("restart-pending@e2e.test"),
+        format!("{r} / {shown}"),
+    );
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
