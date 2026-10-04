@@ -6,7 +6,10 @@
 // signed with the node's secret. The node hands each intercepted request to
 // the platform's `/api/nodes/egress`, signed; the router passes it to the
 // computer's object (`routeNodeEgress`), which checks it again and gives it
-// to the binding its container set (`NodeContainer.binding`).
+// to the binding its container set (`NodeContainer.binding`). A node the
+// platform cannot reach dials it instead (`FRAGMENT_NODE_URL=uplink:<id>`):
+// its calls then go through the node's `Node` object (uplink.mjs), signed
+// the same.
 
 const AUTH = "x-sandcastle-auth";
 // a signature's timestamp, at most this far from our clock
@@ -33,7 +36,8 @@ const egressString = (e, t, body) =>
 
 // The node this deployment places its computers on, or null: its URL, its
 // secret (a Worker secret), and the images it holds, by the names
-// computers are pinned to.
+// computers are pinned to. `fetch(path, init)` is the transport: the
+// node's URL, or, for `uplink:<id>`, the object that holds its uplink.
 export function nodeOf(env) {
   const url = (env.FRAGMENT_NODE_URL || "").trim().replace(/\/+$/, "");
   if (!url) return null;
@@ -41,22 +45,36 @@ export function nodeOf(env) {
   if (enc.encode(secret).length < SECRET_BYTES_MIN) throw new Error(`FRAGMENT_NODE_SECRET is at least ${SECRET_BYTES_MIN} bytes`);
   const images = JSON.parse(env.FRAGMENT_NODE_IMAGES || "{}");
   const key = crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
-  return { url, images, key };
+  const uplink = /^uplink:([a-z0-9-]{1,64})$/.exec(url)?.[1] || null;
+  if (url.startsWith("uplink:") && !uplink) throw new Error("FRAGMENT_NODE_URL is uplink:<id>, the id 1 to 64 of a-z, 0-9 and -");
+  const fetcher = uplink
+    ? (path, init) => env.NODE.get(env.NODE.idFromName(uplink)).fetch(new Request(`https://node.internal${path}`, init))
+    : (path, init) => fetch(url + path, init);
+  return { url, images, key, uplink, fetch: fetcher };
 }
 
-async function signed(node, method, path, bodyHash) {
+// `canonical`'s signature at `t`, as the header carries it.
+export async function authHeader(node, t, canonical) {
+  return `t=${t},sig=${hex(await crypto.subtle.sign("HMAC", await node.key, enc.encode(canonical)))}`;
+}
+
+function signed(node, method, path, bodyHash) {
   const t = Math.floor(Date.now() / 1000);
-  const sig = hex(await crypto.subtle.sign("HMAC", await node.key, enc.encode(callString(method, path, t, bodyHash))));
-  return `t=${t},sig=${sig}`;
+  return authHeader(node, t, callString(method, path, t, bodyHash));
 }
 
-// Checks `header` against the string `canonicalOf(t)` makes.
-async function verified(node, header, canonicalOf) {
+// The time `header` was signed at, when it is inside the window and
+// matches the string `canonicalOf(t)` makes; else null.
+export async function signedAt(node, header, canonicalOf) {
   const m = /^t=(\d{1,12}),sig=([0-9a-f]{64})$/.exec(header || "");
-  if (!m) return false;
+  if (!m) return null;
   const t = Number(m[1]);
-  if (Math.abs(Math.floor(Date.now() / 1000) - t) > WINDOW_S) return false;
-  return crypto.subtle.verify("HMAC", await node.key, unhex(m[2]), enc.encode(canonicalOf(t)));
+  if (Math.abs(Math.floor(Date.now() / 1000) - t) > WINDOW_S) return null;
+  return (await crypto.subtle.verify("HMAC", await node.key, unhex(m[2]), enc.encode(canonicalOf(t)))) ? t : null;
+}
+
+async function verified(node, header, canonicalOf) {
+  return (await signedAt(node, header, canonicalOf)) !== null;
 }
 
 // One exec frame: the engine's 8-byte header (a stream byte, three zeroes,
@@ -214,7 +232,7 @@ export class NodeContainer {
     const bytes = body === undefined ? new Uint8Array() : enc.encode(JSON.stringify(body));
     const headers = { [AUTH]: await signed(this.#node, method, path, await sha256Hex(bytes)) };
     if (body !== undefined) headers["content-type"] = "application/json";
-    const resp = await fetch(this.#node.url + path, { method, headers, body: body === undefined ? undefined : bytes });
+    const resp = await this.#node.fetch(path, { method, headers, body: body === undefined ? undefined : bytes });
     if (!resp.ok && !allowed.includes(resp.status)) {
       const e = await resp.json().catch(() => ({}));
       throw new Error(`the node: ${method} ${path}: ${resp.status} ${e.error || ""}`.trim());
@@ -301,7 +319,7 @@ export class NodeContainer {
     await this.#started();
     const path = `/v1/containers/${this.#name}/exec`;
     const headers = { [AUTH]: await signed(this.#node, "GET", path, await sha256Hex(new Uint8Array())), upgrade: "websocket" };
-    const resp = await fetch(this.#node.url + path, { headers });
+    const resp = await this.#node.fetch(path, { headers });
     const ws = resp.webSocket;
     if (!ws) throw new Error(`the node: exec: ${resp.status} ${await resp.text()}`);
     ws.accept();
@@ -332,7 +350,7 @@ export class NodeContainer {
         const headers = new Headers(request.headers);
         headers.set(AUTH, await signed(this.#node, request.method, path, "UNSIGNED-PAYLOAD"));
         headers.set("x-sandcastle-url", request.url);
-        return fetch(this.#node.url + path, { method: request.method, headers, body: request.body, redirect: "manual" });
+        return this.#node.fetch(path, { method: request.method, headers, body: request.body, redirect: "manual" });
       },
     };
   }
