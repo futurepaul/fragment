@@ -125,10 +125,23 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok("a fragment on a template that declares code of its own is refused, saying to fork", r.status == 200 && refused, "");
 
-    // connections (decision 22): the deployment's offers, and the person's account at each
-    let status = |r: &Reply| r.body["connections"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["status"].clone());
+    // connections (decisions 22 and 37): every provider the deployment
+    // offers, its kind and the person's state there
+    let status = |r: &Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["state"].clone());
     let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
-    s.ok("the shell lists the connections the deployment offers, none connected yet", status(&r) == Some(json!("none")), &r);
+    let rows = r.body["providers"].as_array().cloned().unwrap_or_default();
+    let row = |p: &str| rows.iter().find(|x| x["provider"] == p).cloned().unwrap_or(Value::Null);
+    let keys = crate::SWAP_KEYS.iter().all(|(name, _, env)| {
+        let k = row(name);
+        k["kind"] == "operator" && k["state"] == "offered" && k["env"] == json!([env]) && k["price"]["micros"].as_i64().is_some_and(|m| m > 0)
+    });
+    s.ok(
+        "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
+        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
+        &r,
+    );
+    let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
+    s.ok("an operator key is no connection to authorize (400)", r.status == 400, &r);
     let r = shell(api, &session, "POST", &format!("/api/connections/{}/authorize", crate::SWAP_CONNECTION), Some(&json!({})), &[])?;
     let consent = r.body["url"].as_str().unwrap_or("").to_string();
     s.ok("and starts one: a consent URL for the person's browser", r.status == 200 && consent.starts_with(&s.workos.url), &r);
@@ -478,6 +491,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
     skills_ui(s, api, &mut b, &page, &session)?;
+    connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -513,6 +527,88 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The Connections page in settings (decisions 22, 37 and 44): every
+/// provider the deployment offers, one row each, with its kind, the
+/// person's state there, which agents may use it (and a press that narrows
+/// one), and this month's calls by agent with an operator key's cost. The
+/// person's first agent calls a connection and an operator key through its
+/// computer (the stub's `fetch`), so the page has uses to show.
+fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, email: &str, chat: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let computer = computers.body["computers"][0].clone();
+    let agents: Vec<(String, String)> = computer["agents"].as_array().map(|l| l.iter().map(|a| (a["fragment"].as_str().unwrap_or("").to_string(), a["identity"].as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+    let Some((lead, lead_id)) = agents.first().cloned() else {
+        s.ok("the Connections page has agents to show", false, &computers);
+        return Ok(());
+    };
+    // the person connects Google, and reading their connections tells their computer
+    s.workos.connect(email, crate::SWAP_CONNECTION, true);
+    shell(api, session, "GET", "/api/connections", None, &[])?;
+    let replies = || {
+        shell(api, session, "GET", &format!("/api/f/{chat}/channels/chat"), None, &[])
+            .ok()
+            .and_then(|r| r.body["records"].as_array().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r["principal"] == lead_id.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.starts_with("fetched")))
+            .count()
+    };
+    let calls = [format!("fetch http://{}/gmail/v1/users/me/profile with ${}", crate::SWAP_CONNECTION_HOST, crate::SWAP_CONNECTION_ENV), "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY".to_string()];
+    for (n, text) in calls.iter().enumerate() {
+        shell(api, session, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("conn-{n}"), "body": { "text": text } })), &[])?;
+        s.eventually(std::time::Duration::from_secs(60), || replies() > n);
+    }
+    let id = computer["computer"].as_str().unwrap_or("").to_string();
+    let counted = s.eventually(wait, || {
+        shell(api, session, "GET", &format!("/api/computers/{id}/uses"), None, &[]).is_ok_and(|r| r.body["uses"].as_array().is_some_and(|l| l.len() >= 2))
+    });
+    b.reload(page)?;
+    let row = |p: &str| format!("#settings-connections [data-provider={p:?}]");
+    // each row: its provider, kind, state, agents allowed, and uses
+    let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
+                r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 2, row("perplexity")), wait);
+    let got = b.eval(page, rows)?;
+    let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
+    let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
+    s.ok(
+        "settings' Connections lists every provider, one row each, its kind and the person's state: Google connected, the operator's keys offered, an own key not set",
+        shown
+            && of(crate::SWAP_CONNECTION)[1] == "connection"
+            && of(crate::SWAP_CONNECTION)[2] == "connected"
+            && crate::SWAP_KEYS.iter().all(|(k, _, _)| of(k)[1] == "operator" && of(k)[2] == "offered")
+            && of(crate::SWAP_OWN)[1] == "own"
+            && of(crate::SWAP_OWN)[2] == "not_set",
+        &got,
+    );
+    s.ok("each row names which agents may use it: all of them, by default", got.as_array().is_some_and(|l| l.iter().all(|r| r[3] == agents.len())), &got);
+    s.ok(
+        "and this month's use by agent: a connection's calls counted, an operator key's with its cost",
+        counted && of(crate::SWAP_CONNECTION)[4] == json!([[lead, 1, 0]]) && of("perplexity")[4] == json!([[lead, 1, perplexity_charge]]),
+        &got,
+    );
+    b.eval(page, "(document.getElementById('settings-connections').scrollIntoView(), true)")?;
+    let _ = b.screenshot(page, &s.dir("shell-ui").join("desktop-connections.png"));
+    // a press narrows that agent from that provider, and the page says so
+    b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
+    let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
+    let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
+    let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN]).collect();
+    s.ok(
+        "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
+        narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),
+        &list,
+    );
+    b.eval(page, &format!("document.querySelector('{} [data-agent={lead:?}]').click(), true", row("perplexity")))?;
+    let again = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'true'", row("perplexity")), wait);
+    let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
+    let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
+    s.ok("pressed again, it may use every provider again (null)", again && back, &view);
     Ok(())
 }
 

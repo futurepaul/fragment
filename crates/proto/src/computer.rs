@@ -49,19 +49,130 @@ pub struct ComputerAgent {
     pub name: String,
     /// Its owner, a person.
     pub owner: String,
-    /// The connections (WorkOS Pipes providers) it may have swapped in
-    /// through the computer's swap (decision 22): `None` (`null`), every
-    /// connection its owner has, by default, since a person's agents are
-    /// not fenced from each other (decision 44); a list narrows it to
-    /// those, a role's specialization rather than a wall.
+    /// The providers of the deployment's catalog (its connections, the
+    /// operator's keys and its owner's own) it may have swapped in through
+    /// the computer's swap (decisions 22 and 37): `None` (`null`), every
+    /// one its owner has, by default, since a person's agents are not
+    /// fenced from each other (decision 44); a list narrows it to those, a
+    /// role's specialization rather than a wall.
     #[serde(default)]
     pub connections: Option<Vec<String>>,
+    /// The guest's view only (`GET /api/computer`): each credential the
+    /// agent may use now, its placeholder in its environment variables.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<AgentCredential>,
 }
 
-/// `PUT /api/computers/{id}/agents/{fragment}/connections`: the
-/// connections an agent may use, all of them named at once, or `null`
-/// for every connection its owner has (the default again). The field is
-/// named even when it is `null`: the route refuses a body without it.
+/// What a provider's credential is (docs/computers.md, "Connections and
+/// operator keys"; `fragment_core::catalog`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    /// The person's account at the provider, through WorkOS Pipes.
+    Connection,
+    /// The operator's key, each call metered to the agent's owner.
+    Operator,
+    /// The person's own key, never metered.
+    Own,
+}
+
+impl ProviderKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ProviderKind::Connection => "connection",
+            ProviderKind::Operator => "operator",
+            ProviderKind::Own => "own",
+        }
+    }
+}
+
+/// One credential an agent may use, as its guest learns it: the
+/// placeholder to send, the environment variables to put it in, and the
+/// only hosts it is swapped for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCredential {
+    pub provider: String,
+    pub kind: ProviderKind,
+    pub env: Vec<String>,
+    pub placeholder: String,
+    pub hosts: Vec<String>,
+}
+
+/// A provider as its person sees it (`GET /api/connections`): the state
+/// of their credential there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderState {
+    /// A connection whose account is connected.
+    Connected,
+    /// A connection whose account must be authorized again.
+    NeedsReauthorization,
+    /// A connection with no account connected.
+    NotConnected,
+    /// An operator key the deployment lends.
+    Offered,
+    /// An own key the person has given.
+    Set,
+    /// An own key the person has not given.
+    NotSet,
+}
+
+/// An operator key's price at list (micro-dollars per `per` calls).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderPrice {
+    pub micros: i64,
+    pub per: u64,
+}
+
+/// `GET /api/connections`'s row: one provider the deployment offers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderView {
+    pub provider: String,
+    pub kind: ProviderKind,
+    pub state: ProviderState,
+    pub hosts: Vec<String>,
+    pub env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<ProviderPrice>,
+}
+
+/// `GET /api/connections`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Providers {
+    pub providers: Vec<ProviderView>,
+}
+
+/// One agent's use of one provider in a month: its calls the provider
+/// answered, and what they were charged (an operator key's; zero for a
+/// connection or an own key, which are counted, never charged).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUse {
+    pub provider: String,
+    /// The agent fragment.
+    pub agent: String,
+    pub calls: u64,
+    pub micros: i64,
+}
+
+/// `GET /api/computers/{id}/uses?month=YYYY-MM`: a month's uses of the
+/// deployment's providers through the computer's swap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerUses {
+    pub computer: String,
+    /// `YYYY-MM`, UTC.
+    pub month: String,
+    pub uses: Vec<ProviderUse>,
+}
+
+/// `PUT /api/computers/{id}/agents/{fragment}/connections`: the providers
+/// an agent may use, all of them named at once, or `null` for every one
+/// its owner has (the default again). The field is named even when it is
+/// `null`: the route refuses a body without it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConnections {
@@ -84,6 +195,11 @@ pub struct ComputerView {
     pub agents: Vec<ComputerAgent>,
     /// Its own origin, where its ports are served.
     pub origin: String,
+    /// The guest's view only: every environment variable a credential of
+    /// the deployment's catalog may be in, whether its agents hold it now
+    /// or not (so an image can pass them all through, once).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_env: Vec<String>,
 }
 
 /// `POST /api/computers/{id}/ports/{port}/ticket` → a one-time link that
@@ -121,9 +237,21 @@ mod tests {
         assert_eq!(all.connections, None);
         let narrowed: AgentConnections = serde_json::from_str(r#"{"connections":["github"]}"#).unwrap();
         assert_eq!(narrowed.connections, Some(vec!["github".to_string()]));
-        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None };
-        assert_eq!(serde_json::to_value(&agent).unwrap()["connections"], serde_json::Value::Null, "the default is named, as null");
+        let agent = ComputerAgent { fragment: "juniper.paul".into(), identity: "id:a".into(), name: "juniper".into(), owner: "id:p".into(), connections: None, credentials: vec![] };
+        let v = serde_json::to_value(&agent).unwrap();
+        assert_eq!(v["connections"], serde_json::Value::Null, "the default is named, as null");
+        assert!(v.get("credentials").is_none(), "the owner's view names no placeholder");
         let older: ComputerAgent = serde_json::from_str(r#"{"fragment":"juniper.paul","identity":"id:a","name":"juniper","owner":"id:p"}"#).unwrap();
         assert_eq!(older.connections, None);
+        assert!(older.credentials.is_empty());
+    }
+
+    /// The guest's credentials on the wire, as an image reads them.
+    #[test]
+    fn a_guests_credential() {
+        let c = AgentCredential { provider: "google".into(), kind: ProviderKind::Connection, env: vec!["GOOGLE_OAUTH_ACCESS_TOKEN".into()], placeholder: "fcx_google_00".into(), hosts: vec!["www.googleapis.com".into()] };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v, serde_json::json!({ "provider": "google", "kind": "connection", "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "placeholder": "fcx_google_00", "hosts": ["www.googleapis.com"] }));
+        assert_eq!(serde_json::to_value(ProviderState::NeedsReauthorization).unwrap(), "needs_reauthorization");
     }
 }

@@ -46,9 +46,14 @@ DETAIL_FIELDS = ",".join(
 
 
 def api_key() -> str:
-    # On a fragment computer the key is the operator's, swapped in at the
-    # computer's intercept: the placeholder is sent unless one is set.
-    return (os.getenv("GOOGLE_PLACES_API_KEY") or "").strip() or "fragment-key:google-places"
+    # On a fragment computer the variable holds the operator's key's
+    # placeholder, which names this agent; the computer's intercept swaps in
+    # the real key on the way to Google and meters the call.
+    key = (os.getenv("GOOGLE_PLACES_API_KEY") or "").strip()
+    if not key:
+        print("GOOGLE_PLACES_API_KEY is not set: this deployment does not offer the google-places key; use find-nearby-finite", file=sys.stderr)
+        raise SystemExit(2)
+    return key
 
 
 def request_json(
@@ -59,10 +64,6 @@ def request_json(
         "X-Goog-Api-Key": api_key(),
         "X-Goog-FieldMask": field_mask,
     }
-    # the agent this call is for: its owner pays (docs/computers.md)
-    agent = os.getenv("FRAGMENT_AS_AGENT", "").strip()
-    if agent:
-        headers["x-fragment-agent"] = agent
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode("utf-8")

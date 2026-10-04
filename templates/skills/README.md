@@ -61,8 +61,9 @@ suffix, so none collides with a skill Hermes bundles or one an agent makes.
 - **google-workspace-finite**: Gmail, Calendar, Drive, Contacts, Sheets and
   Docs through the person's connected Google account: its helper is
   rewritten on Google's REST APIs with Python's standard library, sending
-  `Authorization: Bearer fragment-connection:google` and `x-fragment-agent`
-  (docs/computers.md, Connections). The OAuth setup scripts are gone.
+  `GOOGLE_OAUTH_ACCESS_TOKEN` (the connection's placeholder) as a bearer
+  token (docs/computers.md, Connections and operator keys). The OAuth setup
+  scripts are gone.
 - **image-generation-finite** (was `fal-image-editing-finite`): text to
   image with Cloudflare's own FLUX.1 [schnell] through a fragment AI step
   (`job.ai.image`), from an images fragment it carries the code for
@@ -84,13 +85,15 @@ suffix, so none collides with a skill Hermes bundles or one an agent makes.
 - Runtime claims: `/home/node/`, `~/.hermes/venv` and "the Finite runtime
   includes …" are a virtualenv of the agent's own in its home; Telegram
   location pins and `MEDIA:` notes name chats generally.
-- Keys read from `~/.hermes/.env` are the computer's credential swap: the
-  helpers send the placeholder in the header the provider reads, and
-  `x-fragment-agent: $FRAGMENT_AS_AGENT` (perplexity-research, x-api,
-  x-search, goplaces, linear, notion, music-generation; x-search now calls
-  xAI's REST Responses API, since the xai-sdk's gRPC cannot pass the
-  intercept). `trading-agent-finite` reads FRED's keyless CSV, since FRED
-  takes its key in the URL, which the swap cannot fill.
+- Keys read from `~/.hermes/.env` are the computer's credentials (Paul,
+  2026-10-04): each is the provider's standard environment variable, which
+  holds a placeholder naming the agent, and the helpers send it where the
+  provider reads it, as any SDK or CLI would, with no header of ours; the
+  computer's swap fills it on the way to the provider's own hosts
+  (perplexity-research, x-api, x-search, goplaces, linear, notion, monday,
+  music-generation). x-search calls xAI's REST Responses API, since the
+  xai-sdk's gRPC cannot pass the intercept. `trading-agent-finite` reads
+  FRED's keyless CSV, since the platform offers no FRED key.
 - Left out as no skill reads them: tufte-viz's demo pages (2.5 MB), the
   OOXML schemas under powerpoint's `scripts/office/schemas/` (no script of
   it reads them), and compiled Python (`__pycache__`).
@@ -102,27 +105,34 @@ suffix, so none collides with a skill Hermes bundles or one an agent makes.
 
 ### What the deployment must offer
 
-A skill whose provider the deployment does not offer answers 401 or 403,
-and says so. The connections (`FRAGMENT_CONNECTIONS`, WorkOS Pipes) and the
-operator's keys (`FRAGMENT_OPERATOR_KEYS`) these skills use:
+The providers these skills use, as rows of the deployment's catalog
+(`providers` in its config: `deploy/example.jsonc`; docs/computers.md,
+Connections and operator keys). A guest is given each one its agent may use
+as a placeholder in the environment variable named; a skill whose variable
+is unset says the deployment does not offer it. The platform's catalog
+(Paul, 2026-10-04) offers the first five; each other is a row away (and,
+for a connection, its provider enabled in WorkOS Pipes).
 
-| Skill | Credential | Hosts |
-|---|---|---|
-| google-workspace-finite | connection `google` | `gmail.googleapis.com`, `www.googleapis.com`, `people.googleapis.com`, `sheets.googleapis.com`, `docs.googleapis.com` |
-| linear-finite | connection `linear` | `api.linear.app` |
-| notion-finite | connection `notion` | `api.notion.com` |
-| monday-com-finite | connection `monday` | `api.monday.com` |
-| perplexity-research-finite | keys `perplexity`, `firecrawl` | `api.perplexity.ai`, `api.firecrawl.dev` |
-| x-search-finite | key `xai` | `api.x.ai` |
-| x-api-finite | key `x` | `api.x.com` |
-| goplaces-finite | key `google-places` | `places.googleapis.com` |
-| music-generation-finite | keys `fal`, `elevenlabs` | `fal.run`, `queue.fal.run`, `api.elevenlabs.io` |
+| Skill | Provider | Kind | Environment variable | Hosts | Offered |
+|---|---|---|---|---|---|
+| google-workspace-finite | `google` | connection | `GOOGLE_OAUTH_ACCESS_TOKEN` | `gmail.googleapis.com`, `www.googleapis.com`, `people.googleapis.com`, `sheets.googleapis.com`, `docs.googleapis.com` | yes |
+| perplexity-research-finite | `perplexity` | operator | `PERPLEXITY_API_KEY` | `api.perplexity.ai` | yes |
+| goplaces-finite | `google-places` | operator | `GOOGLE_PLACES_API_KEY` | `places.googleapis.com` | yes |
+| x-search-finite | `xai` | operator | `XAI_API_KEY` | `api.x.ai` | yes |
+| music-generation-finite | `elevenlabs` | operator | `ELEVENLABS_API_KEY` | `api.elevenlabs.io` | yes |
+| perplexity-research-finite | `firecrawl` | operator | `FIRECRAWL_API_KEY` | `api.firecrawl.dev` | no |
+| music-generation-finite | `fal` | operator | `FAL_KEY` | `fal.run`, `queue.fal.run` | no |
+| x-api-finite | `x` | operator | `X_API_BEARER_TOKEN` | `api.x.com` | no |
+| linear-finite | `linear` | connection | `LINEAR_API_KEY` | `api.linear.app` | no |
+| notion-finite | `notion` | connection | `NOTION_TOKEN` | `api.notion.com` | no |
+| monday-com-finite | `monday` | connection | `MONDAY_API_TOKEN` | `api.monday.com` | no |
 
-Third-party CLIs cannot name an agent (`x-fragment-agent`), so the swap
-cannot fill their keys: `parallel-cli-finite` and
-`inference-sh-cli-finite` work only with an account the person logs into
-from the CLI itself, and `pdf-workbench-finite`'s `nano-pdf` only with a
-Gemini key the person gives for the task.
+A third-party CLI or SDK that reads its provider's standard variable uses
+the swap unmodified once the catalog offers that provider:
+`pdf-workbench-finite`'s `nano-pdf` with `GEMINI_API_KEY`, `parallel-cli`
+with `PARALLEL_API_KEY`. Until then they work only with a key the person
+gives for the task, or an account they log into from the CLI itself
+(`parallel-cli-finite`, `inference-sh-cli-finite`).
 
 ## Its page
 

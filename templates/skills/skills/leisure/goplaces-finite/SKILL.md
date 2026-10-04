@@ -21,12 +21,12 @@ This skill is different from `find-nearby-finite`:
 
 ## Required Credential
 
-Your computer holds no keys: the helper sends the operator's key
-placeholder `fragment-key:google-places` (hosts `places.googleapis.com`)
-with `x-fragment-agent: $FRAGMENT_AS_AGENT`, and the computer swaps in the
-real key, metered to your owner. `GOOGLE_PLACES_API_KEY`, when set, is sent
-instead. A 403 or 401 naming the key means this deployment does not offer
-the `google-places` key: use `find-nearby-finite` instead and say so.
+Your computer holds no keys: `GOOGLE_PLACES_API_KEY` holds the operator's
+key's placeholder (it names you), the helper sends it in `X-Goog-Api-Key`
+(or a client may send it as `?key=`) to `places.googleapis.com`, and the
+computer swaps in the real key, each call metered to your owner. Unset,
+this deployment does not offer the `google-places` key: use
+`find-nearby-finite` instead and say so.
 
 ## Helper Script
 

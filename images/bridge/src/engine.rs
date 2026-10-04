@@ -500,7 +500,7 @@ impl Engine {
         self.dirty = true;
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": fragment });
         self.post(agent, &fragment, records::WORK, records::work_id(&id, "start"), body, Vec::new());
-        self.out.push(Effect::Runtime(Command::Start(start)));
+        self.out.push(Effect::Runtime(Command::Start(Box::new(start))));
     }
 
     // ---- Stop and answers ----

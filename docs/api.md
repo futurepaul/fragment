@@ -39,6 +39,7 @@ the deployment's secrets are Worker secrets (below).
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
+| `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
 
 Worker secrets (`cargo xtask deploy` uploads them from the files the
 deployment's config names; `.dev.vars` in dev), read only by
@@ -47,7 +48,8 @@ no author code can name one:
 
 | Secret | Meaning |
 |---|---|
-| `FRAGMENT_HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes) |
+| `FRAGMENT_HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes); the key computers' placeholders are tagged with is derived from it (docs/secrets.md) |
+| `FRAGMENT_KEY_<NAME>` | an operator key of the catalog (`perplexity` is `FRAGMENT_KEY_PERPLEXITY`, `google-places` `FRAGMENT_KEY_GOOGLE_PLACES`), uploaded from its row's `key_file` |
 | `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
 | `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
 | `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
@@ -1350,16 +1352,20 @@ turn}` and the steps to `work` when the fragment declares it postable,
 a chat's records (below). Its model calls are its owner's to
 pay.
 
-## Connections (decision 22)
+## Connections (decisions 22 and 37)
 
-A person's accounts at the providers the deployment offers
-(`FRAGMENT_CONNECTIONS`), held and refreshed by WorkOS Pipes; their
-agents use them through the computer's swap (docs/computers.md).
+Every provider of the deployment's catalog (`FRAGMENT_PROVIDERS`): a
+person's accounts (connections, held and refreshed by WorkOS Pipes), the
+operator's keys, and the person's own keys. Their agents use them through
+the computer's swap, each with a placeholder of its own
+(docs/computers.md, Connections and operator keys).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `{connections: [{provider, status}]}`: each offered provider, `connected`, `expired` (connect it again) or `none` |
-| `POST /api/connections/{provider}/authorize` | a person | → `{provider, url}`: Pipes' consent, for the person's browser; followed, the account is connected. A provider not offered is 404 |
+| `GET /api/connections` | a person | → `{providers: [{provider, kind, state, hosts, env, price?}]}` (proto's `Providers`): each provider the deployment offers, in its catalog's order. `kind` is `connection`, `operator` or `own`; `state` a connection's `connected`, `needs_reauthorization` or `not_connected` (Pipes' connected account, read with no token minted), an operator key's `offered`, an own key's `set` or `not_set`; `price` an operator key's list price, `{micros, per}` calls. Reading it tells the person's computer the connections' states, so its guest is given a new connection at its next read |
+| `POST /api/connections/{provider}/authorize` | a person | → `{provider, url}`: Pipes' consent, for the person's browser; followed, the account is connected. A provider not offered is 404, one that is no connection 400 |
+| `PUT /api/connections/{provider}/key` | a person | `{key}` → `{provider, state: "set"}`: the person's own key for an `own` provider, 1 to 4096 printable characters with no space, kept sealed by their computer (made first: 404 without one) and swapped in for their agents' placeholders. Any other provider is 400 |
+| `DELETE /api/connections/{provider}/key` | a person | → `{provider, state: "not_set"}`: the key is gone; their agents' guests are given it no more |
 
 ## The shell (phase 5)
 
@@ -1373,7 +1379,11 @@ standing stops, their computer and agents, their skills (decision 17: the
 managed set, read from their skills fragment's files by category, and
 each agent's own, from its fragment's `skills/`; the shell makes the
 skills fragment, kind `skills`, at setup beside their default agent),
-connections, and pairing the
+their connections (every provider the deployment offers, one row each:
+its kind, their state there with its action, which of their agents may
+use it, pressed to narrow one, and this month's calls by agent with an
+operator key's cost: `GET /api/connections`, the computer's view and its
+`uses`), and pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent); its sidebar lists their fragments, each one's share sheet
 (`/share/<name>`) in a dialog, and the catalog makes an app from a
@@ -1459,7 +1469,9 @@ is docs/computers.md; the routes here are its owner's.
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again |
-| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the WorkOS Pipes connections the agent may have swapped in (decision 22), all named at once. `null`, the default, is every connection its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those. A provider the deployment does not offer (`FRAGMENT_CONNECTIONS`) is 400, as is a body without `connections` |
+| `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
+| `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
+| `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
@@ -1491,12 +1503,19 @@ that fragment, once for the membership, and wakes the computer (Paul,
 2026-10-03; docs/computers.md). The fragment it joined keeps the notice
 until the computer has it (`agent.told`, or `agent.untold` with why).
 
-A guest's request to a connection's or an operator key's host has the
-placeholders in its headers swapped (docs/computers.md). The swap's
-refusals reach the guest as the platform's: 403 `forbidden` (an agent
-its owner narrowed to connections without that one, or a placeholder
-sent to a host that is not its credential's), 403 `not_connected` (its owner has not connected
-that provider, or must connect it again), 401 (no `x-fragment-agent`).
+A guest's request to a provider's host has its placeholders swapped, in
+a header, the query string or basic auth, as the catalog says
+(docs/computers.md, Connections and operator keys); the agent is the one
+its placeholder's tag names, with no header of ours. The swap's refusals
+reach the guest as the platform's, saying why and reaching no provider:
+400 `invalid_request` (a malformed placeholder, a provider the deployment
+does not offer, one in a place its provider does not take it, more than 4,
+or two agents' in one request), 403 `forbidden` (a placeholder sent to a
+host that is not its provider's, a tag that names no agent on this
+computer, or an agent its owner narrowed from that provider), 403
+`not_connected` (its owner has not connected that provider or must connect
+it again, or has given no own key), 402 or 403 the ledger's (an operator
+key's call its owner's ledger refuses).
 
 ### A chat's records (phase 7, slice C)
 

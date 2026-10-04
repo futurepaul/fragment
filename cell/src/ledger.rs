@@ -63,7 +63,7 @@ const PAID_CALLS_USED: &str = "test_paid_calls_used";
 /// at its next call when its version is newer (`take_book`).
 pub fn configured_book(cfg: &Config) -> PriceBook {
     let mut book = PriceBook::defaults();
-    book.keys = cfg.key_prices.clone();
+    book.keys = cfg.providers.key_prices();
     book.version = book.version.max(cfg.price_book_version);
     book
 }
