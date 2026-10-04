@@ -23,6 +23,14 @@ impl OrgKey {
             .map_err(|e| format!("the code.storage org key is not a PKCS#8 P-256 PEM: {e}"))
     }
 
+    /// The key's public half as SPKI PEM: what a code store that verifies
+    /// the org's tokens is given (code.storage's dashboard, or a
+    /// self-hosted store's configuration: docs/self-host.md, seam 5).
+    pub fn public_pem(&self) -> String {
+        use p256::pkcs8::EncodePublicKey;
+        self.0.verifying_key().to_public_key_pem(Default::default()).expect("a P-256 public key encodes as SPKI PEM")
+    }
+
     /// A signed JWT. code.storage requires the `repo` claim on every call,
     /// org-level ones included (where it is the org).
     pub fn token(&self, claims: &Claims<'_>) -> String {
@@ -260,6 +268,21 @@ mod tests {
         let vk = VerifyingKey::from(&SigningKey::from_pkcs8_pem(&pem).unwrap());
         vk.verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &sig).unwrap();
         assert!(OrgKey::from_pem("not a key").is_err());
+    }
+
+    /// Goal: the public half a store is given verifies the org's tokens.
+    /// Method: its SPKI PEM decoded as a verifying key, which checks a
+    /// token signed with the private half.
+    #[test]
+    fn the_public_half_verifies_the_org_tokens() {
+        use p256::pkcs8::DecodePublicKey;
+        let key = OrgKey::from_pem(&key_pem()).unwrap();
+        let public = key.public_pem();
+        assert!(public.starts_with("-----BEGIN PUBLIC KEY-----\n"), "{public}");
+        let t = key.token(&Claims { iss: "org", sub: "fragment-runtime", repo: "r", scopes: &["git:read"], iat: 1, exp: 2 });
+        let (input, sig) = t.rsplit_once('.').unwrap();
+        let sig = Signature::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig).unwrap()).unwrap();
+        VerifyingKey::from_public_key_pem(&public).unwrap().verify(input.as_bytes(), &sig).unwrap();
     }
 
     #[test]
