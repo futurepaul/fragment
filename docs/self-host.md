@@ -152,13 +152,96 @@ protocol. In short:
 - When the socket drops, a read the node had not yet answered (`wait`,
   inspect) is asked again on its next dial. So a computer's `monitor()`
   outlives a reconnect.
-- `NodeContainer` takes its transport from `FRAGMENT_NODE_URL`: a `fetch`
-  to the node's URL, as before, or the `Node` object's `fetch` for
-  `uplink:<id>`. Nothing else in it changes, and the calls are signed
-  as before.
+- `NodeContainer` takes its transport from the node's listing in
+  `FRAGMENT_NODES` (below): a `fetch` to the node's `url`, or the `Node`
+  object's `fetch` for a node with `"uplink": true`. Nothing else in it
+  changes, and the calls are signed as before.
 - Intercepts stay on HTTPS to `/api/nodes/egress`: a node that can dial
   the platform can reach it, and the router spreads them across the
   computers' objects instead of one node's.
+
+**Placement: computers across nodes (built, branch `selfhost-placement`).**
+A deployment lists its nodes in one variable, `FRAGMENT_NODES`, which
+`fragment_core::placement` checks at the cell's first request:
+
+```json
+{ "nodes": [
+    { "id": "box", "url": "http://192.168.50.7:9400", "arch": "x86_64", "capacity": 32 },
+    { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8 } ],
+  "images": {
+    "stub": { "x86_64": "registry.lan/fragment-stub:3", "aarch64": "registry.lan/fragment-stub:3-arm64" },
+    "hermes": "registry.lan/fragment-hermes:7" } }
+```
+
+- **A node** is its id, how the platform reaches it (`url`, or `uplink`
+  when it dials in), its architecture, and its capacity: the computers it
+  holds.
+- **Its secret** is the Worker secret `FRAGMENT_NODE_SECRET_<ID>` (the id
+  upper-cased, `-` as `_`), never in the variable. That is how operator
+  keys live already (`FRAGMENT_KEY_<NAME>`, docs/secrets.md). The list is
+  configuration a deploy renders, and a secret per node rotates alone.
+- **An image** is named as computers are pinned to it, with one
+  reference for every architecture (a multi-arch index, or a fleet of one
+  architecture) or one per architecture. A node takes a computer only
+  when its image has a reference for the node's architecture.
+- **Why one JSON variable**, not a variable per field: a node is a row
+  whose fields are checked together (an uplink has no url; an image needs
+  a reference for some architecture), and a row a deploy adds or drops
+  whole.
+
+**The rule.** A computer is placed at its first start (`place` in
+`computer.rs`). Every node is probed at once: its health within 6 s, the
+architecture it reports, and its `Node` object's count. The candidates are
+the nodes that are up, report the architecture they are listed with, and
+hold the image for it. Of these, the node with the fewest computers for
+its capacity takes it. A tie goes to the node listed first, which is the
+deployment's preference. The node's object takes the computer once and
+refuses one past capacity, so two placements that race never overfill a
+node. Placed one after another on two nodes of one capacity, computers
+alternate.
+
+**Pinned for life.** The node is the computer's (`node` in its view, and
+a meta row that `ContainerHost` reads as an isolate starts), because its
+container and its snapshots live there. **Moving a computer is not
+built**, and a node's count never falls. Since `/data` is backed up to
+the bucket, a move would be a start on another node and a restore, as a
+new image already is (decision 18).
+
+**A node that is down** gets a typed answer, not a hang:
+
+- every call to a node is bounded: a health 6 s, the first look at a
+  container 6 s, a start 120 s (it checks health first), any other call
+  30 s. A `wait`, an exec's stream and a port's stream are not bounded;
+- a failed transport, or a 502, 503 or 504 (the `Node` object with no
+  uplink open, or a proxy in front), is `NodeDown`;
+- the wake answers 503 `node_down`, naming the node, and the view's `why`
+  says the same until a start comes up. The computer stays placed there;
+- when no node can take a new computer, the wake answers 503 `no_node`,
+  with each node's reason.
+
+**One path.** `ContainerHost` uses `ctx.container` when there is no
+`FRAGMENT_NODES`, and otherwise the `NodeContainer` of the computer's
+node. The single-node variables (`FRAGMENT_NODE_URL`, `_SECRET` and
+`_IMAGES`) are gone: a cell that still has them refuses its first request
+and names what replaced them. **Not built:** an owner's preference (a
+field at creation); for now, the deployment's preference is the list's
+order.
+
+**Images per architecture.** Both computer images now build for
+`linux/amd64` and `linux/arm64` from one Dockerfile each, every stage for
+the platform asked for:
+
+- Hermes' base image is published for both.
+- `sandbox-shim`, which DirectoryBackup execs, is not: Cloudflare
+  publishes `cloudflare/sandbox:1.0.0` for amd64 alone. amd64 keeps
+  Cloudflare's binary. arm64 builds it from the same source
+  (`cloudflare/sandbox-sdk` at `@cloudflare/sandbox@1.0.0`,
+  `crates/sandbox-tools`, Apache-2.0), as that repo's own Dockerfile
+  does.
+- Litestream's release is pinned by hash for each architecture.
+- An operator loads the images on each node and names their references
+  in `FRAGMENT_NODES`' `images`. A platform only names them (sandcastle's
+  docs/node.md).
 
 **Snapshots stay node-local.** A computer that moves to another node
 starts from its image and restores `/data` from its last backup. That
@@ -175,7 +258,9 @@ decides whether that tier may run strangers' code.
 
 - A computer's placement becomes a field of the computer: `cloudflare`
   or `node:<id>`. Decision 13's "bring-your-own machines can return
-  without a redesign" is this field.
+  without a redesign" is this field. Built here as `node`, for
+  deployments whose computers are all on nodes; a blend of both is that
+  field with `ctx.container` as one more place.
 - A computer should need no internet. Today a guest calls code.storage
   directly (the debt-ledger entry "An agent's sync and deploy reach
   code.storage directly"). With git behind an intercept
@@ -1013,6 +1098,60 @@ These are listed as found. Each names where it bites and what to do.
 12. **`cargo xtask dev` took fixed ports** (8790 to 8796), so two stacks
     could not share a box. `FRAGMENT_DEV_PORT=<p>` moves the cell to `p`
     and each fake by as much.
+13. **No intercept carried a WebSocket.** A computer's guest opens two
+    WebSockets through `api.fragment.internal`: its keepalive, and
+    `__live` to follow a chat. Neither sandcastle-node's egress, the
+    engine's egress proxy nor the Docker double took an upgrade.
+    - Without them the bridge falls back to polling, so the chat
+      section's Stop and file chips missed their moments.
+    - Without the keepalive, a turn longer than the 20-minute hold could
+      be put to sleep under the guest.
+    - Fixed in the node and the double (sandcastle's `node-placement`):
+      the upgrade is signed over the empty body, and the platform's 101
+      is joined to the guest's.
+    - **The engine's egress proxy still lacks it** (sandcastle's
+      docs/node.md says what it needs). A real node runs no
+      WebSocket-following guest until then.
+14. **A node's intercept followed a provider's redirect.** `nodeEgress`
+    rebuilt the guest's request with fetch's default `redirect:
+    "follow"`, so a provider's redirect was followed with the swapped
+    token. Under the runtime's own intercepts, the guest gets the 3xx.
+    The computers section caught it, and it is fixed (`redirect:
+    "manual"`).
+15. **A failed start on a node was reported twice:** as the start's
+    failure, and by `monitor()` as an exit. Exits count against a
+    computer's starts, so one wake with its node down ran three starts
+    at once and left it "won't wake: its container kept stopping".
+    `monitor()` of a start that failed now says so, and the start alone
+    reports it.
+    - It also showed a bug on master: an exit while starting metered the
+      owner from the end of their last awake interval, so they paid for
+      the sleep before it. Fixed on its own (PR #131).
+16. **An exec's socket stayed open after its process exited.** Nothing
+    closed it from the platform's end. `NodeProcess` now closes it as the
+    process exits, and answers the exit once the socket has closed (or
+    after 2 s).
+17. **On celld, an object's answer was never sent after an outbound
+    socket closed.** A wake whose last await was an exec socket's close
+    event returned its view, but celld held the response for 60 s
+    (`phase="handler"`). The handler resumed inside the socket's own close
+    event, and its driver polled only when it had no op of its own
+    pending; the container's `wait` always was one. Fixed in celld (branch
+    `selfhost-placement`, `9b31c97`: a settled handler wakes its driver).
+    It is a parity bug: workerd sends the answer.
+18. **On celld, a WebSocket one object returned to another closed with
+    1006.** When the uplink's caller closed, celld tore the pair down,
+    and dropped the `Node` object's answering close. Fixed in celld
+    (`04a2cf5`): the caller's close waits for the object's, for up to 5 s.
+19. **A computer's first look at its node failed while its uplink was
+    dialing again.** After a crash of the platform, the node dialed back
+    11 s later, because its backoff had grown on refusals while celld
+    drained. The new object saw "not running", started over a container
+    that was in fact running, and was refused 409. Now:
+    - a look that found the node silent is asked again before the
+      object adopts or starts;
+    - a start refused 409 replaces the container it could not see
+      (lesson 6: never reused half-known).
 
 ## The spike, on this box
 
@@ -1053,7 +1192,7 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   node behind NAT and no inbound port, then against a Cloudflare preview
   (the first real blend; deploying a preview is Paul's call).
 
-### Status, 2026-10-03
+### Status, 2026-10-04
 
 - **S1: done.** The model route sends the models it maps to an
   OpenAI-compatible server; the models it does not map (image steps) go
@@ -1149,6 +1288,60 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   against the WorkOS fake's AuthKit and the strict fake, and it signed in
   through a real Dex (seam 4, Evidence). Real AuthKit is the hosted
   lane's, and Paul's (seam 4, Landing it in master).
+- **Placement, computers across nodes: built** (2026-10-04; branch
+  `selfhost-placement`, sandcastle's `node` (from `node-placement`), and
+  celld's `selfhost` (its two fixes, found 17 and 18)). The design and the
+  rule are seam 2's Placement.
+  - Host tests: 7 in `fragment_core::placement`. They cover the
+    configuration read and refused, the rule, nodes that are down or the
+    wrong architecture or lack the image, and probes read from JSON and
+    replayed. 2 in `devstack::sandcastle`, and the rungs' in the e2e's
+    `needs`.
+  - The e2e starts two nodes (`FRAGMENT_E2E_NODES=two`): `direct`, which
+    listens, and `uplink`, which dials in. Each is a sandcastle-node over
+    sandcastle's Docker engine double (no root, no VMs). Computers
+    alternated between them, section by section.
+  - **wrangler dev:** computers, chat, shell-ui, placement and restart
+    passed 258, failed 0, skipped 1 (local Workflows).
+  - **celld** (with its two fixes, found 17 and 18): placement 13 of 13
+    and restart green on every run. After the rebase onto the renderer
+    (seam 7) and sign-in on one core (seam 4), the five sections passed
+    260, failed 0, skipped 0 (cards are shot now), and auth, signin and
+    site 177, 0, 0.
+    - chat's Stop check failed in 3 of 5 runs before the rebase, and
+      passes under wrangler. chat had never run on celld before: it
+      needed local Docker.
+  - **The whole suite on celld with the two nodes, before the rebase:
+    1526 passed, 1 failed (chat's Stop), 11 skipped.** The skips were 8
+    card checks and the fake's levers. That covers every section,
+    including the four that need computers, which runs before had
+    skipped.
+  - The placement section shows:
+    - a computer placed at its first start, not before;
+    - two placed one after the other land on the two nodes;
+    - each one's screen answers through its node, whether the node
+      listens or dials in;
+    - asleep and woken, a computer wakes on its node, `/data` restored;
+    - each node down in turn: a wake answers 503 `node_down`, naming the
+      node, within 15 s (at once for `direct`, about 5 s for `uplink`);
+      the view says why, and a new computer goes to the node that is up;
+    - the node back, the computer wakes on it again.
+  - The restart section keeps a computer awake on a node through a
+    graceful restart (its new object finds the container and puts it to
+    sleep) and through a crash, and wakes it on the same node each time.
+  - **Images per architecture:** the stub built for `linux/arm64` on
+    this box in 265 s, under qemu (binfmt_misc's `qemu-aarch64` is
+    registered with flag F, and buildx lists `linux/arm64`). It runs:
+    `uname -m` answers aarch64, and its shim runs. Hermes' arm64 stages
+    (the shim, Litestream) build; the whole image (3.8 GB) was not built
+    here. It is faster natively in the Mac's Linux VM.
+  - **Not built:**
+    - an owner's preference;
+    - moving a computer;
+    - a node's count falling;
+    - WebSockets through the real engine's egress proxy (found 13);
+    - `xtask deploy` rendering `FRAGMENT_NODES` and the node secrets for
+      a blend on Cloudflare.
 
 ### Running it
 
@@ -1183,12 +1376,31 @@ The browser runs with Chrome's sandbox, so the host must allow
 unprivileged user namespaces (Ubuntu 24.04's AppArmor restricts them;
 its `kernel.apparmor_restrict_unprivileged_userns`).
 
-Computers on a sandcastle node add three settings:
+Computers on sandcastle nodes take one setting, `FRAGMENT_NODES_FILE`.
+It names a file in `FRAGMENT_NODES`' shape (seam 2, Placement), where
+each node also has a `secret_file`. The dev stack reads each secret and
+hands it to the cell as `FRAGMENT_NODE_SECRET_<ID>`:
 
-- `FRAGMENT_NODE_URL`: the node's API (`sandcastle-node`'s `listen`);
-- `FRAGMENT_NODE_SECRET_FILE`: its secret's file;
-- `FRAGMENT_NODE_IMAGES`: `{"stub": "<reference>"}`, the images the node
-  holds, by the names computers are pinned to.
+```json
+{ "nodes": [
+    { "id": "box", "url": "http://127.0.0.1:9400", "arch": "x86_64", "capacity": 32, "secret_file": "/home/me/.config/fragment/nodes/box.secret" },
+    { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8, "secret_file": "/home/me/.config/fragment/nodes/mac.secret" } ],
+  "images": { "stub": { "x86_64": "docker.io/library/fragment-stub:1", "aarch64": "docker.io/library/fragment-stub:1-arm64" } } }
+```
+
+The e2e starts two nodes of its own with `FRAGMENT_E2E_NODES=two`: one
+that listens, and one that dials in. Each is a `sandcastle-node` in front
+of sandcastle's Docker engine double, which runs each container in local
+Docker (no root, no VMs). `SANDCASTLE_DIR` names a sandcastle checkout
+(branch `node-placement`) with `sandcastle-node` and
+`sandcastle-docker-engine` built, and `sandcastle-docker-relay` built
+static (`--target x86_64-unknown-linux-musl`). The run builds the cell's
+images for them, tagged for the run.
+
+```sh
+FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-placement FRAGMENT_E2E_RUNTIME=celld \
+  CELLD_BIN=../celld/target/release/celld cargo xtask e2e --only computers,chat,shell-ui,placement,restart
+```
 
 Sign-in (seam 4) is one OpenID Connect provider:
 
@@ -1230,7 +1442,7 @@ port to the socket.
 
 A node the platform cannot reach dials it instead (the uplink):
 
-- `FRAGMENT_NODE_URL=uplink:<id>` on the platform;
+- `"uplink": true` for it in the platform's node list, with no `url`;
 - an `uplink` section in the node's config:
   `{"url": "ws://127.0.0.1:<port>/api/nodes/uplink", "id": "<id>"}` (`wss`
   in production), with `listen` dropped.
@@ -1269,3 +1481,12 @@ default dev ports.
 - **The root the engine needs on this box.** sandcastle's engine jails
   each VM, so it runs as root (`sudo systemd-run …`). Someone has to
   start it.
+- **Placement's preference** (seam 2). Today it is the deployment's: the
+  list's order breaks ties. Should an owner name a node (say, "my
+  computer on my Mac")? That is a field at creation. A computer pinned to
+  a laptop is down whenever the laptop sleeps.
+- **The Mac as a node.** Its Linux VM builds the arm64 images natively
+  (`docker build --platform linux/arm64 -f images/hermes/Dockerfile .`),
+  loads them into its engine, and dials the box with `"uplink"` in its
+  config. The box's node list then names its id, `"arch": "aarch64"`, and
+  the images' arm64 references. Its secret is a file on each side.
