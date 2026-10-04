@@ -1308,9 +1308,12 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     (seam 7) and sign-in on one core (seam 4), the five sections passed
     260, failed 0, skipped 0 (cards are shot now), and auth, signin and
     site 177, 0, 0.
-    - chat's Stop check failed in 3 of 5 runs before the rebase, and
-      passes under wrangler. chat had never run on celld before: it
-      needed local Docker.
+    - chat's Stop check failed in 3 of 8 runs on celld. The cause was the
+      lane, not celld: it clicked the Stop the page still showed for the
+      turn before, whose end the page had not yet heard, so nothing was
+      stopped. It now waits for the Stop of the slow message's own turn
+      (`turn_of`). With that, chat passed 4 of 4 on celld. The fix is on
+      master too (its own PR).
   - **The whole suite on celld with the two nodes, before the rebase:
     1526 passed, 1 failed (chat's Stop), 11 skipped.** The skips were 8
     card checks and the fake's levers. That covers every section,
