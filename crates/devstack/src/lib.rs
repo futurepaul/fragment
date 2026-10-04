@@ -276,6 +276,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Sign-in with an OpenID Connect provider (docs/self-host.md, seam 4):
+    /// it signs people in in place of WorkOS, which then serves Pipes alone.
+    pub oidc: Option<OidcVars>,
     /// The platform's origin (sign-in, the platform session), when it is
     /// not the hostname suffix itself.
     pub platform_url: Option<String>,
@@ -324,6 +327,20 @@ pub struct NodeVars {
     pub secret: String,
     /// `FRAGMENT_NODE_IMAGES`' JSON: an image's name to its reference.
     pub images: String,
+}
+
+/// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`).
+pub struct OidcVars {
+    /// Its issuer, exactly as its id_tokens say it.
+    pub issuer: String,
+    pub client_id: String,
+    /// `None`: a public client (PKCE alone).
+    pub client_secret: Option<String>,
+    /// `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS` (JSON) and
+    /// `FRAGMENT_OIDC_AUTH`; `None`: the cell's defaults.
+    pub scopes: Option<String>,
+    pub claims: Option<String>,
+    pub auth: Option<String>,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -383,6 +400,15 @@ impl Fleet {
             vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
             if let Some(u) = &w.api_url {
                 vars.push(("WORKOS_API_URL", u.as_str()));
+            }
+        }
+        if let Some(o) = &self.oidc {
+            vars.push(("FRAGMENT_OIDC_ISSUER", o.issuer.as_str()));
+            vars.push(("FRAGMENT_OIDC_CLIENT_ID", o.client_id.as_str()));
+            for (k, v) in [("FRAGMENT_OIDC_CLIENT_SECRET", &o.client_secret), ("FRAGMENT_OIDC_SCOPES", &o.scopes), ("FRAGMENT_OIDC_CLAIMS", &o.claims), ("FRAGMENT_OIDC_AUTH", &o.auth)] {
+                if let Some(v) = v {
+                    vars.push((k, v.as_str()));
+                }
             }
         }
         if let Some(p) = &self.platform_url {
