@@ -133,13 +133,40 @@ impl CelldNode {
     pub fn wait(mut self) -> Result<std::process::ExitStatus> {
         Ok(self.child.wait()?)
     }
+
+    fn signal_group(&self, signal: &str) {
+        let _ = Command::new("kill").args([signal, "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+    }
+
+    /// A graceful stop, as Ctrl-C stops it (celld dev answers SIGINT): its
+    /// state kept for the next start.
+    pub fn stop(mut self) -> Result<()> {
+        self.signal_group("-INT");
+        let t0 = Instant::now();
+        // Bounded by STOP_TIMEOUT.
+        while self.child.try_wait()?.is_none() {
+            if t0.elapsed() > crate::STOP_TIMEOUT {
+                self.signal_group("-KILL");
+                bail!("celld dev did not stop within {:?}", crate::STOP_TIMEOUT);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+
+    /// A crash: the whole group killed at once, nothing flushed.
+    pub fn crash(mut self) -> Result<()> {
+        self.signal_group("-KILL");
+        self.child.wait()?;
+        Ok(())
+    }
 }
 
 impl Drop for CelldNode {
     /// An early error must not leave celld holding the port: its group
     /// (the supervisor and its node) goes with it.
     fn drop(&mut self) {
-        let _ = Command::new("kill").args(["-TERM", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        let _ = Command::new("kill").args(["-INT", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
     }
 }
 

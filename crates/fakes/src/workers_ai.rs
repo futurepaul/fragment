@@ -27,6 +27,12 @@
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
 //! report (`set_usage`), and a stream cut before its usage (`break_next`).
+//!
+//! It answers an OpenAI-compatible server's `POST /v1/chat/completions`
+//! too, the model named in the body (a self-hosted deployment's upstream,
+//! `FRAGMENT_MODEL_URL`: docs/self-host.md, seam 3), its stream shaped as
+//! OpenAI's: no usage until a last chunk with no choices, which carries the
+//! whole call's, and no Workers AI line.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -183,12 +189,27 @@ fn within(text: &str, budget: &mut Option<usize>) -> (String, bool) {
     (kept, n < text.chars().count())
 }
 
-/// A reply streamed as Workers AI streams it (S4's shapes); `broken` ends
-/// it before the usage and `[DONE]`, as a dropped stream does.
-fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
+/// Whose shape an answer takes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// The binding's, through the gateway (S4's shapes).
+    WorkersAi,
+    /// An OpenAI-compatible server's.
+    OpenAi,
+}
+
+/// A reply streamed as Workers AI streams it (S4's shapes), or as an
+/// OpenAI-compatible server does; `broken` ends it before the usage and
+/// `[DONE]`, as a dropped stream does.
+#[allow(clippy::too_many_arguments)]
+fn stream(shape: Shape, model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Option<usize>, broken: bool, pieces: usize) -> String {
     *ids += 1;
     let id = format!("fake{ids:08x}");
-    let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
+    let usage = |prompt: u64, completion: u64| match shape {
+        Shape::WorkersAi => delta_usage(prompt, completion),
+        Shape::OpenAi => Value::Null,
+    };
+    let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, usage(used.prompt, 0));
     let mut parts: Vec<(Value, u64)> = Vec::new();
     let mut cut = false;
     let finish = match reply {
@@ -238,15 +259,21 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
     let n = parts.len().max(1) as u64;
     for (i, (delta, _)) in parts.iter().enumerate() {
         let share = used.completion / n + u64::from((i as u64) < used.completion % n);
-        out += &chunk(&id, model, delta.clone(), None, delta_usage(0, share));
+        out += &chunk(&id, model, delta.clone(), None, usage(0, share));
     }
     if broken {
         return out;
     }
     let finish = if cut { "length" } else { finish };
-    out += &chunk(&id, model, json!({}), Some(finish), delta_usage(0, 0));
-    out += &format!("data: {}\n\n", json!({ "id": id, "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": delta_usage(0, 0) }));
-    out += &format!("data: {}\n\n", json!({ "response": "", "usage": usage_json(used) }));
+    out += &chunk(&id, model, json!({}), Some(finish), usage(0, 0));
+    let last = match shape {
+        Shape::WorkersAi => delta_usage(0, 0),
+        Shape::OpenAi => usage_json(used),
+    };
+    out += &format!("data: {}\n\n", json!({ "id": id, "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [], "usage": last }));
+    if shape == Shape::WorkersAi {
+        out += &format!("data: {}\n\n", json!({ "response": "", "usage": usage_json(used) }));
+    }
     out + "data: [DONE]\n\n"
 }
 
@@ -300,11 +327,18 @@ fn image_answer(input: &Value, log_id: &str) -> Response {
 }
 
 fn answer(s: &mut State, req: &Request) -> Response {
-    let Some(model) = req.path.strip_prefix("/run/").map(crate::http::decode) else { return problem(404, "no such route") };
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let (shape, model) = match (req.path.strip_prefix("/run/"), req.path.as_str()) {
+        (Some(m), _) => (Shape::WorkersAi, crate::http::decode(m)),
+        (None, "/v1/chat/completions") => match body["model"].as_str() {
+            Some(m) => (Shape::OpenAi, m.to_string()),
+            None => return problem(400, "a chat completion names its model"),
+        },
+        _ => return problem(404, "no such route"),
+    };
     if req.method != "POST" {
         return problem(405, "the binding runs a model with a POST");
     }
-    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let metadata = req.header("x-fragment-ai-metadata").and_then(|m| serde_json::from_str(m).ok()).unwrap_or(Value::Null);
     let affinity = req.header("x-session-affinity").map(str::to_string);
     s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity });
@@ -331,7 +365,7 @@ fn answer(s: &mut State, req: &Request) -> Response {
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
         let pieces = if s.transcripts { 3 } else { 1 };
-        let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
+        let events = stream(shape, &model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
         return Response::bytes(200, "text/event-stream", events.into_bytes()).with_header("cf-aig-log-id", &log_id);
     }
     let reply = match scripted {
@@ -462,15 +496,34 @@ mod tests {
     #[test]
     fn a_stream_is_shaped_as_workers_ai_streams() {
         let used = Used { prompt: 23, cached: 0, completion: 15 };
-        let text = stream("@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
+        let text = stream(Shape::WorkersAi, "@cf/zai-org/glm-5.3-flash", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
         let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         let deltas: u64 = lines.iter().filter(|l| l.get("choices").is_some()).map(|l| l["usage"]["completion_tokens"].as_u64().unwrap()).sum();
         assert_eq!(deltas, 15, "the chunks' deltas add up to the completion");
         let last = lines.last().unwrap();
         assert_eq!((last["response"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!(""), json!(23), json!(15)));
         assert!(text.ends_with("data: [DONE]\n\n"));
-        let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
+        let broken = stream(Shape::WorkersAi, "m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
+    }
+
+    /// Goal: an OpenAI-compatible server's stream reads as OpenAI's: no
+    /// usage on the chunks, the whole call's on a last chunk with no
+    /// choices, and no line of Workers AI's own; the cell's reader takes
+    /// it. Method: a text reply, read by fragment_core's stream reader.
+    #[test]
+    fn a_stream_is_shaped_as_openai_streams() {
+        let used = Used { prompt: 23, cached: 0, completion: 15 };
+        let text = stream(Shape::OpenAi, "bonsai-2-27b", &Reply::Text("1, 2, 3".into()), &mut 0, used, None, false, 1);
+        let lines: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+        assert!(lines.iter().all(|l| l.get("response").is_none()), "no Workers AI line");
+        let (last, rest) = lines.split_last().unwrap();
+        assert!(rest.iter().all(|l| l["usage"].is_null()), "no usage before the last chunk");
+        assert_eq!((last["choices"].clone(), last["usage"]["prompt_tokens"].clone(), last["usage"]["completion_tokens"].clone()), (json!([]), json!(23), json!(15)));
+        let mut reader = fragment_core::models::Stream::default();
+        reader.push(text.as_bytes(), None);
+        reader.finish(None);
+        assert_eq!(reader.usage().map(|u| (u["prompt_tokens"].clone(), u["completion_tokens"].clone())), Some((json!(23), json!(15))));
     }
 
     /// Goal: the image model answers as its catalog says, a JPEG the cell

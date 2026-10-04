@@ -414,6 +414,27 @@ These are listed as found. Each names where it bites and what to do.
    `aecfbb6`) points at `crates/native`, which phase 2 removed. The
    branch `selfhost` of the celld fork deletes the seam: master needs it
    no longer, and that is one less difference from upstream celld.
+6. **A redeploy of the same code broke the app's next call on celld.**
+   - `platform.mjs` locks an app out of facets by making
+     `DurableObjectState`'s `facets` a getter-only accessor on its
+     prototype.
+   - celld's JS `DurableObjectState` assigned `this.facets` in its
+     constructor. The same code redeployed reuses the loaded isolate, so
+     the next facet's state threw: "Cannot set property facets … which
+     has only a getter".
+   - The e2e's `ops` section found it ("redeploying keeps the app's
+     data").
+   - Fixed in celld (branch `selfhost`): `facets` is now defined as an own
+     property, as workerd's native accessor behaves.
+   - It is a parity bug that only a second runtime shows. The e2e on both
+     runtimes is the guard decision 2's port relies on.
+7. **`fragment init` printed a webhook URL that answers 404** to any
+   sender who isn't signed in. It used the short name (`/api/f/inbox/…`),
+   which resolves only through a signer. This is a master bug, not a
+   self-hosting one: the fix (commit "cli: init prints the webhook URL
+   with the fragment's full name") is ready to cherry-pick onto master.
+8. **celld's `dev` stops on SIGINT** (Ctrl-C), not promptly on SIGTERM,
+   so devstack stops it with SIGINT.
 
 ## The spike, on this box
 
@@ -456,18 +477,27 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
 
 ### Status, 2026-10-03
 
-- **S1:** built, and seen working end to end. The `ai` section against
-  an OpenAI-compatible fake is still to do.
-  - The e2e's fake speaks Workers AI's shape, so it does not cover this
-    path; see master item 1.
-- **S4:** built (`cargo xtask dev --runtime celld`). These run on it
-  from the CLI:
-  - sign-in, create and deploy, operations, a trigger's durable job, a
-    blob, and an agent's turn.
-  - The e2e on celld is still to do: its harness drives `wrangler dev`
-    (`devstack::Node`).
-- **S5:** the same flows, run in a network namespace with loopback only
-  (`unshare -rn`, no root). The only way out is a unix socket bridged
+- **S1: done.** The model route sends the models it maps to an
+  OpenAI-compatible server; the models it does not map (image steps) go
+  on to the binding as before.
+  - The e2e drives it: `FRAGMENT_E2E_MODELS=openai`, the model fake
+    answering `/v1/chat/completions` in OpenAI's shape.
+  - ai, agents and ledger: 143 passed, 0 failed, on celld.
+  - It works end to end with the local Bonsai-2-27B (below).
+- **S4: done for everything but computers.** `cargo xtask dev --runtime
+  celld`, and the e2e on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+  - The full suite: 1271 passed and 6 failed. The six were card checks;
+    a deployment without a browser now takes no shots, and those checks
+    are skips there, so a rerun of the affected sections passed 200, 0
+    failed.
+  - It skips the four sections that need the runtime's containers
+    (computers, chat, shell-ui, hermes): their lane is the node's.
+  - It found one parity bug in celld (found item 6, fixed).
+  - It makes a check local workerd cannot: "a job sleeping through a
+    crash wakes and finishes, once". celld's Workflows are durable; until
+    now only the hosted lane made that check.
+- **S5: done.** The same flows, run in a network namespace with loopback
+  only (`unshare -rn`, no root). The only way out is a unix socket bridged
   (`socat`) to the local model's port.
   - Every flow passed, and celld logged no errors.
   - The calories agent was told "I ate an apple". It called its
