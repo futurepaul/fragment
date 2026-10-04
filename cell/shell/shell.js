@@ -970,7 +970,7 @@ async function openSettings(push = true) {
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.node ? [line("Runs on", c.node)] : []), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   if (c) {

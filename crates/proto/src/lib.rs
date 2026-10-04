@@ -377,6 +377,12 @@ pub enum ErrorCode {
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
+    /// 503: the sandcastle node a computer is placed on does not answer
+    /// (docs/self-host.md, seam 2); it waits for that node, which holds it.
+    NodeDown,
+    /// 503: no node can take a new computer (each one down, full, or
+    /// without its image); the message says why, node by node.
+    NoNode,
 }
 
 impl ErrorCode {
@@ -395,7 +401,7 @@ impl ErrorCode {
             ErrorCode::RegistryUnavailable => 503,
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
-            ErrorCode::NodeFull | ErrorCode::WontWake => 503,
+            ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::NodeDown | ErrorCode::NoNode => 503,
             ErrorCode::Moved => 410,
             ErrorCode::NotConnected => 403,
         }

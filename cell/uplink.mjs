@@ -4,13 +4,14 @@
 // holds that WebSocket (hibernatable). Its `fetch` sends a request down
 // the socket as one stream of frames and streams the answer back; a `101`
 // comes back as a WebSocketPair bridged to the stream. `NodeContainer`
-// (node.mjs) calls it in place of the node's URL when
-// `FRAGMENT_NODE_URL=uplink:<id>`: its calls are signed as before, and the
-// node checks them as before. The frames, their order and their limits
+// (node.mjs) calls it in place of the node's URL for a node FRAGMENT_NODES
+// lists with `"uplink": true`, naming the node in the request's host
+// (`<id>.node.internal`): its calls are signed as before, and the node
+// checks them as before. The frames, their order and their limits
 // mirror sandcastle's `uplink::frame`, which is the reference (its tests
 // cover them).
 
-import { authHeader, nodeOf, signedAt } from "./node.mjs";
+import { authHeader, nodeObject, nodesOf, signedAt } from "./node.mjs";
 
 const HELLO = 1;
 const PING = 2;
@@ -167,14 +168,20 @@ function wsKey() {
   return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
 }
 
-// The router's half of `/api/nodes/uplink`: the configured node's dial,
-// to its object, which checks the rest.
+// A node of FRAGMENT_NODES that dials in, by the id a dial names, or null.
+function dialer(env, id) {
+  const node = nodesOf(env)?.byId.get(id || "");
+  return node && node.uplink ? node : null;
+}
+
+// The router's half of `/api/nodes/uplink`: a listed node's dial, to its
+// object, which checks the rest.
 export function routeNodeUplink(request, env) {
-  const node = nodeOf(env);
-  if (!node || !node.uplink) return Response.json({ error: "this platform takes no uplink" }, { status: 404 });
-  if (request.headers.get(NODE_HEADER) !== node.uplink) return Response.json({ error: "not this platform's node" }, { status: 403 });
+  if (!nodesOf(env)) return Response.json({ error: "this platform takes no uplink" }, { status: 404 });
+  const id = request.headers.get(NODE_HEADER);
+  if (!dialer(env, id)) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
   if ((request.headers.get("upgrade") || "").toLowerCase() !== "websocket") return Response.json({ error: "the uplink is a WebSocket" }, { status: 426 });
-  return env.NODE.get(env.NODE.idFromName(node.uplink)).fetch(new Request("https://node.internal/__uplink/dial", request));
+  return nodeObject(env, id).fetch(new Request(`https://${id}.node.internal/__uplink/dial`, request));
 }
 
 // One stream: a call down the uplink, and its answer.
@@ -541,12 +548,12 @@ export class Uplink {
   }
 
   async #dial(request) {
-    const node = nodeOf(this.#env);
-    if (!node || !node.uplink) return Response.json({ error: "this platform takes no uplink" }, { status: 404 });
     const h = request.headers;
     const id = h.get(NODE_HEADER);
+    const node = dialer(this.#env, id);
     const nonce = h.get(NONCE_HEADER) || "";
-    if (id !== node.uplink) return Response.json({ error: "not this platform's node" }, { status: 403 });
+    // this object is that node's alone
+    if (!node || this.#ctx.id.toString() !== this.#env.NODE.idFromName(id).toString()) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
     if (!/^[0-9a-f]{32}$/.test(nonce)) return Response.json({ error: "a dial's nonce is 32 lowercase hex digits" }, { status: 400 });
     const t = await signedAt(node, h.get(AUTH), (t) => dialString(id, nonce, t));
     if (t === null) return Response.json({ error: "a bad signature" }, { status: 401 });
@@ -587,14 +594,13 @@ export class Uplink {
 
   async #call(request) {
     const ws = await this.#connected(UPLINK_WAIT_MS);
-    const node = nodeOf(this.#env);
-    if (!ws) return Response.json({ error: `the node ${node && node.uplink} has no uplink open` }, { status: 503 });
+    const u = new URL(request.url);
+    if (!ws) return Response.json({ error: `the node ${u.hostname.split(".")[0]} has no uplink open` }, { status: 503 });
     if (this.#streams.size >= STREAMS_MAX) return Response.json({ error: `the uplink has ${STREAMS_MAX} calls in flight` }, { status: 503 });
     // Bounded by STREAMS_MAX: at most that many ids are taken.
     do this.#next = (this.#next % 0xffffffff) + 1;
     while (this.#streams.has(this.#next));
     const id = this.#next;
-    const u = new URL(request.url);
     const upgrade = (request.headers.get("upgrade") || "").toLowerCase() === "websocket";
     const headers = [];
     for (const [k, v] of request.headers) if (!HOP.has(k)) headers.push([k, v]);

@@ -58,10 +58,20 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// `obj.method(...args)`, settled (a value, a promise, or an RPC
 /// thenable): for the objects entry.mjs hands the cell (a computer's
 /// `ContainerHost`). A throw or a rejection is the host's failure, its
-/// message kept.
+/// message kept; but a sandcastle node that does not answer (node.mjs's
+/// `NodeDown`) is `ErrorCode::NodeDown`.
 pub(crate) async fn invoke(obj: &JsValue, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-    let out = call(obj, method, args).map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))?;
-    settle(out).await.map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))
+    let out = call(obj, method, args).map_err(|e| host_error(method, &e))?;
+    settle(out).await.map_err(|e| host_error(method, &e))
+}
+
+fn host_error(method: &str, e: &JsValue) -> CellError {
+    let message = js_message(e);
+    let name = e.is_object().then(|| Reflect::get(e, &JsValue::from_str("name")).ok()).flatten().and_then(|n| n.as_string());
+    match name.as_deref() {
+        Some("NodeDown") => CellError::new(ErrorCode::NodeDown, message),
+        _ => CellError::host(format!("{method}: {message}")),
+    }
 }
 
 /// `obj[key]`.
