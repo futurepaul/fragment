@@ -233,27 +233,64 @@ production uses.
 - People are keyed by `(issuer, subject)`, with the issuer
   `workos:<client_id>`. That key is already right for OIDC.
 
-**Built (branch `selfhost-oidc`): any OpenID Connect provider, beside
-WorkOS.** Configuration says who signs people in: with
-`FRAGMENT_OIDC_ISSUER` set, OIDC does; else WorkOS, as before. WorkOS
-configured beside OIDC serves Pipes' connections alone.
+**Can WorkOS sign people in over standard OpenID Connect? Yes** (research,
+2026-10-04). AuthKit is an OAuth 2.0 and OpenID Connect authorization
+server at the AuthKit domain for an *OAuth application* (WorkOS Connect,
+first-party for our own app):
 
-| Setting | What |
-|---|---|
-| `FRAGMENT_OIDC_ISSUER` | the issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback). Its metadata is at `<issuer>/.well-known/openid-configuration` |
-| `FRAGMENT_OIDC_CLIENT_ID` | the client |
-| `FRAGMENT_OIDC_CLIENT_SECRET` | a Worker secret, read only by keys.rs (docs/secrets.md); absent, the client is public and PKCE is its only proof |
-| `FRAGMENT_OIDC_SCOPES` | default `openid email profile` |
-| `FRAGMENT_OIDC_CLAIMS` | JSON: `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. ADFS: `{"username": ["upn", "unique_name"]}` |
-| `FRAGMENT_OIDC_AUTH` | `client_secret_basic`, `client_secret_post` or `none`; default, with a secret, the first of the two the provider lists |
+- **Discovery** at `https://<authkit domain>/.well-known/openid-configuration`:
+  the issuer is the domain itself, with `/oauth2/authorize`,
+  `/oauth2/token`, `/oauth2/jwks` and `/oauth2/userinfo`, and RS256.
+  It lists neither client methods nor PKCE methods; its OAuth metadata
+  (`/.well-known/oauth-authorization-server`) lists S256, and `none`,
+  `client_secret_post` and `client_secret_basic`
+  ([metadata](https://workos.com/docs/reference/workos-connect/metadata/openid-configuration)).
+- **The code flow**: `/oauth2/authorize` requires `client_id`, `nonce`,
+  `redirect_uri`, `response_type=code` and `scope`, with `state` and
+  S256 optional ([authorize](https://workos.com/docs/reference/workos-connect/authorize)).
+  `/oauth2/token` takes the client's id and secret in the body
+  ([token](https://workos.com/docs/reference/workos-connect/token)).
+- **The id_token**: RS256 by the JWKS, with `iss`, `aud` (the request's
+  client id), `sub`, `name`, `given_name`, `family_name`, `email`,
+  `email_verified`, `nonce`, `exp` and `iat` (token, above). Applications
+  "must verify the tokens … using the JWKS for your environment", and
+  WorkOS's own example is `openid-client` pointed at the AuthKit domain
+  ([OAuth applications](https://workos.com/docs/authkit/connect/oauth)).
+- **`sub` is the WorkOS user id**, `user_…`: userinfo's `sub` is
+  `user.id` ([userinfo](https://workos.com/docs/reference/workos-connect/userinfo)),
+  the same users AuthKit manages ([Connect](https://workos.com/docs/authkit/connect)).
+  It is the id Pipes takes.
 
-How it works:
+Three gaps the docs leave, which only real WorkOS settles:
+
+- **PKCE.** The authorize reference says "PKCE is only supported by
+  applications created through Dynamic Client Registration"; the OAuth
+  guide says a public application must use it. The cell always sends
+  S256 and its verifier. A confidential application should ignore them,
+  as RFC 6749 3.1 says a server ignores parameters it does not know.
+- **Logout.** There is no `end_session_endpoint`. Signing out ends the
+  platform's sessions only. AuthKit's own session stays, so the next
+  sign-in in that browser is silent. Master ends it through
+  `/user_management/sessions/logout?session_id=`, with the `sid` of a
+  User Management access token
+  ([sessions](https://workos.com/docs/authkit/sessions)); a Connect access
+  token's `sid` is the consent's id
+  ([claims](https://workos.com/docs/authkit/connect/token-claims)).
+- **Invitations.** `invitation_token`, `login_hint` and `screen_hint` are
+  documented for `/user_management/authorize` alone
+  ([hints](https://workos.com/blog/customizing-authkit-flows)). With
+  sign-up off, an invitee accepts on AuthKit's own page: the dashboard's
+  "User invitation URL" goes back to its default. Then they sign in.
+
+**Built (branch `selfhost-signin`): one sign-in, OpenID Connect. WorkOS
+AuthKit is one issuer, configured.** There is one flow and no provider's
+code path:
 
 - **The request.** The router reads the provider's metadata and sends the
-  browser to its `authorization_endpoint` with a state (bound to the
-  browser by a cookie, as for WorkOS), a nonce, and PKCE's S256
-  challenge. The registry keeps the verifier and the nonce with the state;
-  the verifier never leaves it.
+  browser to its `authorization_endpoint` with a state bound to the
+  browser by a cookie, a nonce, and PKCE's S256 challenge. The registry
+  keeps the verifier and the nonce with the state; the verifier never
+  leaves it.
 - **The callback.** The registry spends the state first, before anything
   is awaited, so a callback sent again or raced finishes once. It
   exchanges the code form-encoded (RFC 6749 4.1.3, with the verifier),
@@ -267,26 +304,90 @@ How it works:
   `exp`, `iat` and `nbf` within two minutes of skew, an `iat` at most 15
   minutes old, the nonce, and `sub`. A token that fails is 401, logged as
   `signin.refused` with why.
-- **Who it is.** `(issuer URL, sub)`. The email, name and username are
-  attributes, refreshed at each sign-in and never matched. No email is
-  assumed: a sign-in is shown by its email, else its first username claim
-  (`preferred_username`, `upn`), else its `sub`.
+- **Who it is.** `(keyed_as, sub)`: the issuer as the deployment keys its
+  people, its URL unless it says otherwise. The email, name and username
+  are attributes, refreshed at each sign-in and never matched. No email
+  is assumed: a sign-in is shown by its email, else its first username
+  claim (`preferred_username`, `upn`), else its `sub`.
+- **The session and logout.** A platform session of the platform's own
+  (30 days) keeps the id_token sealed. Logout is RP-initiated
+  (RP-Initiated Logout 1.0) when the provider advertises an
+  `end_session_endpoint`: the id_token is the `id_token_hint` (Okta and
+  ADFS require one), with `client_id` and `post_logout_redirect_uri`.
+  Otherwise (AuthKit, Dex) it ends the sessions here only.
 - **Caches.** The metadata and the JWKS are kept an hour per isolate. A
   key the JWKS lacks fetches it again, at most once in 15 seconds: a
   rotation is picked up within that, and a provider naming keys it never
   published is not asked again and again. Only the provider's own token
   endpoint hands the cell an id_token, so the bound is against a
   misbehaving provider, not a stranger.
-- **Logout.** RP-initiated (RP-Initiated Logout 1.0) when the provider
-  advertises an `end_session_endpoint`: the session's id_token, kept
-  sealed for the registry, is the `id_token_hint` (Okta and ADFS require
-  one), with `client_id` and `post_logout_redirect_uri`. Otherwise (Dex),
-  logout ends the sessions here only.
+
+| Setting | What |
+|---|---|
+| `FRAGMENT_OIDC_ISSUER` | the issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback). Its metadata is at `<issuer>/.well-known/openid-configuration` |
+| `FRAGMENT_OIDC_CLIENT_ID` | the client |
+| `FRAGMENT_OIDC_CLIENT_SECRET` | a Worker secret, read only by keys.rs (docs/secrets.md); absent, the client is public and PKCE is its only proof |
+| `FRAGMENT_OIDC_KEYED_AS` | the issuer people are keyed under, default `FRAGMENT_OIDC_ISSUER`; required beside `WORKOS_CLIENT_ID`. Printable ASCII, at most 255 bytes, never `e2e.test`. A `workos:` one must be `WORKOS_CLIENT_ID`'s |
+| `FRAGMENT_OIDC_SCOPES` | default `openid email profile` |
+| `FRAGMENT_OIDC_CLAIMS` | JSON: `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. ADFS: `{"username": ["upn", "unique_name"]}` |
+| `FRAGMENT_OIDC_AUTH` | `client_secret_basic`, `client_secret_post` or `none`; default, with a secret, the first of the two the provider lists (Basic when it lists none) |
+
+**WorkOS, as configuration.** A WorkOS deployment's sign-in is these
+settings, spelled out in one place (`devstack::OidcVars::authkit`, which
+`cargo xtask dev`, `cargo xtask deploy` and the e2e use):
+
+- the issuer `https://<authkit domain>`;
+- the client: an OAuth application, first-party, with its own id and
+  secret (not the environment's), its redirect URI
+  `<platform>/auth/callback`;
+- `client_secret_post`, as WorkOS's token reference has it;
+- `FRAGMENT_OIDC_KEYED_AS=workos:<WORKOS_CLIENT_ID>`.
+
+The deploy config's `workos` names `authkit_domain`,
+`oauth_client_id_file` and `oauth_client_secret_file` beside the
+environment's files (`deploy/example.jsonc`).
+
+The WorkOS code left is Pipes': `keys.rs` (`pipes_*`), `connections.rs`
+and the computer's swap. It reads a person's WorkOS user id as their
+subject under `workos:<client id>` (`WorkOsConfig::issuer`). Gone are
+`/user_management/authorize` and `/authenticate`, the unverified `sid`,
+WorkOS's logout, and the invitation token's pass-through.
+
+**The move: the key is kept, not mapped.** Every person WorkOS signed in
+is `(workos:<client id>, user_…)` in the registry's `subjects`. AuthKit's
+id_token names the same `user_…` as `sub`, and
+`FRAGMENT_OIDC_KEYED_AS=workos:<client id>` keys it there. So:
+
+- every existing identity matches on its next sign-in, and no key in
+  `subjects` is rewritten (a sign-in refreshes the attributes alone, as
+  it always has);
+- Pipes reads the same key for old and new people alike;
+- going back is the old code and settings, with no data to undo;
+- sessions are by identity, so live ones last through the deploy;
+- a sign-in pending across the deploy (at most ten minutes) began without
+  a verifier, and is told to start again;
+- the `sessions` table of a deployment from before keeps a `workos_sid`
+  column that nothing reads.
+
+Mapping instead would rewrite every row's issuer to the AuthKit URL:
+a migration of live data, with Pipes' key to move alongside, and an
+orphaned account wherever one step missed. The way left to orphan anyone
+is a deployment keying them under another name, so the isolate refuses
+to start beside `WORKOS_CLIENT_ID` without `FRAGMENT_OIDC_KEYED_AS`, or
+with a `workos:` one of another environment; and the one place the WorkOS
+settings are spelled out sets it.
 
 Where it lives: the rules in `crates/core/src/oidc.rs`; the metadata,
-keys and verification in `cell/src/oidc.rs`; the state, verifier, nonce
-and exchange in `cell/src/registry/signin.rs`; the secret and the token
-request in `cell/src/keys.rs`; the fake in `crates/fakes/src/oidc.rs`.
+keys and verification in `cell/src/oidc.rs`; the state, verifier, nonce,
+exchange and session in `cell/src/registry/signin.rs`; the redirects in
+`cell/src/auth.rs`; the secret and the token request in
+`cell/src/keys.rs`. The fakes: `crates/fakes/src/oidc.rs` plays a strict
+provider (`Profile::Strict`, as Keycloak or Dex) or AuthKit
+(`Profile::AuthKit`: its metadata field for field, `/oauth2/*`, the nonce
+required, PKCE checked when sent, the client in the body, `user_…`
+subjects, WorkOS's claims, a JWT access token, userinfo, and no logout);
+`crates/fakes/src/workos.rs` is that AuthKit at a port of its own, as
+AuthKit's domain is its own, beside Pipes, whose users are AuthKit's.
 
 **Private CAs.** A company's browsers already trust its CA. The cell's
 own fetches (metadata, JWKS, token) go through its runtime's TLS:
@@ -299,14 +400,14 @@ own fetches (metadata, JWKS, token) go through its runtime's TLS:
   bundle, added to that client. **Not built**: it is celld's change.
 - Cloudflare: Workers trust public CAs. A provider on a private CA is
   unreachable from Cloudflare anyway, unless it is fronted publicly.
-- On one box, the issuer may be plain http on loopback, as the fake and
+- On one box, the issuer may be plain http on loopback, as the fakes and
   Dex are here.
 
 **Offline providers.** Dex, Keycloak and Authentik serve discovery and
 a JWKS, and need no internet. ADFS 2016 and later does too, with `upn`
-and `unique_name` instead of an email. Entra needs the internet. SAML
-and LDAP go through a bridge the company already runs (Keycloak,
-Authentik, Dex), not into the cell.
+and `unique_name` instead of an email. Entra and WorkOS need the
+internet. SAML and LDAP go through a bridge the company already runs
+(Keycloak, Authentik, Dex), not into the cell.
 
 **Not built:**
 
@@ -318,40 +419,53 @@ Authentik, Dex), not into the cell.
   so **a person disabled at the provider keeps their sessions until they
   end or sign out.** A company will ask for back-channel logout, or a
   shorter session, next.
+- two providers at once. A deployment has one; `/auth/link` adds a
+  second sign-in from the same provider.
 
-**Connections** (WorkOS Pipes) are online by nature. With
-`FRAGMENT_CONNECTIONS` empty, a deployment offers none. Under OIDC, a
-person has no WorkOS user, so they have no connections either.
+**Connections** (WorkOS Pipes) are online by nature. A deployment whose
+`FRAGMENT_PROVIDERS` names no connection offers none. A person signed
+in by another provider has no WorkOS user, so they have no connections
+either.
 
-**Evidence, 2026-10-03:**
+**Evidence** (`selfhost-signin`, 2026-10-04):
 
-- Host tests: 12 in `fragment_core::oidc`: valid tokens; bad signatures;
-  `none`, HS256 keyed by the secret and by the RSA key's bytes; wrong
-  `iss`, `aud`, `azp`, `exp`, `iat`, `nbf`, nonce and `sub`; a token
-  replayed into the next sign-in; a rotation and the refetch bound;
-  discovery; the token request; PKCE (RFC 7636's vector); the claim map.
-  The fake's own test runs the cell's half of the flow on those rules.
-- The e2e on celld, signing in through the OIDC fake
-  (`FRAGMENT_E2E_SIGNIN=oidc`): auth, identities and signin, 173 passed,
-  0 failed. Every WorkOS check of the signin section has an OIDC twin,
-  and OIDC adds:
-  - client_secret_basic used;
-  - a code injected under another sign-in's state is refused (PKCE);
-  - a spent code is refused at the provider;
-  - a person with no email is shown by their username;
-  - ES256 signs in;
-  - eight spoiled id_tokens are each refused with 401;
-  - a key rotation is picked up within the cooldown, with one JWKS fetch.
-- The restart section finishes a sign-in begun before the restart, on
-  either provider.
-- The whole suite on celld through the OIDC fake: 1273 passed, 1 failed,
-  12 skipped. The skips are the card checks, the container sections, and
-  the shell's Pipes checks, whose people are WorkOS's. The failure was
-  share's "the owner's list wakes no fragment", a race between the blank
-  template's install and a test hook, while another build loaded the
-  machine. Share alone then passed, 44 of 44.
-- The WorkOS lane, unchanged, on celld: auth, identities, signin,
-  levers, share, shell and restart, 314 passed, 0 failed.
+- Host tests: 13 in `fragment_core::oidc`, among them whom a sign-in keys
+  (AuthKit's people keep their key; beside WorkOS the URL is never a
+  default; another environment's name is refused). The fakes' own tests
+  run the cell's half of the flow against each provider; AuthKit's checks
+  its metadata, the client in the body, `user_…` subjects, userinfo, and
+  what it refuses (no nonce, PKCE other than S256, a person without an
+  email). `xtask deploy`'s renders the WorkOS settings. `cargo xtask
+  check`: 428 passed.
+- The e2e on celld, sections auth, identities, signin, levers, restart
+  and shell:
+  - through the WorkOS fake's AuthKit (the default): 279 passed, 0
+    failed, 0 skipped;
+  - through the strict fake (`FRAGMENT_E2E_SIGNIN=oidc`): 271 passed, 0
+    failed, 2 skipped (the shell's Pipes checks, and the restart's
+    WorkOS person: both are WorkOS's people).
+- Every sign-in check runs against both providers, the same checks on
+  the same flow. What differs is what the providers differ in: the
+  client's method (`client_secret_post` configured for AuthKit, Basic
+  chosen from the strict one's list), logout (AuthKit has none: the
+  session ends here), and the strict provider's people with no email and
+  its ES256.
+- The move: a person kept as WorkOS's sign-in kept them, `(workos:<client
+  id>, user_…)`, signs in through AuthKit as the same identity with their
+  one sign-in, and Pipes finds their connection; again after a restart.
+  A new AuthKit person is keyed `workos:<client id>`, their handle the
+  WorkOS user id.
+- The eight spoiled id_tokens, the PKCE code injection, the spent code
+  and the key rotation pass against AuthKit's fake as against the strict
+  one.
+- `cargo xtask dev --runtime celld` signed a person in through the WorkOS
+  fake's AuthKit (curl, `FRAGMENT_DEV_PORT=9420`): S256, a state and a
+  nonce to `/oauth2/authorize`, the callback's session, and the person
+  `(workos:client_fragment_dev, user_…)`.
+
+**Evidence before, 2026-10-03** (`selfhost-oidc`, OpenID Connect beside
+WorkOS):
+
 - **Dex v2.45.1** (the static binary from its release image, run
   unprivileged in /tmp, memory storage, one static user) signed in on
   the dev stack on celld (`FRAGMENT_DEV_PORT=9310`). curl drove the
@@ -371,13 +485,55 @@ person has no WorkOS user, so they have no connections either.
   - With Dex rotating its keys every 20 seconds (it signs with a new key
     the moment it publishes it), sign-in still worked after a rotation:
     the refetch picked up the new key.
+- The whole suite on celld through the OIDC fake: 1273 passed, 1 failed
+  (a race in share, which passed alone), 12 skipped.
 
-**Master:** sign-in on OIDC, verifying the `id_token`, is better on
-Cloudflare too. Nothing here is self-hosting-specific: it is a second
-provider beside WorkOS, chosen by configuration. If WorkOS AuthKit's
-OIDC endpoint serves user sign-in (to verify), WorkOS's own path could
-become one more issuer, and its unverified `sid` would go. Pipes would
-then still need the WorkOS user id, which AuthKit's `sub` is.
+**Landing it in master.** Master signs people in on the finite.place
+previews, which hold real data. The move, in order:
+
+1. **Paul, in the WorkOS dashboard** (staging first, then production):
+   - create an OAuth application, first-party, confidential, its
+     redirect URIs `https://<platform>/auth/callback` (and
+     `http://127.0.0.1:8790/auth/callback` on staging), and save its client
+     id and secret to files;
+   - note the AuthKit domain;
+   - point the "User invitation URL" back at AuthKit's default, so an
+     invitee accepts there.
+2. **One PR to master, the code** (this branch's sign-in commits, without
+   the rest of the spike): the core and the cell as here, the fakes, the
+   e2e, `xtask deploy`'s three new fields, the docs. CI proves the flow
+   on the fakes. It does not deploy.
+3. **The hosted lane on a branch preview** (`e2e.finite.place`) with the
+   staging application. It signs its people in through the levers, so it
+   proves the deploy, the settings, and that nothing else moved. A person
+   then signs in by hand through real AuthKit (Paul, or a test user with
+   a password), which proves what no fake can:
+   - discovery, the JWKS and RS256 verify;
+   - `aud` is the application's client id;
+   - S256 and the verifier are accepted, or ignored;
+   - `client_secret_post` is accepted;
+   - **`sub` equals the `user_…` Pipes knows**: a person who signed in
+     before signs in as the same identity, and their connections answer;
+   - an invitee can accept and sign in;
+   - logout, and what the next sign-in does.
+4. **Production**: Paul's deploy with production's application, then
+   one sign-in by an existing person, checked to be the same identity.
+
+**The risk to live sign-in:**
+
+- If AuthKit refuses the authorize request (PKCE, a parameter), no one
+  can sign in until a revert. Existing sessions keep working: they are
+  the platform's own, 30 days.
+- If `sub` were not the User Management id, every existing person would
+  get a fresh identity on sign-in: the orphaning the move must not cause.
+  The docs say it is the same id, and step 3 checks it before production.
+  Recovery would be `/auth/link` from an old session, or a one-off
+  re-key, since no row was rewritten.
+- Signing out no longer ends AuthKit's session, so a shared browser
+  signs its next person in silently. If that matters, the fix is
+  `prompt=login` after a logout (if AuthKit honors it), or a shorter
+  AuthKit session in the dashboard.
+- A revert is the old code and the old settings. The data is untouched.
 
 ### 5. Files: the code-store contract
 
@@ -749,8 +905,9 @@ that also makes Cloudflare simpler or safer:
 2. **Computers reach a vendor directly.** Git behind an intercept means
    a computer needs no internet (seam 2).
 3. **Sign-in trusts an unverified access token.** OIDC with a verified
-   `id_token` fixes that, and makes WorkOS one provider (seam 4; built
-   beside WorkOS on `selfhost-oidc`).
+   `id_token` fixes that, and makes WorkOS one provider: AuthKit is an
+   OpenID Connect provider for an OAuth application (seam 4; built on
+   `selfhost-signin`, with a plan for landing it).
 4. **A computer's placement is implicit in the `containers` binding.**
    As a field, it is decision 13's promise kept (seam 2).
 5. **Google Fonts** in the shell and the chat template (seam 11).
@@ -967,9 +1124,12 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   The renderer serves Browser Rendering's routes over the pinned
   chrome-headless-shell 154; the cell's card path is Cloudflare's
   (seam 7, Evidence).
-- **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
-  beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
-  it signed in through a real Dex (seam 4, Evidence).
+- **Seam 4, sign-in on OpenID Connect: one core** (branch
+  `selfhost-signin`). WorkOS AuthKit is one issuer, configured; Pipes is
+  the only WorkOS code left; its people keep their key. The e2e runs it
+  against the WorkOS fake's AuthKit and the strict fake, and it signed in
+  through a real Dex (seam 4, Evidence). Real AuthKit is the hosted
+  lane's, and Paul's (seam 4, Landing it in master).
 
 ### Running it
 
@@ -1009,14 +1169,25 @@ Computers on a sandcastle node add three settings:
 - `FRAGMENT_NODE_IMAGES`: `{"stub": "<reference>"}`, the images the node
   holds, by the names computers are pinned to.
 
-Sign-in through OpenID Connect (seam 4): `FRAGMENT_SIGNIN=oidc` uses
-the fake (any email, or a username with no email). A real provider takes
-`FRAGMENT_OIDC_ISSUER`, `FRAGMENT_OIDC_CLIENT_ID` and
-`FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally `FRAGMENT_OIDC_SCOPES`,
-`FRAGMENT_OIDC_CLAIMS` and `FRAGMENT_OIDC_AUTH`. Its redirect URIs must
-include `http://127.0.0.1:<port>/auth/callback`. `FRAGMENT_DEV_PORT`
-moves the stack and its fakes, so it can run beside another on :8790.
-Dex on one box, as tried here:
+Sign-in (seam 4) is one OpenID Connect provider:
+
+- by default, the WorkOS fake's AuthKit, on the port after its API's (any
+  email);
+- `FRAGMENT_SIGNIN=oidc`: the strict fake (any email, or a username with
+  no email);
+- a real WorkOS environment: `WORKOS_CLIENT_ID_FILE` and
+  `WORKOS_API_KEY_FILE` (Pipes), with `WORKOS_AUTHKIT_DOMAIN`,
+  `WORKOS_OAUTH_CLIENT_ID_FILE` and `WORKOS_OAUTH_CLIENT_SECRET_FILE`
+  (its OAuth application);
+- any other provider: `FRAGMENT_OIDC_ISSUER`, `FRAGMENT_OIDC_CLIENT_ID`
+  and `FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally
+  `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS`, `FRAGMENT_OIDC_AUTH` and
+  `FRAGMENT_OIDC_KEYED_AS`.
+
+A real provider's redirect URIs must include
+`http://127.0.0.1:<port>/auth/callback`. `FRAGMENT_DEV_PORT` moves the
+stack and its fakes, so it can run beside another on :8790. Dex on one
+box, as tried here:
 
 ```sh
 # config.yaml: issuer http://127.0.0.1:5556/dex, storage memory, web.http 127.0.0.1:5556,
@@ -1028,8 +1199,8 @@ FRAGMENT_DEV_PORT=9310 FRAGMENT_OIDC_ISSUER=http://127.0.0.1:5556/dex \
   CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
 ```
 
-The e2e signs its people in through the OIDC fake with
-`FRAGMENT_E2E_SIGNIN=oidc`.
+The e2e signs its people in through the WorkOS fake's AuthKit, or
+through the strict fake with `FRAGMENT_E2E_SIGNIN=oidc`.
 
 To run offline, start the stack inside `unshare -rn` (bring `lo` up
 first). Give it the model through a unix socket: `socat` on the host from
@@ -1059,11 +1230,12 @@ default dev ports.
   choices are back-channel logout (the provider calls the platform), a
   session no longer than the id_token's `auth_time` allows, or a fresh
   sign-in every day.
-- **WorkOS through OIDC on master** (seam 4). If AuthKit's OIDC endpoint
-  serves user sign-in, WorkOS becomes one more issuer, and the
-  unverified `sid` path goes. It would change the issuer string of every
-  person fragment.club has (`workos:<client>` becomes a URL), so it needs
-  a migration of `subjects` or a mapping.
+- **WorkOS through OIDC on master** (seam 4). AuthKit serves it, for an
+  OAuth application; the people keep `workos:<client>` as their key, so
+  nothing is migrated. Landing it needs an OAuth application in the
+  dashboard, a check by hand against real AuthKit, and a choice about
+  logout, which then no longer ends AuthKit's session (seam 4, Landing
+  it in master).
 
 - **Sandcastle as a node everywhere** (seam 2), rather than celld's
   `krun-engine` backend. This is recommended; it supersedes

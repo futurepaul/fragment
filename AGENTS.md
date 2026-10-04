@@ -159,9 +159,12 @@ prebuilt bundle is in the debt ledger).
   spend their owner's ledger (dev people are seats, with the month's
   included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
-  http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
-  a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Its secrets are seeded into
+  http://127.0.0.1:8790/ through the WorkOS fake's AuthKit on :8795 (any
+  email; Pipes on :8794), or a real WorkOS environment when
+  `WORKOS_CLIENT_ID_FILE` and `WORKOS_API_KEY_FILE` name its files and
+  `WORKOS_AUTHKIT_DOMAIN`, `WORKOS_OAUTH_CLIENT_ID_FILE` and
+  `WORKOS_OAUTH_CLIENT_SECRET_FILE` its OAuth application (sign-in is
+  OpenID Connect: docs/self-host.md, seam 4). Its secrets are seeded into
   wrangler's local Secrets Store in `cell/.wrangler/state` and bound by
   name as a deploy binds them (`--clean` clears them with the state;
   docs/secrets.md). Each boot's log is

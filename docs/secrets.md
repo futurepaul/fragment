@@ -28,7 +28,7 @@ the old one still open, and come back resealed, which the cell stores.
 | A person's GitHub token, other personal keys | the person's own cell |
 | A person's own key for an `own` provider of the catalog (docs/computers.md) | their computer's cell (one computer per person for now, decision 13), sealed for it; set and removed by the person (`PUT`/`DELETE /api/connections/{provider}/key`), opened only to swap it in |
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
-| The deployment's host secret, the code.storage org key, WorkOS's client id and API key, an OpenID Connect client's secret (docs/self-host.md, seam 4), the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
+| The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the sign-in client's secret (docs/self-host.md, seam 4: WorkOS AuthKit's OAuth application's, or another provider's), the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
@@ -53,6 +53,7 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 | `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | both |
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
+| `workos.oauth_client_secret` (sign-in's client: docs/self-host.md, seam 4) | `OIDC_CLIENT_SECRET` | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
 - **Reading.** `cell/src/keys.rs` is the one place the cell reads them,
