@@ -326,6 +326,20 @@ pub(crate) enum TestHook {
     /// Whether an identity is an e2e person (`{e2e}`): a branch's ledger
     /// levers reach no one else.
     E2eIs(String),
+    /// A person as a sign-in keeps them, made without one (`KeptPerson`):
+    /// the e2e's stand-in for the people a sign-in made before it changed
+    /// (docs/self-host.md, seam 4: WorkOS's, `(workos:<client id>, user id)`).
+    Person(KeptPerson),
+}
+
+/// `TestHook::Person`: their `(issuer, subject)`, and their email. Answers
+/// `{identity, created}`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeptPerson {
+    pub issuer: String,
+    pub subject: String,
+    pub email: String,
 }
 
 /// `TestHook::E2eSignIn`: who, and the paid calls they are lent (the
@@ -405,29 +419,21 @@ impl Call for TestHook {
 // ------------------------------------------------------------- sign-in
 
 /// `POST /login/begin`: a sign-in starts (`link_to`: a signed-in session
-/// adding a second sign-in to its person); an OpenID Connect one (`oidc`)
-/// with a PKCE verifier and a nonce, which the registry keeps with it.
+/// adding a second sign-in to its person), with a PKCE verifier and a
+/// nonce, which the registry keeps with it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Begin {
     pub return_to: String,
     pub link_to: Option<String>,
-    #[serde(default)]
-    pub oidc: bool,
 }
 
+/// What the authorization request carries: the state, the verifier's S256
+/// challenge (the verifier stays in the registry), and the nonce the
+/// id_token must carry back.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Began {
     pub state: String,
-    /// An OpenID Connect sign-in's: what the authorization request carries.
-    #[serde(default)]
-    pub oidc: Option<OidcBegan>,
-}
-
-/// The verifier's S256 challenge (the verifier stays in the registry), and
-/// the nonce the id_token must carry back.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct OidcBegan {
     pub challenge: String,
     pub nonce: String,
 }
@@ -437,15 +443,16 @@ impl Call for Begin {
     type Answer = Began;
 }
 
-/// `POST /login/exchange`: WorkOS's code, exchanged through KEYS, and the
-/// sign-in finished.
+/// `POST /login/exchange`: the provider's code, exchanged with the
+/// sign-in's verifier and the client's secret (KEYS), its id_token
+/// verified, and the sign-in finished. `redirect_uri` is the one the
+/// authorization request named.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Exchange {
     pub state: String,
     pub code: String,
-    pub client_id: String,
-    pub issuer: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -458,23 +465,6 @@ pub(crate) struct Exchanged {
 
 impl Call for Exchange {
     const PATH: &'static str = "/login/exchange";
-    type Answer = Exchanged;
-}
-
-/// `POST /login/oidc`: an OpenID Connect provider's code, exchanged with
-/// the sign-in's verifier and the client's secret (KEYS), its id_token
-/// verified, and the sign-in finished. `redirect_uri` is the one the
-/// authorization request named.
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OidcExchange {
-    pub state: String,
-    pub code: String,
-    pub redirect_uri: String,
-}
-
-impl Call for OidcExchange {
-    const PATH: &'static str = "/login/oidc";
     type Answer = Exchanged;
 }
 
@@ -536,11 +526,9 @@ pub(crate) struct Logout {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LoggedOut {
-    /// WorkOS's session, to end there too.
-    pub workos_sid: Option<String>,
-    /// An OpenID Connect sign-in's id_token: the hint its provider's logout
-    /// takes (RP-Initiated Logout 1.0).
-    #[serde(default)]
+    /// The session's id_token: the hint its provider's logout takes
+    /// (RP-Initiated Logout 1.0); none for a session made before sign-in
+    /// was OpenID Connect, or one whose seal no longer opens.
     pub id_token: Option<String>,
 }
 

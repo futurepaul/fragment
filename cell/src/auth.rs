@@ -1,21 +1,18 @@
 //! Sign-in at the router (phase 4 slice B; the registry's half is
-//! `registry/signin.rs`). WorkOS AuthKit, or any OpenID Connect provider
-//! (docs/self-host.md, seam 4; `config::SignIn` says which), authenticates
-//! people on the platform origin; the platform holds no key for them, only
-//! sessions.
+//! `registry/signin.rs`). One OpenID Connect provider (docs/self-host.md,
+//! seam 4; `config::OidcConfig`), WorkOS AuthKit's or any other,
+//! authenticates people on the platform origin; the platform holds no key
+//! for them, only sessions.
 //!
 //! Platform origin (`/` and `/settings` are the shell's page: shell.rs):
 //!
-//!   GET  /auth/login?return=&login_hint=&invitation_token=   → the provider (a state cookie binds
-//!                                 the round trip; an OpenID Connect one also carries PKCE's challenge
-//!                                 and a nonce; an invitation's token lets its invitee sign up at
-//!                                 WorkOS, since sign-up is off: WorkOS's "User invitation URL" points here)
+//!   GET  /auth/login?return=&login_hint=   → the provider (a state cookie binds the round trip;
+//!                                 it carries PKCE's challenge and a nonce)
 //!   GET  /auth/link?return=       the same, adding a second sign-in to the signed-in person
-//!   GET  /auth/callback           the provider → the code exchanged here (and an id_token verified)
-//!                                 → a session cookie
+//!   GET  /auth/callback           the provider → the code exchanged here and its id_token
+//!                                 verified → a session cookie
 //!   GET  /auth/logout             a button; POST ends the session (and its site sessions), then the
-//!                                 provider's (WorkOS's; an OpenID Connect provider's when it
-//!                                 advertises an end_session_endpoint)
+//!                                 provider's, when it advertises an end_session_endpoint
 //!   GET  /auth/fragment?name=&return=      a single-use redemption for one fragment's origin; for
 //!                                 a fragment that is not theirs, nor shared with them, a
 //!                                 question first ("Continue to X as you?"), asked once
@@ -69,7 +66,7 @@ use fragment_proto::ErrorCode;
 use worker::*;
 
 use crate::ask_registry;
-use crate::config::{Config, SignIn};
+use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::{self, Consent};
 use crate::routed::{Credential, Signed};
@@ -81,7 +78,6 @@ pub const SITE_COOKIE: &str = "fragment_site";
 pub const FRAME_COOKIE: &str = "fragment_frame";
 const LOGIN_COOKIE: &str = "fragment_login";
 const LOGIN_HINT_MAX: usize = 320;
-const INVITATION_TOKEN_MAX: usize = 256;
 /// How long an approval link's proof is good.
 const LINK_PROOF_WINDOW_S: i64 = 600;
 const LINK_PROOF_MAX: usize = 4096;
@@ -274,60 +270,35 @@ pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
     redirect(&format!("{platform}/auth/login?return={}", enc(back)), &[])
 }
 
+/// A sign-in begun: the browser sent to the provider's authorization
+/// endpoint with the state (bound to it by a cookie), the nonce, and PKCE's
+/// challenge, which the registry made and keeps with the verifier.
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
     let signin = cfg.signin()?;
     let platform = cfg.platform(url);
     let return_to = site::return_path(query(url, "return").as_deref());
     let hint = query(url, "login_hint").filter(|h| !h.is_empty() && h.len() <= LOGIN_HINT_MAX);
-    let workos = match signin {
-        SignIn::WorkOs(w) => w,
-        SignIn::Oidc(o) => {
-            // the provider's metadata first: a provider that cannot answer
-            // leaves no pending sign-in behind
-            let provider = crate::oidc::provider(o).await?;
-            let began = ask_registry(env, &calls::Begin { return_to, link_to: link, oidc: true }).await?;
-            let pkce = began.oidc.ok_or_else(|| CellError::host("an OpenID Connect sign-in began without its challenge"))?;
-            let to = fragment_core::oidc::authorize_url(&fragment_core::oidc::Authorize {
-                provider: &provider,
-                client_id: &o.client_id,
-                redirect_uri: &format!("{platform}/auth/callback"),
-                scopes: &o.scopes,
-                state: &began.state,
-                nonce: &pkce.nonce,
-                challenge: &pkce.challenge,
-                login_hint: hint.as_deref(),
-            });
-            return redirect(&to, &[set_cookie(LOGIN_COOKIE, &began.state, "/", 600, secure(url))]);
-        }
-    };
-    let began = ask_registry(env, &calls::Begin { return_to, link_to: link, oidc: false }).await?;
-    let state = began.state;
-    let mut to = format!(
-        "{}/user_management/authorize?client_id={}&redirect_uri={}&response_type=code&provider=authkit&state={state}",
-        workos.api,
-        enc(&workos.client_id),
-        enc(&format!("{platform}/auth/callback"))
-    );
-    if let Some(hint) = hint {
-        to += &format!("&login_hint={}", enc(&hint));
-    }
-    let token = query(url, "invitation_token")
-        .filter(|t| !t.is_empty() && t.len() <= INVITATION_TOKEN_MAX && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
-    if let Some(token) = token {
-        to += &format!("&invitation_token={token}");
-    }
-    redirect(&to, &[set_cookie(LOGIN_COOKIE, &state, "/", 600, secure(url))])
+    // the provider's metadata first: a provider that cannot answer leaves
+    // no pending sign-in behind
+    let provider = crate::oidc::provider(signin).await?;
+    let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
+    let to = fragment_core::oidc::authorize_url(&fragment_core::oidc::Authorize {
+        provider: &provider,
+        client_id: &signin.client_id,
+        redirect_uri: &format!("{platform}/auth/callback"),
+        scopes: &signin.scopes,
+        state: &began.state,
+        nonce: &began.nonce,
+        challenge: &began.challenge,
+        login_hint: hint.as_deref(),
+    });
+    redirect(&to, &[set_cookie(LOGIN_COOKIE, &began.state, "/", 600, secure(url))])
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
-    let signin = cfg.signin()?;
     if let Some(error) = query(url, "error") {
         let why = query(url, "error_description").unwrap_or_default();
-        let who = match signin {
-            SignIn::WorkOs(_) => "WorkOS",
-            SignIn::Oidc(_) => "The sign-in provider",
-        };
-        return page(400, "Sign-in did not finish", &format!("<p>{who} said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
+        return page(400, "Sign-in did not finish", &format!("<p>The sign-in provider said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
     }
     let state = query(url, "state").unwrap_or_default();
     let bound = cookie_of(req, LOGIN_COOKIE, secure(url), "/")?;
@@ -335,12 +306,9 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
         return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><p><a href=\"/auth/login\">Start again</a></p>");
     }
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
-    // the registry exchanges the code: WorkOS's API key, and an OpenID
-    // Connect client's secret and the sign-in's verifier, are the registry's
-    let done = match signin {
-        SignIn::WorkOs(workos) => ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id.clone(), issuer: workos.issuer() }).await?,
-        SignIn::Oidc(_) => ask_registry(env, &calls::OidcExchange { state, code, redirect_uri: format!("{}/auth/callback", cfg.platform(url)) }).await?,
-    };
+    // the registry exchanges the code: the client's secret and the
+    // sign-in's verifier are the registry's
+    let done = ask_registry(env, &calls::Exchange { state, code, redirect_uri: format!("{}/auth/callback", cfg.platform(url)) }).await?;
     redirect(
         &back_to(&format!("{}/", cfg.platform(url)), Some(&done.return_to))?,
         &[
@@ -393,13 +361,10 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                     Err(e) => return Err(e),
                 };
                 match (out, cfg.signin()) {
-                    (Some(calls::LoggedOut { workos_sid: Some(sid), .. }), Ok(SignIn::WorkOs(w))) => redirect(
-                        &format!("{}/user_management/sessions/logout?session_id={}&return_to={}", w.api, enc(&sid), enc(&format!("{platform}/"))),
-                        &[clear],
-                    ),
                     // RP-initiated logout where the provider offers one; signed
-                    // out here all the same when it does not, or cannot be asked
-                    (Some(out), Ok(SignIn::Oidc(o))) => match crate::oidc::provider(o).await.map(|p| p.end_session_endpoint.clone()) {
+                    // out here all the same when it does not (AuthKit, Dex), or
+                    // cannot be asked
+                    (Some(out), Ok(o)) => match crate::oidc::provider(o).await.map(|p| p.end_session_endpoint.clone()) {
                         Ok(Some(end)) => {
                             redirect(&fragment_core::oidc::end_session_url(&end, out.id_token.as_deref(), &o.client_id, &format!("{platform}/")), &[clear])
                         }

@@ -3,9 +3,9 @@
 //! real service for the surface the platform touches, plus test levers the
 //! real service does not have (they are methods, never production routes):
 //! code.storage, Workers AI (the model route's lower rung, text and
-//! images), a web push service, WorkOS (AuthKit and Pipes), an OpenID
-//! Connect provider (self-hosted sign-in), and the provider APIs a
-//! computer's swap sends to.
+//! images), a web push service, WorkOS (Pipes, and AuthKit's OpenID
+//! Connect provider), a strict OpenID Connect provider (self-hosted
+//! sign-in), and the provider APIs a computer's swap sends to.
 
 pub mod codestorage;
 pub mod http;

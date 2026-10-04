@@ -54,7 +54,7 @@ mod signin;
 use calls::{
     Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    OidcExchange, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
+    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
     Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
@@ -660,6 +660,7 @@ impl RegistryCell {
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls)?)),
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
+            TestHook::Person(kept) => Ok(json!(self.kept_person(kept)?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
         }
     }
@@ -699,7 +700,6 @@ impl RegistryCell {
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
             Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
-            OidcExchange::PATH => reply::<OidcExchange>(self.oidc_exchange(body(&bytes)?).await),
             Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
             Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
