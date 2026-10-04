@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 pub mod celld;
+pub mod codestore;
 pub mod containers;
 pub mod node;
 mod node_release;

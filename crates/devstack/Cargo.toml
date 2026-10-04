@@ -20,3 +20,7 @@ tar = { version = "0.4", default-features = false }
 # termination signals (src/signals.rs): sigaction and a self-pipe, as the
 # standard library has neither; already in the lock beneath reqwest
 libc = "0.2"
+
+[dev-dependencies]
+# codestore.rs's tests make a fixed org key
+p256 = { version = "0.13", features = ["pkcs8", "pem"] }

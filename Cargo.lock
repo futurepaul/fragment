@@ -580,6 +580,7 @@ dependencies = [
  "flate2",
  "fragment-core",
  "libc",
+ "p256",
  "reqwest",
  "serde",
  "serde_json",
