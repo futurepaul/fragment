@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Socket, Step, Wake};
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::placement;
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse};
@@ -148,6 +149,13 @@ enum MetaKey {
     Snapshot,
     /// Why the last wake was refused, or the last sleep failed to save.
     Note,
+    /// The sandcastle node it is placed on, for its life (docs/self-host.md,
+    /// seam 2). entry.mjs's `ContainerHost` reads this row as an isolate
+    /// starts, so its container's calls go to that node.
+    Node,
+    /// Why its last start found no node to run on: its own down, or none
+    /// with room. A start that comes up clears it.
+    NodeNote,
 }
 
 impl MetaKey {
@@ -161,6 +169,8 @@ impl MetaKey {
             MetaKey::Backup => "backup",
             MetaKey::Snapshot => "snapshot",
             MetaKey::Note => "note",
+            MetaKey::Node => "node",
+            MetaKey::NodeNote => "node_note",
         }
     }
 }
@@ -188,6 +198,9 @@ pub struct ComputerCell {
     /// The owner's connections' states as Pipes last said them, and until
     /// when they are believed (`STATES_TTL_MS`). In memory only.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// The last start's failure, when its node did not answer or no node
+    /// could take it: the wake that asked answers with it, typed.
+    node_failure: RefCell<Option<CellError>>,
 }
 
 impl DurableObject for ComputerCell {
@@ -196,7 +209,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default(), node_failure: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -414,8 +427,37 @@ impl ComputerCell {
         Ok(host)
     }
 
+    /// A `ContainerHost` call. A node that does not answer is `NodeDown`
+    /// (node.mjs), typed; any other failure is the host's.
     async fn call(&self, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
         js::invoke(&self.host()?, method, args).await
+    }
+
+    /// Places a computer that runs on sandcastle nodes at its first start
+    /// (`fragment_core::placement`: the rule, and why a computer then
+    /// stays): every node probed, ranked, and the best that still has room
+    /// as its object counts takes it. Placed already, or on the runtime's
+    /// containers, nothing.
+    async fn place(&self, id: &str, image: &str) -> CellResult<()> {
+        let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
+        if self.meta(MetaKey::Node)?.is_some() {
+            return Ok(());
+        }
+        let probes = js::from_js(&self.call("probe", &[]).await?).map_err(CellError::host)?;
+        let probes: Vec<placement::Probe> = serde_json::from_value(probes).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
+        let ranked = placement::rank(nodes, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
+        assert!(!ranked.is_empty() && ranked.len() <= placement::NODES_MAX, "a ranking names a node or says why none");
+        for node in &ranked {
+            // the node's object counts what it holds: a place another computer
+            // took since the probe is not given twice
+            if self.call("take", &[node.as_str().into(), id.into()]).await?.as_bool() == Some(true) {
+                self.set_meta(MetaKey::Node, node)?;
+                self.call("pin", &[node.as_str().into()]).await?;
+                console_log!("{}", json!({ "computer": id, "placed": node, "probes": probes }));
+                return Ok(());
+            }
+        }
+        Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.join(", "))))
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -509,8 +551,14 @@ impl ComputerCell {
             }
             self.flush_awake().await;
         }
+        self.node_failure.borrow_mut().take();
         // a wake that started nothing says why
-        if let Some(why) = self.drive(Event::Wake { why }).await? {
+        let refused = self.drive(Event::Wake { why }).await?;
+        // as does one whose start found its node down, or no node at all
+        if let Some(e) = self.node_failure.borrow_mut().take() {
+            return Err(e);
+        }
+        if let Some(why) = refused {
             return Err(CellError::new(ErrorCode::WontWake, why));
         }
         Ok(())
@@ -579,16 +627,27 @@ impl ComputerCell {
     /// restore gate). Any failure destroys what started.
     async fn start(&self, generation: u64) -> Event {
         match self.try_start(generation).await {
-            Ok(()) => Event::Ready { generation },
+            Ok(()) => {
+                let _ = self.del_meta(MetaKey::NodeNote);
+                Event::Ready { generation }
+            }
             Err(e) => {
                 let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the start failed".into()]).await;
-                Event::StartFailed { generation, why: e.message }
+                let why = e.message.clone();
+                // its node down, or no node to place it on: the wake that asked says so, typed
+                if matches!(e.code, ErrorCode::NodeDown | ErrorCode::NoNode) {
+                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "node": e.code, "why": e.message }));
+                    let _ = self.set_meta(MetaKey::NodeNote, &e.message);
+                    *self.node_failure.borrow_mut() = Some(e);
+                }
+                Event::StartFailed { generation, why }
             }
         }
     }
 
     async fn try_start(&self, generation: u64) -> CellResult<()> {
         let (id, image) = (self.must(MetaKey::Id)?, self.must(MetaKey::Image)?);
+        self.place(&id, &image).await?;
         let g = JsValue::from_f64(generation as f64);
         // lesson 6: a container a new isolate found running is never ours to
         // reuse half-known; it goes before this one starts
@@ -839,8 +898,9 @@ impl ComputerCell {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
+            node: self.meta(MetaKey::Node)?,
             phase,
-            why: why.or(self.meta(MetaKey::Note)?),
+            why: why.or(self.meta(MetaKey::NodeNote)?).or(self.meta(MetaKey::Note)?),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -1484,6 +1544,24 @@ impl ComputerEgress {
         }
         let resp = answered.or_else(|e| e.response().map_err(CellError::from)).unwrap_or_else(|_| Response::error("egress failed", 500).expect("a plain response"));
         resp.into()
+    }
+}
+
+/// The deployment's nodes as entry.mjs's `ContainerHost` and node.mjs read
+/// them (`fragment_core::placement::Nodes::for_js`: each node's reach, its
+/// secret's name and its images), or `null` where computers run in the
+/// runtime's own containers. Checked here, so the JavaScript parses
+/// nothing. A class with a static method, as `InternalRoute` is.
+#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+pub struct NodesConfig;
+
+#[wasm_bindgen]
+impl NodesConfig {
+    pub fn read(env: Env) -> JsValue {
+        match &Config::from_env(&env).nodes {
+            Some(nodes) => js::to_js(&nodes.for_js()),
+            None => JsValue::NULL,
+        }
     }
 }
 
