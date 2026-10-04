@@ -394,10 +394,10 @@ own fetches (metadata, JWKS, token) go through its runtime's TLS:
 
 - `wrangler dev`: Miniflare hands workerd the certificates in
   `NODE_EXTRA_CA_CERTS` as trusted, so a private CA works.
-- celld: a Worker's `fetch` trusts the webpki (Mozilla) roots alone
-  (reqwest with rustls in `egress::client`), so a provider on a private
-  CA fails the TLS handshake. celld needs a setting for an extra CA
-  bundle, added to that client. **Not built**: it is celld's change.
+- celld: a Worker's `fetch` trusts the webpki (Mozilla) roots, plus the
+  PEM bundle `CELLD_EXTRA_CA_FILE` names (the fork's `selfhost` branch:
+  `fetch`, outbound WebSockets and `connect()`). The LAN mode hands it its
+  root (docs/self-host-lan.md).
 - Cloudflare: Workers trust public CAs. A provider on a private CA is
   unreachable from Cloudflare anyway, unless it is fronted publicly.
 - On one box, the issuer may be plain http on loopback, as the fakes and
@@ -935,6 +935,10 @@ that also makes Cloudflare simpler or safer:
 
    The fix is the commit "computer: the container's reports reach their
    routes", ready to cherry-pick.
+10. **The CLI trusted the public roots alone** (webpki-roots), so it could
+    not reach a platform behind a company's CA. On `selfhost-lan` it trusts
+    the OS's store beside them, as a company's clients must; the change is
+    two features in `cli/Cargo.toml`.
 
 ## What the spike found (running it)
 
@@ -1108,7 +1112,16 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     shown in sandcastle's in-process test.
   - Still to do: S2's checks on a real engine, which needs root, and
     the same against a Cloudflare preview. Both are Paul's.
-- **S6:** not started.
+- **S6: built, tested on high ports** (branch `selfhost-lan`;
+  docs/self-host-lan.md, Paul's guide). `cargo xtask dev --lan` serves the
+  stack on celld as an intranet would: DNS for `fragment.home.arpa` on the
+  box (every other name to the router), a CA made there and constrained to
+  the zone, a TLS front door on 443 before the cell and Dex (pinned by
+  digest), and the root's profile over http for the iPhone. From this box:
+  `dig`, `curl --resolve` and headless Chromium signed in through Dex, opened
+  a fragment live over `wss`, an agent answered on Bonsai, and a
+  sandcastle node's uplink connected through the door. Left: ports 53, 80
+  and 443 (sudo), the phone, the Mac and the router (the guide's steps).
 - **Seam 5, git in a code store outside the stack: done.**
   - **macrofiche**, a sibling project like sandcastle, is a self-hosted
     git store with code.storage's API, built on git 2.55.0 pinned and
@@ -1138,6 +1151,8 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   lane's, and Paul's (seam 4, Landing it in master).
 
 ### Running it
+
+On the home network, as an intranet: docs/self-host-lan.md.
 
 The dev stack, on wrangler's workerd or on celld, against a local
 OpenAI-compatible model:

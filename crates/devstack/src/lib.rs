@@ -432,6 +432,7 @@ pub struct NodeVars {
 }
 
 /// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`).
+#[derive(Clone, Debug)]
 pub struct OidcVars {
     /// Its issuer, exactly as its id_tokens say it.
     pub issuer: String,
