@@ -243,13 +243,18 @@ class ContainerHost {
   nodeEgress(request) {
     const rearm = async () => {
       const a = await this.#ctx.storage.get(NODE_ARM);
-      if (a && this.adopt(a.generation)) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
+      const adopted = !!a && (await this.adopt(a.generation));
+      if (adopted) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
+      console.log(JSON.stringify({ nodeEgress: "rearm", generation: a?.generation ?? null, adopted }));
     };
     const node = this.#node && this.#nodes.byId.get(this.#node.node);
     return nodeEgress(request, node, this.#node, rearm);
   }
 
-  running() {
+  // Whether its container runs: a node's that could not say as this
+  // isolate began (it was dialing again) is asked again first.
+  async running() {
+    if (this.#node) await this.#node.known();
     return this.#c.running;
   }
 
@@ -271,8 +276,8 @@ class ContainerHost {
   // A new isolate finds the container of start `generation` (lesson 6):
   // when it runs, this isolate takes it, watching its exit again. Answers
   // whether it runs.
-  adopt(generation) {
-    if (!this.#c.running) return false;
+  async adopt(generation) {
+    if (!(await this.running())) return false;
     this.#generation = generation;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),

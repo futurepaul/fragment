@@ -351,6 +351,8 @@ export class NodeContainer {
   #node;
   #name;
   #running = false;
+  // whether `#running` is the node's word (false: it did not answer)
+  #known = false;
   // the start in flight: every later call waits for it
   #starting = null;
   // the intercepts this start set, in order: the node names one by its index
@@ -383,10 +385,20 @@ export class NodeContainer {
     try {
       const r = await this.#call("GET", `/v1/containers/${this.#name}`, undefined, [404], HEALTH_MS);
       this.#running = r.status === 404 ? false : (await r.json()).running === true;
+      this.#known = true;
     } catch (e) {
       console.log(JSON.stringify({ node: this.#node.id, container: this.#name, refresh: String((e && e.message) || e) }));
       this.#running = false;
+      this.#known = false;
     }
+  }
+
+  // What the node says of this container, asked again when the first look
+  // found the node not answering (an uplink dialing again after the
+  // platform restarted): a container still running there is adopted, not
+  // started over. A node still down leaves it not running.
+  async known() {
+    if (!this.#known) await this.refresh();
   }
 
   // The node it is on.
@@ -415,7 +427,7 @@ export class NodeContainer {
     if (!resp.ok && !allowed.includes(resp.status)) {
       const e = await resp.json().catch(() => ({}));
       if ([502, 503, 504].includes(resp.status)) throw new NodeDown(node, `${method} ${path}: ${resp.status} ${e.error || ""}`.trim());
-      throw new Error(`the node ${node}: ${method} ${path}: ${resp.status} ${e.error || ""}`.trim());
+      throw Object.assign(new Error(`the node ${node}: ${method} ${path}: ${resp.status} ${e.error || ""}`.trim()), { status: resp.status });
     }
     return resp;
   }
@@ -439,8 +451,17 @@ export class NodeContainer {
     // its health first: a node that is down says so within HEALTH_MS, where
     // a start's own bound is the boot's
     const path = `/v1/containers/${this.#name}/start`;
+    const begin = () => this.#json("POST", path, body, START_MS);
+    this.#known = true;
     this.#starting = this.#call("GET", "/v1/health", undefined, [], HEALTH_MS)
-      .then(() => this.#json("POST", path, body, START_MS))
+      .then(begin)
+      .catch(async (e) => {
+        if (e.status !== 409) throw e;
+        // one of its name runs there, which this isolate could not see
+        // (lesson 6: never reused half-known): it goes, and this one starts
+        await this.#json("POST", `/v1/containers/${this.#name}/destroy`, { error: "a new start" });
+        return begin();
+      })
       .catch((e) => {
         this.#running = false;
         throw e;
@@ -571,21 +592,27 @@ export function routeNodeEgress(request, env) {
 export async function nodeEgress(request, node, nodeContainer, rearm) {
   const h = request.headers;
   const [container, intercept, host, scheme, path] = EGRESS_HEADERS.map((k) => h.get(k) || "");
+  // one line per refusal (lesson 14): a guest's request answered here never
+  // reaches the request log
+  const refuse = (status, error) => {
+    console.log(JSON.stringify({ nodeEgress: "refused", node: node?.id ?? null, container, intercept, host, path, status, error }));
+    return Response.json({ error }, { status });
+  };
   const body = await request.arrayBuffer();
-  if (!node || !node.key || !nodeContainer) return Response.json({ error: "this computer is not on a node" }, { status: 404 });
-  if (container !== nodeContainer.name) return Response.json({ error: "another computer's intercept" }, { status: 403 });
-  if (body.byteLength > EGRESS_BODY_MAX) return Response.json({ error: `a body of at most ${EGRESS_BODY_MAX} bytes` }, { status: 413 });
+  if (!node || !node.key || !nodeContainer) return refuse(404, "this computer is not on a node");
+  if (container !== nodeContainer.name) return refuse(403, "another computer's intercept");
+  if (body.byteLength > EGRESS_BODY_MAX) return refuse(413, `a body of at most ${EGRESS_BODY_MAX} bytes`);
   const e = { method: request.method, container, intercept, scheme, host, path };
   const bodyHash = await sha256Hex(body);
-  if (!(await verified(node, h.get(AUTH), (t) => egressString(e, t, bodyHash)))) return Response.json({ error: "a bad signature" }, { status: 401 });
-  if (!/^\d{1,3}$/.test(intercept)) return Response.json({ error: "an intercept's index" }, { status: 400 });
+  if (!(await verified(node, h.get(AUTH), (t) => egressString(e, t, bodyHash)))) return refuse(401, "a bad signature");
+  if (!/^\d{1,3}$/.test(intercept)) return refuse(400, "an intercept's index");
   const index = Number(intercept);
   let fetcher = nodeContainer.binding(index);
   if (!fetcher) {
     await rearm();
     fetcher = nodeContainer.binding(index);
   }
-  if (!fetcher) return Response.json({ error: `no binding for intercept ${intercept}` }, { status: 503 });
+  if (!fetcher) return refuse(503, `no binding for intercept ${intercept}`);
   const headers = new Headers(h);
   for (const k of [...EGRESS_HEADERS, AUTH, "host"]) headers.delete(k);
   const method = request.method;
