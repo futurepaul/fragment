@@ -23,12 +23,11 @@ libc = "0.2"
 # the pinned chrome-headless-shell (src/browser.rs) comes as a zip: read
 # with flate2's deflate alone, no other method or encryption
 zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
-# the renderer's CDP socket (src/rendering/ws.rs): its handshake's accept key
-sha1 = "0.10"
+# the renderer's CDP socket (src/rendering): tungstenite's server side
+tungstenite = "=0.29.0"
+# a private CA's PEM blocks, checked as base64 (src/rendering)
 base64 = "0.22"
 
 [dev-dependencies]
 # codestore.rs's tests make a fixed org key
 p256 = { version = "0.13", features = ["pkcs8", "pem"] }
-# rendering.rs's tests are the cell's side of the CDP socket
-tungstenite = "=0.29.0"
