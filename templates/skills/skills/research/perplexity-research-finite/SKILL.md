@@ -9,16 +9,17 @@ Use this skill for current-events, policy, legal-adjacent, or factual research w
 
 ## Required credentials
 
-Your computer holds no keys. The script sends the operator's key
-placeholders, which the computer swaps for the real keys and meters to
-your owner, with `x-fragment-agent: $FRAGMENT_AS_AGENT`:
+Your computer holds no keys. Its environment holds the operator's key
+placeholders, which name you; the script sends them as any client would,
+and the computer swaps in the real keys on the way and meters each call to
+your owner:
 
-- `fragment-key:perplexity` (hosts `api.perplexity.ai`) for raw search and Sonar Pro briefs
-- `fragment-key:firecrawl` (hosts `api.firecrawl.dev`) for exact-page fetches
+- `PERPLEXITY_API_KEY` (hosts `api.perplexity.ai`) for raw search and Sonar Pro briefs
+- `FIRECRAWL_API_KEY` (hosts `api.firecrawl.dev`) for exact-page fetches
 
-`PERPLEXITY_API_KEY` or `FIRECRAWL_API_KEY`, when set, is sent instead. A
-401 from the provider means this deployment does not offer that key: say
-so rather than hunting for one.
+Perplexity's own SDK reads the same variable. One that is unset means this
+deployment does not offer that key (Firecrawl is not offered yet): say so
+rather than hunting for one, and use `search` without `fetch`.
 
 ## Workflow
 

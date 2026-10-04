@@ -246,14 +246,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
-    // a guest pays for nothing, so a deploy of theirs is not shot (decision 31)
+    // a guest pays for nothing, so a deploy of theirs is not shot (decision
+    // 31): this deploy's own skip, after any its first deploy had, and no
+    // card wanted or out once the alarm has decided (a deploy's answer
+    // comes before the alarm looks)
+    let skips = || super::site::event_kinds(api, &guest, &guest_app).iter().filter(|k| *k == "card.skipped").count();
+    let skips_before = skips();
     s.commit(&c, &[("notes/guest.md", Some(b"a guest deploys"))]);
     s.deploy(&c);
-    let skipped = s.eventually(wait, || super::site::event_kinds(api, &guest, &guest_app).iter().any(|k| k == "card.skipped"));
+    let unshot = || {
+        let cards = super::site::cards(api, &guest_app);
+        cards["cards"]["wanted"].is_null() && cards["cards"]["flight"].is_null()
+    };
+    let skipped = s.eventually(wait, || skips() > skips_before && unshot());
     s.ok(
         "a guest's deploy gets no preview card: its ledger takes no shot",
-        skipped && super::site::cards(api, &guest_app)["cards"]["wanted"].is_null() && super::site::cards(api, &guest_app)["cards"]["flight"].is_null(),
-        json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app) }),
+        skipped,
+        json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app), "skipsBefore": skips_before }),
     );
 
     // ---- an AI step: reserved, then settled from the usage it reported

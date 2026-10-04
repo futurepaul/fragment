@@ -342,12 +342,22 @@ fn write_whole(path: &Path, text: &str, ids: Option<(u32, u32)>) {
     }
 }
 
+/// An agent's credentials (docs/computers.md, "Connections and operator
+/// keys"): its `.env`, which Hermes reads again at every turn, and its
+/// terminal's credentials file, each written whole. Placeholders only: the
+/// computer's swap fills them on the way to their providers.
+fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
+    let dir = hermes::profile_dir(home, &a.fragment);
+    write_whole(&dir.join(hermes::CREDENTIALS_FILE), &hermes::credentials_sh(a), ids);
+    write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
+}
+
 /// One agent's profile: its directories, its config, its repo pulled. At a
 /// boot for each agent, and while awake for each one assigned since
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
 /// The config is written before `.env`, so the directory is a profile to
 /// Hermes (an identity file) only once its config is whole.
-async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, model: &str) {
+async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String]) {
     let t = Instant::now();
     let high_on = env("FRAGMENT_HIGH_TIER").as_deref() == Some("on");
     let own = move |p: &Path| chown(p, ids);
@@ -362,10 +372,11 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
     let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
-    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model), ids);
-    // who the agent is, for its terminal (the fragment CLI, the skills'
-    // helpers): written whole each time, after the config
-    write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
+    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    // who the agent is and its credentials, for Hermes and its terminal (the
+    // fragment CLI, the skills' helpers, any SDK): written whole each time,
+    // after the config
+    write_credentials(a, home, ids);
     match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
@@ -375,12 +386,12 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
 /// Each agent's profile at a boot, and the profiles of agents that left
 /// this computer retired: moved aside, never deleted. Only a boot retires
 /// one: no Hermes runs yet that could be winding down a turn in it.
-async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str) {
+async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String]) {
     let profiles_root = home.join("profiles");
     let _ = std::fs::create_dir_all(&profiles_root);
     chown(&profiles_root, ids);
     for a in agents {
-        write_profile(api, a, home, ids, model).await;
+        write_profile(api, a, home, ids, model, credential_env).await;
     }
     if let Ok(entries) = std::fs::read_dir(&profiles_root) {
         for e in entries.filter_map(Result::ok) {
@@ -491,12 +502,18 @@ async fn ask_gateway(home: &Path, verb: &str) -> Result<serde_json::Value, Strin
 /// create` asks), and then the ready file names it, so the bridge hands it
 /// no turn before its profile is whole. A removed agent leaves the ready
 /// file, so the bridge stops at once; its profile waits for the next boot.
-async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str) {
+async fn follow_agents(api: &Api, change: &agents::Change, now: &[Agent], home: &Path, ids: Option<(u32, u32)>, model: &str, credential_env: &[String]) {
     let t = Instant::now();
     let names = |l: &[Agent]| l.iter().map(|a| a.fragment.clone()).collect::<Vec<_>>();
-    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "screen": change.screen, "agents": now.len() });
+    ev!("agents.changed", { "added": names(&change.added), "removed": names(&change.removed), "screen": change.screen, "credentials": names(&change.credentials), "agents": now.len() });
     for a in &change.added {
-        write_profile(api, a, home, ids, model).await;
+        write_profile(api, a, home, ids, model, credential_env).await;
+    }
+    // an agent's credentials changed: its next turn reads them (its `.env`),
+    // and its terminal's next session (its credentials file)
+    for a in &change.credentials {
+        write_credentials(a, home, ids);
+        ev!("profile.credentials", { "agent": a.fragment, "providers": a.credentials.iter().map(|c| c.provider.clone()).collect::<Vec<_>>() });
     }
     if !change.added.is_empty() {
         let asked = Instant::now();
@@ -664,6 +681,7 @@ async fn boot_main() {
     };
     // What the boot runs: the agents read at its start, then as they change.
     let mut agents = computer.agents.clone();
+    let mut credential_env = computer.credential_env.clone();
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
@@ -679,7 +697,7 @@ async fn boot_main() {
     // Hermes skips an external dir it does not find, until the profile's
     // config changes. What it holds is installed off the boot's path.
     managed_dir();
-    profiles(&api, &agents, &home, ids, &model).await;
+    profiles(&api, &agents, &home, ids, &model, &credential_env).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
     end_previous_life(&agents, &home);
@@ -756,9 +774,18 @@ async fn boot_main() {
                 match api.computer().await {
                     Ok(c) => {
                         agents_unread = false;
+                        // the deployment's credential names changed (a release):
+                        // every profile's config names them, which Hermes reads
+                        // at its next start
+                        if c.credential_env != credential_env {
+                            credential_env = c.credential_env.clone();
+                            for a in agents.iter().filter(|a| c.agents.iter().any(|n| n.fragment == a.fragment)) {
+                                write_profile(&api, a, &home, ids, &model, &credential_env).await;
+                            }
+                        }
                         let change = agents::diff(&agents, &c.agents);
                         if !change.is_empty() {
-                            follow_agents(&api, &change, &c.agents, &home, ids, &model).await;
+                            follow_agents(&api, &change, &c.agents, &home, ids, &model, &credential_env).await;
                         }
                         agents = c.agents;
                     }

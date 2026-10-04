@@ -69,15 +69,14 @@ STATUS_RE = re.compile(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/[^/]+/status
 
 
 def bearer_token() -> str:
-    # On a fragment computer the token is the operator's key, swapped in at
-    # the computer's intercept: the placeholder is sent unless one is set.
-    return os.environ.get("X_API_BEARER_TOKEN", "").strip() or "fragment-key:x"
-
-
-def agent_headers() -> dict[str, str]:
-    # the agent this call is for: its owner pays (docs/computers.md)
-    agent = os.environ.get("FRAGMENT_AS_AGENT", "").strip()
-    return {"x-fragment-agent": agent} if agent else {}
+    # On a fragment computer the variable holds the operator's key's
+    # placeholder, which names this agent; the computer's intercept swaps in
+    # the real token on the way to X and meters the call.
+    token = os.environ.get("X_API_BEARER_TOKEN", "").strip()
+    if not token:
+        print("X_API_BEARER_TOKEN is not set: this deployment does not offer the x key", file=sys.stderr)
+        raise SystemExit(2)
+    return token
 
 
 def api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -92,7 +91,6 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             "Authorization": f"Bearer {bearer_token()}",
             "Accept": "application/json",
             "User-Agent": "finite-x-api-finite/1.0",
-            **agent_headers(),
         },
     )
 

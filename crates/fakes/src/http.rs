@@ -245,7 +245,20 @@ pub fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The most of an answer `post` reads, head and body: a webhook's answer
+/// is a few hundred bytes, and one past this is a bug, not a slow server.
+pub const ANSWER_BYTES_MAX: usize = 1024 * 1024;
+
 /// POSTs to an `http://` URL; the answer's status, or why it failed.
+///
+/// It returns as soon as the answer is complete (its head, then its body
+/// by Content-Length, or to the chunked terminator) and drops the socket.
+/// Reading to the end of the stream is not "complete": workerd's HTTP
+/// server holds a connection open for a next request for 5 s after an
+/// answer (KJ's pipeline timeout), whatever `connection: close` asked, so a
+/// client that waits for the server to close waits 5 s on every delivery.
+/// Only an answer that declares no length is read to the end, as HTTP/1.1
+/// says it must be.
 pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<u16, String> {
     let rest = url.strip_prefix("http://").ok_or("only http:// URLs")?;
     let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
@@ -258,8 +271,224 @@ pub fn post(url: &str, headers: &[(&str, &str)], body: &[u8]) -> Result<u16, Str
     req.push_str("\r\n");
     stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     stream.write_all(body).map_err(|e| e.to_string())?;
-    let mut answer = Vec::new();
-    stream.read_to_end(&mut answer).map_err(|e| e.to_string())?;
-    let line = String::from_utf8_lossy(&answer);
-    line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).ok_or_else(|| format!("no HTTP status in {:?}", line.chars().take(80).collect::<String>()))
+    read_answer(&mut stream)
+}
+
+/// How an answer's body ends (RFC 9112, 6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// No body: a 1xx, 204 or 304.
+    Empty,
+    Length(usize),
+    Chunked,
+    /// No length declared: the body ends when the server closes.
+    Close,
+}
+
+/// Reads one answer from `stream`, to its last byte and no further: its
+/// status, or why it is not a whole HTTP/1.1 answer.
+fn read_answer(stream: &mut impl Read) -> Result<u16, String> {
+    let mut answer = Answer { buf: Vec::new(), at: 0, stream };
+    let head_end = answer.until(b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&answer.buf[..head_end]).into_owned();
+    answer.at = head_end;
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().unwrap_or("");
+    let status: u16 = match status_line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [version, code, ..] if version.starts_with("HTTP/1.") => code.parse().map_err(|_| format!("no HTTP status in {status_line:?}"))?,
+        _ => return Err(format!("no HTTP status in {:?}", status_line.chars().take(80).collect::<String>())),
+    };
+    let header = |name: &str| lines.clone().filter_map(|l| l.split_once(':')).find(|(k, _)| k.trim().eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string());
+    let framing = match (status, header("transfer-encoding"), header("content-length")) {
+        (100..=199 | 204 | 304, _, _) => Framing::Empty,
+        (_, Some(te), _) if te.to_ascii_lowercase().ends_with("chunked") => Framing::Chunked,
+        (_, _, Some(n)) => Framing::Length(n.parse().map_err(|_| format!("a Content-Length that is no number: {n:?}"))?),
+        (_, _, None) => Framing::Close,
+    };
+    match framing {
+        Framing::Empty => {}
+        Framing::Length(n) => answer.take(n)?,
+        Framing::Chunked => answer.chunks()?,
+        Framing::Close => answer.rest()?,
+    }
+    assert!(answer.buf.len() <= ANSWER_BYTES_MAX, "an answer is read within its bound");
+    Ok(status)
+}
+
+/// An answer as it arrives: what was read (`buf`), and how far it is parsed (`at`).
+struct Answer<'a, R: Read> {
+    buf: Vec<u8>,
+    at: usize,
+    stream: &'a mut R,
+}
+
+impl<R: Read> Answer<'_, R> {
+    /// Reads more; an error when the server closed first, or the answer
+    /// outgrew its bound.
+    fn more(&mut self, what: &str) -> Result<(), String> {
+        let mut tmp = [0u8; 16384];
+        let n = self.stream.read(&mut tmp).map_err(|e| format!("reading {what}: {e}"))?;
+        if n == 0 {
+            return Err(format!("the server closed the connection before {what} ended"));
+        }
+        self.buf.extend_from_slice(&tmp[..n]);
+        if self.buf.len() > ANSWER_BYTES_MAX {
+            return Err(format!("an answer of more than {ANSWER_BYTES_MAX} bytes"));
+        }
+        Ok(())
+    }
+
+    /// The end of the first `marker` at or after `at`, reading until it comes.
+    fn until(&mut self, marker: &[u8]) -> Result<usize, String> {
+        // bounded: each pass reads at least a byte, and `more` stops at ANSWER_BYTES_MAX
+        loop {
+            if let Some(i) = self.buf[self.at..].windows(marker.len()).position(|w| w == marker) {
+                return Ok(self.at + i + marker.len());
+            }
+            self.more("the answer's head")?;
+        }
+    }
+
+    /// `n` more bytes past `at`, which then ends past them.
+    fn take(&mut self, n: usize) -> Result<(), String> {
+        if n > ANSWER_BYTES_MAX {
+            return Err(format!("a body of {n} bytes, more than {ANSWER_BYTES_MAX}"));
+        }
+        // bounded: each pass reads at least a byte, and `more` stops at ANSWER_BYTES_MAX
+        while self.buf.len() < self.at + n {
+            self.more("the body")?;
+        }
+        self.at += n;
+        Ok(())
+    }
+
+    /// A chunked body, to its last chunk and the trailers' blank line.
+    fn chunks(&mut self) -> Result<(), String> {
+        // bounded: a chunk is a byte at least, and `more` stops at ANSWER_BYTES_MAX
+        loop {
+            let line_end = self.until(b"\r\n")?;
+            let line = String::from_utf8_lossy(&self.buf[self.at..line_end - 2]).into_owned();
+            self.at = line_end;
+            let size = line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size, 16).map_err(|_| format!("a chunk size that is no number: {line:?}"))?;
+            if size == 0 {
+                break;
+            }
+            self.take(size)?;
+            let end = self.until(b"\r\n")?;
+            if end != self.at + 2 {
+                return Err("a chunk longer than its size".into());
+            }
+            self.at = end;
+        }
+        // the trailers, each a line, then a blank one
+        loop {
+            let line_end = self.until(b"\r\n")?;
+            let blank = line_end == self.at + 2;
+            self.at = line_end;
+            if blank {
+                return Ok(());
+            }
+        }
+    }
+
+    /// A body with no length: to the end of the stream, which the server ends.
+    fn rest(&mut self) -> Result<(), String> {
+        let mut tmp = [0u8; 16384];
+        // bounded: each pass reads at least a byte, and the check stops at ANSWER_BYTES_MAX
+        loop {
+            let n = self.stream.read(&mut tmp).map_err(|e| format!("reading the body: {e}"))?;
+            if n == 0 {
+                self.at = self.buf.len();
+                return Ok(());
+            }
+            self.buf.extend_from_slice(&tmp[..n]);
+            if self.buf.len() > ANSWER_BYTES_MAX {
+                return Err(format!("an answer of more than {ANSWER_BYTES_MAX} bytes"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `post` against servers of the tests' own, each of which answers and
+    //! then holds the connection open, as workerd does for its pipeline
+    //! timeout: a whole answer returns at once, however it is framed, and
+    //! one cut short is an error, never a status.
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    /// A server that answers one request with `answer`, written in pieces
+    /// of at most `piece` bytes, then holds the socket until the test ends
+    /// (`hold`) or, with `close`, closes it.
+    fn server(answer: &'static [u8], piece: usize, close: bool) -> (String, mpsc::Sender<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://127.0.0.1:{}/hook", listener.local_addr().unwrap().port());
+        let (hold, held) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream).expect("a request");
+            for part in answer.chunks(piece) {
+                stream.write_all(part).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !close {
+                // held until the test drops its end: never a close that ends the answer
+                let _ = held.recv_timeout(Duration::from_secs(20));
+            }
+        });
+        (url, hold)
+    }
+
+    fn timed(url: &str) -> (Result<u16, String>, Duration) {
+        let t0 = Instant::now();
+        let r = post(url, &[("content-type", "application/json")], b"{}");
+        (r, t0.elapsed())
+    }
+
+    #[test]
+    fn a_whole_answer_returns_at_once_on_a_connection_held_open() {
+        let answers: [&'static [u8]; 4] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\ncontent-type: application/json\r\n\r\n{\"ok\":true}",
+            b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\n\r\n4;ext=1\r\n{\"ok\r\n7\r\n\":true}\r\n0\r\nx-trailer: 1\r\n\r\n",
+            b"HTTP/1.1 204 No Content\r\n\r\n",
+            b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n",
+        ];
+        for (answer, status) in answers.into_iter().zip([200, 202, 204, 401]) {
+            // in one write, and a byte at a time
+            for piece in [answer.len(), 1] {
+                let (url, hold) = server(answer, piece, false);
+                let (r, took) = timed(&url);
+                assert_eq!(r, Ok(status), "{}", String::from_utf8_lossy(answer));
+                assert!(took < Duration::from_secs(3), "{took:?}: post waited for the server to close");
+                drop(hold);
+            }
+        }
+    }
+
+    #[test]
+    fn an_answer_without_a_length_is_read_until_the_server_closes() {
+        let (url, _hold) = server(b"HTTP/1.1 200 OK\r\n\r\nall of it", 4, true);
+        assert_eq!(timed(&url).0, Ok(200));
+    }
+
+    #[test]
+    fn an_answer_cut_short_is_an_error() {
+        let cut: [&'static [u8]; 4] = [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{\"ok\":",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\nshort",
+            b"HTTP/1.1 200 OK\r\ncontent-len",
+            b"",
+        ];
+        for answer in cut {
+            let (url, _hold) = server(answer, 64, true);
+            let r = timed(&url).0;
+            assert!(r.is_err(), "{r:?} for {}", String::from_utf8_lossy(answer));
+        }
+        let (url, _hold) = server(b"SMTP ready\r\n\r\n", 64, true);
+        assert!(timed(&url).0.is_err_and(|e| e.contains("no HTTP status")));
+    }
 }

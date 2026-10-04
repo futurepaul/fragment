@@ -10,11 +10,10 @@ Commands:
   ask <handle> <question>                  Freeform question about an account
 
 Environment:
-  XAI_API_KEY        xAI API key for Grok. Unset on a fragment computer: the
-                     operator's key placeholder (fragment-key:xai) is sent and
-                     the computer swaps in the real key.
-  FRAGMENT_AS_AGENT  the agent the call is for (its owner pays), set on a
-                     fragment computer.
+  XAI_API_KEY        xAI API key for Grok. On a fragment computer it holds
+                     the operator's key's placeholder, which names the agent:
+                     the computer swaps in the real key and meters the call
+                     to the agent's owner.
 """
 
 from __future__ import annotations
@@ -40,13 +39,11 @@ def grok_chat(
     if handles:
         tool["allowed_x_handles"] = handles
     body = {"model": model, "input": [{"role": "user", "content": prompt}], "tools": [tool]}
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('XAI_API_KEY', '').strip() or 'fragment-key:xai'}",
-        "Content-Type": "application/json",
-    }
-    agent = os.environ.get("FRAGMENT_AS_AGENT", "").strip()
-    if agent:
-        headers["x-fragment-agent"] = agent
+    key = os.environ.get("XAI_API_KEY", "").strip()
+    if not key:
+        print("XAI_API_KEY is not set: this deployment does not offer the xAI key", file=sys.stderr)
+        raise SystemExit(1)
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     request = urllib.request.Request(XAI_RESPONSES_URL, data=json.dumps(body).encode(), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=300) as response:

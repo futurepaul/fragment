@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn the_reader_is_an_agent_of_the_computers_owner() {
-        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("id:{f}"), name: f.into(), owner: o.into() };
+        let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("id:{f}"), name: f.into(), owner: o.into(), credentials: vec![] };
         let agents = [a("x.skyler", "id:skyler"), a("juniper.paul", "id:paul")];
         assert_eq!(reader(&agents, "id:paul").map(|r| r.fragment.as_str()), Some("juniper.paul"));
         assert!(reader(&agents[..1], "id:paul").is_none());
@@ -348,7 +348,7 @@ mod tests {
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into() };
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));

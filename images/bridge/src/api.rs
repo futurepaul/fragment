@@ -84,6 +84,10 @@ pub struct Computer {
     #[serde(default)]
     pub image: String,
     pub agents: Vec<Agent>,
+    /// Every environment variable a credential of the deployment may be
+    /// in, whether its agents hold it now or not.
+    #[serde(default, rename = "credentialEnv")]
+    pub credential_env: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +259,9 @@ impl Api {
         let c: Computer = self.json(Method::GET, "/api/computer", None, None).await?;
         if c.agents.len() > limits::AGENTS_MAX {
             return Err(ApiError::Decode(format!("{} agents; a computer runs at most {}", c.agents.len(), limits::AGENTS_MAX)));
+        }
+        if c.agents.iter().any(|a| a.credentials.len() > crate::runtime::CREDENTIALS_MAX) || c.credential_env.len() > crate::runtime::CREDENTIALS_MAX * 4 {
+            return Err(ApiError::Decode(format!("more credentials than a deployment offers (at most {})", crate::runtime::CREDENTIALS_MAX)));
         }
         Ok(c)
     }

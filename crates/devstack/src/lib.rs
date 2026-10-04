@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod node;
 mod node_release;
+pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -303,15 +304,14 @@ pub struct Fleet {
     /// `containers` images), and whether they sleep with a snapshot.
     pub computer_image: Option<String>,
     pub computer_snapshots: bool,
-    /// What a computer's swap offers (`swap::parse_hosts`' JSON): the WorkOS
-    /// Pipes providers and the operator's keys, each with its hosts, and
-    /// the keys' values. `swap_upstream` (tests only) takes every swapped
-    /// request in place of its host.
-    pub connections: Option<String>,
-    pub operator_keys: Option<String>,
+    /// What a computer's swap offers: the provider catalog
+    /// (`FRAGMENT_PROVIDERS`, `fragment_core::catalog`'s JSON: connections,
+    /// operator keys and own keys, each with its hosts, placements,
+    /// environment variables and a key's price), and the operator keys'
+    /// values. `swap_upstream` (tests only) takes every swapped request in
+    /// place of its host.
+    pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
-    /// The keys' prices (`FRAGMENT_KEY_PRICES`' JSON).
-    pub key_prices: Option<String>,
     pub swap_upstream: Option<String>,
 }
 
@@ -393,18 +393,12 @@ impl Fleet {
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
         }
-        if let Some(c) = &self.connections {
-            vars.push(("FRAGMENT_CONNECTIONS", c.as_str()));
+        if let Some(p) = &self.providers {
+            vars.push(("FRAGMENT_PROVIDERS", p.as_str()));
         }
-        if let Some(k) = &self.operator_keys {
-            vars.push(("FRAGMENT_OPERATOR_KEYS", k.as_str()));
-        }
-        let key_names: Vec<String> = self.operator_key_values.iter().map(|(name, _)| fragment_core::swap::key_secret_name(name)).collect();
+        let key_names: Vec<String> = self.operator_key_values.iter().map(|(name, _)| fragment_core::catalog::key_secret_name(name)).collect();
         for ((_, value), name) in self.operator_key_values.iter().zip(&key_names) {
             vars.push((name.as_str(), value.as_str()));
-        }
-        if let Some(p) = &self.key_prices {
-            vars.push(("FRAGMENT_KEY_PRICES", p.as_str()));
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));

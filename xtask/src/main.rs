@@ -1,6 +1,7 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5)
+//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
+//!                    parallel once worker-build has fetched its tools: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
@@ -12,9 +13,17 @@
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
-//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...]
-//!                    or --except <section>[,...]; --rehearse keeps the hosted lane's
-//!                    rules on the local node)
+//!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...],
+//!                    --except <section>[,...], or --shard <k>/<n> (the table's, as CI
+//!                    splits it); --summary <file> writes the run's summary; --rehearse
+//!                    keeps the hosted lane's rules on the local node). The build
+//!                    builds the computer images ahead of the node beside the Rust.
+//!                    CI splits it in two steps, so the cache saves between them:
+//!                    --build-only (builds, runs nothing), then --no-build (runs
+//!                    what the build left)
+//!   e2e-summary <dir>
+//!                    CI's `e2e` check: the shards' summaries in <dir> make the
+//!                    suite exactly once, and every check passed (summary.rs)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>]
 //!                    the suite against that branch deployment on its real vendors
@@ -45,12 +54,12 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use fragment_devstack as devstack;
 
+mod build;
 mod deploy;
 mod dns;
 mod js_syntax;
+mod summary;
 
-
-const WORKER_BUILD_VERSION: &str = "0.8.5";
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
 const DEV_WORKOS_PORT: u16 = 8794;
@@ -78,23 +87,9 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// cell/ and agent/ for wasm32 (build.rs).
 fn build() -> Result<()> {
-    build_worker(&devstack::cell_dir())?;
-    build_worker(&devstack::agent_dir())
-}
-
-/// One Worker project (`cell/` or `agent/`) for wasm32, into its `build/`.
-/// One at a time: worker-build fetches its tools into one shared cache,
-/// and two at once race there.
-fn build_worker(dir: &Path) -> Result<()> {
-    let out = Command::new("worker-build").arg("--version").output().context(
-        "worker-build is not installed: cargo install worker-build --version 0.8.5 --locked",
-    )?;
-    let version = String::from_utf8_lossy(&out.stdout);
-    if !version.contains(WORKER_BUILD_VERSION) {
-        bail!("worker-build {WORKER_BUILD_VERSION} is required, found {}", version.trim());
-    }
-    run(Command::new("worker-build").arg("--release").current_dir(dir))
+    build::workers()
 }
 
 fn dev(args: &[String]) -> Result<()> {
@@ -162,10 +157,8 @@ fn dev(args: &[String]) -> Result<()> {
         test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
-        connections: None,
-        operator_keys: None,
+        providers: None,
         operator_key_values: vec![],
-        key_prices: None,
         swap_upstream: None,
     }
     .configure(&devstack::cell_dir())?;
@@ -261,11 +254,27 @@ fn e2e(args: &[String]) -> Result<()> {
         }
         return run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args));
     }
+    // CI's split: `--build-only` builds (and the cache is saved after it,
+    // so a red run still saves), then `--no-build` runs what it left
+    let build_only = args.iter().any(|a| a == "--build-only");
+    let no_build = args.iter().any(|a| a == "--no-build");
+    if build_only && no_build {
+        bail!("--build-only and --no-build are two steps of one run, not one");
+    }
+    let suite_args: Vec<&String> = args.iter().filter(|a| *a != "--build-only" && *a != "--no-build").collect();
+    if build_only && !suite_args.is_empty() {
+        bail!("--build-only builds what every run needs, and takes no suite arguments");
+    }
     // the pinned Node and node_modules, before the build; the suite finds
     // them in place
     devstack::Tools::locate()?;
-    build_e2e()?;
-    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(args))
+    if !no_build {
+        build_e2e()?;
+    }
+    if build_only {
+        return Ok(());
+    }
+    run(Command::new(devstack::repo_root().join(E2E_BIN)).args(suite_args))
 }
 
 /// The suite alone, for this machine.
@@ -276,23 +285,30 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// What the e2e runs: the workers, the CLI (the e2e drives it too), and the
-/// suite. The native binaries build alongside the workers, which build one
-/// at a time (worker-build fetches its tools into one shared cache, and two
-/// at once race there).
+/// What the e2e runs: the workers (build.rs: in parallel once worker-build
+/// has its tools), the CLI (the e2e drives it too) and the suite beside
+/// them, and the computer images the node's boot builds, built ahead
+/// beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
-    std::thread::scope(|s| {
+    let t0 = std::time::Instant::now();
+    let built = std::thread::scope(|s| {
+        let images = s.spawn(build::images);
         let native = s.spawn(build_native);
-        let workers = [devstack::cell_dir(), devstack::agent_dir()].iter().try_for_each(|dir| build_worker(dir));
-        workers.and(native.join().expect("the native build does not panic"))
-    })
+        let workers = build::workers();
+        workers.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+    });
+    println!("built the workers, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    built
 }
 
 /// The CLI and the suite, for this machine.
 fn build_native() -> Result<()> {
+    let t0 = std::time::Instant::now();
     let manifest = devstack::repo_root().join("Cargo.toml");
     run(Command::new("cargo").args(["build", "--quiet", "--release", "--manifest-path"]).arg(&manifest).args(["-p", "fragment-cli"]))?;
-    build_suite()
+    build_suite()?;
+    println!("built the CLI and the suite in {:.1?}", t0.elapsed());
+    Ok(())
 }
 
 /// A merge conflict's markers (git's diff3 style too), at the start of a
@@ -387,10 +403,11 @@ fn main() -> Result<()> {
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
+        Some("e2e-summary") => summary::e2e_summary(&args[1..]),
         Some("check") => check(),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--only | --except <section>[,...]] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 
