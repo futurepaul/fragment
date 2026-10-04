@@ -16,7 +16,10 @@ fragment-nip98 = { path = "../crates/nip98", features = ["sign"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+# TLS trusts the public roots and the machine's own: an intranet's CA,
+# installed in the OS's store, signs its platform's certificate
+# (docs/self-host-lan.md)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots"] }
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
@@ -27,7 +30,7 @@ ignore = "=0.4.25"
 notify = "=8.2.0"
 notify-debouncer-full = "=0.7.0"
 fs2 = "=0.4.3"
-tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots"] }
+tungstenite = { version = "=0.29.0", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 
 
 [dev-dependencies]
