@@ -170,12 +170,12 @@ fn dev(args: &[String]) -> Result<()> {
         Some(l) => (l.oidc.clone(), format!("Dex at {}", l.oidc.issuer), None),
         None => dev_signin(port, &read, authkit)?,
     };
-    let (model_upstream, node) = self_host(&read)?;
-    // computers run on the node when there is one, else in local Docker;
+    let (model_upstream, nodes) = self_host(&read)?;
+    // computers run on the nodes when there are some, else in local Docker;
     // with neither, the stack runs without computers, and says so
     // (celld runs no containers of its own: its computers are a node's)
-    let docker = !celld && node.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    let computers = node.is_some() || docker;
+    let docker = !celld && nodes.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let computers = nodes.is_some() || docker;
     let mut fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
@@ -209,7 +209,7 @@ fn dev(args: &[String]) -> Result<()> {
         operator_key_values: vec![],
         swap_upstream: None,
         model_upstream,
-        node,
+        nodes,
         browser_url: None,
     };
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
@@ -276,10 +276,10 @@ fn dev(args: &[String]) -> Result<()> {
         Ok(u) => println!("  models:       {u} (a self-hosted model server)"),
         Err(_) => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
     }
-    match (std::env::var("FRAGMENT_NODE_URL"), docker) {
-        (Ok(u), _) => println!("  computers:    the sandcastle node at {u}"),
+    match (std::env::var(devstack::sandcastle::NODES_FILE_VAR), docker) {
+        (Ok(f), _) => println!("  computers:    the sandcastle nodes {f} lists"),
         (Err(_), true) => println!("  computers:    local Docker (the stub image)"),
-        (Err(_), false) => println!("  computers:    none (no FRAGMENT_NODE_URL, and {})", if celld { "celld runs no containers" } else { "Docker is not reachable" }),
+        (Err(_), false) => println!("  computers:    none (no {}, and {})", devstack::sandcastle::NODES_FILE_VAR, if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
 
     match &renderer {
@@ -468,14 +468,14 @@ fn dev_signin(port: u16, read: ReadFile, authkit: AuthKit) -> Result<(devstack::
 /// The self-hosted lane's settings for dev (docs/self-host.md), each from
 /// the environment, secrets from files: a model server
 /// (`FRAGMENT_MODEL_URL`, `FRAGMENT_MODELS`, `FRAGMENT_MODEL_KEY_FILE`) and
-/// a sandcastle node for computers (`FRAGMENT_NODE_URL`,
-/// `FRAGMENT_NODE_SECRET_FILE`, `FRAGMENT_NODE_IMAGES`).
+/// the sandcastle nodes computers are placed on (`FRAGMENT_NODES_FILE`:
+/// `FRAGMENT_NODES`' JSON, each node with its `secret_file`).
 type ReadFile<'a> = &'a dyn Fn(&str) -> Result<Option<String>>;
 
 /// AuthKit's settings as sign-in, and how the dev summary names them.
 type AuthKit = Option<(devstack::OidcVars, String)>;
 
-fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Option<devstack::NodeVars>)> {
+fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Option<devstack::sandcastle::NodesVars>)> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let model = match var("FRAGMENT_MODEL_URL") {
         Some(url) => Some(devstack::ModelUpstreamVars {
@@ -485,15 +485,14 @@ fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Opt
         }),
         None => None,
     };
-    let node = match var("FRAGMENT_NODE_URL") {
-        Some(url) => Some(devstack::NodeVars {
-            url,
-            secret: read("FRAGMENT_NODE_SECRET_FILE")?.context("FRAGMENT_NODE_URL needs FRAGMENT_NODE_SECRET_FILE")?,
-            images: var("FRAGMENT_NODE_IMAGES").context("FRAGMENT_NODE_URL needs FRAGMENT_NODE_IMAGES: {\"<name>\": \"<reference>\"}")?,
-        }),
+    if let Some(gone) = ["FRAGMENT_NODE_URL", "FRAGMENT_NODE_SECRET_FILE", "FRAGMENT_NODE_IMAGES"].into_iter().find(|k| var(k).is_some()) {
+        bail!("{gone} is gone: {} names a file listing the nodes (docs/self-host.md, Running it)", devstack::sandcastle::NODES_FILE_VAR);
+    }
+    let nodes = match var(devstack::sandcastle::NODES_FILE_VAR) {
+        Some(file) => Some(devstack::sandcastle::NodesFile::read(std::path::Path::new(&file))?),
         None => None,
     };
-    Ok((model, node))
+    Ok((model, nodes))
 }
 
 /// The templates `try` scaffolds.
