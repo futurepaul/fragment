@@ -38,7 +38,6 @@
 //! certificates are checked by the browser itself, as a visitor's are.
 
 pub mod gate;
-pub mod ws;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -51,6 +50,10 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+use tungstenite::protocol::frame::{coding::CloseCode, CloseFrame};
+use tungstenite::protocol::{Role, WebSocket, WebSocketConfig};
+use tungstenite::Message;
 
 pub use gate::Origins;
 
@@ -74,6 +77,9 @@ const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTIONS_MAX: usize = 64;
 /// How often expired sessions are looked for.
 const REAP_EVERY: Duration = Duration::from_millis(250);
+/// A client's socket is read this long at a time, its thread sending the
+/// browser's messages between reads (a WebSocket is one thread's).
+const CLIENT_POLL: Duration = Duration::from_millis(5);
 /// The id of the command a new browser must answer before its session is
 /// handed out (a client's own ids count up from 1).
 const PROBE_ID: u64 = 2_000_000_000;
@@ -169,10 +175,18 @@ struct Session {
 enum Sink {
     /// Its first answer, awaited by the request that starts it.
     Probe(mpsc::Sender<Vec<u8>>),
-    /// The client's socket (its writing half).
-    Client(TcpStream),
+    /// The client's thread, which holds its socket.
+    Client(mpsc::Sender<ToClient>),
     /// No one: what it says between clients is dropped.
     Nobody,
+}
+
+/// What the client's thread is handed.
+enum ToClient {
+    /// One of the browser's messages.
+    Message(Vec<u8>),
+    /// The session ends: close the socket with this code.
+    Close(u16),
 }
 
 fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -510,9 +524,8 @@ fn pump(from: ChildStdout, out: &Mutex<Sink>) {
         }
         let mut sink = locked(out);
         match &mut *sink {
-            Sink::Client(s) => {
-                if ws::write_frame(s, ws::TEXT, &msg).is_err() {
-                    let _ = s.shutdown(Shutdown::Both);
+            Sink::Client(tx) => {
+                if tx.send(ToClient::Message(msg)).is_err() {
                     *sink = Sink::Nobody;
                 }
             }
@@ -525,22 +538,22 @@ fn pump(from: ChildStdout, out: &Mutex<Sink>) {
     // the browser is gone: so is its client's socket, and a start that
     // waits for its first answer hears now that none will come
     let mut sink = locked(out);
-    if let Sink::Client(s) = &mut *sink {
-        let _ = ws::write_close(s, 1011);
-        let _ = s.shutdown(Shutdown::Both);
+    if let Sink::Client(tx) = &*sink {
+        let _ = tx.send(ToClient::Close(1011));
     }
     *sink = Sink::Nobody;
 }
 
-/// `GET /v1/devtools/browser/<id>`, upgraded: the client's messages to the
-/// browser, the browser's (`pump`) to the client, until either ends.
-fn connect(inner: &Arc<Inner>, id: &str, head: &Head, mut stream: TcpStream, mut r: BufReader<TcpStream>) {
+/// `GET /v1/devtools/browser/<id>`, upgraded (tungstenite's server side
+/// after this route's own head): the client's messages to the browser,
+/// the browser's (`pump`, through a channel) to the client, until either
+/// ends.
+fn connect(inner: &Arc<Inner>, id: &str, head: &Head, mut stream: TcpStream, r: BufReader<TcpStream>) {
     let upgrade = head.header("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
     let key = head.header("sec-websocket-key").filter(|k| k.len() == 24);
     let (true, Some(key), Some("13")) = (upgrade, key, head.header("sec-websocket-version")) else {
         return error(&mut stream, 426, "the session's CDP is a WebSocket (version 13)");
     };
-    let Ok(writing) = stream.try_clone() else { return };
     let (to_browser, out) = {
         let mut sessions = locked(&inner.sessions);
         let Some(s) = sessions.get_mut(id) else { return error(&mut stream, 404, "no such session (closed, or never made)") };
@@ -550,52 +563,77 @@ fn connect(inner: &Arc<Inner>, id: &str, head: &Head, mut stream: TcpStream, mut
         s.idle_since = None;
         (Arc::clone(&s.to_browser), Arc::clone(&s.out))
     };
-    let accept = format!("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {}\r\n\r\n", ws::accept_key(key));
+    let accept = tungstenite::handshake::derive_accept_key(key.as_bytes());
+    let accept = format!("HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: {accept}\r\n\r\n");
+    let (tx, rx) = mpsc::channel();
     {
         // the 101 goes out before any message of the browser's can
         let mut sink = locked(&out);
-        if stream.write_all(accept.as_bytes()).is_err() {
+        if stream.write_all(accept.as_bytes()).is_err() || stream.set_read_timeout(Some(CLIENT_POLL)).is_err() {
             drop(sink);
             return detach(inner, id, &out);
         }
-        *sink = Sink::Client(writing);
+        *sink = Sink::Client(tx);
     }
-    let _ = stream.set_read_timeout(Some(SESSION_LIFE_MAX));
-    let mut reader = ws::Reader::new(MESSAGE_MAX);
-    // bounded: each event is read off the socket, which closes with the session
-    loop {
-        match reader.next(&mut r) {
-            Ok(ws::Event::Message(_, msg)) => {
-                if msg.contains(&0) {
-                    control(&out, |s| ws::write_close(s, 1007));
-                    break;
-                }
-                if write_message(&to_browser, &msg).is_err() {
-                    control(&out, |s| ws::write_close(s, 1011));
-                    break;
-                }
-            }
-            Ok(ws::Event::Ping(p)) => control(&out, |s| ws::write_frame(s, ws::PONG, &p)),
-            Ok(ws::Event::Pong) => {}
-            Ok(ws::Event::Close(_)) => {
-                control(&out, |s| ws::write_close(s, 1000));
-                break;
-            }
-            Err(ws::WsError::Refused { code, .. }) => {
-                control(&out, |s| ws::write_close(s, code));
-                break;
-            }
-            Err(ws::WsError::Io(_)) => break,
-        }
+    let config = WebSocketConfig::default().max_message_size(Some(MESSAGE_MAX)).max_frame_size(Some(MESSAGE_MAX));
+    // what the head's reader took past the head (a client sends nothing
+    // before the 101, so nothing, but it is the socket's)
+    let mut ws = WebSocket::from_partially_read(stream, r.buffer().to_vec(), Role::Server, Some(config));
+    drop(r);
+    let code = carry(&mut ws, &rx, &to_browser);
+    if let Some(code) = code {
+        let _ = ws.close(Some(CloseFrame { code: CloseCode::from(code), reason: "".into() }));
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    // the close (ours, or the reply to the client's) goes out
+    let _ = ws.flush();
+    let _ = ws.get_mut().shutdown(Shutdown::Both);
     detach(inner, id, &out);
 }
 
-/// A frame of the service's own to the client, if it is still there.
-fn control(out: &Mutex<Sink>, write: impl FnOnce(&mut TcpStream) -> io::Result<()>) {
-    if let Sink::Client(s) = &mut *locked(out) {
-        let _ = write(s);
+/// The client's socket until it ends: the browser's messages sent between
+/// reads, the client's written to the browser. What it ends with: the
+/// close code to send (`None`: the client closed, or went away).
+fn carry(ws: &mut WebSocket<TcpStream>, rx: &mpsc::Receiver<ToClient>, to_browser: &Mutex<ChildStdin>) -> Option<u16> {
+    // bounded: the session's end (DELETE, the reaper, the browser's exit)
+    // reaches rx, and the client's end reaches the socket
+    loop {
+        // bounded: the messages waiting now
+        loop {
+            match rx.try_recv() {
+                Ok(ToClient::Message(m)) => {
+                    let msg = match String::from_utf8(m) {
+                        Ok(text) => Message::text(text),
+                        Err(e) => Message::binary(e.into_bytes()),
+                    };
+                    if ws.send(msg).is_err() {
+                        return None;
+                    }
+                }
+                Ok(ToClient::Close(code)) => return Some(code),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Some(1011),
+            }
+        }
+        let msg = match ws.read() {
+            Ok(Message::Text(t)) => t.as_bytes().to_vec(),
+            Ok(Message::Binary(b)) => b.to_vec(),
+            // a ping's pong is tungstenite's, sent with its next read
+            Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => continue,
+            // its reply is queued: the caller flushes it
+            Ok(Message::Close(_)) => return None,
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => continue,
+            Err(tungstenite::Error::Protocol(_)) => return Some(1002),
+            Err(tungstenite::Error::Utf8(_)) => return Some(1007),
+            Err(tungstenite::Error::Capacity(_)) => return Some(1009),
+            Err(_) => return None,
+        };
+        // a NUL would end the message early on the browser's pipe
+        if msg.contains(&0) {
+            return Some(1007);
+        }
+        if write_message(to_browser, &msg).is_err() {
+            return Some(1011);
+        }
     }
 }
 
@@ -632,9 +670,12 @@ fn reap(inner: &Inner) {
 /// group killed (while its leader is unreaped, so the group is still its
 /// own), the leader reaped, its home removed.
 fn close(mut s: Session) {
-    if let Sink::Client(c) = &mut *locked(&s.out) {
-        let _ = ws::write_close(c, 1000);
-        let _ = c.shutdown(Shutdown::Both);
+    {
+        let mut sink = locked(&s.out);
+        if let Sink::Client(tx) = &*sink {
+            let _ = tx.send(ToClient::Close(1000));
+        }
+        *sink = Sink::Nobody;
     }
     if !s.exited {
         let group = format!("-{}", s.child.id());
