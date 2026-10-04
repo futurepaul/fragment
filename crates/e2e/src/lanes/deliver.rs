@@ -214,9 +214,15 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let call = s.ai.calls().last().cloned();
+    // the binding takes its input less the model; an OpenAI-compatible
+    // server, the model by its own name (the run maps each id to itself)
+    let named = |c: &fragment_fakes::workers_ai::AiCall| match s.openai_models() {
+        true => c.body["model"] == c.model.as_str(),
+        false => c.body.get("model").is_none(),
+    };
     s.ok(
         "the model route sent its input bounded: the job's reasoning effort as given (high is one GLM takes), its tokens capped",
-        call.as_ref().is_some_and(|c| c.model == "@cf/zai-org/glm-5.3" && c.body["reasoning_effort"] == "high" && c.body["max_tokens"] == 16_384 && c.body.get("model").is_none()),
+        call.as_ref().is_some_and(|c| c.model == "@cf/zai-org/glm-5.3" && c.body["reasoning_effort"] == "high" && c.body["max_tokens"] == 16_384 && named(c)),
         format!("{call:?}"),
     );
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;

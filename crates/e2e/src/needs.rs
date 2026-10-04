@@ -76,13 +76,24 @@ pub struct Offers {
 pub enum Rung {
     /// Under `wrangler dev`, with the fakes: everything.
     Local,
+    /// Under `celld dev`, with the fakes (docs/self-host.md, seam 1):
+    /// everything but the runtime's own containers, which a self-hosted
+    /// deployment places on a sandcastle node.
+    Celld,
     /// A branch deployment on real vendors.
     Hosted(Offers),
 }
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
-    let Rung::Hosted(offers) = rung else { return None };
+    let offers = match rung {
+        Rung::Local => return None,
+        Rung::Celld => {
+            return matches!(need, Need::LocalDocker | Need::Computers)
+                .then_some("it needs the runtime's containers, and celld runs none: a self-hosted deployment's computers are a sandcastle node's (docs/self-host.md, seam 2)");
+        }
+        Rung::Hosted(offers) => offers,
+    };
     match need {
         Need::Fakes => Some("it needs the vendor fakes (a scripted model, code.storage's git, WorkOS' accounts, the push service, a local upstream), which only a local run has"),
         Need::Node => Some("it needs the node itself (a crash, a restart, settings of its own, its local address or clock), which only a local run has"),
