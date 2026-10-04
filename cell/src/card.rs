@@ -11,7 +11,9 @@
 //!   out per fragment at a time; a deploy meanwhile is shot next, and the
 //!   shot out lands stale (newest wins).
 //! - **The queue's consumer** (deliveries.rs) takes the shot with the
-//!   `BROWSER` binding: a Browser Rendering session driven over CDP, the
+//!   `BROWSER` binding, or the service `FRAGMENT_BROWSER_URL` names, which
+//!   answers the binding's routes (docs/self-host.md, seam 7; `Renderer`):
+//!   a Browser Rendering session driven over CDP, the
 //!   page opened as a visitor without an account sees it (a link
 //!   fragment's with its share link), at 1280×800, as a JPEG; the session
 //!   closed whatever happens. It reports to the fragment, with the image
@@ -178,7 +180,7 @@ impl FragmentCell {
             Err(skip) => return Ok(Err(skip)),
         };
         let Some(origin) = self.cfg.outside_origin(&self.name()?) else { return Ok(Err(Skip::NoAddress)) };
-        if !crate::js::has_binding(self.env.as_ref(), "BROWSER") {
+        if Renderer::of(&self.env).is_none() {
             return Ok(Err(Skip::NoBrowser));
         }
         let owner = self.must(MetaKey::Owner)?;
@@ -328,21 +330,65 @@ pub async fn consume(env: &Env, d: &Delivery, shot: &CardShot) {
     console_log!("{}", json!({ "card": d.fragment, "attempt": shot.ticket.attempt, "ms": ms, "image": ok, "report": status.as_ref().map_err(|e| e.message.clone()) }));
 }
 
+/// Where a shot's browser comes from. The routes and the CDP are the
+/// same either way; only who answers them differs.
+#[derive(Clone, Copy)]
+enum Renderer {
+    /// The `BROWSER` binding: Browser Rendering (Cloudflare, `wrangler dev`).
+    Binding,
+    /// `FRAGMENT_BROWSER_URL`: a service answering the binding's routes
+    /// under this base (a self-hosted deployment's: docs/self-host.md,
+    /// seam 7), reached with `fetch`. It wins over the binding.
+    Url(&'static str),
+}
+
+impl Renderer {
+    /// This deployment's, or `None`: it shoots no cards.
+    fn of(env: &Env) -> Option<Renderer> {
+        match &crate::config::Config::from_env(env).browser_url {
+            Some(base) => Some(Renderer::Url(base)),
+            None if js::has_binding(env.as_ref(), "BROWSER") => Some(Renderer::Binding),
+            None => None,
+        }
+    }
+
+    /// One of the routes, as a request to this renderer.
+    fn request(self, path: &str, init: &RequestInit) -> Result<Request, Failure> {
+        assert!(path.starts_with("/v1/devtools/browser"), "a renderer answers the binding's routes alone");
+        let url = match self {
+            Renderer::Binding => format!("{BROWSER_HOST}{path}"),
+            Renderer::Url(base) => format!("{base}{path}"),
+        };
+        Request::new_with_init(&url, init).map_err(|e| Failure::retry(e.to_string()))
+    }
+
+    async fn fetch(self, env: &Env, req: Request) -> CellResult<Response> {
+        match self {
+            Renderer::Binding => js::browser_fetch(env.as_ref(), req).await,
+            Renderer::Url(_) => Ok(Fetch::Request(req).send().await?),
+        }
+    }
+}
+
 /// One shot: a Browser Rendering session (`POST /v1/devtools/browser`),
 /// CDP over its WebSocket (`GET /v1/devtools/browser/{id}`), then the
 /// session closed (`DELETE`), as `@cloudflare/puppeteer` speaks to the
 /// binding. Answers whether a session was acquired and then closed
 /// (`None`: none was), and the image or why there is none.
 async fn take(env: &Env, page: &str) -> (Option<bool>, Result<Vec<u8>, Failure>) {
+    let Some(renderer) = Renderer::of(env) else {
+        // the fragment found one when it sent the shot: a deployment changed under it
+        return (None, Err(Failure::retry("this deployment has no browser")));
+    };
     let deadline = js::now_ms() + card::SHOT_TIMEOUT_MS as i64;
-    let session = match within(deadline, acquire(env)).await {
+    let session = match within(deadline, acquire(env, renderer)).await {
         Some(Ok(s)) => s,
         Some(Err(f)) => return (None, Err(f)),
         // a session may have been made that no one will close: billed as one
         None => return (Some(false), Err(Failure::retry("Browser Rendering gave no session in time"))),
     };
-    let image = within(deadline, drive(env, &session, page, deadline)).await.unwrap_or_else(|| Err(Failure::retry("the shot did not finish in time")));
-    let closed = within(js::now_ms() + RELEASE_TIMEOUT_MS, release(env, &session)).await.unwrap_or(false);
+    let image = within(deadline, drive(env, renderer, &session, page, deadline)).await.unwrap_or_else(|| Err(Failure::retry("the shot did not finish in time")));
+    let closed = within(js::now_ms() + RELEASE_TIMEOUT_MS, release(env, renderer, &session)).await.unwrap_or(false);
     (Some(closed), image)
 }
 
@@ -360,12 +406,11 @@ async fn within<T>(until: i64, f: impl std::future::Future<Output = T>) -> Optio
     }
 }
 
-async fn acquire(env: &Env) -> Result<String, Failure> {
+async fn acquire(env: &Env, renderer: Renderer) -> Result<String, Failure> {
     let mut init = RequestInit::new();
     init.with_method(Method::Post);
-    let url = format!("{BROWSER_HOST}/v1/devtools/browser?keep_alive={}", card::KEEP_ALIVE_MS);
-    let req = Request::new_with_init(&url, &init).map_err(|e| Failure::retry(e.to_string()))?;
-    let mut resp = js::browser_fetch(env.as_ref(), req).await.map_err(|e| Failure::retry(format!("no browser: {}", e.message)))?;
+    let req = renderer.request(&format!("/v1/devtools/browser?keep_alive={}", card::KEEP_ALIVE_MS), &init)?;
+    let mut resp = renderer.fetch(env, req).await.map_err(|e| Failure::retry(format!("no browser: {}", e.message)))?;
     let status = resp.status_code();
     let text = resp.text().await.unwrap_or_default();
     if status != 200 {
@@ -381,11 +426,11 @@ async fn acquire(env: &Env) -> Result<String, Failure> {
 
 /// Closes the session: whether it is known closed (else it is billed to
 /// its inactivity timeout).
-async fn release(env: &Env, session: &str) -> bool {
+async fn release(env: &Env, renderer: Renderer, session: &str) -> bool {
     let mut init = RequestInit::new();
     init.with_method(Method::Delete);
-    let Ok(req) = Request::new_with_init(&format!("{BROWSER_HOST}/v1/devtools/browser/{session}"), &init) else { return false };
-    match js::browser_fetch(env.as_ref(), req).await {
+    let Ok(req) = renderer.request(&format!("/v1/devtools/browser/{session}"), &init) else { return false };
+    match renderer.fetch(env, req).await {
         Ok(resp) => (200..300).contains(&resp.status_code()),
         Err(_) => false,
     }
@@ -394,13 +439,13 @@ async fn release(env: &Env, session: &str) -> bool {
 /// The CDP half: a page target at the viewport, the page opened, its load
 /// waited for (at most `LOAD_TIMEOUT_MS`), `SETTLE_MS` more, then a JPEG
 /// at each of `QUALITIES` until one fits.
-async fn drive(env: &Env, session: &str, page: &str, deadline: i64) -> Result<Vec<u8>, Failure> {
+async fn drive(env: &Env, renderer: Renderer, session: &str, page: &str, deadline: i64) -> Result<Vec<u8>, Failure> {
     let headers = Headers::new();
     headers.set("upgrade", "websocket").map_err(|e| Failure::retry(e.to_string()))?;
     let mut init = RequestInit::new();
     init.with_headers(headers);
-    let req = Request::new_with_init(&format!("{BROWSER_HOST}/v1/devtools/browser/{session}"), &init).map_err(|e| Failure::retry(e.to_string()))?;
-    let resp = js::browser_fetch(env.as_ref(), req).await.map_err(|e| Failure::retry(format!("no CDP socket: {}", e.message)))?;
+    let req = renderer.request(&format!("/v1/devtools/browser/{session}"), &init)?;
+    let resp = renderer.fetch(env, req).await.map_err(|e| Failure::retry(format!("no CDP socket: {}", e.message)))?;
     let status = resp.status_code();
     let ws = resp.websocket().ok_or_else(|| Failure::retry(format!("Browser Rendering answered {status}, not a CDP socket")))?;
     ws.accept().map_err(|e| Failure::retry(e.to_string()))?;

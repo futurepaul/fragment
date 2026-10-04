@@ -32,6 +32,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
 | `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
+| `FRAGMENT_BROWSER_URL` | where preview cards are shot instead of the `BROWSER` binding (docs/self-host.md, seam 7): a service answering the binding's routes (`/v1/devtools/browser…`) under this base, reached with `fetch`; set, it wins over the binding. A self-hosted deployment's renderer (`crates/devstack/src/rendering`) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
@@ -106,7 +107,8 @@ e2e set `FRAGMENT_AI_URL`. `BROWSER` runs locally under `wrangler dev`
 (its own local mode: a Chrome for Testing it downloads into its cache,
 `$XDG_CACHE_HOME/.wrangler/chrome`, on the first shot; dev and the e2e
 set `XDG_CACHE_HOME` to the repo's `target/cache`), a lower rung than
-Cloudflare's browsers.
+Cloudflare's browsers. A runtime without it (celld) shoots cards through
+`FRAGMENT_BROWSER_URL`, the same routes and the same CDP.
 
 
 ## Principals and access

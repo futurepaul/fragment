@@ -249,6 +249,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         tools: None,
         node: None,
         celld: None,
+        renderer: None,
         port: 0,
         run: crate::run_name(),
         fake: Fake::absent("code.storage"),

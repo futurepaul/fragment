@@ -64,6 +64,7 @@ This design doesn't need it (seam 2).
 - **Self-hosted:** `celld deploy` (a fleet) or `celld dev` (one node,
   state in a local directory), from a config rendered for celld. The
   render drops `ai`, `browser`, `build`, `routes` and `containers`.
+  Cards then go to the renderer (seam 7).
 - **The bucket:** celld takes a cell's ownership with a conditional
   write, so its bucket must support `If-None-Match` and `If-Match`. AWS
   S3, R2, Ceph RGW and Tigris do. **Garage does not**, and MinIO's
@@ -484,13 +485,161 @@ contract master then speaks.
   directory under `celld dev`.
 - **Master:** nothing.
 
-### 7. Preview cards: CDP
+### 7. Preview cards: Browser Rendering's routes, over a pinned browser
 
-- **Cloudflare:** Browser Rendering.
-- **Self-hosted:** a headless Chrome behind the same acquire-and-connect
-  routes `card.rs` uses, or no cards. Cards are already skipped when a
-  deployment lacks what they need.
-- **The spike:** cards off.
+- **Cloudflare:** Browser Rendering, through the `BROWSER` binding.
+  `wrangler dev` runs its local mode (a Chrome for Testing it downloads
+  on the first shot).
+- **Self-hosted:** the same three routes (`POST /v1/devtools/browser`,
+  the CDP socket at `/v1/devtools/browser/<id>`, and `DELETE`), served by
+  the **renderer** over a pinned chrome-headless-shell. The cell reaches
+  it with `fetch` at `FRAGMENT_BROWSER_URL`, which wins over the binding.
+  card.rs's acquire, CDP and release are one path; only who answers
+  differs (`Renderer`).
+
+**Built (branch `selfhost-cards`).**
+
+**The browser: chrome-headless-shell 154.0.8037.92**, Chrome for
+Testing's Stable on 2026-10-04. The survey, that day:
+
+| | What it is | CDP | Screenshots | Licence |
+|---|---|---|---|---|
+| **chrome-headless-shell** | Chrome's old headless mode as its own build: one zip per platform (linux64, linux-arm64, mac-arm64, mac-x64), 99 to 121 MB, 274 MB unpacked | yes | Blink's own | BSD-3 (Chromium) |
+| browserless | a Node server around Chrome; its image is about 1 GB | yes | Chrome's | SSPL, or commercial |
+| Lightpanda 1.0 | one 188 MB binary, no layout engine | yes | the page's text alone, PNG only | AGPL-3.0 |
+| Steel | a Node API over Chrome; 0.7 to 1.4 GB images | yes | Chrome's | Apache-2.0 |
+| Playwright's server | needs Node | its own protocol | Chrome's | Apache-2.0 |
+| Obscura | one 71 MB binary, layout of its own | yes | not Chromium's | Apache-2.0 |
+| Firefox | | WebDriver BiDi only: CDP went in 141 | | MPL-2.0 |
+
+Gotenberg and chromedp's headless-shell image wrap Chrome too; Servo and
+Ladybird speak no CDP. So the pick is Chrome itself, its smallest build,
+pinned as the Node is: no wrapper, and the CDP card.rs already speaks.
+It is one zip but not one binary: it needs the host's NSS, glib and X11
+libraries (its `deb.deps`) and fonts.
+
+Sources: [Chrome for Testing's versions](https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json),
+[browserless's licence](https://github.com/browserless/browserless/blob/main/LICENSE),
+[Lightpanda's renderer](https://github.com/lightpanda-io/browser/blob/main/src/rust/render/lib.rs),
+[Steel](https://github.com/steel-dev/steel-browser),
+[Playwright's server](https://playwright.dev/docs/api/class-browsertype),
+[Obscura](https://github.com/h4ckf0r0day/obscura),
+[Firefox 141](https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/141).
+
+**Where the adapter lives: a renderer beside the stack**
+(`crates/devstack/src/rendering`), the smallest of three:
+
+- The cell speaking CDP to a browser it is configured with would be a
+  second way to get one: Browser Rendering's acquire and release have no
+  CDP equivalent.
+- celld implementing the `browser` binding, as miniflare does, would
+  launch browsers inside a fork whose aim is fewer differences from
+  upstream, and Browser Rendering is out of celld's scope.
+- A renderer keeps card.rs's one path and celld unchanged. The cell's
+  `fetch` reaches it as it reaches the model server or a node. celld's
+  `fetch` upgrades to a WebSocket (its `__fetchWebSocketUpgrade`), as
+  the node's exec already uses.
+
+The renderer starts a browser per session (a fresh profile and home) and
+drives it over `--remote-debugging-pipe`. At most four run at once. A
+session is stopped after its `keep_alive` without a client (default
+60 s, at most 10 min), or 15 min after it began. A message either way is
+at most 64 MiB.
+
+**Isolation.** A card's page is a stranger's code. Its browser reaches
+fragments' origins and nothing else on the box:
+
+- **The gate.** Every connection the browser makes (http, https,
+  WebSockets) goes through a SOCKS5 proxy in the renderer
+  (`--proxy-server`, with `<-loopback>`, so loopback and `*.localhost`
+  go through it too). The gate lets through
+  `<one label with "--">.<suffix>:<the origins' port>` alone, and
+  connects it to one configured address: the node, or the edge before
+  it. It resolves no name. An IP literal, `localhost`, any other name,
+  and a name rebound to another address all go nowhere, so the sandcastle
+  engine, Bonsai, Dex, the LAN and the internet are out of reach.
+- **Nothing beside it.** The browser resolves nothing itself
+  (`--host-resolver-rules`, the gate's literal excepted). It sends no
+  QUIC, and no WebRTC UDP outside its proxy
+  (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`).
+  WebTransport fails outright with a proxy set.
+- **No port.** The browser listens on none: its pipe is the renderer's
+  alone.
+- **The process.** Chrome's sandbox stays on. Each browser gets a clean
+  environment (no variable of the stack's), its own process group
+  (killed whole), and a home removed after it.
+- **The renderer** listens on loopback, unauthenticated. A local process
+  may start sessions, which reach only what any visitor reaches.
+
+**A private CA.** On an intranet, fragments are
+`https://<label>--<user>.fragment.home.arpa` under the operator's CA.
+`FRAGMENT_BROWSER_CA_FILE` names its PEM. The renderer makes an NSS
+database trusting it, with NSS's `certutil` (Debian's `libnss3-tools`,
+Fedora's `nss-tools`, Arch's `nss`), and copies it into each browser's
+`~/.pki/nssdb`, where Chrome on Linux reads local roots. The browser
+checks the edge's certificate itself, as a visitor's browser does.
+
+- `--ignore-certificate-errors-spki-list` was the alternative. It
+  matches only the certificates a server presents, so a pinned CA fails
+  against a server that sends its leaf alone (tried: refused).
+- On macOS the browser trusts the system keychain: the CA goes there.
+
+**Pinning.** `browser_release.rs` pins the version and each zip's
+SHA-256. Chrome for Testing publishes no checksums, so each hash is of a
+zip whose MD5 matched the one Google's bucket answers. `browser.rs`
+fetches it into `target/tools` once, checks it before unpacking, refuses
+links and paths outside its directory, and names the directory only once
+the binary answers `--version` with the pin. An intranet supplies the
+zip itself (`FRAGMENT_BROWSER_ZIP=<path>`), checked against the same pin.
+
+**Evidence, 2026-10-04:**
+
+- **The e2e on celld,** sections site, deploy and ledger: 152 passed,
+  0 failed, 0 skipped. Before, celld shot no cards, and these sections
+  skipped their card checks there. Now they run: a deploy's card and a
+  viewer's copy of it, a second
+  deploy's card, revalidation by its tag, two failed shots then the card,
+  five then one `card.failed`, and the shot's browser time on the
+  owner's ledger. A guest's deploy and a members-only fragment still get
+  none.
+- **The same sections on `wrangler dev`** (Browser Rendering's local
+  mode, the Cloudflare path, unchanged): 152 passed, 0 failed.
+- **`cargo xtask dev --runtime celld`** (`FRAGMENT_DEV_PORT=9460`) was
+  ready in 4.9 s, the renderer named in its banner and in the cell's
+  `FRAGMENT_BROWSER_URL`. A session started (the browser answering CDP)
+  in 35 to 39 ms, and closed in about 10 ms, leaving no process.
+- **16 host tests** run against stand-in browsers (shell scripts on the
+  same pipes):
+  - a session's CDP both ways, a 300 KB message whole;
+  - a second client refused (409), then let in once the first leaves;
+  - a close, and its replay (404);
+  - the routes it refuses;
+  - four sessions, then 429;
+  - a browser that dies as it starts fails the start at once, saying
+    what it said;
+  - a NUL in a message refused;
+  - an idle session stopped after its `keep_alive`;
+  - every browser stopped with its renderer, and a crashed renderer's
+    homes cleared by the next;
+  - the gate's rule and its SOCKS5;
+  - WebSocket framing (RFC 6455's key; unmasked, reserved, oversized
+    and non-UTF-8 frames refused);
+  - the pinned zip: a hash mismatch, a path outside, a link, the limits.
+- **Two run by name** against chrome-headless-shell 154 itself
+  (`cargo test -p fragment-devstack -- --ignored`):
+  - A card's JPEG through the renderer. Its page reached its own origin
+    alone. A loopback service, tried by IP literal, `localhost` and
+    another `*.localhost` name, by image, fetch and WebSocket, heard
+    nothing; nor did the internet; and pages there did not open.
+  - Fragments on https under a test CA: refused without it
+    (`ERR_CERT_AUTHORITY_INVALID`), opened with it named.
+- Before it was built, the same flags under a SOCKS5 stand-in showed
+  what Chrome sends a proxy: every name, `127.0.0.1`, `::1` and
+  `localhost` included, as a name (remote DNS), and its WebSockets.
+
+**Master:** where the browser is becomes configuration
+(`FRAGMENT_BROWSER_URL`), as the model upstream is. Cloudflare keeps the
+binding.
 
 ### 8. Notifications
 
@@ -631,7 +780,8 @@ These are listed as found. Each names where it bites and what to do.
    shot, `wrangler dev`'s local Browser Rendering downloads Chrome. The
    shot took 55 s, and the queue consumer held the next batch behind it.
    A person's first message to an agent waited 45 s before its delivery
-   ran. Offline, a deployment has no Chrome to download.
+   ran. Offline, a deployment has no Chrome to download (on celld, the
+   pinned browser is fetched, or supplied, before the stack starts: seam 7).
    - **Master:** cards should get their own queue, or the shot should go
      after the batch's deliveries. Cards are already skipped when there
      is no hostname suffix; a deployment without Browser Rendering should
@@ -812,6 +962,10 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   - So every cell, every fragment's git and every run here was
     self-hosted: celld and macrofiche, with the fakes standing only for
     sign-in (WorkOS or OpenID Connect), the model, and push.
+- **Seam 7, preview cards on celld: done** (branch `selfhost-cards`).
+  The renderer serves Browser Rendering's routes over the pinned
+  chrome-headless-shell 154; the cell's card path is Cloudflare's
+  (seam 7, Evidence).
 - **Seam 4, sign-in on OpenID Connect: built** (branch `selfhost-oidc`),
   beside WorkOS, by configuration. It is on the OIDC fake in the e2e, and
   it signed in through a real Dex (seam 4, Evidence).
@@ -831,6 +985,21 @@ CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
 `CELLD_BIN` is celld built from the fork's branch `selfhost`
 (`cargo build --release -p celld`). celld bundles with esbuild, taken
 from worker-build's cache or `CELLD_ESBUILD`.
+
+Preview cards on celld (seam 7): the stack starts the renderer over the
+pinned chrome-headless-shell, fetched into `target/tools` on first use.
+
+- `FRAGMENT_BROWSER_ZIP`: the pinned zip, by path, in place of the
+  fetch (an intranet's copy, checked against the same SHA-256).
+- `FRAGMENT_BROWSER_UPSTREAM`: where fragments are served, `ip:port`
+  (default this box, at the platform URL's port: the node, or an edge
+  before it).
+- `FRAGMENT_BROWSER_CA_FILE`: a private CA's PEM, for fragments on https
+  under it. It needs NSS's `certutil` on the box.
+
+The browser runs with Chrome's sandbox, so the host must allow
+unprivileged user namespaces (Ubuntu 24.04's AppArmor restricts them;
+its `kernel.apparmor_restrict_unprivileged_userns`).
 
 Computers on a sandcastle node add three settings:
 
