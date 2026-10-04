@@ -72,21 +72,38 @@ pub struct External {
     http: reqwest::blocking::Client,
     /// What the run's banner and skips call it.
     pub label: String,
+    /// It follows the service where the fake differs by design (the
+    /// contract's section 10): macrofiche does. A store named only by its
+    /// URL may be the fake run as a process, so it is not held to them.
+    pub service: bool,
 }
 
-/// A store's answer: its status and its body.
-struct Answer {
-    status: u16,
-    body: Vec<u8>,
+/// A store's answer: its status, its headers and its body.
+pub struct Answer {
+    pub status: u16,
+    headers: reqwest::header::HeaderMap,
+    pub body: Vec<u8>,
 }
 
 impl Answer {
-    fn json(&self) -> Value {
+    pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
     }
 
-    fn text(&self) -> String {
+    /// The body's first 300 bytes, as a check's detail shows it.
+    pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body[..self.body.len().min(300)]).into_owned()
+    }
+
+    /// A header's value ("" when absent).
+    pub fn header(&self, name: &str) -> String {
+        self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+    }
+}
+
+impl std::fmt::Display for Answer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {}", self.status, self.text())
     }
 }
 
@@ -104,7 +121,7 @@ impl External {
     pub fn new(url: &str, org: &str, key_pem: &str, label: String) -> Result<External> {
         let key = OrgKey::from_pem(key_pem).map_err(|e| anyhow::anyhow!("{e}"))?;
         let http = reqwest::blocking::Client::builder().timeout(CALL_TIMEOUT).build()?;
-        Ok(External { url: url.trim_end_matches('/').to_string(), org: org.to_string(), key, http, label })
+        Ok(External { url: url.trim_end_matches('/').to_string(), org: org.to_string(), key, http, label, service: false })
     }
 
     /// A token for one call: `repo` is the claim (a repo, a new repo's name,
@@ -114,19 +131,34 @@ impl External {
         self.key.token(&Claims { iss: &self.org, sub: SUBJECT, repo, scopes: &[scope], iat: now, exp: now + TOKEN_TTL_S })
     }
 
-    fn call(&self, method: &str, path: &str, query: &[(&str, &str)], claim: &str, scope: &str, body: Option<(&str, Vec<u8>)>) -> Result<Answer> {
+    /// One call, its token naming `claim` with exactly `scope`.
+    pub fn call(&self, method: &str, path: &str, query: &[(&str, &str)], claim: &str, scope: &str, body: Option<(&str, Vec<u8>)>) -> Result<Answer> {
+        self.send(method, path, query, Some(self.token(claim, scope)), body)
+    }
+
+    fn send(&self, method: &str, path: &str, query: &[(&str, &str)], bearer: Option<String>, body: Option<(&str, Vec<u8>)>) -> Result<Answer> {
         let method = reqwest::Method::from_bytes(method.as_bytes())?;
-        let mut req = self.http.request(method.clone(), format!("{}{path}", self.url)).query(query).bearer_auth(self.token(claim, scope));
+        let mut req = self.http.request(method.clone(), format!("{}{path}", self.url)).query(query);
+        if let Some(token) = bearer {
+            req = req.bearer_auth(token);
+        }
         if let Some((content_type, bytes)) = body {
             req = req.header("content-type", content_type).body(bytes);
         }
         let r = req.send().with_context(|| format!("{method} {}{path}", self.url))?;
-        let status = r.status().as_u16();
+        let (status, headers) = (r.status().as_u16(), r.headers().clone());
         let body = r.bytes().with_context(|| format!("{method} {path}: the body"))?.to_vec();
-        Ok(Answer { status, body })
+        Ok(Answer { status, headers, body })
     }
 
-    fn repo_call(&self, method: &str, repo: &str, op: &str, query: &[(&str, &str)], scope: &str, body: Option<(&str, Vec<u8>)>) -> Result<Answer> {
+    /// A call with no bearer token at all.
+    pub fn unsigned(&self, method: &str, path: &str) -> Result<Answer> {
+        self.send(method, path, &[], None, None)
+    }
+
+    /// One repo-scoped call (`/api/repos/{repo}/{op}`), its token naming
+    /// the repo with exactly `scope`: what the `codestore` section probes.
+    pub fn repo_call(&self, method: &str, repo: &str, op: &str, query: &[(&str, &str)], scope: &str, body: Option<(&str, Vec<u8>)>) -> Result<Answer> {
         let repo = checked_repo(repo)?;
         self.call(method, &format!("/api/repos/{repo}/{op}"), query, repo, scope, body)
     }
