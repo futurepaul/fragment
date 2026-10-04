@@ -323,10 +323,11 @@ pub struct Fleet {
     /// The wait before a delivery is retried, every time (`None`: the
     /// cell's, 10 s growing with the delivery's age to an hour).
     pub delivery_retry_s: Option<u32>,
-    /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
+    /// WorkOS, for Pipes' connections (the real one, or the fake in
+    /// `crates/fakes`).
     pub workos: Option<WorkOsVars>,
-    /// Sign-in with an OpenID Connect provider (docs/self-host.md, seam 4):
-    /// it signs people in in place of WorkOS, which then serves Pipes alone.
+    /// Sign-in (docs/self-host.md, seam 4): an OpenID Connect provider,
+    /// WorkOS AuthKit's (`OidcVars::authkit`) or another.
     pub oidc: Option<OidcVars>,
     /// The platform's origin (sign-in, the platform session), when it is
     /// not the hostname suffix itself.
@@ -384,14 +385,49 @@ pub struct OidcVars {
     pub client_id: String,
     /// `None`: a public client (PKCE alone).
     pub client_secret: Option<String>,
-    /// `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS` (JSON) and
-    /// `FRAGMENT_OIDC_AUTH`; `None`: the cell's defaults.
+    /// `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS` (JSON),
+    /// `FRAGMENT_OIDC_AUTH` and `FRAGMENT_OIDC_KEYED_AS`; `None`: the
+    /// cell's defaults.
     pub scopes: Option<String>,
     pub claims: Option<String>,
     pub auth: Option<String>,
+    pub keyed_as: Option<String>,
 }
 
-/// A WorkOS environment as the cell reads it.
+impl OidcVars {
+    /// WorkOS AuthKit's provider at `issuer` (the AuthKit domain), for an
+    /// OAuth application (`client_id`) of the environment `workos_client`
+    /// (docs/self-host.md, seam 4): the client in the token request's
+    /// body, as WorkOS's reference has it, and the people keyed as the
+    /// environment's, `workos:<client id>`, the name they had before
+    /// sign-in was OpenID Connect, which Pipes reads them by. The one
+    /// place a WorkOS deployment's sign-in is spelled out.
+    pub fn authkit(issuer: &str, client_id: &str, client_secret: &str, workos_client: &str) -> OidcVars {
+        assert!(!workos_client.is_empty() && client_id != workos_client, "an OAuth application is a client of its own, not the environment's");
+        OidcVars {
+            issuer: issuer.to_string(),
+            client_id: client_id.to_string(),
+            client_secret: Some(client_secret.to_string()),
+            scopes: None,
+            claims: None,
+            auth: Some("client_secret_post".into()),
+            keyed_as: Some(format!("workos:{workos_client}")),
+        }
+    }
+
+    /// Its Worker variables, its secret apart (`client_secret`).
+    pub fn vars(&self) -> Vec<(&'static str, &str)> {
+        let mut vars = vec![("FRAGMENT_OIDC_ISSUER", self.issuer.as_str()), ("FRAGMENT_OIDC_CLIENT_ID", self.client_id.as_str())];
+        for (k, v) in [("FRAGMENT_OIDC_SCOPES", &self.scopes), ("FRAGMENT_OIDC_CLAIMS", &self.claims), ("FRAGMENT_OIDC_AUTH", &self.auth), ("FRAGMENT_OIDC_KEYED_AS", &self.keyed_as)] {
+            if let Some(v) = v {
+                vars.push((k, v.as_str()));
+            }
+        }
+        vars
+    }
+}
+
+/// A WorkOS environment as the cell reads it: Pipes'.
 pub struct WorkOsVars {
     pub client_id: String,
     pub api_key: String,
@@ -451,12 +487,9 @@ impl Fleet {
             }
         }
         if let Some(o) = &self.oidc {
-            vars.push(("FRAGMENT_OIDC_ISSUER", o.issuer.as_str()));
-            vars.push(("FRAGMENT_OIDC_CLIENT_ID", o.client_id.as_str()));
-            for (k, v) in [("FRAGMENT_OIDC_CLIENT_SECRET", &o.client_secret), ("FRAGMENT_OIDC_SCOPES", &o.scopes), ("FRAGMENT_OIDC_CLAIMS", &o.claims), ("FRAGMENT_OIDC_AUTH", &o.auth)] {
-                if let Some(v) = v {
-                    vars.push((k, v.as_str()));
-                }
+            vars.extend(o.vars());
+            if let Some(secret) = &o.client_secret {
+                vars.push(("FRAGMENT_OIDC_CLIENT_SECRET", secret.as_str()));
             }
         }
         if let Some(p) = &self.platform_url {

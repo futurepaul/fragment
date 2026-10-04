@@ -128,7 +128,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     // connections (decisions 22 and 37): every provider the deployment
     // offers, its kind and the person's state there
     if s.oidc_signin() {
-        s.skip("the shell's connections", "they are WorkOS Pipes', whose people sign in through WorkOS; this run signs people in with OpenID Connect");
+        s.skip("the shell's connections", "they are WorkOS Pipes', whose people sign in through WorkOS AuthKit; this run signs people in through the strict OpenID Connect fake");
     } else {
         let status = |r: &Reply| r.body["providers"].as_array().and_then(|l| l.iter().find(|c| c["provider"] == crate::SWAP_CONNECTION)).map(|c| c["state"].clone());
         let r = shell(api, &session, "GET", "/api/connections", None, &[])?;
