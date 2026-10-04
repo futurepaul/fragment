@@ -9,11 +9,13 @@
 //! its file (`CODESTORAGE_PRIVATE_KEY_FILE`: secrets are files read by
 //! path). macrofiche is `MACROFICHE_BIN`.
 //!
-//! macrofiche's command line is written against its docs/contract.md as it
-//! stood on 2026-10-03, before it had a binary: the org and its public key
-//! (SPKI PEM, the contract's section 3 and question 7), a data directory,
-//! and a loopback port. `macrofiche_command` is the one place that shape
-//! lives.
+//! macrofiche's configuration is written against its docs/design.md as it
+//! stood on 2026-10-03, before it had a binary: a config file naming its
+//! state directory, its listener, and each org with its public keys (SPKI
+//! PEM by file; design.md, the contract's question 7). It registers no
+//! per-repo webhook (question 2), so none is configured: the cell's pins
+//! move by `refresh` and the poll. `macrofiche_config` and
+//! `macrofiche_command` are the one place that shape lives.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -122,18 +124,21 @@ pub struct MacroficheOptions {
     pub log_dir: PathBuf,
 }
 
-/// macrofiche's command line for `opts`, the org's public key at `public`.
-/// Provisional (the module's comment): the contract names what macrofiche
-/// needs, not its flags.
-fn macrofiche_command(bin: &Path, opts: &MacroficheOptions, public: &Path) -> Command {
+/// macrofiche's config for `opts`, the org's public key at `public`.
+/// Provisional (the module's comment): its design names what the file
+/// holds, not yet its keys.
+fn macrofiche_config(opts: &MacroficheOptions, public: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "listen": format!("127.0.0.1:{}", opts.port),
+        "state_dir": opts.dir.join("state"),
+        "orgs": [{ "name": opts.org, "keys": [{ "pem_file": public }] }],
+    })
+}
+
+/// macrofiche's command line, its config at `config`.
+fn macrofiche_command(bin: &Path, config: &Path) -> Command {
     let mut cmd = Command::new(bin);
-    cmd.arg("serve")
-        .arg("--data")
-        .arg(&opts.dir)
-        .args(["--listen", &format!("127.0.0.1:{}", opts.port)])
-        .args(["--org", &opts.org])
-        .arg("--org-key")
-        .arg(public);
+    cmd.arg("serve").arg("--config").arg(config);
     cmd
 }
 
@@ -154,11 +159,13 @@ impl Macrofiche {
         let key = OrgKey::from_pem(&opts.key_pem).map_err(|e| anyhow::anyhow!("{e}"))?;
         let public = opts.dir.join(format!("{}.pub.pem", opts.org));
         fs::write(&public, key.public_pem())?;
+        let config = opts.dir.join("macrofiche.json");
+        fs::write(&config, serde_json::to_string_pretty(&macrofiche_config(opts, &public))?)?;
         let log = opts.log_dir.join(format!("macrofiche-{}.log", opts.port));
         let out = fs::OpenOptions::new().create(true).append(true).open(&log).with_context(|| format!("open {}", log.display()))?;
         // in the caller's process group, so the Ctrl-C that stops `xtask
         // dev` stops it too; its git children are its own to end
-        let mut cmd = macrofiche_command(bin, opts, &public);
+        let mut cmd = macrofiche_command(bin, &config);
         cmd.stdin(Stdio::null()).stdout(out.try_clone()?).stderr(out);
         let child = cmd.spawn().with_context(|| format!("start {}", bin.display()))?;
         let url = format!("http://127.0.0.1:{}", opts.port);
@@ -238,15 +245,24 @@ mod tests {
         }
     }
 
-    /// Goal: macrofiche is told its org, its data, its port and the org's
-    /// public half, never the private key. Method: the command it is
-    /// started with, read back.
+    /// Goal: macrofiche is told its state, its port, and its org with the
+    /// org's public half, never the private key. Method: the config and
+    /// the command it is started with, read back.
     #[test]
     fn macrofiche_is_given_the_public_half_alone() {
         let opts = MacroficheOptions { dir: PathBuf::from("/tmp/mf"), port: 9101, org: "fragment-e2e".into(), key_pem: key(), log_dir: PathBuf::from("/tmp") };
-        let cmd = macrofiche_command(Path::new("/bin/macrofiche"), &opts, Path::new("/tmp/mf/fragment-e2e.pub.pem"));
+        let config = macrofiche_config(&opts, Path::new("/tmp/mf/fragment-e2e.pub.pem"));
+        assert_eq!(
+            config,
+            serde_json::json!({
+                "listen": "127.0.0.1:9101",
+                "state_dir": "/tmp/mf/state",
+                "orgs": [{ "name": "fragment-e2e", "keys": [{ "pem_file": "/tmp/mf/fragment-e2e.pub.pem" }] }],
+            })
+        );
+        assert!(!config.to_string().contains("PRIVATE"), "{config}");
+        let cmd = macrofiche_command(Path::new("/bin/macrofiche"), Path::new("/tmp/mf/macrofiche.json"));
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(args, ["serve", "--data", "/tmp/mf", "--listen", "127.0.0.1:9101", "--org", "fragment-e2e", "--org-key", "/tmp/mf/fragment-e2e.pub.pem"]);
-        assert!(!args.iter().any(|a| a.contains("PRIVATE")), "{args:?}");
+        assert_eq!(args, ["serve", "--config", "/tmp/mf/macrofiche.json"]);
     }
 }
