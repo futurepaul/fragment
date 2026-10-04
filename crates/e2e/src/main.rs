@@ -612,14 +612,19 @@ impl Suite {
         r.body
     }
 
-    /// Polls `f` until it holds or `timeout` passes.
+    /// Polls `f` until it holds or `timeout` passes. One that runs out says
+    /// so, with its place: a wait whose limit is its usual length (a check
+    /// that something never happens aside) costs every run that limit.
+    #[track_caller]
     pub fn eventually(&self, timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
+        let at = std::panic::Location::caller();
         let t0 = Instant::now();
         loop {
             if f() {
                 return true;
             }
             if t0.elapsed() > timeout {
+                println!("      (a wait ran out its {timeout:.0?} at {}:{})", at.file(), at.line());
                 return false;
             }
             std::thread::sleep(Duration::from_millis(100));

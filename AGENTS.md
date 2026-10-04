@@ -112,6 +112,8 @@ prebuilt bundle is in the debt ledger).
   fakes, the node, the whole deployment, levers, local Docker, Chrome,
   computers, models, two sites), and that alone chooses the hosted set.
   The node's test levers (`/api/test/*`) take a secret made per run.
+  A wait that runs out its limit prints `(a wait ran out its …s at
+  <file>:<line>)`: one that does so on a passing run costs every run.
 - `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
   shards CI runs, each on its own runner with its own build and node
   (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
