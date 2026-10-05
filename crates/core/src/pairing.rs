@@ -66,6 +66,9 @@ pub const NODES_MAX: u64 = 8;
 pub const ROWS_MAX: u64 = 32;
 /// A node's name, as its owner reads it in settings (the machine's name).
 pub const NAME_BYTES_MAX: usize = 48;
+/// The end of a node's id people are shown beside its name (`id_suffix`),
+/// to tell apart two named alike before names were each person's own.
+pub const ID_SUFFIX_CHARS: usize = 6;
 
 /// Why a step of pairing is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +93,8 @@ pub enum PairError {
     NotYours(String),
     /// The node was revoked by its owner: it dials nothing, runs nothing.
     Revoked(String),
+    /// The person has a live node by this name already (its id).
+    NameTaken { name: String, id: String },
 }
 
 impl fmt::Display for PairError {
@@ -105,6 +110,11 @@ impl fmt::Display for PairError {
             PairError::Full(why) => write!(f, "{why}"),
             PairError::NotYours(id) => write!(f, "no node of yours is {id}"),
             PairError::Revoked(id) => write!(f, "the node {id} was revoked by its owner: pair the machine again to use it"),
+            PairError::NameTaken { name, id } => write!(
+                f,
+                "you have a node named {name:?} already (…{} in settings): revoke that one in settings first, or pair this machine under another name, with `sandcastle-node pair <platform> --name <name> …`",
+                id_suffix(id)
+            ),
         }
     }
 }
@@ -117,6 +127,20 @@ pub fn paired_id(random: [u8; PAIRED_HEX / 2]) -> String {
 /// Whether `id` is a person's own node's.
 pub fn is_paired_id(id: &str) -> bool {
     id.strip_prefix(PAIRED_PREFIX).is_some_and(|h| h.len() == PAIRED_HEX && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+}
+
+/// The last `ID_SUFFIX_CHARS` of a node's id (of its random hex, for a
+/// paired one), shown beside its name in settings (the shell's
+/// `nodeSuffix` takes the same).
+pub fn id_suffix(id: &str) -> &str {
+    let at = id.char_indices().rev().nth(ID_SUFFIX_CHARS - 1).map_or(0, |(i, _)| i);
+    &id[at..]
+}
+
+/// Whether two node names read as one name to a person: the same, whatever
+/// their case or the spaces around them.
+pub fn same_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 
 /// A user code, `XXXX-XXXX` of `USER_CODE_ALPHABET`, from 8 random bytes:
@@ -221,10 +245,19 @@ pub struct Holder {
     pub misses: u64,
 }
 
+/// One of a person's live (unrevoked) nodes, as approving another reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveNode {
+    pub id: String,
+    pub name: String,
+}
+
 /// Whether the pairing `found` under a code a person entered may be
 /// shown and approved by them. A miss (no pairing under the code) is
-/// theirs to count: past `MISSES_MAX`, nothing is looked up at all.
-pub fn approvable(byoc: Byoc, found: Option<&Pending>, holder: Holder, now: i64) -> Result<(), PairError> {
+/// theirs to count: past `MISSES_MAX`, nothing is looked up at all. A
+/// node named as one of their `live` nodes is (`same_name`) is refused, so
+/// settings never list two alike; a revoked node's name is free again.
+pub fn approvable(byoc: Byoc, found: Option<&Pending>, holder: Holder, live: &[LiveNode], now: i64) -> Result<(), PairError> {
     if byoc == Byoc::Off {
         return Err(PairError::ByocOff);
     }
@@ -237,6 +270,9 @@ pub fn approvable(byoc: Byoc, found: Option<&Pending>, holder: Holder, now: i64)
     }
     if now >= p.expires_at {
         return Err(PairError::Expired);
+    }
+    if let Some(n) = live.iter().find(|n| same_name(&n.name, &p.name)) {
+        return Err(PairError::NameTaken { name: p.name.clone(), id: n.id.clone() });
     }
     if holder.live >= NODES_MAX {
         return Err(PairError::Full(format!("you hold {NODES_MAX} nodes: revoke one in settings first")));
@@ -384,7 +420,7 @@ mod tests {
     fn a_pairing_starts_is_approved_and_polled() {
         let p = started();
         assert_eq!((p.name.as_str(), p.arch, p.expires_at, p.interval_s), ("mac", Arch::Aarch64, T0 + PAIRING_TTL_MS, POLL_INTERVAL_S));
-        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), T0 + 1000), Ok(()));
+        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), &[], T0 + 1000), Ok(()));
         let (first, p) = poll(&p, T0 + 1000);
         assert_eq!(first, Polled::Pending { interval_s: POLL_INTERVAL_S });
         let (again, p) = poll(&p, T0 + 1000 + 5000);
@@ -402,9 +438,9 @@ mod tests {
         assert!(matches!(start(Byoc::On, Load::default(), &"m".repeat(NAME_BYTES_MAX + 1), "aarch64", [0; 8], T0), Err(PairError::Invalid(_))));
         assert!(matches!(start(Byoc::On, Load::default(), "a\nb", "aarch64", [0; 8], T0), Err(PairError::Invalid(_))));
         assert!(start(Byoc::On, Load::default(), "mac", "riscv64", [0; 8], T0).unwrap_err().to_string().contains("x86_64 or aarch64"));
-        assert_eq!(approvable(Byoc::On, None, Holder::default(), T0), Err(PairError::NoSuchCode));
+        assert_eq!(approvable(Byoc::On, None, Holder::default(), &[], T0), Err(PairError::NoSuchCode));
         assert_eq!(start(Byoc::Off, Load::default(), "mac", "aarch64", [0; 8], T0), Err(PairError::ByocOff));
-        assert_eq!(approvable(Byoc::Off, Some(&started()), Holder::default(), T0), Err(PairError::ByocOff));
+        assert_eq!(approvable(Byoc::Off, Some(&started()), Holder::default(), &[], T0), Err(PairError::ByocOff));
         assert!(PairError::ByocOff.to_string().contains("FRAGMENT_BYOC is off"));
     }
 
@@ -414,8 +450,8 @@ mod tests {
     fn an_expired_code() {
         let p = started();
         let late = T0 + PAIRING_TTL_MS;
-        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), late), Err(PairError::Expired));
-        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), late - 1), Ok(()));
+        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), &[], late), Err(PairError::Expired));
+        assert_eq!(approvable(Byoc::On, Some(&p), Holder::default(), &[], late - 1), Ok(()));
         assert_eq!(poll(&p, late).0, Polled::Expired);
     }
 
@@ -426,8 +462,37 @@ mod tests {
     #[test]
     fn a_used_code_is_not_approved_again() {
         let approved = Pending { node: Some(paired_id([2; 8])), ..started() };
-        assert_eq!(approvable(Byoc::On, Some(&approved), Holder::default(), T0), Err(PairError::Used));
+        assert_eq!(approvable(Byoc::On, Some(&approved), Holder::default(), &[], T0), Err(PairError::Used));
         assert_eq!(poll(&approved, T0).0, poll(&approved, T0 + 1).0);
+    }
+
+    // Goal (names): a person's live nodes are named apart. A node named as
+    // one of theirs (whatever its case, or the spaces around it) is
+    // refused, naming the one it would be confused with by the end of its
+    // id, and saying how to go on: revoke that one, or `--name`. Another
+    // name passes, and so does the name of a node they revoked (the
+    // registry passes only live ones). The suffix is the id's end.
+    #[test]
+    fn a_persons_live_nodes_are_named_apart() {
+        let mac = LiveNode { id: paired_id([0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89]), name: "mac".into() };
+        let one = Holder { live: 1, rows: 1, misses: 0 };
+        let p = started();
+        assert_eq!(p.name, "mac");
+        let taken = approvable(Byoc::On, Some(&p), one, std::slice::from_ref(&mac), T0).unwrap_err();
+        assert_eq!(taken, PairError::NameTaken { name: "mac".into(), id: mac.id.clone() });
+        let said = taken.to_string();
+        assert!(said.contains("named \"mac\" already (…456789 in settings)"), "{said}");
+        assert!(said.contains("revoke that one") && said.contains("--name"), "{said}");
+        for alike in [" MAC", "Mac ", "mac"] {
+            let q = Pending { name: alike.to_string(), ..started() };
+            assert!(matches!(approvable(Byoc::On, Some(&q), one, std::slice::from_ref(&mac), T0), Err(PairError::NameTaken { .. })), "{alike:?}");
+        }
+        let other = Pending { name: "mac mini".into(), ..started() };
+        assert_eq!(approvable(Byoc::On, Some(&other), one, std::slice::from_ref(&mac), T0), Ok(()));
+        assert_eq!(approvable(Byoc::On, Some(&p), Holder { live: 0, rows: 1, misses: 0 }, &[], T0), Ok(()), "a revoked node's name is free");
+        assert_eq!(id_suffix(&mac.id), "456789");
+        assert_eq!((id_suffix("box"), id_suffix("")), ("box", ""), "a short id is all suffix");
+        assert!(same_name(" Mac\t", "mAC") && !same_name("mac", "mac2"));
     }
 
     // Goal (revoke): only its owner revokes a node, once (again changes
@@ -480,10 +545,10 @@ mod tests {
         }
         assert_eq!(q.interval_s, POLL_INTERVAL_MAX_S);
         let fresh = started();
-        assert_eq!(approvable(Byoc::On, Some(&fresh), Holder { misses: MISSES_MAX, ..Holder::default() }, T0), Err(PairError::Misses));
-        assert_eq!(approvable(Byoc::On, None, Holder { misses: MISSES_MAX, ..Holder::default() }, T0), Err(PairError::Misses), "past the bound, no lookup at all");
-        assert_eq!(approvable(Byoc::On, Some(&fresh), Holder { misses: MISSES_MAX - 1, ..Holder::default() }, T0), Ok(()));
-        assert!(matches!(approvable(Byoc::On, Some(&fresh), Holder { live: NODES_MAX, ..Holder::default() }, T0), Err(PairError::Full(_))));
-        assert!(matches!(approvable(Byoc::On, Some(&fresh), Holder { live: 1, rows: ROWS_MAX, misses: 0 }, T0), Err(PairError::Full(_))));
+        assert_eq!(approvable(Byoc::On, Some(&fresh), Holder { misses: MISSES_MAX, ..Holder::default() }, &[], T0), Err(PairError::Misses));
+        assert_eq!(approvable(Byoc::On, None, Holder { misses: MISSES_MAX, ..Holder::default() }, &[], T0), Err(PairError::Misses), "past the bound, no lookup at all");
+        assert_eq!(approvable(Byoc::On, Some(&fresh), Holder { misses: MISSES_MAX - 1, ..Holder::default() }, &[], T0), Ok(()));
+        assert!(matches!(approvable(Byoc::On, Some(&fresh), Holder { live: NODES_MAX, ..Holder::default() }, &[], T0), Err(PairError::Full(_))));
+        assert!(matches!(approvable(Byoc::On, Some(&fresh), Holder { live: 1, rows: ROWS_MAX, misses: 0 }, &[], T0), Err(PairError::Full(_))));
     }
 }

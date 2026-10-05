@@ -201,7 +201,8 @@ Tables:
 - `entries (ref PRIMARY KEY, kind, at_ms, …)`, `batches (id PRIMARY KEY,
   digest, answer, at_ms)`, `commands (id PRIMARY KEY, command, at_ms)`;
 - `spend (month, fragment, micros, PRIMARY KEY (month, fragment))`,
-  `caps (fragment PRIMARY KEY, micros)`.
+  `caps (fragment PRIMARY KEY, micros)`, `own_hardware (month PRIMARY
+  KEY, list_micros)`.
 
 Inner routes (platform code only, through the DO's stub):
 
@@ -231,7 +232,8 @@ Public routes (a hard cut of `/api/budget`; docs/api.md, Ledger):
   `cap:<fragment>:<id>`); `fragment cap <name> <usd>|default`.
 - Operators: `POST /api/ledger/<user>/grant|plan|seat|overdraft` with
   proto's bodies, their ids kept as `<kind>:<id>`; `fragment ledger
-  grant <user> <usd> --why <text>`.
+  grant <user> <usd> --why <text>`. `GET /api/ledger/<user>` reads
+  anyone's status (`fragment ledger show <user>`).
 
 ## How each meter reaches it
 
@@ -275,7 +277,14 @@ mark sends the same batch again, which answers as before.
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
   ledger waives an always-on seat's awake time; no wake starts when
-  `may_spend(wake)` refuses.
+  `may_spend(wake)` refuses. A computer on its owner's own node (bring
+  your own computer: docs/self-host.md, seams 2 and 10) is own hardware:
+  each row names the node (`own_node`), and the ledger keeps it at its
+  list price, charges nothing, and counts the list price in the month's
+  own-hardware total, which the status shows as points (`price::points`:
+  a point is $0.001 at list, rounded up). Its wake goes on past a refusal
+  for want of credit (`Refused::want_of_credit`); a guest's or a canceled
+  seat's stands.
 - **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
   SQLite (its own and its app facet's) and its blobs, and meters `bytes ×
   hours since the last sample` (`store:<fragment>@<incarnation>:<class>:<at>`)
