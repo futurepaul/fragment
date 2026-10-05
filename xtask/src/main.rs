@@ -68,7 +68,7 @@
 //! reaches it.
 
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
@@ -232,7 +232,7 @@ fn dev(args: &[String]) -> Result<()> {
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
     // on celld, which has no `browser` binding, the renderer shoots them
     let renderer = match celld {
-        true => Some(dev_renderer(&fleet)?),
+        true => Some(dev_renderer(&fleet, lan.as_ref().map(lan::Lan::renderer_defaults))?),
         false => None,
     };
     fleet.browser_url = renderer.as_ref().map(|(r, _)| r.url.clone());
@@ -327,14 +327,15 @@ fn dev(args: &[String]) -> Result<()> {
 /// origins alone, served on this box at the platform URL's port (the node,
 /// or an edge before it) unless `FRAGMENT_BROWSER_UPSTREAM` (`ip:port`)
 /// names where. `FRAGMENT_BROWSER_CA_FILE` names a private CA's PEM the
-/// browser trusts, for fragments on https under it. With it, what the
-/// banner says the browser is.
-fn dev_renderer(fleet: &devstack::Fleet) -> Result<(devstack::rendering::Rendering, String)> {
+/// browser trusts, for fragments on https under it. On the LAN (`lan`),
+/// each defaults to the front door's: its address and the root it serves
+/// under. With it, what the banner says the browser is.
+fn dev_renderer(fleet: &devstack::Fleet, lan: Option<(std::net::SocketAddr, PathBuf)>) -> Result<(devstack::rendering::Rendering, String)> {
     let suffix = fleet.host_suffix.as_deref().context("cards need fragments on hosts of their own (a host suffix)")?;
     let platform = fleet.platform_url.as_deref().context("cards need the platform's URL: its scheme and port are the fragments'")?;
     let upstream = match std::env::var("FRAGMENT_BROWSER_UPSTREAM") {
         Ok(u) => Some(u.parse().with_context(|| format!("FRAGMENT_BROWSER_UPSTREAM is ip:port, not {u:?}"))?),
-        Err(_) => None,
+        Err(_) => lan.as_ref().map(|(door, _)| *door),
     };
     let origins = devstack::rendering::Origins::of_platform(suffix, platform, upstream).map_err(anyhow::Error::msg)?;
     let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
@@ -342,7 +343,7 @@ fn dev_renderer(fleet: &devstack::Fleet) -> Result<(devstack::rendering::Renderi
         browser: browser.bin,
         state: devstack::repo_root().join(format!("target/devstack/renderer-{}", origins.port)),
         origins,
-        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(std::path::PathBuf::from),
+        ca_file: std::env::var_os("FRAGMENT_BROWSER_CA_FILE").map(PathBuf::from).or(lan.map(|(_, ca)| ca)),
         port: 0,
     };
     Ok((devstack::rendering::Rendering::start(opts)?, browser.version))
