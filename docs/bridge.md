@@ -90,7 +90,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's hold before every save; looked at before each claim's every try) |
 | `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
-| `BRIDGE_STATE_DIR` | `/data/bridge` | its state |
+| `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |

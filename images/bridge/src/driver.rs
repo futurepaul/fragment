@@ -221,6 +221,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     if !restore_gate(&cfg, stop.clone()).await {
         return Ok(());
     }
+    // its state's directory at once, and so `/data`, which on a first start
+    // the image makes (docs/computers.md, "Data and the restore gate"): a
+    // computer that has run no turn yet still has a `/data` to save, so its
+    // sleep saves rather than failing (and keeping it awake). Past the gate,
+    // never before: a restore swaps `/data` into place.
+    std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
     // its answer to the platform's holds, for its whole life (none claims yet)
