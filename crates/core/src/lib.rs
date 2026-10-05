@@ -26,6 +26,7 @@ pub mod media;
 pub mod models;
 pub mod npub;
 pub mod oidc;
+pub mod pairing;
 pub mod placement;
 pub mod price;
 pub mod ratelimit;

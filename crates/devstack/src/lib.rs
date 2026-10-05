@@ -409,6 +409,9 @@ pub struct Fleet {
     /// The runtime's own containers (Docker under `wrangler dev`): `false`
     /// when computers run on sandcastle nodes instead, or nowhere.
     pub containers: bool,
+    /// Whether its people may pair nodes of their own (`FRAGMENT_BYOC=on`;
+    /// docs/self-host.md, seam 2, Bring your own computer). Needs `nodes`.
+    pub byoc: bool,
     /// Where preview cards are shot when the runtime has no `BROWSER`
     /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering.rs;
     /// docs/self-host.md, seam 7).
@@ -597,6 +600,10 @@ impl Fleet {
         if let Some(m) = &self.model_upstream {
             vars.push(("FRAGMENT_MODEL_URL", m.url.as_str()));
             vars.push(("FRAGMENT_MODELS", m.models.as_str()));
+        }
+        if self.byoc {
+            anyhow::ensure!(self.nodes.is_some(), "FRAGMENT_BYOC=on needs the nodes' list (FRAGMENT_NODES_FILE): its images are what a person's own node runs");
+            vars.push(("FRAGMENT_BYOC", "on"));
         }
         if let Some(n) = &self.nodes {
             vars.push(("FRAGMENT_NODES", n.nodes.as_str()));

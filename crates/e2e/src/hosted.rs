@@ -252,6 +252,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         renderer: None,
         nodes: vec![],
         node_images: serde_json::Value::Null,
+        sandcastle: None,
+        byoc: false,
         image_tags: vec![],
         port: 0,
         run: crate::run_name(),

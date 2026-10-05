@@ -387,6 +387,10 @@ pub enum ErrorCode {
     /// 503: no node can take a new computer (each one down, full, or
     /// without its image); the message says why, node by node.
     NoNode,
+    /// 410: the person's own node a computer is placed on was revoked by
+    /// them (docs/self-host.md, seam 2, Bring your own computer): it runs
+    /// nothing again, and the computer stays placed there.
+    NodeRevoked,
 }
 
 impl ErrorCode {
@@ -406,7 +410,7 @@ impl ErrorCode {
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::NodeDown | ErrorCode::NoNode => 503,
-            ErrorCode::Moved => 410,
+            ErrorCode::Moved | ErrorCode::NodeRevoked => 410,
             ErrorCode::NotConnected => 403,
         }
     }
@@ -1403,6 +1407,7 @@ fn write_canonical(v: &Value, out: &mut String) {
 pub mod computer;
 pub mod ledger;
 pub mod live;
+pub mod nodes;
 
 #[cfg(test)]
 mod tests {

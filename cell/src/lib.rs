@@ -52,6 +52,7 @@ mod live;
 mod members;
 mod meter;
 mod models;
+mod nodes;
 mod oidc;
 mod ops;
 mod plane;
@@ -998,6 +999,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
+        // a person's own nodes: the page they approve one at (nodes.rs)
+        (_, ["nodes", "pair"]) => nodes::page(req, env, cfg, &url).await,
         (_, ["share" | "join", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
@@ -1078,6 +1081,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
             connections::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+        }
+        (_, ["api", "nodes", rest @ ..]) => {
+            let rest = rest.to_vec();
+            nodes::api(req, env, cfg, &url, &rest).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

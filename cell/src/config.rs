@@ -237,14 +237,22 @@ pub struct ModelUpstream {
 /// `FRAGMENT_MODEL_URL` with `FRAGMENT_MODELS`, a JSON object of catalog
 /// ids to the server's names. A URL without a map, a map naming no model,
 /// or a malformed one is refused at the first request.
-/// The nodes computers are placed on (`FRAGMENT_NODES`): a deployment
-/// whose list is malformed, or that still names one node the way the spike
-/// first did, is refused at its first request.
+/// The nodes computers are placed on (`FRAGMENT_NODES`), and whether its
+/// people may pair their own (`FRAGMENT_BYOC`, `placement::Byoc`): a
+/// deployment whose list is malformed, that still names one node the way
+/// the spike first did, or that pairs people's nodes with no list (whose
+/// images they run), is refused at its first request.
 fn nodes(env: &Env, computer_image: Option<&str>) -> Option<fragment_core::placement::Nodes> {
     for gone in ["FRAGMENT_NODE_URL", "FRAGMENT_NODE_SECRET", "FRAGMENT_NODE_IMAGES"] {
         assert!(var(env, gone).is_none(), "{gone} is gone: FRAGMENT_NODES lists the nodes, each one's secret in FRAGMENT_NODE_SECRET_<ID> (docs/self-host.md, seam 2)");
     }
-    let nodes = fragment_core::placement::Nodes::parse(&var(env, "FRAGMENT_NODES")?).unwrap_or_else(|e| panic!("FRAGMENT_NODES: {e}"));
+    // whether its people may pair nodes of their own (BYOC: off unless it says on)
+    let byoc = fragment_core::placement::Byoc::parse(var(env, "FRAGMENT_BYOC").as_deref()).unwrap_or_else(|e| panic!("{e}"));
+    let Some(list) = var(env, "FRAGMENT_NODES") else {
+        assert!(byoc == fragment_core::placement::Byoc::Off, "FRAGMENT_BYOC=on needs FRAGMENT_NODES: its images, by architecture, are what a person's own node runs (docs/self-host.md, seam 2)");
+        return None;
+    };
+    let nodes = fragment_core::placement::Nodes::parse(&list, byoc).unwrap_or_else(|e| panic!("FRAGMENT_NODES: {e}"));
     if let Some(image) = computer_image {
         assert!(nodes.image_names().any(|n| n == image), "FRAGMENT_COMPUTER_IMAGE {image:?} is none of FRAGMENT_NODES' images");
     }
