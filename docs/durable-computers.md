@@ -57,7 +57,7 @@ file is the newer word, and decision 18 points here.
   restore puts the copies back and `quick_check`s each before a turn.
   Measured in Docker: none of 54 held databases tore (none of 54 hot ones
   either: the hold makes rarely into never). docs/computers.md.
-- **Step 2, the seam (#PR3).** `/data/work` is the tools' (Hermes'
+- **Step 2, the seam (#149).** `/data/work` is the tools' (Hermes'
   terminal's cwd and its browser's profile, per agent), saved as a
   record of its own; the rest of `/data` is Hermes' home and the bridge's
   state, saved beside it, restored together.
@@ -105,8 +105,8 @@ Sprite workspaces that paused warm (docs/finite-next-lessons.md). Five
 steps, each its own pull request with its tests, each leaving master
 whole:
 
-1. **A+ (P2, reframed).** *Built (#147, #148; Litestream's cut,
-   #PR4), with two refinements: the copy is SQLite's online backup from
+1. **A+ (P2, reframed).** *Built (#147, #148; Litestream still to
+   cut), with two refinements: the copy is SQLite's online backup from
    Rust, since Hermes' own covers a fixed list of files and restarts a
    busy copy; and the save leaves out exactly what the image names as
    copied, never `*.db`, so a database Hermes makes after the copy is kept
@@ -133,7 +133,7 @@ whole:
    sessions, profiles) and a work directory for everything its tools
    write (projects, scratch files, the browser profile), each saved on
    its own. Nothing moves yet; the split is what lets each live
-   elsewhere later. *Built (#PR3): the platform names no runtime, so its
+   elsewhere later. *Built (#149): the platform names no runtime, so its
    contract is `/data/work` (the tools') and the rest of `/data` (the
    guest's own: for ours, Hermes' home at `/data/hermes` and the bridge's
    state), two records a save.*
