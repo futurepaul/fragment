@@ -182,6 +182,28 @@ speaking Cloudflare's APIs) returns once this product works.
     - Missing: image editing (FLUX.1 [schnell] is text to image), other
       vendors' models in the model council, and operator keys or
       connections a deployment does not offer (the README's table).
+
+    Status, 2026-10-05 (branch `claude/agents-know-the-platform`; Paul, on
+    p5 before a demo: the agent knew nothing of fragment or of its Google
+    connection):
+    - Built: a platform skill, `fragment`, in every profile of our Hermes
+      image whatever the skills fragment holds: the image's CLI's own
+      `fragment skill` after a page of the computer's (acting for its
+      owner, the apps and brain skills, connections and
+      `GOOGLE_OAUTH_ACCESS_TOKEN`, its desktop), written at the image's
+      build, named after the managed set in `skills.external_dirs` so a
+      managed or own `fragment` wins (docs/computers.md). The shell makes
+      a skills fragment, once, for a person with an agent and none (set up
+      before 2026-10-03), and an awake computer looks for one every minute
+      while its owner has none.
+    - Evidence: hermes-boot's tests (the platform skill with no skills
+      fragment, a managed one shadowing it); shell-ui (the backfill); the
+      real-Hermes lane (with no skills fragment Hermes lists `fragment` in
+      its model's skills index, and a skills fragment made while awake is
+      installed within the minute: 46 and 50 s). Sections shell, shell-ui,
+      computers and hermes: 257 passed, 0 failed.
+    - Not yet: the same on a preview (the hosted lane), and the platform
+      skill in the shell's Skills list.
 18. **Backups are a computer feature.** `/data` is saved with
     `DirectoryBackup` every few minutes while written. A sleep is driven
     by the Computer DO, in this order:

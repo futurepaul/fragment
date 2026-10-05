@@ -490,6 +490,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
+    backfill_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     b.color_scheme(&page, "dark")?;
@@ -617,6 +618,45 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// The person's own skills fragments (kind `skills`, theirs), as their list says.
+fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
+    let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
+}
+
+/// The skills fragment backfilled (decision 17): a person whose agents were
+/// made before setup made one (2026-10-03) has an agent and no skills
+/// fragment. Valid: the shell makes one as it loads, from the blessed
+/// template, before settings reads it. Replay: loaded again, it makes no
+/// second. Method: the person's own is deleted, then the shell reloaded.
+fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let before = own_skills(api, session)?;
+    let Some(old) = before.first().cloned() else {
+        s.ok("the shell made the person's skills fragment at setup", false, json!(before));
+        return Ok(());
+    };
+    let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
+    let gone = own_skills(api, session)?.is_empty();
+    s.ok("with it deleted, the person has an agent and no skills fragment, as people set up before 2026-10-03 do", r.status == 200 && gone, &r);
+    b.reload(page)?;
+    let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
+    let now = own_skills(api, session)?;
+    let name = now.first().cloned().unwrap_or_default();
+    let manifest = shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[])?;
+    let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
+    s.ok(
+        "the shell, loaded, makes them one from the blessed template, silently, and their settings list it",
+        made && manifest.body["template"] == "skills" && listed,
+        json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
+    );
+    b.reload(page)?;
+    b.until(page, "!!document.getElementById('settings-skills')", wait);
+    let again = own_skills(api, session)?;
+    s.ok("loaded again, it makes no second", again == now, json!(again));
     Ok(())
 }
 

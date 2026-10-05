@@ -1,17 +1,25 @@
-//! The managed skills (decision 17) for every profile. They are the
-//! owner's skills fragment's `skills/`: the blessed `skills` template's
-//! release, beneath any file of the fragment's own at the same path
-//! (docs/computers.md). The boot installs them read-only at `MANAGED_DIR`,
-//! which every profile names in `skills.external_dirs` (hermes.rs). Hermes
-//! scans a profile's own `skills/` (its agent fragment's, synced: sync.rs)
-//! before its external dirs, and the first skill of a name wins, so an
-//! agent's own skill wins over a managed one of the same name.
+//! The skills every profile finds beyond its own (docs/computers.md):
 //!
-//! The owner's skills fragment is found as the computer's first agent
-//! acting for its owner (`for`): of the owner's fragments, the one of kind
-//! `skills` under the owner's username. None means no managed skills, and
-//! what was installed goes: the skills a person's settings list are their
-//! agents' (the shell reads the same fragment).
+//! - The managed skills (decision 17): the owner's skills fragment's
+//!   `skills/`, the blessed `skills` template's release beneath any file of
+//!   the fragment's own at the same path. The boot installs them read-only
+//!   at `MANAGED_DIR`. The owner's skills fragment is found as the
+//!   computer's first agent acting for its owner (`for`): of the owner's
+//!   fragments, the one of kind `skills` under the owner's username. None
+//!   means no managed skills, and what was installed goes: the skills a
+//!   person's settings list are their agents' (the shell reads the same
+//!   fragment).
+//! - The platform skill, `fragment`, whatever the skills fragment holds: the
+//!   `fragment` CLI's own skill (`fragment skill`) after a page of what the
+//!   computer adds (`computer.md`), written at the image's build into
+//!   `PLATFORM_DIR` (`hermes-boot build-info`), so it is the binary's in the
+//!   image and nothing at a boot.
+//!
+//! Every profile names both in `skills.external_dirs` (hermes.rs), in
+//! `EXTERNAL_DIRS`' order. Hermes scans a profile's own `skills/` (its agent
+//! fragment's, synced: sync.rs) before its external dirs, and the first
+//! skill of a name wins: an agent's own skill wins over a managed one, and
+//! either over the platform skill.
 //!
 //! The plan is a pure function (`pick`, `plan`); `install` carries it out.
 
@@ -42,6 +50,61 @@ pub const FETCH_AT_ONCE: usize = 8;
 /// A path under `MANAGED_DIR` is at most this long, and this deep.
 const PATH_MAX: usize = 300;
 const DEPTH_MAX: usize = 8;
+/// While the owner has no skills fragment, it is looked for this often
+/// rather than every `SKILLS_EVERY_MS` (main.rs): the shell makes one for a
+/// person who lacks it (shell.js, `backfillSkills`), and their agents have
+/// it within about this.
+pub const ABSENT_EVERY_MS: u64 = 60_000;
+
+/// Where the platform skill is: in the image, read-only to the agents.
+pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
+/// Its name, which a managed or an agent's own skill of the same name
+/// shadows; and its path under `PLATFORM_DIR` (`<category>/<name>/`).
+pub const PLATFORM_NAME: &str = "fragment";
+pub const PLATFORM_PATH: &str = "platform/fragment/SKILL.md";
+/// The external dirs every profile names, in Hermes' order: the managed set
+/// first, so a managed `fragment` wins over the platform's.
+pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_DIR];
+/// The page the computer adds to the CLI's skill.
+const COMPUTER_PAGE: &str = include_str!("computer.md");
+/// The platform skill's description, which Hermes lists in every turn's
+/// prompt (its skills index): what makes an agent load it.
+const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
+/// The platform skill is a page or two, not a manual.
+pub const PLATFORM_MAX_BYTES: usize = 16 * 1024;
+
+/// The platform skill: `cli_skill` (what `fragment skill` prints, a skill
+/// named `fragment`) with the computer's page before its body, and the
+/// computer's description. Refused unless the CLI's skill is one named
+/// `fragment`, and the whole is within `PLATFORM_MAX_BYTES`.
+pub fn platform_skill(cli_skill: &str) -> Result<String, String> {
+    let (front, body) = cli_skill.strip_prefix("---\n").and_then(|rest| rest.split_once("\n---\n")).ok_or("`fragment skill` printed no skill: no frontmatter")?;
+    if !front.lines().any(|l| l.trim_end() == format!("name: {PLATFORM_NAME}")) {
+        return Err(format!("`fragment skill` printed a skill not named {PLATFORM_NAME}: {front:?}"));
+    }
+    let description = serde_json::to_string(PLATFORM_DESCRIPTION).expect("a string serializes");
+    let skill = format!("---\nname: {PLATFORM_NAME}\ndescription: {description}\n---\n\n{}\n\n{}\n", COMPUTER_PAGE.trim(), body.trim());
+    if skill.len() > PLATFORM_MAX_BYTES {
+        return Err(format!("the platform skill is {} bytes, past {PLATFORM_MAX_BYTES}", skill.len()));
+    }
+    Ok(skill)
+}
+
+/// Writes the platform skill whole under `dir` (the image's build: root's,
+/// readable by all).
+pub fn write_platform_skill(dir: &Path, skill: &str) -> std::io::Result<()> {
+    write_file(dir, PLATFORM_PATH, skill.as_bytes())
+}
+
+/// When the next install of the managed skills is due after one that found
+/// the owner's skills fragment (`Some(true)`), found none (`Some(false)`),
+/// or did not answer (`None`): sooner while there is none.
+pub fn next_install_ms(found: Option<bool>, every_ms: u64) -> u64 {
+    match found {
+        Some(false) => every_ms.min(ABSENT_EVERY_MS),
+        Some(true) | None => every_ms,
+    }
+}
 
 /// The owner's skills fragment among the fragments the agent reaches acting
 /// for them: kind `skills`, named under the owner's username (an agent
@@ -346,7 +409,7 @@ mod tests {
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
         files.lock().unwrap().insert("fragment.json".into(), ("c1".into(), b"{}".to_vec()));
         let down = Arc::new(Mutex::new(false));
-        let (addr, _stop) = fake::start(files.clone(), down.clone()).await;
+        let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
         let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
@@ -379,8 +442,132 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Hermes' rule for a profile's skills (its `_find_all_skills`): each
+    /// dir in order, each dir's `SKILL.md`s by path, the first of a
+    /// frontmatter name winning. Each name → the file that is its skill.
+    fn hermes_finds(dirs: &[PathBuf]) -> BTreeMap<String, PathBuf> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            for e in entries.filter_map(Result::ok) {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.file_name().is_some_and(|n| n == "SKILL.md") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut found = BTreeMap::new();
+        for dir in dirs {
+            let mut files = vec![];
+            walk(dir, &mut files);
+            files.sort();
+            for f in files {
+                let text = std::fs::read_to_string(&f).unwrap();
+                let front = text.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).map(|(f, _)| f).unwrap_or("");
+                let name = front.lines().find_map(|l| l.strip_prefix("name: ")).map(str::to_string).unwrap_or_else(|| f.parent().unwrap().file_name().unwrap().to_string_lossy().into());
+                found.entry(name).or_insert(f);
+            }
+        }
+        found
+    }
+
+    /// Hermes' skill guard: a skill whose text holds one of these is
+    /// flagged as a prompt injection (its `_INJECTION_PATTERNS`).
+    const HERMES_INJECTION_PATTERNS: [&str; 9] = ["ignore previous instructions", "ignore all previous", "you are now", "disregard your", "forget your instructions", "new instructions:", "system prompt:", "<system>", "]]>"];
+
+    /// Valid: the platform skill is named `fragment`, says what the
+    /// computer adds before the CLI's own skill, whole, and reads to Hermes
+    /// as a skill (one frontmatter, a one-line description it lists, nothing
+    /// its guard flags or its preprocessing would run). Invalid: a CLI skill
+    /// with no frontmatter, or another name, is refused.
+    #[test]
+    fn the_platform_skill_is_the_clis_after_the_computers_page() {
+        let cli = include_str!("../../../../cli/SKILL.md");
+        let skill = platform_skill(cli).unwrap();
+        assert!(skill.starts_with("---\nname: fragment\ndescription: \"You are an agent on a Fragment computer"), "{skill}");
+        let (front, body) = skill.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).unwrap();
+        assert_eq!(front.lines().count(), 2, "a name and a description: {front}");
+        let cli_body = cli.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).unwrap().1.trim();
+        assert!(body.contains(cli_body), "the CLI's skill, whole");
+        let page = body.find("# Your computer").unwrap();
+        assert!(page < body.find("# fragment").unwrap(), "the computer's page first");
+        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its computer's screen\"", "take over", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list"] {
+            assert!(body.contains(said), "it says {said:?}");
+        }
+        let lower = skill.to_lowercase();
+        assert!(HERMES_INJECTION_PATTERNS.iter().all(|p| !lower.contains(p)), "nothing Hermes' guard flags");
+        assert!(!skill.contains("!`") && !skill.contains("${HERMES_"), "nothing Hermes' preprocessing runs or fills");
+        assert!(skill.len() <= PLATFORM_MAX_BYTES && PLATFORM_DESCRIPTION.len() <= 1024, "a page, and a description Hermes lists whole");
+        assert!(platform_skill(cli_body).is_err(), "no frontmatter");
+        assert!(platform_skill(&cli.replacen("name: fragment", "name: other", 1)).is_err(), "another name");
+        assert!(platform_skill(&format!("{cli}{}", "x".repeat(PLATFORM_MAX_BYTES))).is_err(), "past its bound");
+    }
+
+    #[test]
+    fn the_skills_fragment_is_looked_for_sooner_while_there_is_none() {
+        assert_eq!(next_install_ms(Some(true), 600_000), 600_000);
+        assert_eq!(next_install_ms(None, 600_000), 600_000, "an install that failed waits its cadence");
+        assert_eq!(next_install_ms(Some(false), 600_000), ABSENT_EVERY_MS);
+        assert_eq!(next_install_ms(Some(false), 2_000), 2_000, "a test's cadence is never slowed");
+    }
+
+    /// Goal: the platform skill is every profile's whatever the skills
+    /// fragment holds. Valid: with no skills fragment it is the `fragment`
+    /// Hermes finds; a managed `fragment` shadows it (the managed set is
+    /// named first). Replay: the managed one gone, it is found again, as it
+    /// was written. Method: the managed set installed against the fake API,
+    /// and Hermes' rule over a profile's own dir and `EXTERNAL_DIRS`.
+    #[tokio::test]
+    async fn the_platform_skill_is_there_with_no_skills_fragment_and_a_managed_one_shadows_it() {
+        use std::sync::{Arc, Mutex};
+        fragment_bridge::log::set_quiet(true);
+        let files: fake::Files = Arc::new(Mutex::new(BTreeMap::new()));
+        let listed = Arc::new(Mutex::new(false));
+        let (addr, _stop) = fake::start(files.clone(), Arc::new(Mutex::new(false)), listed.clone()).await;
+        let api = Api::new(&format!("http://{addr}")).unwrap();
+        let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
+        let root = std::env::temp_dir().join(format!("hermes-boot-platform-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));
+        // the profile's dirs as its config names them, under the test's root
+        let at = |d: &str| root.join(d.trim_start_matches('/'));
+        let dirs: Vec<PathBuf> = std::iter::once(own.clone()).chain(EXTERNAL_DIRS.iter().map(|d| at(d))).collect();
+        let (managed, platform) = (at(MANAGED_DIR), at(PLATFORM_DIR));
+        let skill = platform_skill(include_str!("../../../../cli/SKILL.md")).unwrap();
+        write_platform_skill(&platform, &skill).unwrap();
+        std::fs::create_dir_all(own.join("garden-notes")).unwrap();
+        std::fs::write(own.join("garden-notes/SKILL.md"), "---\nname: garden-notes\n---\n").unwrap();
+
+        // no skills fragment: no managed skills, the platform's `fragment`
+        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        assert_eq!((d.fragment.as_deref(), d.skills), (None, 0));
+        let found = hermes_finds(&dirs);
+        assert_eq!(found.get("fragment"), Some(&platform.join(PLATFORM_PATH)), "{found:?}");
+        assert!(found.contains_key("garden-notes"));
+
+        // the skills fragment appears, holding a `fragment` of its own: it wins
+        *listed.lock().unwrap() = true;
+        files.lock().unwrap().insert("skills/fragment/SKILL.md".into(), ("release:f".into(), b"---\nname: fragment\ndescription: The managed one.\n---\n".to_vec()));
+        files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
+        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills.paul"), 2));
+        let found = hermes_finds(&dirs);
+        assert_eq!(found.get("fragment"), Some(&managed.join("fragment/SKILL.md")), "the managed one shadows it: {found:?}");
+        assert!(found.contains_key("grill-me") && found.contains_key("garden-notes"));
+
+        // the managed one gone: the platform's again, untouched
+        files.lock().unwrap().remove("skills/fragment/SKILL.md");
+        let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
+        assert_eq!((d.removed, d.skills), (1, 1));
+        assert_eq!(hermes_finds(&dirs).get("fragment"), Some(&platform.join(PLATFORM_PATH)));
+        assert_eq!(std::fs::read_to_string(platform.join(PLATFORM_PATH)).unwrap(), skill, "no install touches it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The fragment list and a skills fragment's files, as the platform
-    /// answers an agent acting for its owner (`for`).
+    /// answers an agent acting for its owner (`for`); `listed` says whether
+    /// the owner has the skills fragment.
     mod fake {
         use std::collections::BTreeMap;
         use std::net::SocketAddr;
@@ -392,12 +579,12 @@ mod tests {
 
         pub type Files = Arc<Mutex<BTreeMap<String, (String, Vec<u8>)>>>;
 
-        pub async fn start(files: Files, down: Arc<Mutex<bool>>) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+        pub async fn start(files: Files, down: Arc<Mutex<bool>>, listed: Arc<Mutex<bool>>) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (stop, rx) = tokio::sync::watch::channel(false);
             let handler = move |req: hyper::Request<hyper::body::Incoming>, _: SocketAddr| {
-                let (files, down) = (files.clone(), down.clone());
+                let (files, down, listed) = (files.clone(), down.clone(), listed.clone());
                 async move {
                     if *down.lock().unwrap() {
                         return net::refusal(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "down");
@@ -405,8 +592,16 @@ mod tests {
                     assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper.paul"), "as the agent");
                     let q = req.uri().query().unwrap_or("").to_string();
                     assert!(q.split('&').any(|kv| kv == "for=id%3Apaul"), "acting for its owner: {q}");
+                    let skills = *listed.lock().unwrap();
                     match (req.method().clone(), req.uri().path()) {
-                        (Method::GET, "/api/fragments") => net::json_answer(StatusCode::OK, &json!({ "fragments": [{ "name": "skills.paul", "role": "editor", "kind": "skills" }, { "name": "garden.paul", "role": "editor", "kind": "app" }] })),
+                        (Method::GET, "/api/fragments") => {
+                            let mut list = vec![json!({ "name": "garden.paul", "role": "editor", "kind": "app" })];
+                            if skills {
+                                list.insert(0, json!({ "name": "skills.paul", "role": "editor", "kind": "skills" }));
+                            }
+                            net::json_answer(StatusCode::OK, &json!({ "fragments": list }))
+                        }
+                        (_, path) if !skills && path.starts_with("/api/f/skills.paul/") => net::refusal(StatusCode::NOT_FOUND, "not_found", "no such fragment"),
                         (Method::GET, "/api/f/skills.paul/files") => {
                             let list: Vec<Value> = files.lock().unwrap().iter().map(|(p, (v, b))| json!({ "path": p, "size": b.len(), "lastCommitSha": v })).collect();
                             net::json_answer(StatusCode::OK, &json!({ "files": list }))

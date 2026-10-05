@@ -15,7 +15,7 @@
 //! hermes-boot screen-start (the bridge's, when a viewer finds the screen
 //!                          down) the first agent's desktop
 //! hermes-boot build-info   (at image build) the lean plugin list, Hermes'
-//!                          revision, the browser's path
+//!                          revision, the browser's path, the platform skill
 //! ```
 
 mod agents;
@@ -36,6 +36,9 @@ use fragment_bridge::runtime::Agent;
 
 /// Where the image keeps its own files.
 const OPT: &str = "/opt/fragment";
+/// The fragment CLI the agents' terminals run (its skill is the platform
+/// skill's: skills.rs).
+const FRAGMENT_CLI: &str = "/usr/local/bin/fragment";
 /// This boot's runtime files (the relay secret, the gateway's go): emptied
 /// at every start, since a container started from a snapshot carries the
 /// last boot's (S3b).
@@ -55,7 +58,9 @@ const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 const SYNC_EVERY_MS: u64 = 60_000;
 /// The managed skills (skills.rs) are read again this often while awake: a
 /// platform release changes them, and an install fetches only what changed.
+/// While the owner has none, every `skills::ABSENT_EVERY_MS`.
 const SKILLS_EVERY_MS: u64 = 10 * 60_000;
+const _: () = assert!(skills::ABSENT_EVERY_MS < SKILLS_EVERY_MS && skills::ABSENT_EVERY_MS >= 10_000, "no skills fragment is looked for sooner, never in a loop");
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
 /// The bridge is restarted at most this many times before the boot fails.
@@ -241,7 +246,8 @@ fn screen_start() -> ! {
     fail(&format!("exec hermes computer-use: {err}"));
 }
 
-/// At image build: what the boot reads instead of finding it each time.
+/// At image build: what the boot reads instead of finding it each time, and
+/// the platform skill (skills.rs), from the image's own `fragment` CLI.
 fn build_info() -> ! {
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
@@ -249,7 +255,13 @@ fn build_info() -> ! {
     std::fs::write(format!("{OPT}/image-rev"), &rev).unwrap_or_else(|e| fail(&e.to_string()));
     let browser = find_browser(Path::new("/opt/hermes/.playwright"));
     std::fs::write(format!("{OPT}/browser-path"), browser.as_ref().map(|p| p.display().to_string()).unwrap_or_default()).unwrap_or_else(|e| fail(&e.to_string()));
-    println!("{} plugins disabled; Hermes {rev}; browser {:?}", plugins.len(), browser);
+    let cli = Command::new(FRAGMENT_CLI).arg("skill").output().unwrap_or_else(|e| fail(&format!("{FRAGMENT_CLI} skill: {e}")));
+    if !cli.status.success() {
+        fail(&format!("{FRAGMENT_CLI} skill: {}", String::from_utf8_lossy(&cli.stderr)));
+    }
+    let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
+    skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
+    println!("{} plugins disabled; Hermes {rev}; browser {:?}; the platform skill, {} bytes", plugins.len(), browser, skill.len());
     std::process::exit(0);
 }
 
@@ -541,14 +553,20 @@ fn managed_dir() {
     }
 }
 
+/// What the last install of the managed skills found: the owner's skills
+/// fragment, none, or no answer (skills.rs, `next_install_ms`).
+type SkillsFound = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
+
 /// One install of the managed skills, in the background (skills.rs), as the
 /// computer's first agent of its owner: none while it has no such agent.
-fn spawn_skills(api: &Api, agents: &[Agent], owner: &str) -> Option<tokio::task::JoinHandle<()>> {
+fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound) -> Option<tokio::task::JoinHandle<()>> {
     let reader = skills::reader(agents, owner)?.clone();
-    let (api, owner) = (api.clone(), owner.to_string());
+    let (api, owner, found) = (api.clone(), owner.to_string(), found.clone());
     Some(tokio::spawn(async move {
         let t = Instant::now();
-        match skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await {
+        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await;
+        *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
+        match done {
             Ok(d) => ev!("skills.installed", { "fragment": d.fragment, "fetched": d.fetched, "removed": d.removed, "refused": d.refused, "skills": d.skills, "ms": t.elapsed().as_millis() as u64 }),
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
@@ -722,11 +740,13 @@ async fn boot_main() {
     // HERMES_BOOT_SYNC_MS: the operator's (a test's) cadence, at least 1 s.
     let sync_every = env("HERMES_BOOT_SYNC_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SYNC_EVERY_MS, |v| v.max(1_000));
     // the managed skills: installed now, off the boot's path, then again
-    // every SKILLS_EVERY_MS (HERMES_BOOT_SKILLS_MS: a test's, at least 1 s);
-    // one install at a time, and none until the computer has an agent
+    // every SKILLS_EVERY_MS (HERMES_BOOT_SKILLS_MS: a test's, at least 1 s),
+    // or every minute while the owner has no skills fragment; one install at
+    // a time, and none until the computer has an agent
     let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
     let owner = computer.owner.clone();
-    let mut skills_task = spawn_skills(&api, &agents, &owner);
+    let skills_found = SkillsFound::default();
+    let mut skills_task = spawn_skills(&api, &agents, &owner, &skills_found);
     let mut last_skills = Instant::now();
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
@@ -754,13 +774,17 @@ async fn boot_main() {
             }
         }
         // the managed skills again: the first as soon as there is an agent to
-        // read them as, then on their cadence, never two at once
+        // read them as, then on their cadence (sooner while the owner has no
+        // skills fragment: the shell makes one), never two at once
         let skills_due = match &skills_task {
             None => !agents.is_empty(),
-            Some(t) => t.is_finished() && last_skills.elapsed() >= Duration::from_millis(skills_every),
+            Some(t) => {
+                let found = *skills_found.lock().expect("the skills' state is never poisoned");
+                t.is_finished() && last_skills.elapsed() >= Duration::from_millis(skills::next_install_ms(found, skills_every))
+            }
         };
         if skills_due {
-            skills_task = spawn_skills(&api, &agents, &owner);
+            skills_task = spawn_skills(&api, &agents, &owner, &skills_found);
             last_skills = Instant::now();
         }
         // What waits on the platform (each call up to its 15 s), cut short by

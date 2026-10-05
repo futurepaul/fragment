@@ -8,9 +8,9 @@ name: images
 on:
   push:
     branches: [master]
-    paths: ["images/**", ".github/workflows/images.yml"]
+    paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
   pull_request:
-    paths: ["images/**", ".github/workflows/images.yml"]
+    paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
 
 concurrency:
   group: images-${{ github.ref }}
