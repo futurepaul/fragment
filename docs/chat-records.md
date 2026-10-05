@@ -41,15 +41,24 @@ SHA-256 of `<agent fragment>|<fragment>/<channel>/<seq>` (the record
 that started it), so a record read twice (a catch-up, a restart, a
 reconnect) is one turn, and two agents answering one message are two
 turns. A message an agent's runtime sends on its own (no turn running)
-gets a turn of its own, from the bridge's counter.
+gets a turn of its own, from the bridge's life and counter (`work`,
+below), so a counter that a restored `/data` sent back names a new turn.
 
 One turn of an agent runs in a chat at a time; the rest wait, in order,
 at most 16. A turn's records, in order:
 
-1. `turn.start` on `work`, as the agent hands it to its runtime;
+1. `turn.start` on `work`: its claim, posted before its runtime hears of
+   it (`work`, below);
 2. any number of `turn.step`, replies on `chat`, and `turn.prompt`
    (each `turn.prompt` followed by its `turn.prompt.closed`);
 3. `turn.end` on `work`.
+
+Every turn has both its start and its end, one of each: a turn refused
+(too many waiting) or stopped while it waited posts its `turn.start` and
+then its `turn.end`, and runs nothing. The bridge keeps a turn until its
+last records are answered, and a bridge that stops before then leaves
+them to the next, which posts them again with the same ids and bodies
+(docs/bridge.md, "State").
 
 While a turn writes a reply, the chat's **draft** for it holds the
 reply's whole text so far (`PUT …/channels/chat/draft {turn, text}`,
@@ -123,10 +132,25 @@ step posts the same record:
 
 ```json
 { "kind": "turn.start", "turn": "…", "asker": "id:…", "agent": "id:…",
-  "cause": { "fragment": "…", "channel": "chat", "seq": 12 } }
+  "cause": { "fragment": "…", "channel": "chat", "seq": 12 },
+  "life": "<32 lowercase hex>" }
 ```
 
-Part `start`. `asker` may stop it; `agent` is the agent's identity.
+Part `start`. `asker` may stop it; `agent` is the agent's identity;
+`life` is the bridge process that claimed it: 128 random bits each
+bridge makes as it starts and never writes to `/data`. The record is the
+turn's claim, "this life runs this turn": the runtime is given the turn
+only once the platform answers it as this life's (appended, or a replay
+of this life's own retry). A 409 is another life's claim of the turn, so
+this life never runs it, posts its `turn.end` as lost (a 409 too when
+that life ended it), and forgets it; no answer runs nothing, and the turn
+is claimed again. An agent that may not post on `work` (its owner holds it
+below editor) claims nothing, so it runs no turn in the chat: its turn is
+dropped, with no record. So a turn runs in one life at most, whatever `/data` a
+computer wakes with, an older one or none: a turn whose life ended before
+it did is lost, and said so, never run twice. A turn is claimed only
+while its runtime can take it, and never while the platform holds the
+computer (docs/computers.md, the hold).
 
 ```json
 { "kind": "turn.step", "turn": "…", "step": 1, "tool": "terminal",
@@ -167,7 +191,10 @@ waited: Hermes cannot resume a turn across a restart), or `stopped`.
 Part `end`. `outcome` is `idle` (it finished, with or without words),
 `stopped`, or `error` with `error` (at most 300 characters): the
 runtime failed, the agent stopped answering for 15 minutes, the turn
-was lost in a restart, or it was refused (too many waiting).
+was lost when its computer restarted (the next life ends every turn an
+earlier life claimed and did not finish, `lost when the computer
+restarted`, and never runs it again), or it was refused (too many
+waiting).
 
 ## Attachments
 

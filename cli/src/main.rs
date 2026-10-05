@@ -795,6 +795,13 @@ fn main() {
     std::process::exit(code.exit_status());
 }
 
+/// Opens `url` with the desktop's opener: started, never waited for. On
+/// Linux, `xdg-open` runs a browser in the foreground when none is running,
+/// and `fragment login` must see its approval without that browser closing.
+fn open_link(opener: &str, url: &str) -> std::io::Result<std::process::Child> {
+    std::process::Command::new(opener).arg(url).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn()
+}
+
 fn run(cli: Cli) -> Result<()> {
     let j = cli.json || json_env_flag();
 
@@ -837,8 +844,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 eprintln!("sign in and approve this key (the link is good for ten minutes):\n  {url}\nthe page should show a key ending in {tail}");
                 if !no_browser {
-                    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                    let _ = std::process::Command::new(opener).arg(&url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                    let _ = open_link(if cfg!(target_os = "macos") { "open" } else { "xdg-open" }, &url);
                 }
                 let t0 = std::time::Instant::now();
                 while done.is_none() {
@@ -1979,6 +1985,20 @@ fn uid() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: login's opener is started, not waited for: one that never
+    /// returns (a browser `xdg-open` ran in the foreground) costs nothing.
+    /// Invalid: no opener at all is an error, never a panic.
+    #[test]
+    fn the_link_opens_without_waiting_for_the_browser() {
+        let t0 = std::time::Instant::now();
+        let mut browser = open_link("sleep", "30").expect("sleep runs");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "waited {:?} for the opener", t0.elapsed());
+        assert!(browser.try_wait().expect("its state").is_none(), "the opener still runs, ours to leave");
+        browser.kill().expect("killed");
+        browser.wait().expect("reaped");
+        assert!(open_link("/nonexistent/xdg-open", "https://x.test").is_err());
+    }
 
     fn code_of(r: Result<impl std::fmt::Debug>) -> Code {
         classify_err(&r.expect_err("a failure"))

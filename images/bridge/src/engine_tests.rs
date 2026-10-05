@@ -1,6 +1,10 @@
 //! The engine's rules, each a valid path and its invalid, replay, and
 //! restart paths. Method: drive the pure engine with records and runtime
-//! events at chosen times, and read the effects it asks for.
+//! events at chosen times, and read the effects it asks for. The rules of
+//! one turn answer each claim as this life's (`answered`); the rules across
+//! lives drive the engine inside a model world (below, "across lives").
+
+use std::collections::VecDeque;
 
 use serde_json::{json, Value};
 
@@ -9,15 +13,39 @@ use crate::records::Step as ToolStep;
 
 const T0: u64 = 1_000_000;
 
+/// The life of a test's engine.
+const LIFE: &str = "0123456789abcdef0123456789abcdef";
+
 fn agent(label: &str) -> Agent {
     Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.to_string(), owner: "id:paul".into(), credentials: vec![] }
 }
 
+/// A fresh engine whose runtime can take turns.
 fn engine(agents: &[Agent]) -> Engine {
-    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }).expect("a fresh state");
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state");
     e.step(Input::Agents(agents.to_vec()), T0);
     e.recover(T0);
+    e.step(Input::Runtime(Event::Connected(true)), T0);
     e
+}
+
+/// `s`, with each claim it makes answered as this life's and each record it
+/// owes answered, and what each answer does (the turn handed to the
+/// runtime, an ended turn let go) added to it.
+fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
+    let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
+    for turn in claims {
+        let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
+    let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
+    for (turn, id) in owed {
+        let more = e.step(Input::Posted { turn, id }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
+    s
 }
 
 fn rec(seq: u64, principal: &str, body: Value) -> Record {
@@ -32,11 +60,13 @@ fn view(agents: &[&Agent]) -> ChatView {
 }
 
 fn said(e: &mut Engine, a: &Agent, v: &ChatView, seq: u64, principal: &str, body: Value, now: u64) -> Step {
-    e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now)
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
+    answered(e, s, now)
 }
 
+/// What a step posts, claims and owed records included.
 fn posts(s: &Step) -> Vec<(String, Value)> {
-    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
+    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } | Effect::Claim { id, body, .. } | Effect::Owed { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
 }
 
 fn kinds(s: &Step) -> Vec<String> {
@@ -56,7 +86,8 @@ fn keepalive(s: &Step) -> Option<bool> {
 }
 
 fn ev(e: &mut Engine, event: Event, now: u64) -> Step {
-    e.step(Input::Runtime(event), now)
+    let s = e.step(Input::Runtime(event), now);
+    answered(e, s, now)
 }
 
 /// Goal: a person's message to the lead starts exactly one turn, which is
@@ -73,6 +104,7 @@ fn a_message_starts_one_turn() {
     assert_eq!(t.turn, records::turn_id(&a.fragment, "talk.paul", "chat", 1));
     assert_eq!(kinds(&s), vec!["turn.start"]);
     assert_eq!(posts(&s)[0].0, records::work_id(&t.turn, "start"));
+    assert_eq!(posts(&s)[0].1["life"], LIFE, "claimed as this life");
     assert_eq!(keepalive(&s), Some(true));
     assert_eq!(e.cursor(&a.fragment, "talk.paul", "chat"), 1);
 
@@ -120,19 +152,24 @@ fn a_reply_streams_then_posts() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "hi" }), T0)).expect("started").turn;
-    assert!(ev(&mut e, Event::Accepted { turn: turn.clone() }, T0 + 1).dirty, "taken by the runtime: a restart ends it");
     let d = ev(&mut e, Event::Draft { turn: turn.clone(), text: "He".into() }, T0 + 2);
     assert_eq!(d.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: Some("He".into()) }]);
     assert!(!d.dirty, "drafts are never stored");
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
-    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+    let end = e.step(Input::Runtime(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);
     let p = posts(&end);
     assert_eq!(p[0], (records::reply_id(&turn, 1), json!({ "text": "Hello", "turn": turn })));
     assert_eq!(p[1], (records::work_id(&turn, "end"), json!({ "kind": "turn.end", "turn": turn, "outcome": "idle" })));
     assert!(end.effects.contains(&Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: None }));
     assert_eq!(keepalive(&end), Some(false));
-    assert!(e.state().turns.is_empty());
+    // its end is owed: the turn is kept, ended, until the lane is done with it
+    let t = &e.state().turns[&turn];
+    assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
+    assert!(e.step(Input::Runtime(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
+    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end") }, T0 + 4);
+    assert!(done.dirty && done.effects.is_empty());
+    assert!(e.state().turns.is_empty(), "let go once its end is answered");
     // replay: a late event for the ended turn is dropped
     assert_eq!(ev(&mut e, Event::Reply { turn: turn.clone(), part: 2, text: "late".into() }, T0 + 5), Step::default());
 }
@@ -166,7 +203,8 @@ fn steps_split_replies() {
 }
 
 /// Goal: one turn of an agent runs in a chat at a time, the rest in order;
-/// past the queue's bound a message is told so, not queued.
+/// past the queue's bound a message is told so, not queued: its claim and
+/// its end, both records as every turn has, and nothing run.
 #[test]
 fn one_turn_at_a_time() {
     let a = agent("juniper");
@@ -184,13 +222,17 @@ fn one_turn_at_a_time() {
         assert!(posts(&s).is_empty());
     }
     let over = said(&mut e, &a, &v, 100, "id:paul", json!({ "text": "too many" }), T0);
-    assert_eq!(kinds(&over), vec!["turn.end"]);
-    assert_eq!(posts(&over)[0].1["outcome"], "error");
+    assert_eq!(kinds(&over), vec!["turn.start", "turn.end"]);
+    let refused = records::turn_id(&a.fragment, "talk.paul", "chat", 100);
+    assert_eq!(posts(&over)[0], (records::work_id(&refused, "start"), json!({ "kind": "turn.start", "turn": refused, "asker": "id:paul", "agent": "id:juniper", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 100 }, "life": LIFE })));
+    assert_eq!(posts(&over)[1].1["outcome"], "error");
     assert!(started(&over).is_none());
+    assert!(!e.state().turns.contains_key(&refused), "held only until both its records were answered");
 }
 
 /// Goal: only the turn's asker stops it. A Stop from anyone else is
-/// ignored; a Stop naming a queued turn removes it.
+/// ignored; a Stop naming a queued turn removes it, with its claim and its
+/// end (both records, nothing run).
 #[test]
 fn stop_is_the_askers() {
     let a = agent("juniper");
@@ -212,7 +254,9 @@ fn stop_is_the_askers() {
     said(&mut e, &a, &v, 6, "id:paul", json!({ "text": "b" }), T0 + 5);
     let queued = records::turn_id(&a.fragment, "talk.paul", "chat", 6);
     let s = said(&mut e, &a, &v, 7, "id:paul", json!({ "kind": "stop", "turn": queued }), T0 + 6);
-    assert_eq!(posts(&s), vec![(records::work_id(&queued, "end"), json!({ "kind": "turn.end", "turn": queued, "outcome": "stopped" }))]);
+    assert_eq!(kinds(&s), vec!["turn.start", "turn.end"]);
+    assert_eq!((posts(&s)[0].0.as_str(), &posts(&s)[0].1["life"]), (records::work_id(&queued, "start").as_str(), &json!(LIFE)));
+    assert_eq!(posts(&s)[1], (records::work_id(&queued, "end"), json!({ "kind": "turn.end", "turn": queued, "outcome": "stopped" })));
     assert!(commands(&s).is_empty(), "the runtime never had it");
     let after = ev(&mut e, Event::End { turn: running, outcome: Outcome::Idle }, T0 + 7);
     assert!(started(&after).is_none(), "the stopped one never runs");
@@ -227,7 +271,6 @@ fn an_approval_answered() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "risky" }), T0)).expect("started").turn;
-    ev(&mut e, Event::Accepted { turn: turn.clone() }, T0);
     let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None }, PromptOption { id: "deny".into(), label: "Deny".into(), style: Some("danger".into()) }];
     let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "ab12.0011".into(), text: "Run rm?".into(), options: options.clone(), ttl_ms: None }, T0 + 10);
     let (id, body) = posts(&p)[0].clone();
@@ -274,42 +317,41 @@ fn an_approval_expires() {
 }
 
 /// Goal: a restart keeps every admission: a turn the runtime held is ended
-/// (it died with the old boot), one handed but never taken is handed again,
-/// a queued one runs, and catching up on the same records starts nothing.
+/// (one life per turn: its runtime died with the life before), a queued one
+/// is claimed by the new life once its runtime can take it, and runs, and
+/// catching up on the same records starts nothing. (A turn handed and never
+/// taken is ended too: `a_restart_ends_what_was_handed`.)
 #[test]
 fn a_restart_starts_nothing_twice() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let first = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "one" }), T0)).expect("started").turn;
-    ev(&mut e, Event::Accepted { turn: first.clone() }, T0);
     said(&mut e, &a, &v, 2, "id:paul", json!({ "text": "two" }), T0);
     let b = agent("rowan");
     // the state as persisted, read back
     let saved = serde_json::to_string(e.state()).expect("serializes");
     let state: State = serde_json::from_str(&saved).expect("deserializes");
     assert_eq!(&state, e.state(), "a round trip changes nothing");
+    assert!(!saved.contains(LIFE), "the life is never in the state");
 
-    let mut e2 = Engine::new(state, Settings::default()).expect("whole");
+    let next_life = "fedcba9876543210fedcba9876543210";
+    let mut e2 = Engine::new(state, Settings::default(), next_life).expect("whole");
     e2.step(Input::Agents(vec![a.clone(), b]), T0 + 10);
     let r = e2.recover(T0 + 10);
     let p = posts(&r);
-    assert_eq!(p[0].1["kind"], "turn.end");
-    assert_eq!(p[0].1["turn"], first);
-    assert_eq!(p[0].1["outcome"], "error");
-    let next = started(&r).expect("the queued one runs");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert_eq!(p[0].1, json!({ "kind": "turn.end", "turn": first, "outcome": "error", "error": LOST }));
+    assert!(started(&r).is_none(), "nothing runs before its runtime can take it");
+    let c = e2.step(Input::Runtime(Event::Connected(true)), T0 + 10);
+    assert_eq!(posts(&c)[0].1["life"], next_life, "claimed by the new life");
+    let next = started(&answered(&mut e2, c, T0 + 10)).expect("the queued one runs");
     assert_eq!(next.text, "two");
     // the backlog again: nothing new
     for seq in 1..=2 {
         assert_eq!(said(&mut e2, &a, &v, seq, "id:paul", json!({ "text": "again" }), T0 + 11), Step::default());
     }
-    // handed, never taken: a restart hands it again (same turn id)
-    let saved = serde_json::to_string(e2.state()).expect("serializes");
-    let mut e3 = Engine::new(serde_json::from_str(&saved).expect("reads"), Settings::default()).expect("whole");
-    e3.step(Input::Agents(vec![a.clone()]), T0 + 20);
-    let r3 = e3.recover(T0 + 20);
-    assert_eq!(started(&r3).expect("handed again").turn, next.turn);
-    assert_eq!(e3.state().boot, 3);
+    assert_eq!(e2.state().boot, 2);
 }
 
 /// Invalid state: a turn past its channel's cursor, or a wrong id, is
@@ -322,15 +364,15 @@ fn a_corrupt_state_is_refused() {
     said(&mut e, &a, &v, 5, "id:paul", json!({ "text": "x" }), T0);
     let mut behind = e.state().clone();
     behind.cursors.insert(cursor_key(&a.fragment, "talk.paul", "chat"), 4);
-    assert!(Engine::new(behind, Settings::default()).is_err());
+    assert!(Engine::new(behind, Settings::default(), LIFE).is_err());
     let mut renamed = e.state().clone();
     let (id, mut t) = renamed.turns.pop_first().expect("one");
     t.id = "0".repeat(24);
     renamed.turns.insert(id, t);
-    assert!(Engine::new(renamed, Settings::default()).is_err());
+    assert!(Engine::new(renamed, Settings::default(), LIFE).is_err());
     let mut old = e.state().clone();
     old.version = 0;
-    assert!(Engine::new(old, Settings::default()).is_err());
+    assert!(Engine::new(old, Settings::default(), LIFE).is_err());
 }
 
 /// Goal (decision 8): in a group, an `@mention` (or `to`) picks who answers;
@@ -362,7 +404,7 @@ fn a_group_picks_who_answers() {
     assert_eq!(reply["hop"], 1);
     let (byj, byr) = both(&mut e, 4, "id:juniper", reply);
     assert_eq!((byj, byr), (false, true), "rowan takes the hand-off; juniper skips its own reply");
-    assert_eq!(e.state().turns.values().find(|t| t.agent == r.fragment).expect("rowan's").hop, 1);
+    assert_eq!(e.state().turns.values().find(|t| t.agent == r.fragment && t.phase != Phase::Ended).expect("rowan's").hop, 1);
     // too deep: an agent's message past HOPS_MAX starts nothing
     let deep = json!({ "text": "@juniper again", "turn": "x", "to": ["id:juniper"], "hop": limits::HOPS_MAX + 1 });
     assert!(started(&said(&mut e, &j, &v, 5, "id:rowan", deep, T0)).is_none());
@@ -377,6 +419,7 @@ fn two_agents_run_at_once() {
     let mut e = engine(&[j.clone(), r.clone()]);
     let s1 = said(&mut e, &j, &view(&[&j]), 1, "id:paul", json!({ "text": "a" }), T0);
     let s2 = e.step(Input::Record { agent: r.fragment.clone(), fragment: "notes.paul".into(), record: rec(1, "id:paul", json!({ "text": "b" })), view: Some(view(&[&r])), since: 0 }, T0);
+    let s2 = answered(&mut e, s2, T0);
     let (t1, t2) = (started(&s1).expect("juniper"), started(&s2).expect("rowan"));
     assert_ne!(t1.turn, t2.turn);
     assert_eq!((t1.agent.fragment.as_str(), t2.agent.fragment.as_str()), ("juniper.paul", "rowan.paul"));
@@ -390,6 +433,7 @@ fn tasks_start_routines() {
     let mut e = engine(std::slice::from_ref(&a));
     let task = |seq, body| Record { channel: "tasks".into(), seq, at: 0, principal: "id:paul".into(), kind: "message".into(), body };
     let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(1, json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" })), view: None, since: 0 }, T0);
+    let s = answered(&mut e, s, T0);
     let t = started(&s).expect("a routine turn");
     assert!(t.routine);
     assert_eq!((t.fragment.as_str(), t.asker.as_str()), ("talk.paul", "id:paul"));
@@ -441,6 +485,7 @@ fn history_is_not_for_a_new_agent() {
     assert!(old.dirty, "its cursor still moves");
     assert_eq!(e.cursor(&a.fragment, "talk.paul", "chat"), 1);
     let new = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: at(2, 1000), view: Some(v), since: 1000 }, T0);
+    let new = answered(&mut e, new, T0);
     assert!(started(&new).is_some());
 }
 
@@ -460,4 +505,876 @@ fn attachments_ride_along() {
     let end = ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0);
     let files = end.effects.iter().find_map(|e| match e { Effect::Post { files, .. } if !files.is_empty() => Some(files.clone()), _ => None });
     assert_eq!(files, Some(vec![file]));
+}
+
+// ---- across lives (docs/explorations/pi-durable.md, rung 1) ----
+//
+// The engine inside a model of what is around it: the platform's channels
+// with their replay and 409 rule (the journal), the lane that posts to them
+// in order, the runtime, and every state the engine ever persisted (a save
+// may be any of them). A crash drops the engine, its lane and its runtime;
+// a new life starts from any state saved, or from none. Runs
+// (`Command::Start`) are counted, never records: a second run's records
+// are replays of the first's.
+
+const CHAT: &str = "talk.paul";
+
+/// The platform's answer to a post (docs/api.md: the same id and body again
+/// is a replay; another body, or another channel, is 409).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Answer {
+    Appended,
+    Replayed,
+    Conflict,
+}
+
+/// The platform's channels: each one's records in order, and posts by id.
+#[derive(Debug, Default)]
+struct Journal {
+    records: BTreeMap<(String, String), Vec<Record>>,
+    ids: HashMap<(String, String), (String, Value)>,
+}
+
+impl Journal {
+    fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> u64 {
+        let list = self.records.entry((fragment.to_string(), channel.to_string())).or_default();
+        let seq = list.len() as u64 + 1;
+        list.push(Record { channel: channel.to_string(), seq, at: 0, principal: principal.to_string(), kind: "message".into(), body });
+        seq
+    }
+
+    fn post(&mut self, fragment: &str, channel: &str, principal: &str, id: &str, body: &Value) -> Answer {
+        let key = (fragment.to_string(), id.to_string());
+        match self.ids.get(&key) {
+            Some((c, b)) if c == channel && b == body => Answer::Replayed,
+            Some(_) => Answer::Conflict,
+            None => {
+                self.append(fragment, channel, principal, body.clone());
+                self.ids.insert(key, (channel.to_string(), body.clone()));
+                Answer::Appended
+            }
+        }
+    }
+
+    fn channel(&self, fragment: &str, channel: &str) -> &[Record] {
+        self.records.get(&(fragment.to_string(), channel.to_string())).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// A turn's records of `kind` on the chat's `work`.
+    fn work(&self, turn: &str, kind: &str) -> Vec<Value> {
+        self.channel(CHAT, records::WORK).iter().map(|r| r.body.clone()).filter(|b| b["turn"] == turn && b["kind"] == kind).collect()
+    }
+}
+
+/// A turn the model runtime holds: the prompt it waits on, and whether its
+/// asker pressed Stop.
+#[derive(Debug, Default, Clone)]
+struct Held {
+    prompted: Option<String>,
+    stop: bool,
+}
+
+struct World {
+    agents: Vec<Agent>,
+    view: ChatView,
+    journal: Journal,
+    engine: Option<Engine>,
+    lives: u64,
+    /// Every state the engine persisted, in order.
+    saves: Vec<State>,
+    /// The lane: posts not yet answered, in order (one chat, one lane).
+    lane: VecDeque<Effect>,
+    /// Each run: the life that ran it, and its turn.
+    runs: Vec<(u64, String)>,
+    /// At each run, the turn's `turn.start` on `work` as it stood then.
+    claims_at_run: Vec<(u64, String, Option<Value>)>,
+    held: BTreeMap<String, Held>,
+    /// Posts on `chat` the platform answered 409: one id, two bodies.
+    conflicts_on_chat: Vec<String>,
+    /// The ids of the posts a crash took from the lane before they were sent.
+    dropped: Vec<String>,
+    now: u64,
+}
+
+impl World {
+    fn new(labels: &[&str]) -> World {
+        let agents: Vec<Agent> = labels.iter().map(|l| agent(l)).collect();
+        let view = view(&agents.iter().collect::<Vec<&Agent>>());
+        World {
+            agents,
+            view,
+            journal: Journal::default(),
+            engine: None,
+            lives: 0,
+            saves: Vec::new(),
+            lane: VecDeque::new(),
+            runs: Vec::new(),
+            claims_at_run: Vec::new(),
+            held: BTreeMap::new(),
+            conflicts_on_chat: Vec::new(),
+            dropped: Vec::new(),
+            now: T0,
+        }
+    }
+
+    fn lead(&self) -> &Agent {
+        &self.agents[0]
+    }
+
+    /// Life `n`'s id, as a bridge process makes its own (128 bits, hex).
+    fn life_of(n: u64) -> String {
+        format!("{n:032x}")
+    }
+
+    /// This life's id.
+    fn life(&self) -> String {
+        World::life_of(self.lives)
+    }
+
+    fn alive(&self) -> bool {
+        self.engine.is_some()
+    }
+
+    fn engine(&self) -> &Engine {
+        self.engine.as_ref().expect("a live engine")
+    }
+
+    /// The state as the engine last persisted it.
+    fn latest(&self) -> Option<State> {
+        self.saves.last().cloned()
+    }
+
+    /// A new life from `state` (a save, or none), its runtime connected.
+    fn start(&mut self, state: Option<State>) {
+        self.start_unconnected(state);
+        self.connect();
+    }
+
+    /// A new life whose runtime cannot take a turn yet.
+    fn start_unconnected(&mut self, state: Option<State>) {
+        assert!(!self.alive(), "one life at a time");
+        self.lives += 1;
+        let settings = Settings { prompt_ttl_ms: 60_000, turn_idle_ms: 600_000 };
+        let life = self.life();
+        self.engine = Some(Engine::new(state.unwrap_or_default(), settings, &life).expect("a saved state is whole"));
+        self.step(Input::Agents(self.agents.clone()));
+        let now = self.now;
+        let s = self.engine.as_mut().expect("alive").recover(now);
+        self.absorb(s);
+        self.deliver();
+    }
+
+    /// Its runtime can take turns now.
+    fn connect(&mut self) {
+        self.step(Input::Runtime(Event::Connected(true)));
+    }
+
+    /// Its runtime can take no turn now (Hermes gone from its socket).
+    fn disconnect(&mut self) {
+        self.step(Input::Runtime(Event::Connected(false)));
+    }
+
+    /// The life ends where it is: the post in flight lands (`landed`) or
+    /// not, and the rest of its lane and its runtime are gone with it.
+    fn crash(&mut self, landed: bool) {
+        assert!(self.engine.take().is_some(), "a live engine crashes");
+        if landed {
+            if let Some(e) = self.lane.pop_front() {
+                self.land(&e);
+            }
+        }
+        for e in self.lane.drain(..) {
+            if let Effect::Post { id, .. } | Effect::Claim { id, .. } = e {
+                self.dropped.push(id);
+            }
+        }
+        self.held.clear();
+    }
+
+    fn step(&mut self, input: Input) {
+        let now = self.now;
+        let s = self.engine.as_mut().expect("a live engine").step(input, now);
+        self.absorb(s);
+    }
+
+    /// A step's effects, carried out as the driver does: its state saved
+    /// first, its posts onto the lane, its commands to the runtime.
+    fn absorb(&mut self, s: Step) {
+        if s.dirty {
+            self.saves.push(self.engine().state().clone());
+        }
+        for e in s.effects {
+            match e {
+                Effect::Post { .. } | Effect::Claim { .. } | Effect::Owed { .. } => self.lane.push_back(e),
+                Effect::Runtime(Command::Start(ts)) => {
+                    let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
+                    self.runs.push((self.lives, ts.turn.clone()));
+                    self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
+                    self.held.insert(ts.turn.clone(), Held::default());
+                }
+                Effect::Runtime(Command::Stop { turn }) => {
+                    if let Some(h) = self.held.get_mut(&turn) {
+                        h.stop = true;
+                    }
+                }
+                Effect::Runtime(Command::Answer { turn, .. }) => {
+                    if let Some(h) = self.held.get_mut(&turn) {
+                        h.prompted = None;
+                    }
+                }
+                Effect::Runtime(Command::Forget { turn }) => {
+                    self.held.remove(&turn);
+                }
+                Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } => {}
+            }
+        }
+    }
+
+    /// Every record of the chat the engine has not read, as its followers
+    /// feed them (from its cursor).
+    fn deliver(&mut self) {
+        if !self.alive() {
+            return;
+        }
+        for a in self.agents.clone() {
+            let cursor = self.engine().cursor(&a.fragment, CHAT, records::CHAT);
+            let unread: Vec<Record> = self.journal.channel(CHAT, records::CHAT).iter().filter(|r| r.seq > cursor).cloned().collect();
+            for r in unread {
+                self.step(Input::Record { agent: a.fragment.clone(), fragment: CHAT.into(), record: r, view: Some(self.view.clone()), since: 0 });
+            }
+        }
+    }
+
+    /// A lane's post or claim, landed: the platform's answer.
+    fn land(&mut self, e: &Effect) -> Answer {
+        let (agent, fragment, channel, id, body) = match e {
+            Effect::Post { agent, fragment, channel, id, body, .. } => (agent, fragment, *channel, id, body),
+            Effect::Claim { agent, fragment, id, body, .. } | Effect::Owed { agent, fragment, id, body, .. } => (agent, fragment, records::WORK, id, body),
+            _ => panic!("the lane holds posts, claims and owed records: {e:?}"),
+        };
+        let principal = self.agents.iter().find(|a| &a.fragment == agent).map(|a| a.identity.clone()).expect("an agent's post");
+        let answer = self.journal.post(fragment, channel, &principal, id, body);
+        if channel == records::CHAT && answer == Answer::Conflict {
+            self.conflicts_on_chat.push(id.clone());
+        }
+        answer
+    }
+
+    /// The engine is told a claim's answer (the driver's `Input::Claimed`),
+    /// or that the lane is done with an owed record (`Input::Posted`).
+    fn tell(&mut self, e: &Effect, answer: ClaimAnswer) {
+        match e {
+            Effect::Claim { turn, .. } => self.step(Input::Claimed { turn: turn.clone(), answer }),
+            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone() }),
+            _ => {}
+        }
+    }
+
+    /// The lane's next post, answered; false when it holds none.
+    fn answer_one(&mut self) -> bool {
+        let Some(e) = self.lane.pop_front() else { return false };
+        let answer = match self.land(&e) {
+            Answer::Appended | Answer::Replayed => ClaimAnswer::Ours,
+            Answer::Conflict => ClaimAnswer::Theirs,
+        };
+        self.tell(&e, answer);
+        self.deliver();
+        true
+    }
+
+    /// Every post answered, and every record read.
+    fn answer_all(&mut self) {
+        // bounded: each pass answers one post, and a world makes few
+        for _ in 0..10_000 {
+            if !self.answer_one() {
+                return;
+            }
+        }
+        panic!("a lane that never empties");
+    }
+
+    /// The lane gives up on its next claim: it never reaches the platform,
+    /// and the engine hears it unanswered. Any other post the model's lane
+    /// tries until it lands (the lane's own bound of tries is a property of
+    /// every post, out of this model; a crash is in it).
+    fn lose_one(&mut self) {
+        match self.lane.front() {
+            Some(Effect::Claim { .. }) => {
+                let e = self.lane.pop_front().expect("a claim");
+                self.tell(&e, ClaimAnswer::Unanswered);
+            }
+            Some(_) => {
+                self.answer_one();
+            }
+            None => {}
+        }
+    }
+
+    /// The lane's next post reaches the platform, and its answer is lost: a
+    /// claim is heard unanswered (the next tick's claim will find it a
+    /// replay); any other post stays at the lane's head, for its retry to
+    /// find it a replay.
+    fn land_unanswered_one(&mut self) {
+        let Some(e) = self.lane.front().cloned() else { return };
+        self.land(&e);
+        if matches!(e, Effect::Claim { .. }) {
+            self.lane.pop_front();
+            self.tell(&e, ClaimAnswer::Unanswered);
+        }
+        self.deliver();
+    }
+
+    /// `who` says `body` in the chat, read at once: its seq.
+    fn say_body(&mut self, who: &str, body: Value) -> u64 {
+        let seq = self.journal.append(CHAT, records::CHAT, who, body);
+        self.deliver();
+        seq
+    }
+
+    /// `who` says `text`: the lead's turn of it.
+    fn say(&mut self, who: &str, text: &str) -> String {
+        let seq = self.say_body(who, json!({ "text": text }));
+        self.turn_of(seq)
+    }
+
+    fn turn_of(&self, seq: u64) -> String {
+        records::turn_id(&self.lead().fragment, CHAT, records::CHAT, seq)
+    }
+
+    /// The runtime ends a turn it holds: with an answer (idle), or without.
+    fn end(&mut self, turn: &str, outcome: Outcome) {
+        assert!(self.held.remove(turn).is_some(), "the runtime holds {turn}");
+        if outcome == Outcome::Idle {
+            self.step(Input::Runtime(Event::Reply { turn: turn.into(), part: 1, text: format!("an answer to {turn}") }));
+        }
+        self.step(Input::Runtime(Event::End { turn: turn.into(), outcome }));
+    }
+
+    /// The runtime asks its owner something; the turn waits.
+    fn ask(&mut self, turn: &str) {
+        let prompt = format!("p-{}", &turn[..12]);
+        self.held.get_mut(turn).expect("held").prompted = Some(prompt.clone());
+        let options = vec![PromptOption { id: "once".into(), label: "Allow once".into(), style: None }, PromptOption { id: "deny".into(), label: "Deny".into(), style: None }];
+        self.step(Input::Runtime(Event::Prompt { turn: turn.into(), prompt, text: "ok?".into(), options, ttl_ms: None }));
+    }
+
+    fn tick(&mut self, ms: u64) {
+        self.now += ms;
+        if self.alive() {
+            self.step(Input::Tick);
+        }
+    }
+
+    /// The lead's runtime says something with no turn running.
+    fn say_unasked(&mut self, text: &str) {
+        let agent = self.lead().fragment.clone();
+        self.step(Input::Runtime(Event::Say { agent, fragment: CHAT.into(), text: text.into() }));
+    }
+
+    fn runs_of(&self, turn: &str) -> usize {
+        self.runs.iter().filter(|(_, t)| t == turn).count()
+    }
+
+    fn starts(&self, turn: &str) -> Vec<Value> {
+        self.journal.work(turn, "turn.start")
+    }
+
+    fn ends(&self, turn: &str) -> Vec<Value> {
+        self.journal.work(turn, "turn.end")
+    }
+
+    /// The turns whose `turn.start` the lane holds, in order.
+    fn pending_starts(&self) -> Vec<String> {
+        self.lane
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Claim { turn, .. } => Some(turn.clone()),
+                Effect::Post { body, .. } | Effect::Owed { body, .. } if body["kind"] == "turn.start" => body["turn"].as_str().map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Another life's claim of `turn` (the turn of chat record `seq`),
+    /// already on `work`.
+    fn claimed_by_another_life(&mut self, turn: &str, seq: u64) {
+        let lead = self.lead().clone();
+        let body = json!({ "kind": "turn.start", "turn": turn, "asker": "id:paul", "agent": lead.identity,
+            "cause": { "fragment": CHAT, "channel": "chat", "seq": seq }, "life": "f".repeat(32) });
+        assert_eq!(self.journal.post(CHAT, records::WORK, &lead.identity, &records::work_id(turn, "start"), &body), Answer::Appended);
+    }
+
+    /// What may be checked at any moment (I1, I2, and F11's ids).
+    fn check(&self) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for (_, t) in &self.runs {
+            if !seen.insert(t) {
+                return Err(format!("I1: {t} ran twice: {:?}", self.runs));
+            }
+        }
+        for (life, t, claim) in &self.claims_at_run {
+            let ours = claim.as_ref().is_some_and(|c| c["life"] == json!(World::life_of(*life)));
+            if !ours {
+                return Err(format!("I1: life {life} ran {t} without its claim answered as its own (work held {claim:?})"));
+            }
+        }
+        let work = self.journal.channel(CHAT, records::WORK);
+        let started: BTreeSet<&str> = work.iter().filter(|r| r.body["kind"] == "turn.start").filter_map(|r| r.body["turn"].as_str()).collect();
+        for end in work.iter().filter(|r| r.body["kind"] == "turn.end") {
+            let t = end.body["turn"].as_str().unwrap_or("");
+            if !started.contains(t) {
+                return Err(format!("I2: {t} ended with no start"));
+            }
+        }
+        if !self.conflicts_on_chat.is_empty() {
+            return Err(format!("an id on chat posted with two bodies: {:?}", self.conflicts_on_chat));
+        }
+        Ok(())
+    }
+
+    /// Everything settles: a life (the latest state's, if none runs), its
+    /// runtime connected, every post answered, every turn it holds ended.
+    fn settle(&mut self) {
+        if !self.alive() {
+            let s = self.latest();
+            self.start(s);
+        }
+        self.connect();
+        // bounded: each pass ends what the runtime holds, so the queues drain
+        for _ in 0..1_000 {
+            self.deliver();
+            self.answer_all();
+            let held: Vec<(String, Held)> = self.held.iter().map(|(t, h)| (t.clone(), h.clone())).collect();
+            if held.is_empty() && self.lane.is_empty() && self.engine().state().turns.is_empty() {
+                return;
+            }
+            for (t, h) in held {
+                self.end(&t, if h.stop { Outcome::Stopped } else { Outcome::Idle });
+            }
+            // a claim left unanswered is claimed again at a tick
+            self.tick(1_000);
+        }
+        panic!("a world that never settles");
+    }
+
+    /// Settled, every message said has one start and one end (I2, I4), and
+    /// ran at most once (I1); and no turn is held any more.
+    fn check_settled(&self, said: &[String]) -> Result<(), String> {
+        self.check()?;
+        for t in said {
+            let (starts, ends) = (self.starts(t).len(), self.ends(t).len());
+            if (starts, ends) != (1, 1) {
+                let dropped: Vec<&String> = self.dropped.iter().filter(|id| id.contains(t.as_str())).collect();
+                return Err(format!("I2/I4: {t} has {starts} starts and {ends} ends; crashes took its posts {dropped:?} from the lane"));
+            }
+        }
+        let held = &self.engine().state().turns;
+        if !held.is_empty() {
+            return Err(format!("settled, and still holding {:?}", held.keys().collect::<Vec<_>>()));
+        }
+        Ok(())
+    }
+}
+
+/// Goal (I1, P1): a turn is handed to its runtime only once its claim (its
+/// `turn.start`, as this life) is answered as this life's, and only while
+/// its runtime can take it. A replay of the claim (the lane's own retry,
+/// after an answer was lost) is this life's too, and runs it once.
+#[test]
+fn a_turn_starts_only_once_its_claim_is_answered() {
+    let mut w = World::new(&["juniper"]);
+    w.start_unconnected(None);
+    let t = w.say("id:paul", "one");
+    assert_eq!((w.runs_of(&t), w.pending_starts()), (0, vec![]), "its runtime cannot take it: neither claimed nor run");
+    w.connect();
+    assert_eq!(w.pending_starts(), vec![t.clone()], "claimed once its runtime can take it");
+    assert_eq!(w.runs_of(&t), 0, "not run before its claim is answered");
+    w.answer_one();
+    assert_eq!(w.runs_of(&t), 1, "run once its claim is answered");
+    assert_eq!(w.starts(&t)[0]["life"], json!(w.life()), "the claim names its life");
+
+    // replay: the claim landed and its answer was lost; claimed again at the
+    // next tick, its replay is this life's own: run once
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.land_unanswered_one();
+    assert_eq!(w.runs_of(&t), 0, "an unanswered claim starts nothing");
+    w.tick(1_000);
+    assert_eq!(w.pending_starts(), vec![t.clone()], "claimed again");
+    w.answer_one();
+    assert_eq!((w.runs_of(&t), w.starts(&t).len()), (1, 1), "its own claim, replayed: run once");
+}
+
+/// Goal (I1): a claim another life holds (409) is never run here; the
+/// turn gets its one end, and the next message runs.
+#[test]
+fn a_claim_another_life_holds_ends_the_turn() {
+    let mut w = World::new(&["juniper"]);
+    let t = w.turn_of(1);
+    w.claimed_by_another_life(&t, 1);
+    w.start(None);
+    assert_eq!(w.say("id:paul", "one"), t);
+    w.answer_one();
+    assert_eq!(w.runs_of(&t), 0, "another life's turn is never run here");
+    w.answer_all();
+    let ends = w.ends(&t);
+    assert_eq!(ends.len(), 1, "one end: {ends:?}");
+    assert_eq!((ends[0]["outcome"].as_str(), ends[0]["error"].as_str()), (Some("error"), Some("lost when the computer restarted")));
+    assert!(w.engine().state().turns.is_empty(), "forgotten");
+    let next = w.say("id:paul", "two");
+    w.answer_all();
+    assert_eq!(w.runs_of(&next), 1, "the next message runs");
+}
+
+/// Goal (P1): a claim the platform refuses (403 or 404: the agent left the
+/// chat, or its owner holds it below editor) runs nothing and is not asked
+/// again: the turn is dropped, the chat's next turn is claimed, and the
+/// computer is let go once none is left (never held awake for a claim that
+/// cannot land).
+#[test]
+fn a_claim_the_agent_may_not_post_drops_the_turn() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let say = |e: &mut Engine, seq: u64, text: &str| e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "id:paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, T0);
+    let one = say(&mut e, 1, "one");
+    let t1 = records::turn_id(&a.fragment, "talk.paul", "chat", 1);
+    assert_eq!(kinds(&one), vec!["turn.start"]);
+    assert!(say(&mut e, 2, "two").effects.iter().all(|x| !matches!(x, Effect::Claim { .. })), "two waits behind one's claim");
+    let r = e.step(Input::Claimed { turn: t1.clone(), answer: ClaimAnswer::Refused }, T0 + 1);
+    assert!(started(&r).is_none(), "refused: not run");
+    let t2 = records::turn_id(&a.fragment, "talk.paul", "chat", 2);
+    assert_eq!(posts(&r), vec![(records::work_id(&t2, "start"), posts(&r)[0].1.clone())], "no end for one (it cannot be posted), and two is claimed");
+    assert!(r.dirty && !e.state().turns.contains_key(&t1), "one is dropped");
+    let r2 = e.step(Input::Claimed { turn: t2.clone(), answer: ClaimAnswer::Refused }, T0 + 2);
+    assert_eq!(keepalive(&r2), Some(false), "nothing left: the computer may sleep");
+    assert!(e.state().turns.is_empty());
+    assert!(e.step(Input::Tick, T0 + 3).effects.is_empty(), "and nothing is asked again");
+}
+
+/// Goal (P1): a claim the lane gave up on (no answer) starts nothing; the
+/// turn stays queued, unclaimed, and is claimed again at the next tick.
+#[test]
+fn a_claim_with_no_answer_starts_nothing() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.lose_one();
+    assert_eq!(w.runs_of(&t), 0, "no answer: not run");
+    assert!(w.starts(&t).is_empty(), "nor claimed");
+    assert_eq!(w.engine().state().turns[&t].phase, Phase::Queued, "kept queued");
+    w.tick(1_000);
+    assert_eq!(w.pending_starts(), vec![t.clone()], "claimed again at a tick");
+    w.answer_one();
+    assert_eq!(w.runs_of(&t), 1);
+}
+
+/// Goal (P1, one life per turn): a turn whose life ended after it was handed
+/// to its runtime is ended as lost by the next life, never handed again,
+/// whether or not the runtime had taken it.
+#[test]
+fn a_restart_ends_what_was_handed() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.answer_all();
+    assert_eq!(w.runs_of(&t), 1, "handed");
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.runs_of(&t), 1, "never handed again");
+    let ends = w.ends(&t);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0]["error"], "lost when the computer restarted");
+}
+
+/// Goal (I3): a rollback starts nothing twice. Method: keep the state after
+/// turn one, run turn two to its end, start a new life from the kept state,
+/// feed it the records again against the journal, and count runs.
+#[test]
+fn a_rollback_starts_nothing_twice() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t1 = w.say("id:paul", "one");
+    w.answer_all();
+    w.end(&t1, Outcome::Idle);
+    w.answer_all();
+    let kept = w.latest();
+    let t2 = w.say("id:paul", "two");
+    w.answer_all();
+    w.end(&t2, Outcome::Idle);
+    w.answer_all();
+    w.crash(false);
+
+    w.start(kept);
+    w.answer_all();
+    let t3 = w.say("id:paul", "three");
+    w.answer_all();
+    w.end(&t3, Outcome::Idle);
+    w.answer_all();
+    let runs: Vec<&str> = w.runs.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(runs, vec![t1.as_str(), t2.as_str(), t3.as_str()], "each turn ran once");
+    for t in [&t1, &t2, &t3] {
+        let ends = w.ends(t);
+        assert_eq!(ends.len(), 1, "{t}: one end");
+        assert_eq!(ends[0]["outcome"], "idle", "{t}: its own life's end stands");
+    }
+    w.check().unwrap();
+}
+
+/// Goal (I4): a message admitted and never started before a crash is run by
+/// the next life, whether that life wakes with the state the crash left (it
+/// queued there), a state from before it was said, or none.
+#[test]
+fn said_before_a_crash_and_never_started_runs_in_the_next_life() {
+    for wake in ["latest", "before", "none"] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let t1 = w.say("id:paul", "one");
+        w.answer_all();
+        let before = w.latest();
+        let t2 = w.say("id:paul", "two");
+        w.answer_all();
+        assert_eq!(w.runs_of(&t2), 0, "{wake}: two waits behind one");
+        let state = match wake {
+            "latest" => w.latest(),
+            "before" => before,
+            _ => None,
+        };
+        w.crash(false);
+        w.start(state);
+        w.answer_all();
+        assert_eq!(w.runs_of(&t2), 1, "{wake}: the next life runs it");
+        w.end(&t2, Outcome::Idle);
+        w.answer_all();
+        assert_eq!(w.ends(&t2)[0]["outcome"], "idle", "{wake}");
+        assert_eq!(w.ends(&t1).len(), 1, "{wake}: one ended once");
+    }
+}
+
+/// Goal (F11): what an agent says with no turn running survives a
+/// rollback: its id holds the life, so a counter that went back collides
+/// with nothing, and both messages are posted.
+#[test]
+fn what_an_agent_says_unasked_survives_a_rollback() {
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let kept = w.latest();
+    w.say_unasked("remember the milk");
+    w.answer_all();
+    w.crash(false);
+    w.start(kept);
+    w.say_unasked("water the plants");
+    w.answer_all();
+    let said: Vec<Value> = w.journal.channel(CHAT, records::CHAT).iter().map(|r| r.body["text"].clone()).collect();
+    assert_eq!(said, vec![json!("remember the milk"), json!("water the plants")], "both posted");
+    w.check().unwrap();
+}
+
+/// A small deterministic generator (splitmix64): one seed, one history.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, n: u64) -> u64 {
+        assert!(n > 0, "a choice among some");
+        self.next() % n
+    }
+}
+
+/// Seeds the simulation runs, events in each, and messages said in each.
+const SIM_SEEDS: u64 = 120;
+const SIM_EVENTS: usize = 400;
+const SIM_SAID_MAX: usize = 40;
+
+/// One history: events chosen by `seed`, the invariants checked after each,
+/// and every message's records checked once everything settles.
+fn simulate(seed: u64) -> Result<(), String> {
+    // Its events would be millions of log lines.
+    crate::log::set_quiet(true);
+    let mut rng = Rng(seed);
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let mut said: Vec<String> = Vec::new();
+    let mut unasked = 0;
+    for n in 0..SIM_EVENTS {
+        let what = if !w.alive() && rng.below(3) == 0 {
+            // a new life: from the latest state, an earlier one, or none
+            let state = match rng.below(4) {
+                0 => None,
+                1 => w.latest(),
+                _ if w.saves.is_empty() => None,
+                _ => Some(w.saves[rng.below(w.saves.len() as u64) as usize].clone()),
+            };
+            w.start(state);
+            "start"
+        } else {
+            match rng.below(100) {
+                0..=14 if said.len() < SIM_SAID_MAX => {
+                    // said, and read when the followers next deliver
+                    let seq = w.journal.append(CHAT, records::CHAT, "id:paul", json!({ "text": format!("message {}", said.len()) }));
+                    said.push(w.turn_of(seq));
+                    "say"
+                }
+                15..=27 => {
+                    w.deliver();
+                    "deliver"
+                }
+                28..=47 => {
+                    w.answer_one();
+                    "answer"
+                }
+                48..=51 => {
+                    w.lose_one();
+                    "lose"
+                }
+                52..=55 => {
+                    w.land_unanswered_one();
+                    "land unanswered"
+                }
+                56..=70 if !w.held.is_empty() => {
+                    let held: Vec<(String, Held)> = w.held.iter().map(|(t, h)| (t.clone(), h.clone())).collect();
+                    let (t, h) = held[rng.below(held.len() as u64) as usize].clone();
+                    match (h.stop, h.prompted.is_some(), rng.below(10)) {
+                        (true, _, _) => w.end(&t, Outcome::Stopped),
+                        (false, true, _) => {}
+                        (false, false, 0..=1) => w.ask(&t),
+                        (false, false, 2) => w.end(&t, Outcome::Error("it failed".into())),
+                        (false, false, _) => w.end(&t, Outcome::Idle),
+                    }
+                    "the runtime"
+                }
+                71..=75 => {
+                    // paul answers a card the journal shows open
+                    let asked: Vec<Value> = w.journal.channel(CHAT, records::WORK).iter().map(|r| r.body.clone()).filter(|b| b["kind"] == "turn.prompt").collect();
+                    if !asked.is_empty() {
+                        let p = &asked[rng.below(asked.len() as u64) as usize];
+                        let option = if rng.below(2) == 0 { "once" } else { "deny" };
+                        w.journal.append(CHAT, records::CHAT, "id:paul", json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": option }));
+                    }
+                    "answer a card"
+                }
+                76..=79 => {
+                    let ms = [1_000, 30_000, 120_000, 1_800_000][rng.below(4) as usize];
+                    w.tick(ms);
+                    "tick"
+                }
+                80..=83 if !said.is_empty() => {
+                    let t = said[rng.below(said.len() as u64) as usize].clone();
+                    w.journal.append(CHAT, records::CHAT, "id:paul", json!({ "kind": "stop", "turn": t }));
+                    "stop"
+                }
+                84..=88 if w.alive() => {
+                    w.crash(rng.below(2) == 0);
+                    "crash"
+                }
+                89..=92 if w.alive() => {
+                    unasked += 1;
+                    w.say_unasked(&format!("unasked {unasked}"));
+                    "say unasked"
+                }
+                93..=94 if w.alive() => {
+                    w.disconnect();
+                    "the runtime goes"
+                }
+                95..=97 if w.alive() => {
+                    w.connect();
+                    "the runtime comes back"
+                }
+                _ => "nothing",
+            }
+        };
+        w.check().map_err(|e| format!("seed {seed}, event {n} ({what}): {e}"))?;
+    }
+    w.settle();
+    w.check_settled(&said).map_err(|e| format!("seed {seed}, settled: {e}"))
+}
+
+/// Goal (I1, I2, I4): any history of messages, answers lost and late, runs,
+/// cards, Stops, crashes (each taking the lane's unsent posts with it), and
+/// lives started from any saved state or none keeps the invariants: checked
+/// after every event, and once it settles every message has one start and
+/// one end, ran at most once, and no turn is held. No case is let off. The
+/// test that finds the cases nobody listed.
+#[test]
+fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
+    let failures: Vec<String> = (0..SIM_SEEDS).filter_map(|seed| simulate(seed).err()).collect();
+    assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
+}
+
+/// Goal (I2, I4): the case the simulation found, each way it happens: a
+/// crash takes a turn's last records from the lane after the state was
+/// written without them, and the next life (from the state the crash
+/// left) posts them again, under the same ids and bodies, so the turn ends
+/// once and as itself, never as lost. A turn that ran (its end taken; or
+/// its end landed and its answer lost, so the next life's is a replay), a
+/// refused one, and one stopped while it waited (their start and end
+/// taken). Was `a_crash_that_drops_a_turns_end_leaves_it_open`, ignored
+/// while P1 left it so.
+#[test]
+fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
+    // a turn that ran: its end taken by the crash
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.answer_all();
+    w.end(&t, Outcome::Idle);
+    assert_eq!(w.engine().state().turns[&t].phase, Phase::Ended, "ended, owing its end");
+    let state = w.latest();
+    w.crash(false);
+    assert!(w.ends(&t).is_empty(), "the crash took its end");
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.ends(&t), vec![json!({ "kind": "turn.end", "turn": t, "outcome": "idle" })], "its own end, posted again");
+    assert_eq!(w.runs_of(&t), 1);
+    assert!(w.engine().state().turns.is_empty(), "let go once answered");
+
+    // its end landed, and the answer was lost with the life: a replay
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.answer_all();
+    w.end(&t, Outcome::Idle);
+    w.answer_one(); // its reply
+    let state = w.latest();
+    w.crash(true); // its end lands; no one hears
+    assert_eq!(w.ends(&t).len(), 1);
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.ends(&t).len(), 1, "posted again: a replay, so one end");
+    assert!(w.engine().state().turns.is_empty());
+
+    // a refused turn, and one stopped while it waited: their two records taken
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let running = w.say("id:paul", "running");
+    w.answer_all();
+    let stopped = w.say("id:paul", "stopped");
+    // the queue full: `stopped` and these wait, the next is refused
+    for n in 1..limits::QUEUED_PER_CHAT_MAX {
+        w.say("id:paul", &format!("waiting {n}"));
+    }
+    let refused = w.say("id:paul", "refused");
+    w.say_body("id:paul", json!({ "kind": "stop", "turn": stopped }));
+    assert_eq!(w.pending_starts(), vec![refused.clone(), stopped.clone()], "both owe their start and end");
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    for (t, outcome) in [(&refused, "error"), (&stopped, "stopped")] {
+        assert_eq!((w.starts(t).len(), w.ends(t).len()), (1, 1), "{t}: both records, once");
+        assert_eq!(w.ends(t)[0]["outcome"], outcome);
+        assert_eq!(w.runs_of(t), 0, "{t}: never run");
+    }
+    assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
+    w.check().unwrap();
 }

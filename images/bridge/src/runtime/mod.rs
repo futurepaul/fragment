@@ -14,6 +14,9 @@
 //! A runtime owns the in-flight turn (lesson 1): the bridge hands it a turn
 //! once, and hears back. It never talks to the fragment API: the bridge
 //! downloads a turn's attachments before handing it, and uploads a reply's.
+//! A turn is handed only in the life that claimed it (docs/chat-records.md,
+//! `turn.start`), and a turn is claimed only while the runtime says it can
+//! take one (`Event::Connected`).
 
 pub mod relay;
 pub mod script;
@@ -108,18 +111,20 @@ pub enum Command {
     /// A prompt's answer (`option`), or its expiry (`None`): only ever once
     /// per prompt. `seq` is the answering record's (a fresh message id).
     Answer { turn: String, prompt: String, option: Option<String>, seq: u64, by: String },
-    /// The bridge ended the turn itself (it went quiet too long, or was lost
-    /// in a restart): forget it.
+    /// The bridge ended the turn itself (it went quiet too long, or its
+    /// agent left): forget it.
     Forget { turn: String },
 }
 
-/// What a runtime tells the bridge. Every event names its turn; one for a
-/// turn the bridge no longer holds is dropped.
+/// What a runtime tells the bridge. Every event but `Connected` and `Say`
+/// names its turn; one for a turn the bridge no longer holds is dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// The runtime took the turn (Relay: Hermes acked it). From here the
-    /// turn is the runtime's; a restart ends it rather than hand it again.
-    Accepted { turn: String },
+    /// The runtime can take turns now (true), or cannot (false). The bridge
+    /// claims a turn only while it can, so a turn claimed is one the runtime
+    /// is there to run (Relay: Hermes has dialed and said hello). A runtime
+    /// that can always take one says so as it starts.
+    Connected(bool),
     /// The reply being written, its whole text so far (shown live, never
     /// stored).
     Draft { turn: String, text: String },

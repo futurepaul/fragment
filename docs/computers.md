@@ -123,6 +123,10 @@ that names a PID from before a sleep can name a live process after it.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).
+- While `/run/computer/hold` exists, a sleep has begun and its save comes
+  next: the image takes no new work. Our bridge claims no turn while it
+  does (docs/bridge.md, `BRIDGE_HOLD`), so a message that arrives then is
+  left for the next start.
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
   before the signal; whatever is written after it may be lost.
 

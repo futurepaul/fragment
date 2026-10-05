@@ -342,6 +342,18 @@ impl Loop {
         let _ = self.events.send(e).await;
     }
 
+    /// Hermes is (or is no longer) on a greeted connection: the bridge
+    /// claims turns only while it is, so a turn is claimed by a life whose
+    /// Hermes is there to take it (one handed meanwhile is kept until
+    /// acked, and handed again on the next dial).
+    async fn greet(&mut self, greeted: bool) {
+        if self.greeted == greeted {
+            return;
+        }
+        self.greeted = greeted;
+        self.emit(Event::Connected(greeted)).await;
+    }
+
     /// Sends a frame on the greeted connection: whether it went.
     fn send(&self, frame: String) -> bool {
         let Some((_, tx)) = &self.conn else { return false };
@@ -433,12 +445,12 @@ impl Loop {
                     crate::ev!("relay.replaced_dial", { "conn": old });
                     let _ = old_tx.try_send(Message::Close(Some(CloseFrame { code: CloseCode::from(4000), reason: "replaced by a new dial".into() })));
                 }
-                self.greeted = false;
+                self.greet(false).await;
             }
             Wire::Closed { conn } => {
                 if self.conn.as_ref().is_some_and(|(c, _)| *c == conn) {
                     self.conn = None;
-                    self.greeted = false;
+                    self.greet(false).await;
                 }
             }
             Wire::Frame { conn, text } => {
@@ -462,7 +474,7 @@ impl Loop {
     async fn frame(&mut self, f: FromGateway) {
         match f {
             FromGateway::Hello => {
-                self.greeted = true;
+                self.greet(true).await;
                 if let Some((_, tx)) = &self.conn {
                     let _ = tx.try_send(Message::text(wire::descriptor()));
                 }
@@ -495,7 +507,7 @@ impl Loop {
                         if let Some(frame) = stop {
                             let _ = self.send(frame);
                         }
-                        self.emit(Event::Accepted { turn: buffer_id }).await;
+                        crate::ev!("relay.acked", { "turn": buffer_id });
                     }
                 } else {
                     self.answers.retain(|a| a.buffer != buffer_id);
