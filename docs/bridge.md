@@ -29,11 +29,11 @@ A runtime gets commands and sends events, each naming its turn
 | `Start(TurnStart)` | a turn: agent, chat, asker and their name, text, attachments as local files, whether it is a routine |
 | `Stop {turn}` | the asker pressed Stop |
 | `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
-| `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or a restart) |
+| `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
 
 | Event | |
 |---|---|
-| `Accepted` | the runtime took it: from here a restart ends it rather than hand it again |
+| `Connected(bool)` | the runtime can take turns now, or cannot: the bridge claims a turn only while it can (Relay: Hermes on its socket, greeted; `script`: from its start) |
 | `Draft {text}` | the reply so far, shown live |
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
@@ -62,7 +62,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
 | `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages |
 | `GET /f/{f}/__live?v=2`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
-| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{replayed}`; retried 10 times with jitter on a transport error, 429 or 5xx; a 409 or 403/404 is dropped and logged |
+| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{replayed}`; retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
@@ -82,6 +82,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `FRAGMENT_API` | required | the fragment API |
 | `RESTORE_PENDING` | | `1`: wait for `BRIDGE_RESTORED` first |
 | `BRIDGE_RESTORED` | `/run/computer/restored` | |
+| `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's mark before a sleep's save; looked at before each claim's every try) |
 | `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
@@ -102,11 +103,64 @@ Bodies are JSON. `api.rs` has one method for each.
 
 `<state>/state.json`, written whole (a temporary file, synced, renamed)
 after every step that changed it and before that step's effects: the
-cursors (`agent|fragment|channel` → seq) and the open turns. A state
-that contradicts itself (a turn past its cursor, an id not its cause's)
-is refused at start, never repaired. At a start, turns the runtime had
-taken are ended (`error`, their cards `expired`); turns handed but never
-taken are handed again; queued turns run.
+cursors (`agent|fragment|channel` → seq) and the turns not yet over
+(queued, running, waiting, or ended and owing their last records). It is
+a cache. The authority on which turns have started is the chat's `work`
+channel, which never goes back in time, so `/data` restored from any
+earlier save, or lost, costs reads and runs nothing twice
+(docs/explorations/pi-durable.md, P1).
+
+- **One life per turn.** Each bridge process is a life, with 128 random
+  bits of its own, never written to `/data`. A turn is run only by the
+  life whose claim, its `turn.start` naming the life, the platform
+  answered as its own (docs/chat-records.md); a 409 is another life's,
+  and the turn is ended as lost; a 403/404 (the agent may not post on the
+  chat's `work`) drops the turn, run and recorded nowhere, and is not
+  asked again; no answer runs nothing, and the turn is claimed again at
+  the next tick. A cursor a rollback sent back reads a record again, and
+  its claim is the 409.
+- **At a start**, every turn the state holds that is not queued belongs
+  to an earlier life and is ended (`error: lost when the computer
+  restarted`, its cards `expired`), never handed again: this is the
+  at-most-once choice, so a turn whose life ended before it did is lost,
+  and said so. Queued turns stay queued and are claimed like any other.
+- **A claim waits for the runtime and the hold**: a turn is claimed only
+  while the runtime says it can take one (`Connected`), and not while
+  `BRIDGE_HOLD` exists (a sleep's mark before its save; the file is looked
+  at before every try of every claim). Until then it waits, unclaimed,
+  and any later life may run it.
+- **Every turn has both records**: a refusal, and a Stop of a turn that
+  waited, post its `turn.start` and then its `turn.end`.
+- What the runtime says unasked is a turn of the life's counter and the
+  life, so a counter a rollback sent back collides with nothing.
+
+A state that contradicts itself (a turn past its cursor, an id not its
+cause's) is refused at start, never repaired. A state of another format
+(an older bridge's) is set aside for a fresh one: the journal says which
+turns ran.
+
+- **A turn leaves the state only once its last records are answered.**
+  The state is written before a step's effects, so a turn that has ended
+  there would otherwise have its `turn.end` only in its fragment's lane,
+  and a crash then would leave it open for good (its start, and no end),
+  or leave a refused or queued-and-stopped turn with no record at all.
+  So an ended turn is kept (`ended`), holding what it owes `work`: its
+  `turn.end`, and for a turn that never ran its `turn.start` too, with
+  their bodies. It is let go once the lane is done with each: answered
+  (appended, a replay, or refused: a 409 is another life's end, a
+  403/404 a chat it may not post in), or given up by the lane's rule for
+  every post, `POST_TRIES_MAX` (10) tries with a jittered backoff on a
+  transport error, 429 or 5xx. A life that ends first leaves them to the
+  next, which posts every one again at its start under the same id and
+  body: a replay when it had landed. This closes the gap the simulation
+  found (`any_history_of_crashes_and_rollbacks_keeps_the_invariants`
+  checks I2 with no case let off; `a_crash_that_drops_a_turns_end_leaves_
+  nothing_open` and `an_end_a_crash_kept_from_the_platform_is_posted_by_
+  the_next_life` each way it happened). A record that keeps failing holds
+  its turn for one life's tries, and each later life tries it again once.
+  Not kept: the turn's last reply, and its cards' closings, posted in the
+  same step; a crash before they land loses them. A turn refused past
+  `TURNS_OPEN_MAX` is not kept either.
 
 Every bound is a const in `limits.rs`, with its reason. SIGTERM: gone
 within 3 s.
@@ -123,7 +177,10 @@ get_chat_info`.
 - Each turn is an `inbound` group message routed to the agent's profile
   (`source.profile`), its chat id `<chat fragment>/<agent fragment>` so
   two agents in one chat are two chats to Hermes, its message id the
-  turn id. Kept until Hermes acks it, handed again on each dial.
+  turn id. Claimed only while Hermes is on its socket and has said
+  `hello` (the bridge starts just before Hermes' gateway, so the message
+  that woke the computer waits for it, unclaimed); once handed, kept until
+  Hermes acks it and handed again on each dial, within that life.
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.
