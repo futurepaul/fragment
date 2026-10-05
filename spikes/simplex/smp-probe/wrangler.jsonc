@@ -1,0 +1,8 @@
+{
+  // The SMP transport probe as a Worker, for `wrangler dev` only (never
+  // deployed). Build first: worker-build --release (ring for wasm32 needs a
+  // clang that targets it: CC_wasm32_unknown_unknown, AR_wasm32_unknown_unknown).
+  "name": "smp-probe",
+  "main": "build/index.js",
+  "compatibility_date": "2026-01-01"
+}

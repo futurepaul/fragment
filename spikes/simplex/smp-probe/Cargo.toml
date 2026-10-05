@@ -1,0 +1,38 @@
+# The SimpleX connector spike's transport probe (question 3 of
+# docs/explorations/simplex-connector.md): can a Worker hold SMP's
+# TLS-over-TCP? The same probe runs on the host (src/bin/probe.rs, tokio)
+# and as a Worker under `wrangler dev` (src/lib.rs, workers-rs `connect()`).
+# Spike code: its own workspace, never built by the root workspace or CI.
+[workspace]
+
+[package]
+name = "smp-probe"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# TLS 1.3 in userland, over a plain socket: SMP routers pin their own
+# self-signed CA by fingerprint, which no platform TLS lets a Worker do
+rustls = { version = "=0.23.36", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+tokio = { version = "=1.49.0", default-features = false, features = ["io-util"] }
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "=0.8.5"
+# ring's randomness on wasm32-unknown-unknown is the JS crypto API's
+ring = { version = "=0.17.14", features = ["wasm32_unknown_unknown_js"] }
+# rustls' clock on wasm32-unknown-unknown is the JS one
+rustls-pki-types = { version = "=1.15.1", features = ["web"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "=1.49.0", features = ["rt", "net", "macros", "time"] }
+
+[profile.release]
+opt-level = "s"

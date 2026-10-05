@@ -30,6 +30,9 @@ mod restart;
 mod share;
 mod shell;
 mod signin;
+// The SimpleX connector spike (spike/simplex-connector only; runs by name).
+#[path = "../../../../spikes/simplex/lane.rs"]
+mod simplex;
 mod site;
 mod sync;
 mod templates;
@@ -102,6 +105,7 @@ const LANES: &[Lane] = &[
     chat::chat,
     shell::shell_ui,
     hermes::hermes,
+    simplex::simplex,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,
@@ -123,7 +127,7 @@ const LANES: &[Lane] = &[
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "sync", "restart", "pathmode"],
+    &["shell", "computers", "chat", "hermes", "simplex", "sync", "restart", "pathmode"],
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
