@@ -349,7 +349,12 @@ docs/durable-computers.md. A computer keeps its newest three saves of
 
 `http://storage.fragment.internal` is an S3 endpoint over the
 computer's own R2 prefix: any bucket name and key, scoped by the
-intercept. It is for an image's own disaster recovery (Litestream).
+intercept. It is the image's, for whatever it keeps of its own outside
+`/data`. Ours keeps nothing there: its Litestream replicas went with
+step 1 of docs/durable-computers.md (P4 of
+docs/explorations/pi-durable.md: they were never read, and a restore of
+them would have put a `state.db` of seconds ago into a `/data` of the
+last save).
 
 ### Connections and operator keys
 
@@ -514,7 +519,7 @@ settings and state):
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
 - `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
-  bridge as Hermes' Relay connector, Litestream, the screen. One Hermes
+  bridge as Hermes' Relay connector, the screen. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
@@ -596,9 +601,7 @@ settings and state):
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
   with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call);
-  Litestream starts again when the set of databases it streams changes
-  (a new profile's appears at its first turn). Events: `agents.changed`,
+  `/data` at the first call). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 

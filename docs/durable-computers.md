@@ -61,6 +61,9 @@ file is the newer word, and decision 18 points here.
   terminal's cwd and its browser's profile, per agent), saved as a
   record of its own; the rest of `/data` is Hermes' home and the bridge's
   state, saved beside it, restored together.
+- **Litestream is cut (P4, #150).** Its replicas were never read; the
+  saves carry Hermes' databases whole. The storage endpoint stays, the
+  image's for whatever it keeps outside `/data`.
 
 ## The open problem
 
@@ -105,8 +108,8 @@ Sprite workspaces that paused warm (docs/finite-next-lessons.md). Five
 steps, each its own pull request with its tests, each leaving master
 whole:
 
-1. **A+ (P2, reframed).** *Built (#147, #148; Litestream still to
-   cut), with two refinements: the copy is SQLite's online backup from
+1. **A+ (P2, reframed).** *Built (#147, #148; Litestream cut in
+   #150), with two refinements: the copy is SQLite's online backup from
    Rust, since Hermes' own covers a fixed list of files and restarts a
    busy copy; and the save leaves out exactly what the image names as
    copied, never `*.db`, so a database Hermes makes after the copy is kept

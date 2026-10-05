@@ -2,7 +2,7 @@
 //! agent assigned while it runs), as pure functions of the computer's
 //! agents: the managed overlay (`/etc/hermes/config.yaml`, merged over every
 //! profile's config), each agent's profile config, the gateway's Relay
-//! environment, and Litestream's configuration; and the wire of the
+//! environment; and the wire of the
 //! gateway's control socket. YAML is written by hand: every string is a
 //! JSON string, which is a YAML double-quoted scalar.
 
@@ -262,27 +262,6 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
 }
 
-/// Litestream for each profile's `state.db`, to the computer's storage
-/// endpoint (disaster recovery only: off the wake path, decision 18). The
-/// keys are placeholders; the intercept scopes the bucket.
-pub fn litestream_config(dbs: &[(String, PathBuf)], storage: &str) -> String {
-    let mut y = String::from("# Written by hermes-boot: each profile's state.db, streamed for disaster recovery.\ndbs:\n");
-    for (name, path) in dbs {
-        y.push_str(&format!("  - path: {}\n    replica:\n      type: s3\n      bucket: computer\n      path: {}\n      endpoint: {}\n      region: auto\n      force-path-style: true\n      access-key-id: fragment\n      secret-access-key: fragment\n      sync-interval: 10s\n", q(&path.display().to_string()), q(&format!("litestream/{name}")), q(storage)));
-    }
-    y
-}
-
-/// The databases Litestream streams: the gateway's own and each agent
-/// profile's `state.db`, as `(replica name, path)`. Hermes makes a
-/// profile's database at its first turn, so the boot streams those that
-/// exist, and starts Litestream again when that set changes.
-pub fn litestream_dbs(agents: &[Agent], home: &Path) -> Vec<(String, PathBuf)> {
-    let mut dbs = vec![("default".to_string(), home.join("state.db"))];
-    dbs.extend(agents.iter().map(|a| (wire::profile(&a.fragment), profile_dir(home, &a.fragment).join("state.db"))));
-    dbs
-}
-
 /// A profile's directory, under the Hermes home.
 pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
@@ -393,8 +372,6 @@ mod tests {
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
-        let l = litestream_config(&[("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))], "http://storage.fragment.internal");
-        assert!(l.contains("path: \"litestream/juniper-paul\"") && l.contains("endpoint: \"http://storage.fragment.internal\""), "{l}");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
     }
 
@@ -467,12 +444,6 @@ mod tests {
     #[should_panic(expected = "a control verb")]
     fn a_verb_out_of_shape_is_a_bug() {
         control_request("rescan profiles\n{");
-    }
-
-    #[test]
-    fn litestream_streams_the_gateways_and_each_profiles_database() {
-        let dbs = litestream_dbs(&[agent()], Path::new("/data/hermes"));
-        assert_eq!(dbs, vec![("default".into(), PathBuf::from("/data/hermes/state.db")), ("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))]);
     }
 
     #[test]
