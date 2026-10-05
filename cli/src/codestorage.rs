@@ -322,37 +322,11 @@ impl CodeStorage {
         sha_at(&v["commit_sha"]).ok_or_else(|| CsError::Malformed(format!("branches/create without a commit sha: {v}")))
     }
 
-    /// Move `live` to `main`'s current tip: ff when possible, else a merge
-    /// commit (post-rollback deploys). `expected_live` is the CAS tip guard.
-    /// Returns the new live tip.
-    pub fn promote_live(&self, expected_live: &str, message: &str, author: &Author) -> Result<String, CsError> {
-        let body = serde_json::json!({
-            "target_branch": LIVE,
-            "source_ref": MAIN,
-            "strategy": "ff_prefer",
-            "expected_target_sha": expected_live,
-            "commit_message": message,
-            "author": { "name": author.name, "email": author.email },
-        });
-        let (status, rbody) = self.req("POST", "/merge", Some(body.to_string().into_bytes()), Some("application/json"))?;
-        self.check(status, &rbody)?;
-        let v = Self::json(&rbody)?;
-        sha_at(&v["target"]["new_sha"]).ok_or_else(|| CsError::Malformed(format!("merge without a target sha: {v}")))
-    }
-
     /// Rollback: append a restore commit on `live` whose tree matches
-    /// `base_ref` (must be an ancestor of the current tip, else 412).
+    /// `base_ref` (must be an ancestor of the current tip, else 412, as is
+    /// a restore that changes nothing).
     pub fn restore_live(&self, base_ref: &str, expected_live: &str, message: &str, author: &Author) -> Result<String, CsError> {
-        let meta = serde_json::json!({
-            "metadata": {
-                "target_branch": LIVE,
-                "base_ref": base_ref,
-                "expected_target_sha": expected_live,
-                "commit_message": message,
-                "author": { "name": author.name, "email": author.email },
-            }
-        });
-        let body = format!("{meta}\n");
+        let body = core_cs::restore_commit(LIVE, base_ref, expected_live, message, (&author.name, &author.email));
         let (status, rbody) = self.req("POST", "/restore-commit", Some(body.into_bytes()), Some("application/x-ndjson"))?;
         self.check(status, &rbody)?;
         // a restore answers as a commit pack does
@@ -537,17 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn promote_and_rollback_flow() {
+    fn preview_and_rollback_flow() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
-        // first deploy: create live at main's tip
+        // live at main's second commit, where a deploy leaves it (the
+        // platform moves live: POST …/deploy)
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
-        let live1 = cs.create_branch(&tip1, LIVE, false).unwrap();
-        assert_eq!(live1, tip1);
-        // second deploy: main moves, live fast-forwards via merge (CAS-guarded)
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        let live2 = cs.promote_live(&live1, "deploy v2", &author()).unwrap();
+        let live2 = cs.create_branch(&tip2, LIVE, false).unwrap();
         assert_eq!(live2, tip2);
         // preview: ephemeral ref at main's tip
         let p = cs.create_branch(&tip2, "preview/abc123", true).unwrap();
@@ -567,18 +539,16 @@ mod tests {
     }
 
     #[test]
-    fn promote_with_stale_expected_live_is_cas_rejected() {
-        // deploy's bounded retry loop keys off this rejection: live moved
-        // since the SHA we pinned -> 409 target_moved, nothing applied
+    fn a_rollback_with_a_stale_expected_live_is_cas_rejected() {
+        // live moved since the SHA the rollback read -> 409 target_moved,
+        // nothing applied
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
-        cs.create_branch(&tip1, LIVE, false).unwrap();
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        // someone already moved live to tip2; we pinned tip1 (stale)
-        cs.promote_live(&tip1, "first deploy", &author()).unwrap();
-        let err = cs.promote_live(&tip1, "second deploy", &author()).unwrap_err();
+        cs.create_branch(&tip2, LIVE, false).unwrap();
+        let err = cs.restore_live(&tip1, &tip1, "rollback", &author()).unwrap_err();
         assert!(matches!(err, CsError::CasRejected { .. }), "got: {err}");
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
     }

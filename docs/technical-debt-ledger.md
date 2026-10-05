@@ -765,3 +765,25 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a computer's sync and deploy go through its API egress
   (the files and deploy routes, or a code.storage intercept that swaps
   the token in), proven by the hermes lane deploying an app from a chat.
+
+## `fragment rollback` right after a two-step deploy picks its first step
+
+- **Observed:** 2026-10-03, deploys after a rollback. code.storage merges
+  three ways, so a deploy whose `live` has diverged from `main` (a
+  rollback's restore commit, then main moved) first restores live to
+  their merge base, then merges main in, which then takes main's files
+  whole (`fragment_core::codestorage::Promotion`). Every deploy is the
+  cell's (`go_live`, `POST /api/f/{name}/deploy`; `fragment deploy` asks
+  it), which holds its plane lock across both moves, so a push webhook
+  for the first waits and pins the second: the first is never served.
+- **Risk:** `fragment rollback` without `--to` right after such a deploy
+  restores the first move's files (the deploy the earlier rollback
+  undid), not the files the rollback served (by first parents, as the
+  fake lists; the service's date order picks among main's commits, the
+  contract's question 4).
+- **First proof:** `fragment drafts` after a deploy that followed a
+  rollback listing its "(first, live back to …)" commit as the one before
+  live, and a bare `fragment rollback` landing on it.
+- **Delete when:** `rollback`'s default target is the commit live served
+  before its tip (skipping a deploy's first step), or code.storage merges
+  with the source's tree.

@@ -12,9 +12,13 @@
 //! - Commit packs are NDJSON (`{"metadata": …}` first), with decoded chunks
 //!   capped at 4 MiB, every upsert's stream ending in `eof: true`, and
 //!   expected-parent CAS (409 `precondition_failed`).
-//! - Each commit has its own tree; merges fast-forward when they can and
-//!   otherwise write a merge commit with the source's tree; restore commits
-//!   take an ancestor's tree; history walks first parents.
+//! - Each commit has its own tree. Merges are git's: nothing when the
+//!   target holds the source, a fast-forward when they can, and otherwise
+//!   a three-way merge from the merge base, a file whole (409
+//!   `merge_conflict` when both sides changed one); the merge preview says
+//!   which. Restore commits take an ancestor's tree, and refuse (412) the
+//!   tip itself, a commit the branch does not hold, and no change. History
+//!   walks first parents.
 //! - Every branch move delivers a signed push webhook
 //!   (`X-Pierre-Signature`) to the URLs registered for that repo.
 //!
@@ -106,15 +110,19 @@ struct Hook {
 pub type Change<'a> = (&'a str, Option<&'a [u8]>);
 type OwnedChange = (String, Option<Vec<u8>>);
 
+/// A commit's files, by path.
+type Tree = BTreeMap<String, Entry>;
+
 /// A commit to write: `changes` on top of the branch's tip, or, with
-/// `from`, on top of that commit's tree with it as a second parent (a
-/// merge commit or a restore commit).
+/// `from`, on top of the tree given with that commit as a second parent
+/// (a merge commit and its merged tree, or a restore commit and the tree
+/// of the commit it restores).
 struct Write<'a> {
     branch: &'a str,
     message: &'a str,
     author: &'a str,
     changes: &'a [OwnedChange],
-    from: Option<&'a str>,
+    from: Option<(&'a str, Tree)>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -252,33 +260,67 @@ impl Repo {
         self.commits.contains_key(r).then(|| r.to_string())
     }
 
-    /// Is `ancestor` on the first-parent chain from `head` (inclusive)?
-    fn first_parent_reaches(&self, ancestor: &str, head: &str) -> bool {
-        let mut cur = Some(head.to_string());
-        for _ in 0..=self.commits.len() {
-            let Some(sha) = cur else { return false };
-            if sha == ancestor {
-                return true;
-            }
-            cur = self.commits.get(&sha).and_then(|c| c.parents.first().cloned());
-        }
-        false
-    }
-
-    fn is_ancestor(&self, ancestor: &str, head: &str) -> bool {
-        let mut stack = vec![head.to_string()];
+    /// Every commit reachable from `heads`, the heads included.
+    fn reachable(&self, heads: impl IntoIterator<Item = String>) -> BTreeSet<String> {
+        let mut stack: Vec<String> = heads.into_iter().collect();
         let mut seen = BTreeSet::new();
         while let Some(sha) = stack.pop() {
-            if sha == ancestor {
-                return true;
-            }
             if seen.insert(sha.clone()) {
                 if let Some(c) = self.commits.get(&sha) {
                     stack.extend(c.parents.iter().cloned());
                 }
             }
         }
-        false
+        seen
+    }
+
+    /// Is `ancestor` reachable from `head` by any parents (`head` itself
+    /// included), as git's `merge-base --is-ancestor`?
+    fn is_ancestor(&self, ancestor: &str, head: &str) -> bool {
+        self.reachable([head.to_string()]).contains(ancestor)
+    }
+
+    /// git's merge base of two commits: a common ancestor that no other
+    /// common ancestor descends from (`None` for unrelated histories).
+    fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        let of_a = self.reachable([a.to_string()]);
+        let common: BTreeSet<String> = self.reachable([b.to_string()]).into_iter().filter(|c| of_a.contains(c)).collect();
+        let below = self.reachable(common.iter().flat_map(|c| self.commits[c].parents.clone()));
+        common.into_iter().find(|c| !below.contains(c))
+    }
+
+    /// git's three-way merge of `ours` and `theirs` from `base`, by path: a
+    /// side that changed a path from the base wins it, and both changing it
+    /// differently is a conflict (git would also try to merge the two
+    /// files' lines; the fake takes a file whole). The paths that conflict
+    /// when any do.
+    fn merge_trees(&self, base: &str, ours: &str, theirs: &str) -> Result<Tree, Vec<String>> {
+        let (base, ours, theirs) = (&self.commits[base].tree, &self.commits[ours].tree, &self.commits[theirs].tree);
+        let blob = |t: &Tree, p: &str| t.get(p).map(|e| e.blob.clone());
+        let mut merged = Tree::new();
+        let mut conflicts = Vec::new();
+        let paths: BTreeSet<&String> = base.keys().chain(ours.keys()).chain(theirs.keys()).collect();
+        for path in paths {
+            let (b, o, t) = (blob(base, path), blob(ours, path), blob(theirs, path));
+            let take = if o == t || b == t {
+                ours.get(path)
+            } else if b == o {
+                theirs.get(path)
+            } else {
+                conflicts.push(path.clone());
+                continue;
+            };
+            if let Some(entry) = take {
+                merged.insert(path.clone(), entry.clone());
+            }
+        }
+        if conflicts.is_empty() { Ok(merged) } else { Err(conflicts) }
+    }
+
+    /// The same files, by bytes (a restore that would change nothing).
+    fn same_files(&self, a: &str, b: &str) -> bool {
+        let blobs = |sha: &str| self.commits[sha].tree.iter().map(|(p, e)| (p.clone(), e.blob.clone())).collect::<Vec<_>>();
+        blobs(a) == blobs(b)
     }
 }
 
@@ -294,13 +336,14 @@ impl State {
     /// Writes a commit; returns (old, new) and queues the push webhooks.
     fn commit(&mut self, url: &str, w: Write<'_>, out: &mut Vec<Delivery>) -> (String, String) {
         let Write { branch, message, author, changes, from } = w;
-        let (tree_from, extra_parent) = (from, from);
         let tag = format!("{url}|{branch}|{message}");
         let sha = fresh_sha(&mut self.counter, &tag);
         let repo = self.repos.get_mut(url).expect("commit on a known repo");
         let old = repo.branches.get(branch).cloned();
-        let base = tree_from.map(str::to_string).or_else(|| old.clone());
-        let mut tree = base.and_then(|b| repo.commits.get(&b)).map(|c| c.tree.clone()).unwrap_or_default();
+        let (extra_parent, mut tree) = match from {
+            Some((parent, tree)) => (Some(parent), tree),
+            None => (None, old.as_ref().and_then(|b| repo.commits.get(b)).map(|c| c.tree.clone()).unwrap_or_default()),
+        };
         for (path, bytes) in changes {
             match bytes {
                 None => {
@@ -432,6 +475,25 @@ impl Inner {
                 st.refreshes += 1;
                 return Response::json(200, &json!({ "ok": true }));
             }
+            // the host's deploy (`POST /api/f/{name}/deploy`): live serves
+            // main's tip, as the cell's `go_live` leaves it; its steps after
+            // a rollback are the cell's, proven by the e2e's deploy lane
+            if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/deploy")).filter(|_| m == "POST") {
+                let Some(url) = st.url_of(name) else { return problem(404, &format!("no fragment {name}")) };
+                let Some(main) = st.repos[&url].branches.get("main").cloned() else { return problem(400, "nothing to deploy: main has no commits") };
+                let live = match st.repos[&url].branches.get("live").cloned() {
+                    Some(live) if live == main => live,
+                    Some(live) if !st.repos[&url].is_ancestor(&live, &main) => {
+                        let tree = st.repos[&url].commits[&main].tree.clone();
+                        st.commit(&url, Write { branch: "live", message: "deploy", author: "host", changes: &[], from: Some((&main, tree)) }, out).1
+                    }
+                    _ => {
+                        st.move_branch(&url, "live", &main, out);
+                        main
+                    }
+                };
+                return Response::json(200, &json!({ "live": live }));
+            }
         }
         if path == "/api/repos" && m == "POST" {
             // the service names a new repo by the token's repo claim; the
@@ -528,6 +590,7 @@ impl Inner {
             ("GET" | "HEAD", "file") if st.reads_failing => problem(503, "file reads are unavailable (the fake's outage lever)"),
             ("GET" | "HEAD", "file") => file(&st.repos[&url], req),
             ("GET", "commits") => commits(&st.repos[&url], req),
+            ("GET", "merge/preview") => merge_preview(&st.repos[&url], req),
             ("POST", "commit-pack") => self.commit_pack(st, &url, req, out),
             ("POST", "branches/create") => branch_create(st, &url, req, out),
             ("POST", "merge") => merge(st, &url, req, out),
@@ -714,6 +777,37 @@ fn branch_create(st: &mut State, url: &str, req: &Request, out: &mut Vec<Deliver
     )
 }
 
+/// What merging `source` into `target` does, as code.storage's merge and
+/// its preview see it: nothing when the target holds the source already,
+/// a fast-forward when the source holds the target, else git's three-way
+/// merge from their merge base (`Repo::merge_trees`). `None` for
+/// unrelated histories.
+enum Merging {
+    NoOp,
+    FastForward,
+    Merge { base: String, merged: Result<Tree, Vec<String>> },
+}
+
+impl Repo {
+    fn merging(&self, target: &str, source: &str) -> Option<Merging> {
+        if self.is_ancestor(source, target) {
+            return Some(Merging::NoOp);
+        }
+        if self.is_ancestor(target, source) {
+            return Some(Merging::FastForward);
+        }
+        let base = self.merge_base(target, source)?;
+        let merged = self.merge_trees(&base, target, source);
+        Some(Merging::Merge { base, merged })
+    }
+}
+
+/// A merge that conflicts, in the service's shape: its 409 is also a
+/// stale `expected_target_sha`'s, told apart by `conflict_type`.
+fn merge_conflict(base: &str, paths: &[String]) -> Response {
+    Response::json(409, &json!({ "error": "merge conflict", "conflict_type": "merge_conflict", "conflict_paths": paths, "merge_base_sha": base }))
+}
+
 fn merge(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let target = body["target_branch"].as_str().unwrap_or("");
@@ -724,18 +818,52 @@ fn merge(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> R
             return cas_failed(target, &old);
         }
     }
-    let (new, strategy) = if source == old || st.repos[url].is_ancestor(&old, &source) {
-        st.move_branch(url, target, &source, out);
-        (source, "ff")
-    } else {
-        let msg = body["commit_message"].as_str().unwrap_or("merge").to_string();
-        let author = body["author"]["name"].as_str().unwrap_or("unknown").to_string();
-        let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some(&source) }, out);
-        (new, "merge_commit")
+    let (new, strategy) = match st.repos[url].merging(&old, &source) {
+        None => return problem(400, "refusing to merge unrelated histories"),
+        Some(Merging::NoOp) => (old.clone(), "no_op"),
+        Some(Merging::FastForward) => {
+            st.move_branch(url, target, &source, out);
+            (source, "ff")
+        }
+        Some(Merging::Merge { base, merged: Err(paths) }) => return merge_conflict(&base, &paths),
+        Some(Merging::Merge { merged: Ok(tree), .. }) => {
+            let msg = body["commit_message"].as_str().unwrap_or("merge").to_string();
+            let author = body["author"]["name"].as_str().unwrap_or("unknown").to_string();
+            let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&source, tree)) }, out);
+            (new, "merge_commit")
+        }
     };
     Response::json(
         200,
         &json!({ "target": { "branch": target, "old_sha": old, "new_sha": new, "strategy": strategy }, "result": { "success": true, "status": "ok" } }),
+    )
+}
+
+/// `GET merge/preview?source_branch=&target_branch=`: what that merge
+/// would do, changing nothing.
+fn merge_preview(repo: &Repo, req: &Request) -> Response {
+    let named = |k: &str| req.query.get(k).map(String::as_str).unwrap_or("");
+    let (source_branch, target_branch) = (named("source_branch"), named("target_branch"));
+    let (Some(source), Some(target)) = (repo.branches.get(source_branch), repo.branches.get(target_branch)) else { return problem(404, "branch not found") };
+    let (result, base, conflicts) = match repo.merging(target, source) {
+        None => return problem(400, "refusing to merge unrelated histories"),
+        Some(Merging::NoOp) => ("no_op", source.clone(), vec![]),
+        Some(Merging::FastForward) => ("fast_forward", target.clone(), vec![]),
+        Some(Merging::Merge { base, merged }) => ("merge_commit", base, merged.err().unwrap_or_default()),
+    };
+    Response::json(
+        200,
+        &json!({
+            "status": if conflicts.is_empty() { "clean" } else { "conflicted" },
+            "result": result,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "source_tip_sha": source,
+            "target_tip_sha": target,
+            "merge_base_sha": base,
+            "conflict_paths": conflicts,
+            "conflicts": [],
+        }),
     )
 }
 
@@ -745,19 +873,29 @@ fn restore(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) ->
     let meta = if first["metadata"].is_object() { &first["metadata"] } else { &first };
     let target = meta["target_branch"].as_str().unwrap_or("");
     let Some(old) = st.repos[url].branches.get(target).cloned() else { return problem(404, &format!("branch not found: {target}")) };
-    // an unknown base is not an ancestor either: 412, as the spec words it
-    let base = st.repos[url].resolve(meta["base_ref"].as_str().unwrap_or("")).unwrap_or_default();
-    if !st.repos[url].first_parent_reaches(&base, &old) {
+    // as the service refuses a restore that cannot move the branch: to its
+    // own tip, to a commit it does not hold (an unknown one included), or
+    // to the files it has
+    let repo = &st.repos[url];
+    let base = repo.resolve(meta["base_ref"].as_str().unwrap_or("")).unwrap_or_default();
+    if base == old {
+        return problem(412, "the branch already points at base_ref");
+    }
+    if !repo.is_ancestor(&base, &old) {
         return problem(412, "base_ref is not an ancestor of the target's tip");
+    }
+    if repo.same_files(&base, &old) {
+        return problem(412, "the restore would produce no change");
     }
     if let Some(exp) = meta["expected_target_sha"].as_str() {
         if exp != old {
             return cas_failed(target, &old);
         }
     }
+    let tree = repo.commits[&base].tree.clone();
     let msg = meta["commit_message"].as_str().unwrap_or("restore").to_string();
     let author = meta["author"]["name"].as_str().unwrap_or("unknown").to_string();
-    let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some(&base) }, out);
+    let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&base, tree)) }, out);
     Response::json(
         201,
         &json!({

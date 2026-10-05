@@ -81,8 +81,9 @@ impl FragmentCell {
     }
 
     /// Moves `live` to `main`'s tip: the first deploy makes the branch,
-    /// later ones fast-forward it (or merge, after a rollback), each
-    /// guarded against a `live` that moved meanwhile. Answers the new tip.
+    /// later ones fast-forward it (after a rollback, restore commits and a
+    /// merge: `Cs::promote_live`), each guarded against a `live` that moved
+    /// meanwhile. Answers the new tip.
     pub(crate) async fn go_live(&self, principal: &str, message: &str) -> CellResult<String> {
         let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
@@ -92,7 +93,13 @@ impl FragmentCell {
             let moved = match cs.branch_head(&repo, "live").await? {
                 None => cs.create_branch(&repo, &main, "live").await?,
                 Some(tip) if tip == main => Some(tip),
-                Some(tip) => cs.promote_live(&repo, &tip, message, (&author, &email)).await?,
+                Some(_) => {
+                    // Held across the steps: a push webhook for the first of
+                    // two waits, then pins the second, so the files live
+                    // holds between them are never served.
+                    let _held = self.plane.lock().await;
+                    cs.promote_live(&repo, message, (&author, &email)).await?
+                }
             };
             if let Some(tip) = moved {
                 // the pin follows now (the webhook and the poll would, later)

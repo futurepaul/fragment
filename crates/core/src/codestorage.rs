@@ -234,6 +234,75 @@ pub fn committed(v: &Value) -> Option<String> {
     (v["result"]["success"] == true).then(|| v["result"]["new_sha"].as_str().map(str::to_string)).flatten().filter(|s| is_sha(s))
 }
 
+/// The one NDJSON line of `POST /api/repos/<repo>/restore-commit`: a
+/// commit on `branch` (whose tip must be `expected`) with the tree of
+/// `base`, an ancestor of that tip.
+pub fn restore_commit(branch: &str, base: &str, expected: &str, message: &str, author: (&str, &str)) -> String {
+    let meta = json!({
+        "target_branch": branch,
+        "base_ref": base,
+        "expected_target_sha": expected,
+        "commit_message": message,
+        "author": { "name": author.0, "email": author.1 },
+    });
+    format!("{}\n", json!({ "metadata": meta }))
+}
+
+/// The query of `GET /api/repos/<repo>/merge/preview` for a deploy: main
+/// merged into live.
+pub const DEPLOY_PREVIEW_QUERY: &str = "source_branch=main&target_branch=live";
+
+/// How a deploy makes `live` serve `main`'s tip, from a preview of
+/// merging main into live. code.storage's merge is git's three-way merge,
+/// so once a rollback's restore commit is on `live`, merging main into it
+/// keeps what the rollback reverted (and conflicts where main changed a
+/// file it reverted), and when main is unchanged since, does nothing. So a
+/// deploy merges only a `live` that holds nothing main lacks, or whose
+/// files are their merge base's; restore commits, which take a tree whole,
+/// do the rest. Each step is guarded by the `live` it read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Promotion {
+    /// `live` is at main's tip.
+    Current { live: String },
+    /// `live` is an ancestor of main: the merge fast-forwards it.
+    FastForward { live: String },
+    /// main's tip is an ancestor of `live` (a rollback, and main unchanged
+    /// since the deploy before it): a restore commit of main's tip.
+    Restore { live: String, main: String },
+    /// They diverged (a rollback, then main moved): a restore commit of
+    /// their merge base, then the merge, which takes main's side of every
+    /// path since live's files are the base's. A deploy after such a deploy
+    /// is one too, its restore a no-op (412).
+    RestoreThenMerge { live: String, base: String },
+}
+
+/// `GET /api/repos/<repo>/merge/preview?source_branch=main&target_branch=live`
+/// → the deploy's steps; `None` for an answer that is not one.
+pub fn promotion(v: &Value) -> Option<Promotion> {
+    let sha = |k: &str| v[k].as_str().filter(|s| is_sha(s)).map(str::to_string);
+    let (live, main) = (sha("target_tip_sha")?, sha("source_tip_sha")?);
+    match v["result"].as_str()? {
+        _ if live == main => Some(Promotion::Current { live }),
+        "fast_forward" => Some(Promotion::FastForward { live }),
+        "no_op" => Some(Promotion::Restore { live, main }),
+        "merge_commit" => Some(Promotion::RestoreThenMerge { live, base: sha("merge_base_sha")? }),
+        _ => None,
+    }
+}
+
+/// The message of a deploy's first step after a rollback (`RestoreThenMerge`),
+/// as `drafts` lists it beside the deploy's own: `base` is a sha.
+pub fn back_to_base_message(deploy: &str, base: &str) -> String {
+    format!("{deploy} (first, live back to {}: the last of main it holds)", &base[..12.min(base.len())])
+}
+
+/// A merge's 409 that is a conflict, not a target that moved (the service
+/// answers 409 for both, told apart by `conflict_type`): a retry cannot
+/// pass.
+pub fn merge_conflicted(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|v| v["conflict_type"] == "merge_conflict" || v["code"] == "merge_conflict")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +381,41 @@ mod tests {
         assert_eq!(next_repos_cursor(&repos).as_deref(), Some("c2"));
         assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": false, "next_cursor": "c3" })), None);
         assert_eq!(next_repos_cursor(&json!({ "repos": [], "has_more": true })), None);
+    }
+
+    /// Goal: a deploy's steps follow the preview, and an answer that names
+    /// no tips, an unknown result, or a diverged live without its merge
+    /// base is refused, never read as a fast-forward. Method: the service's
+    /// documented answers, and broken ones.
+    #[test]
+    fn a_deploy_follows_the_merge_preview() {
+        let (live, main, base) = ("1".repeat(40), "2".repeat(40), "3".repeat(40));
+        let preview = |result: &str| {
+            json!({ "status": "clean", "result": result, "source_branch": "main", "target_branch": "live",
+                    "source_tip_sha": main, "target_tip_sha": live, "merge_base_sha": base, "conflict_paths": [], "conflicts": [] })
+        };
+        assert_eq!(promotion(&preview("fast_forward")), Some(Promotion::FastForward { live: live.clone() }));
+        assert_eq!(promotion(&preview("no_op")), Some(Promotion::Restore { live: live.clone(), main: main.clone() }));
+        assert_eq!(promotion(&preview("merge_commit")), Some(Promotion::RestoreThenMerge { live: live.clone(), base: base.clone() }));
+        let mut same = preview("no_op");
+        same["source_tip_sha"] = json!(live);
+        assert_eq!(promotion(&same), Some(Promotion::Current { live: live.clone() }));
+        assert_eq!(promotion(&preview("unknown")), None);
+        let mut baseless = preview("merge_commit");
+        baseless["merge_base_sha"] = json!("");
+        assert_eq!(promotion(&baseless), None);
+        let mut tipless = preview("fast_forward");
+        tipless["target_tip_sha"] = json!("short");
+        assert_eq!(promotion(&tipless), None);
+
+        assert!(merge_conflicted(br#"{"error":"merge conflict","conflict_type":"merge_conflict","conflict_paths":["a"]}"#));
+        assert!(merge_conflicted(br#"{"type":"about:blank","title":"Conflict","status":409,"code":"merge_conflict"}"#));
+        assert!(!merge_conflicted(br#"{"result":{"status":"precondition_failed"}}"#), "a stale expected sha is not a conflict");
+        assert!(!merge_conflicted(b"not json"));
+
+        let line = restore_commit("live", &base, &live, "deploy x", ("a", "a@x"));
+        assert!(line.ends_with('\n') && line.lines().count() == 1, "{line:?}");
+        let v: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!((v["metadata"]["base_ref"].as_str(), v["metadata"]["expected_target_sha"].as_str()), (Some(base.as_str()), Some(live.as_str())));
     }
 }

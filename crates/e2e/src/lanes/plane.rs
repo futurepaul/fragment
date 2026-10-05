@@ -234,6 +234,29 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
         st5["code"]["sha"] == st5["pins"]["live"] && st5["code"]["operations"]["add_todo"]["kind"] == "mutation",
         &st5["code"],
     );
+    // the deploy after the rollback: code.storage merges three ways, so a
+    // merge of main into the rolled-back live keeps v1's page beside main's
+    // new files
+    s.ok("a deploy after a rollback serves main: the page the rollback reverted shows main's version", page(api).contains("v2 marker"), page(api));
+    // the platform's deploy, each way a rollback leaves live (the CLI's
+    // deploy is the platform's, POST …/deploy, under the plane lock)
+    let rolled_back = |s: &mut Suite| {
+        s.cli(api, &home, &["rollback", &name, "--to", &live1]);
+        s.eventually(Duration::from_secs(10), || page(api).contains("v1 marker"))
+    };
+    let deployed = |s: &mut Suite, marker: &str| {
+        s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
+        s.eventually(Duration::from_secs(10), || page(api).contains(marker))
+    };
+    let ok = rolled_back(s) && deployed(s, "v2 marker");
+    s.ok("a deploy after a rollback with main unchanged since serves main again (a restore of main's tip)", ok, page(api));
+    let back = rolled_back(s);
+    std::fs::write(site.join("site/index.html"), "<h1>v3 marker</h1>")?;
+    let ok = back && deployed(s, "v3 marker");
+    s.ok("a deploy that changes the page a rollback reverted serves main's change (a merge alone conflicts)", ok, page(api));
+    std::fs::write(site.join("site/index.html"), "<h1>v4 marker</h1>")?;
+    let ok = deployed(s, "v4 marker");
+    s.ok("and the deploy after it serves main (its restore changes nothing)", ok, page(api));
     if let Some(keys) = s.cli_keys(&home) {
         let r = api.op(&keys, &name, "add_todo", "d1", json!({ "text": "deployed" }))?;
         s.ok("the deployed app answers", r.status == 200 && r.body["result"]["id"] == 1, &r);
@@ -242,6 +265,7 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // a deploy whose code the platform refuses says so and fails
+    let good = s.cli_json(api, &home, &["status", &name, "--json"])?;
     std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json").replacen("\"add_todo\"", "\"Add-Todo\"", 1))?;
     let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap()]);
     s.ok(
@@ -250,6 +274,6 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
         text(&out),
     );
     let st6 = s.cli_json(api, &home, &["status", &name, "--json"])?;
-    s.ok("and the last good code keeps serving", st6["code"]["sha"] == st5["code"]["sha"] && st6["pins"]["live"] != st5["pins"]["live"], &st6["code"]);
+    s.ok("and the last good code keeps serving", st6["code"]["sha"] == good["code"]["sha"] && st6["pins"]["live"] != good["pins"]["live"], &st6["code"]);
     Ok(())
 }
