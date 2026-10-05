@@ -738,6 +738,22 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
+    // a socket on its port, bridged through the Computer DO both ways: the
+    // screen's control socket speaks first (who holds control), as an RFB
+    // server does, and that first word reaches the page
+    let control = || Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let heard = control().and_then(|mut c| {
+        let first = c.next()?;
+        c.send(&json!({ "type": "take" }))?;
+        let taken = c.next()?;
+        c.close();
+        Ok((first, taken))
+    });
+    s.ok(
+        "a socket on its port opens from its own page, and carries the container's first word and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| *first == json!({ "type": "control", "holder": null }) && taken["holder"] == "e2e"),
+        format!("{heard:?}"),
+    );
     // and in a frame of the platform's page (the shell's tab onto its screen),
     // where the platform is cross-site from the computer's origin
     match s.hosted() {

@@ -1,7 +1,7 @@
 ---
 name: google-workspace-finite
-description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with the bundled helper (Python's standard library only). No OAuth setup, no keys on the computer.
-version: 2.0.0
+description: Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the person's connected Google account, with `gws` (Google's Workspace CLI, in your computer's image) or the bundled helper. No OAuth setup, no keys on the computer.
+version: 2.1.0
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
@@ -15,10 +15,18 @@ metadata:
 Gmail, Calendar, Drive, Contacts, Sheets, and Docs through your owner's
 connected Google account. Your computer holds no Google credential:
 `GOOGLE_OAUTH_ACCESS_TOKEN` holds the connection's placeholder (it names
-you), the helper sends it as a bearer token to Google's own hosts, and the
-computer swaps in a short-lived token for your owner's account. There is
-no OAuth setup to run, no client secret and no token file: never ask the
-person for one, and never create a Google Cloud project for them.
+you), it goes as a bearer token to Google's own hosts, and the computer
+swaps in a short-lived token for your owner's account. There is no OAuth
+setup to run, no client secret and no token file: never run `gws auth
+setup` or `gws auth login`, never ask the person for a credential, and never
+create a Google Cloud project for them.
+
+**Use `gws` first.** It is Google's Workspace CLI
+(github.com/googleworkspace/cli), on your PATH, and it takes the
+placeholder as its access token by itself: every Google API it knows, as
+`gws <service> <resource> <method>`, JSON out. Where `gws` is not on your
+PATH, the bundled helper (`scripts/google_api.py`, Python's standard
+library only) does the common calls the same way.
 
 ## Connected?
 
@@ -29,24 +37,55 @@ $GAPI check
 
 - `{"status": "connected", "email": …}`: go on.
 - `not_connected`: your owner has not connected Google, or must authorize
-  it again (`GOOGLE_OAUTH_ACCESS_TOKEN` is then unset). Ask them to connect
-  it in the shell's Settings, under Connections, then check again: your
-  computer is given it within seconds.
+  it again (`GOOGLE_OAUTH_ACCESS_TOKEN` is then unset, and `gws` says it
+  has no credentials, exit 2). Ask them to connect it in the shell's
+  Settings, under Connections, then check again: your computer is given it
+  within seconds.
 - `forbidden`: your owner narrowed your connections and left Google out, or
   Google refused the scope. Say which, and stop.
 
 The deployment's Google connection (`google`) is swapped for the hosts
-`gmail.googleapis.com`, `www.googleapis.com`, `people.googleapis.com`,
-`sheets.googleapis.com` and `docs.googleapis.com` only. The scopes it grants
-are in `references/google-workspace-scopes.json`.
+`gmail.googleapis.com`, `www.googleapis.com` (Drive, Calendar),
+`people.googleapis.com`, `sheets.googleapis.com` and `docs.googleapis.com`
+only. An API on any other host (Tasks, Chat, Slides, Forms, Apps Script,
+and the `gws workflow` helpers that use them) gets the placeholder itself,
+which Google refuses (401): do not use those. The scopes the connection
+grants are in `references/google-workspace-scopes.json`.
+
+## gws
+
+```bash
+gws gmail +triage                                   # unread inbox: sender, subject, date
+gws gmail users messages list --params '{"userId": "me", "q": "is:unread newer_than:1d", "maxResults": 10}'
+gws gmail users messages get --params '{"userId": "me", "id": "MESSAGE_ID", "format": "full"}'
+gws gmail +send --to user@example.com --subject "Hello" --body "Message text"
+gws gmail +reply --message-id MESSAGE_ID --body "Thanks, that works for me."
+gws calendar +agenda                                # upcoming events, in the account's timezone
+gws calendar +insert --summary "Standup" --start 2026-03-01T10:00:00-06:00 --end 2026-03-01T10:30:00-06:00
+gws drive files list --params "{\"q\": \"name contains 'report'\", \"pageSize\": 10}"
+gws drive +upload ./report.pdf
+gws sheets +read --spreadsheet SHEET_ID --range 'Sheet1!A1:D10'
+gws sheets spreadsheets values append --params '{"spreadsheetId": "SHEET_ID", "range": "Sheet1!A1", "valueInputOption": "USER_ENTERED"}' --json '{"values": [["Name", "Score"], ["Alice", 95]]}'
+gws docs documents get --params '{"documentId": "DOC_ID"}'
+gws docs +write --document DOC_ID --text "A line to append"
+gws people people connections list --params '{"resourceName": "people/me", "personFields": "names,emailAddresses", "pageSize": 20}'
+```
+
+- `gws <service> --help` lists a service's methods and its `+` helpers;
+  `gws schema <service>.<resource>.<method>` shows what a method takes and
+  answers.
+- `--dry-run` shows the request without sending it; `--page-all` follows
+  pages (one JSON line a page).
+- Quote a Sheets range in single quotes: `!` is the shell's.
+- Exit 2 is an auth error: check the connection (above).
 
 ## References
 
 - `references/gmail-search-syntax.md`: Gmail search operators (is:unread, from:, newer_than:, etc.)
 - `references/google-workspace-scopes.json`: the scopes the connection grants
 
-The helper exposes Docs read only: do not imply that it can write a Doc or
-use Apps Script.
+The helper reads Docs only; `gws docs +write` appends to one. Neither uses
+Apps Script.
 
 ## Login emails
 
@@ -56,7 +95,9 @@ matching message. Verify the connected address, service/sender, and
 freshness; do not echo the token. Ask the human only when mailbox access
 fails or the match is ambiguous.
 
-## Usage
+## The helper
+
+Where `gws` is not on your PATH.
 
 ### Gmail
 
@@ -154,8 +195,8 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 - **Contacts list**: `[{name, emails: [...], phones: [...]}]`
 - **Sheets get**: `[[cell, cell, ...], ...]`
 
-A failure is one JSON line on stderr, `{error, status, message, hint}`, and
-exit 1.
+A helper's failure is one JSON line on stderr, `{error, status, message,
+hint}`, and exit 1. `gws` answers Google's JSON, and its errors on stderr.
 
 ## Rules
 
@@ -171,6 +212,7 @@ exit 1.
 
 | Problem | Fix |
 |---------|-----|
-| `not_connected` | Your owner connects Google in Settings → Connections |
+| `not_connected`, or `gws` exits 2 | Your owner connects Google in Settings → Connections |
+| `401` from a Google API | That API's host is not one the connection is swapped for: it is not offered |
 | `forbidden` | Your owner left Google off this agent's connections, or the scope is missing |
 | `HttpError 403: Access Not Configured` | That API is not enabled for the deployment's Google client: tell the person, and stop |

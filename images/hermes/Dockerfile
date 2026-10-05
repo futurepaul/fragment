@@ -55,6 +55,24 @@ FROM ${HERMES} AS hermes
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
+# cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
+# desktop, XTest input): without it Hermes offers the agent no computer_use.
+# Pinned (the release current at Hermes v0.21.5's), named to Hermes by
+# HERMES_CUA_DRIVER_CMD below, so Hermes never runs its upstream installer.
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
+ && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
+# gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
+# wrapper hands it the agent's Google connection: the placeholder in
+# GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
+# which the computer's egress swaps for the real token on Google's hosts.
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
+ && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
+      '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
+      'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
+ && chmod 0755 /usr/local/bin/gws \
+ && /usr/local/bin/gws --version | grep -q '0\.22\.5'
 COPY --from=build /out/ /opt/fragment/bin/
 # The check the platform runs after it restores /data, before the gate
 # (docs/computers.md): the last hold's copies of Hermes' databases put back,
@@ -124,6 +142,9 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     S6_CMD_RECEIVE_SIGNALS=1 \
     S6_SERVICES_GRACETIME=1000 \
     S6_KILL_GRACETIME=1000 \
+    HERMES_CUA_DRIVER_CMD=/usr/local/bin/cua-driver \
+    CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
+    CUA_DRIVER_RS_UPDATE_CHECK=false \
     FRAGMENT_API=http://api.fragment.internal \
     FRAGMENT_MODEL=http://model.fragment.internal
 WORKDIR /opt/hermes

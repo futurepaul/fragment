@@ -8,7 +8,8 @@
 //! fakes at the platform's boundary.
 //!
 //! Run: `cargo test -p fragment-bridge --test docker -- --ignored --nocapture`
-//! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built).
+//! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built;
+//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag).
 
 mod support;
 
@@ -46,6 +47,12 @@ fn build(context: &std::path::Path, dockerfile: &str, tag: &str) -> Duration {
     t.elapsed()
 }
 
+/// The Hermes image's tag (`FRAGMENT_DOCKER_HERMES_TAG`, so two checkouts
+/// on one Docker never build over each other's).
+fn hermes_tag() -> String {
+    std::env::var("FRAGMENT_DOCKER_HERMES_TAG").unwrap_or_else(|_| "fragment-hermes:test".into())
+}
+
 fn size(tag: &str) -> u64 {
     let out = Command::new(docker()).args(["image", "inspect", tag, "--format", "{{.Size}}"]).output().expect("docker runs");
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
@@ -74,10 +81,19 @@ impl Container {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
         }
+        // its screen's port, on a port of this host's loopback (`port`)
+        args.extend(["-p".into(), "127.0.0.1::6080".into()]);
         args.push(tag.into());
         let out = Command::new(docker()).args(&args).output().expect("docker runs");
         assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
         Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
+    }
+
+    /// The host's port its `port` is published on.
+    fn port(&self, port: u16) -> u16 {
+        let out = Command::new(docker()).args(["port", &self.id, &format!("{port}/tcp")]).output().expect("docker runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().find_map(|l| l.rsplit_once(':').and_then(|(_, p)| p.trim().parse().ok())).unwrap_or_else(|| panic!("{port} is not published: {text}"))
     }
 
     fn exec(&self, cmd: &[&str]) -> bool {
@@ -174,8 +190,9 @@ async fn the_stub_image() {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_hermes_image() {
-    let built = build(&repo_dir(), "images/hermes/Dockerfile", "fragment-hermes:test");
-    eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size("fragment-hermes:test") / 1_000_000);
+    let tag = hermes_tag();
+    let built = build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size(&tag) / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
         let f = w.fragments.get_mut("juniper.paul").unwrap();
@@ -200,7 +217,7 @@ async fn the_hermes_image() {
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
@@ -471,11 +488,11 @@ fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<ser
 /// The Hermes image, running against the fake API and the scripted model,
 /// its agent answering in its chat.
 async fn hermes_running() -> (Fake, Model, String, Container) {
-    build(&repo_dir(), "images/hermes/Dockerfile", "fragment-hermes:test");
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
-    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
     let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
@@ -544,7 +561,7 @@ async fn a_save_taken_while_it_writes_opens() {
     let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
     for (held, path) in &saves {
         let t = Instant::now();
-        let (code, said, files) = restore_and_check("fragment-hermes:test", path);
+        let (code, said, files) = restore_and_check(&hermes_tag(), path);
         let torn: Vec<&serde_json::Value> = files.iter().filter(|f| f["ok"] != true).collect();
         eprintln!("{}: check {code} in {} ms ({}); {} SQLite files, torn: {torn:?}", path.display(), t.elapsed().as_millis(), said.trim(), files.len());
         let ours = files.iter().filter(|f| hermes_db(f)).count();
@@ -624,4 +641,193 @@ async fn held_nothing_under_data_changes() {
     fake.until(120_000, "the message answered once the hold goes", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(!c.exec(&["test", "-e", "/data/held-copies"]), "the copies go with the hold");
+}
+
+/// What the agent's desktop looks like from inside the container, as the
+/// hermes user: the pointer's position and the windows' titles, read from
+/// the X server the profile publishes (`<profile>/bot-desktop/env`).
+fn desk(c: &Container, profile: &str) -> serde_json::Value {
+    const SCRIPT: &str = r#"import ctypes, json, os, re, subprocess, sys
+env = dict(l.split("=", 1) for l in open(sys.argv[1]).read().splitlines() if "=" in l)
+os.environ.update(env)
+x = ctypes.cdll.LoadLibrary("libX11.so.6")
+x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = ctypes.c_ulong, [ctypes.c_void_p]
+x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_void_p] * 7
+d = x.XOpenDisplay(env["DISPLAY"].encode())
+root = x.XDefaultRootWindow(d)
+v = [ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_uint()]
+x.XQueryPointer(d, root, *[ctypes.byref(a) for a in v])
+ids = re.findall(r"0x[0-9a-f]+", subprocess.run(["xprop", "-root", "_NET_CLIENT_LIST"], capture_output=True, text=True).stdout)
+names = [subprocess.run(["xprop", "-id", w, "_NET_WM_NAME"], capture_output=True, text=True).stdout.split("=", 1)[-1].strip().strip('"') for w in ids]
+print(json.dumps({"pointer": [v[2].value, v[3].value], "windows": names}))
+"#;
+    let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
+    let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SCRIPT, &env]);
+    serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
+}
+
+/// An HTTP server that answers every request `{}` and keeps each one's
+/// request line and headers: what a vendor's API would be sent.
+struct Recorder {
+    port: u16,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recorder {
+    async fn start() -> Recorder {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("the recorder listens");
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            // bounded by the test: it ends with the runtime
+            while let Ok((mut s, _)) = listener.accept().await {
+                let kept = kept.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut b = [0u8; 4096];
+                    // bounded: a request's head is at most 64 KiB
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 65_536 {
+                        match s.read(&mut b).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&b[..n]),
+                        }
+                    }
+                    kept.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                });
+            }
+        });
+        Recorder { port, seen }
+    }
+}
+
+/// The container's memory now, in MiB: its cgroup's anonymous memory (what
+/// its processes hold, without the page cache).
+fn anon_mib(c: &Container) -> u64 {
+    let stat = c.exec_out(&["cat", "/sys/fs/cgroup/memory.stat"]);
+    stat.lines().find_map(|l| l.strip_prefix("anon ")).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) / 1_048_576
+}
+
+/// Goal: a person can watch and take over the agent's desktop, and the
+/// agent operates it (docs/computers.md, Ports; Paul, 2026-10-05): before
+/// any agent's call the screen's page, its control socket and its RFB
+/// stream answer, the first agent's desktop started for its first viewer;
+/// a viewer who takes over moves the pointer, and one who has not cannot;
+/// the agent's `computer_use` is among its tools and captures the screen;
+/// its browser opens on that desktop.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_hermes_desktop() {
+    use fragment_bridge::net::Base;
+    use support::rfb::{colours, Control, Viewer};
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    // its owner connected Google: the agent's placeholder, as the platform makes one
+    let google = "fcx_google_0123456789abcdef0123456789abcdef";
+    fake.with(|w| {
+        w.computer["agents"][0]["credentials"] = json!([{ "provider": "google", "kind": "connection", "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "placeholder": google, "hosts": ["www.googleapis.com"] }]);
+        w.computer["credentialEnv"] = json!(["GOOGLE_OAUTH_ACCESS_TOKEN"]);
+    });
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("desk", &["juniper"]);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let before = anon_mib(&c);
+    eprintln!("desktop: the container holds {before} MiB before any screen");
+
+    // before any agent's call: the page, the control socket, the RFB stream
+    assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
+    let mut watching = Control::open(&base, "watcher").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "holder": null }), "a viewer hears who holds control");
+    let t = Instant::now();
+    let opened = Viewer::open(&base, "watcher", Duration::from_secs(60)).await;
+    let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"])));
+    eprintln!("desktop: first viewer to the RFB greeting {} ms; {}x{} {:?}", t.elapsed().as_millis(), watcher.width, watcher.height, watcher.name);
+    // the desktop drawn: its wallpaper and panel, not one colour
+    let t = Instant::now();
+    let mut frame = watcher.frame().await.unwrap();
+    while colours(&frame) <= 16 && t.elapsed() < Duration::from_secs(30) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        frame = watcher.frame().await.unwrap();
+    }
+    let after = anon_mib(&c);
+    eprintln!("desktop: a frame of {} colours {} ms on; the container holds {after} MiB with the desktop (+{})", colours(&frame), t.elapsed().as_millis(), after.saturating_sub(before));
+    assert!(colours(&frame) > 16, "the desktop shows something: {} colours\n{}", colours(&frame), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"]));
+
+    // Take over: the holder's pointer moves the screen's; a watcher's does not
+    let mut driving = Control::open(&base, "driver").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+    let mut driver = Viewer::open(&base, "driver", Duration::from_secs(30)).await.unwrap();
+    assert!(driver.clipboard_caps, "Xvnc offers its extended clipboard, and the viewer answers it as noVNC does (a ClientCutText of negative length)");
+    driving.say("take").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], "driver");
+    assert_eq!(watching.next().await.unwrap()["holder"], "driver", "every viewer hears who took over");
+    driver.pointer(101, 57, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the holder moves the pointer");
+    watcher.pointer(301, 257, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "a watcher does not");
+    driving.say("give").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+
+    // the agent's computer_use: among its tools, and it captures the screen
+    let reply = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "look at your screen" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "the capture's reply", |w| reply(w, &turn).is_some()).await;
+    let offered = model.calls.lock().unwrap().iter().find(|c| c.path.ends_with("/chat/completions") && c.body["messages"].to_string().contains("look at your screen")).map(|c| c.body["tools"].clone()).unwrap_or_default();
+    let tools: Vec<&str> = offered.as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    let search = offered.as_array().into_iter().flatten().find(|t| t["function"]["name"] == "tool_search").and_then(|t| t["function"]["description"].as_str()).unwrap_or("");
+    let listed = search.find("computer_use").map(|i| search[i..].chars().take(160).collect::<String>());
+    eprintln!("desktop: the agent's tools: {tools:?}; computer_use in tool_search's listing: {listed:?}");
+    let captured = fake.with(|w| reply(w, &turn)).unwrap_or_default();
+    eprintln!("desktop: the capture's reply: {}", captured.chars().take(600).collect::<String>());
+    assert!(tools.contains(&"computer_use") || listed.is_some(), "computer_use is the agent's, directly or through tool_search: {tools:?}");
+    assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
+
+    // its browser, on its desktop
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "the browser's reply", |w| reply(w, &turn).is_some()).await;
+    eprintln!("desktop: the browser's reply: {:?}", fake.with(|w| reply(w, &turn)));
+    let t = Instant::now();
+    let shown = loop {
+        let d = desk(&c, "juniper-paul");
+        if d["windows"].as_array().is_some_and(|w| w.iter().any(|n| n.as_str().is_some_and(|n| n.contains("Example Domain")))) {
+            break d;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "the browser never showed on the desktop: {d}\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("desktop: its windows {}; the container holds {} MiB", shown["windows"], anon_mib(&c));
+
+    // gws, Google's Workspace CLI: in the image, and run in the agent's
+    // terminal it sends the agent's Google placeholder as its bearer token
+    // (the computer's egress swaps it on Google's hosts). Its Drive API is
+    // pointed at a recorder (a discovery document in its cache) to see it.
+    let version = c.exec_out(&["gws", "--version"]);
+    assert!(version.contains("0.22.5"), "gws is pinned: {version}");
+    let api = Recorder::start().await;
+    let doc = json!({
+        "name": "drive", "version": "v3", "rootUrl": format!("http://api.fragment.internal:{}/", api.port), "servicePath": "drive/v3/",
+        "resources": { "files": { "methods": { "list": { "id": "drive.files.list", "httpMethod": "GET", "path": "files", "scopes": ["https://www.googleapis.com/auth/drive"] } } } },
+    });
+    let planted = format!("mkdir -p /tmp/gws/cache && printf '%s' '{doc}' > /tmp/gws/cache/drive_v3.json");
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &planted]));
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "run: GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/tmp/gws gws drive files list" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "gws's reply", |w| reply(w, &turn).is_some()).await;
+    let seen = api.seen.lock().unwrap().clone();
+    eprintln!("desktop: gws in the agent's terminal said {:?}; its API saw {seen:?}", fake.with(|w| reply(w, &turn)));
+    assert!(
+        seen.iter().any(|r| r.starts_with("GET /drive/v3/files") && r.to_ascii_lowercase().contains(&format!("authorization: bearer {google}"))),
+        "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
+        fake.with(|w| reply(w, &turn))
+    );
 }

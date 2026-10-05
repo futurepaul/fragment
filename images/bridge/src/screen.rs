@@ -4,12 +4,15 @@
 //!
 //! - `GET /` and the page's files, from a directory;
 //! - `GET /websockify?viewer=<id>`: the RFB stream, bytes both ways. Every
-//!   viewer sees the screen; input (keys, pointer, clipboard) reaches it
-//!   only from the viewer holding control. The RFB client stream is parsed
-//!   message by message, so input is dropped, never half-sent;
+//!   viewer sees the screen; input (keys, pointer, clipboard, a resize)
+//!   reaches it only from the viewer holding control. The RFB client stream
+//!   is parsed message by message (noVNC 1.7.0's, its extensions included:
+//!   `InputGate`), so input is dropped, never half-sent;
 //! - `GET /control?viewer=<id>`: a WebSocket of `{type: "take"}` and
 //!   `{type: "give"}` from the page, answered to every viewer with
-//!   `{type: "control", holder: <viewer>|null}`.
+//!   `{type: "control", holder: <viewer>|null}`, the first at once. It
+//!   answers on an image with no display too (the stub's), so the
+//!   platform's lanes open a socket through a computer's port.
 //!
 //! The display starts lazily: a viewer runs `start` when the RFB socket
 //! does not answer, at most once a minute while it stays down (S3b: the
@@ -107,16 +110,20 @@ async fn handle(mut req: Request<Incoming>, cfg: Arc<ScreenConfig>, control: Arc
     let path = req.uri().path().to_string();
     match path.as_str() {
         "/websockify" | "/control" => {
-            let Some(target) = cfg.target.clone() else { return net::refusal(StatusCode::NOT_FOUND, "not_found", "this computer has no display") };
+            // the control socket answers on any image (the stub's has no
+            // display): the platform's lanes open it through a computer's port
+            let rfb = path == "/websockify";
+            let target = cfg.target.clone();
+            if rfb && target.is_none() {
+                return net::refusal(StatusCode::NOT_FOUND, "not_found", "this computer has no display");
+            }
             let Some(viewer) = viewer_of(&req) else { return net::refusal(StatusCode::BAD_REQUEST, "invalid", "?viewer=<id>") };
             let Some((response, socket)) = net::accept_ws(&mut req) else { return net::refusal(StatusCode::BAD_REQUEST, "invalid", "a WebSocket") };
-            let rfb = path == "/websockify";
             tokio::spawn(async move {
                 let Some(ws) = socket.await else { return };
-                if rfb {
-                    viewer_rfb(ws, target, viewer, cfg, control).await;
-                } else {
-                    viewer_control(ws, viewer, control).await;
+                match target {
+                    Some(target) if rfb => viewer_rfb(ws, target, viewer, cfg, control).await,
+                    _ => viewer_control(ws, viewer, control).await,
                 }
             });
             response
@@ -268,9 +275,12 @@ async fn viewer_rfb(ws: net::ServerWs, target: Target, viewer: String, cfg: Arc<
     while let Some(Ok(m)) = stream.next().await {
         let Message::Binary(b) = m else { continue };
         let holds = control.holder.lock().expect("control").as_deref() == Some(viewer.as_str());
-        let Ok(out) = filter.push(&b, holds) else {
-            crate::ev!("screen.refused", { "why": "an RFB message this screen does not know" });
-            break;
+        let out = match filter.push(&b, holds) {
+            Ok(out) => out,
+            Err(e) => {
+                crate::ev!("screen.refused", { "why": e.why() });
+                break;
+            }
         };
         if !out.is_empty() && rfb_write.write_all(&out).await.is_err() {
             break;
@@ -280,7 +290,10 @@ async fn viewer_rfb(ws: net::ServerWs, target: Target, viewer: String, cfg: Arc<
 }
 
 /// The RFB client stream, message by message: input passes only while the
-/// viewer holds control. RFB 3.8 with no authentication or VNC auth.
+/// viewer holds control. RFB 3.8 with no authentication or VNC auth, and
+/// every message noVNC 1.7.0 (the screen page's) sends, its extensions
+/// included: TigerVNC's extended clipboard (a negative length), the
+/// extended pointer event (its marker bit), QEMU's extended key event.
 #[derive(Debug, Default)]
 pub struct InputGate {
     buf: Vec<u8>,
@@ -297,14 +310,31 @@ enum Stage {
     Messages,
 }
 
-/// A client message the gate cannot size: the stream can no longer be
-/// followed, so the viewer is closed.
+/// A client message the gate cannot follow, so the viewer is closed.
 #[derive(Debug, PartialEq)]
-pub struct Unknown(pub u8);
+pub enum Unframed {
+    /// A message type the gate cannot size.
+    Unknown(u8),
+    /// A clipboard longer than `CUT_TEXT_MAX`, as Xvnc would refuse it.
+    TooLong(usize),
+}
+
+impl Unframed {
+    fn why(&self) -> String {
+        match self {
+            Unframed::Unknown(t) => format!("an RFB message this screen does not know ({t})"),
+            Unframed::TooLong(n) => format!("a clipboard of {n} bytes, more than {CUT_TEXT_MAX}"),
+        }
+    }
+}
+
+/// The longest clipboard a viewer may send: Xvnc's `-MaxCutText`, as Hermes'
+/// desktop launcher sets it.
+pub const CUT_TEXT_MAX: usize = 256 * 1024;
 
 impl InputGate {
     /// The bytes to forward for `bytes` from the viewer.
-    pub fn push(&mut self, bytes: &[u8], holds_control: bool) -> Result<Vec<u8>, Unknown> {
+    pub fn push(&mut self, bytes: &[u8], holds_control: bool) -> Result<Vec<u8>, Unframed> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
         // bounded by the buffer: each pass consumes a whole message or stops
@@ -341,7 +371,9 @@ impl InputGate {
 
 fn is_input(msg: &[u8]) -> bool {
     match msg[0] {
-        4..=6 => true,
+        // keys, the pointer, the clipboard; and SetDesktopSize, which
+        // resizes the agent's screen (Xvnc runs -AcceptSetDesktopSize)
+        4..=6 | 251 => true,
         // QEMU's extended key event
         255 => msg.get(1) == Some(&0),
         _ => false,
@@ -349,18 +381,23 @@ fn is_input(msg: &[u8]) -> bool {
 }
 
 /// A client message's length, once enough of it is here to know it.
-fn message_len(b: &[u8]) -> Result<Option<usize>, Unknown> {
+fn message_len(b: &[u8]) -> Result<Option<usize>, Unframed> {
     let Some(&t) = b.first() else { return Ok(None) };
     let at = |i: usize| b.get(i).copied();
     let u16_at = |i: usize| Some(u16::from_be_bytes([at(i)?, at(i + 1)?]) as usize);
-    let u32_at = |i: usize| Some(u32::from_be_bytes([at(i)?, at(i + 1)?, at(i + 2)?, at(i + 3)?]) as usize);
+    let i32_at = |i: usize| Some(i32::from_be_bytes([at(i)?, at(i + 1)?, at(i + 2)?, at(i + 3)?]));
     Ok(match t {
         0 => Some(20),
         2 => u16_at(2).map(|n| 4 + 4 * n),
         3 => Some(10),
         4 => Some(8),
-        5 => Some(6),
-        6 => u32_at(4).map(|n| 8 + n.min(1 << 20)),
+        // its marker bit: the extended pointer event, a byte of buttons more
+        5 => at(1).map(|mask| if mask & 0x80 != 0 { 7 } else { 6 }),
+        // a negative length is the extended clipboard's: as many bytes follow
+        6 => match i32_at(4).map(|n| n.unsigned_abs() as usize) {
+            Some(n) if n > CUT_TEXT_MAX => return Err(Unframed::TooLong(n)),
+            n => n.map(|n| 8 + n),
+        },
         150 => Some(10),
         248 => at(8).map(|n| 9 + n as usize),
         250 => Some(4),
@@ -368,9 +405,9 @@ fn message_len(b: &[u8]) -> Result<Option<usize>, Unknown> {
         255 => match at(1) {
             None => None,
             Some(0) => Some(12),
-            Some(other) => return Err(Unknown(other)),
+            Some(other) => return Err(Unframed::Unknown(other)),
         },
-        other => return Err(Unknown(other)),
+        other => return Err(Unframed::Unknown(other)),
     })
 }
 
@@ -409,7 +446,52 @@ mod tests {
         let cut = [6u8, 0, 0, 0, 0, 0, 0, 3, b'a', b'b', b'c'];
         assert!(g.push(&cut[..9], false).unwrap().is_empty());
         assert!(g.push(&cut[9..], false).unwrap().is_empty(), "clipboard is input");
-        assert_eq!(g.push(&[9], false), Err(Unknown(9)), "an unknown message closes the viewer");
+        assert_eq!(g.push(&[9], false), Err(Unframed::Unknown(9)), "an unknown message closes the viewer");
+    }
+
+    /// What noVNC 1.7.0 sends once Xvnc offers its extensions (Paul,
+    /// 2026-10-05: "I can't remote control the desktop"): its extended
+    /// clipboard caps, a ClientCutText whose length is negative, came right
+    /// after the first update request, and the gate read the length as a
+    /// u32 and waited for a megabyte, so no input of the viewer's, nor its
+    /// next update request, ever reached the screen after Take over.
+    #[test]
+    fn novncs_extensions_are_followed() {
+        let mut g = InputGate::default();
+        g.push(&handshake(), true).unwrap();
+        // extendedClipboardCaps: flags (caps, five actions; text) and text's max size
+        let caps_body = [0x1fu8, 0, 0, 1, 0, 0, 0, 0];
+        let mut caps = vec![6u8, 0, 0, 0];
+        caps.extend_from_slice(&(-(caps_body.len() as i32)).to_be_bytes());
+        caps.extend_from_slice(&caps_body);
+        let update = [3u8, 1, 0, 0, 0, 0, 5, 160, 3, 132];
+        let pointer = [5u8, 1, 0, 101, 0, 57];
+        let extended_pointer = [5u8, 0x80, 0, 9, 0, 9, 1];
+        let mut stream = caps.clone();
+        stream.extend_from_slice(&update);
+        stream.extend_from_slice(&pointer);
+        stream.extend_from_slice(&extended_pointer);
+        let mut want = caps.clone();
+        want.extend_from_slice(&update);
+        want.extend_from_slice(&pointer);
+        want.extend_from_slice(&extended_pointer);
+        assert_eq!(g.push(&stream, true).unwrap(), want, "the holder's caps, update request and pointer all pass, in order");
+        let mut watched = caps;
+        watched.extend_from_slice(&update);
+        watched.extend_from_slice(&extended_pointer);
+        assert_eq!(g.push(&watched, false).unwrap(), update.to_vec(), "a watcher's update request passes; its clipboard and pointer do not");
+        // a viewer resizing the agent's screen is input
+        let resize = [251u8, 0, 3, 32, 2, 88, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 32, 2, 88, 0, 0, 0, 0];
+        assert!(g.push(&resize, false).unwrap().is_empty(), "a watcher does not resize the screen");
+        assert_eq!(g.push(&resize, true).unwrap(), resize.to_vec());
+        // a clipboard longer than Xvnc takes closes the viewer, either sign
+        for len in [CUT_TEXT_MAX as i32 + 1, -(CUT_TEXT_MAX as i32) - 1] {
+            let mut g = InputGate::default();
+            g.push(&handshake(), true).unwrap();
+            let mut long = vec![6u8, 0, 0, 0];
+            long.extend_from_slice(&len.to_be_bytes());
+            assert_eq!(g.push(&long, true), Err(Unframed::TooLong(CUT_TEXT_MAX + 1)));
+        }
     }
 
     /// A display that stays down is started again, at most once a minute:

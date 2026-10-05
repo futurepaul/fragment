@@ -76,8 +76,12 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
     y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {APPROVAL_TIMEOUT_S}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
-    // The desktop starts at a computer-use tool's first call, never at boot.
-    y.push_str("bot_desktop:\n  auto_start: true\nbrowser:\n  headed: true\n");
+    // The first agent's desktop starts for the screen's first viewer (the
+    // bridge's `screen-start`), and any agent's at its first computer_use or
+    // browser call, never at boot (measured: about 300 MiB more once it
+    // runs). Its browser, on that desktop, is each profile's own config's
+    // (`profile_config`).
+    y.push_str("bot_desktop:\n  auto_start: true\n");
     if !disabled_plugins.is_empty() {
         // Messaging platforms this computer never serves (it is reached through its
         // bridge) and the dashboard's auth providers: the gateway imports every one
@@ -119,6 +123,14 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // agent's own wins, and a managed one over the platform's.
     let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
+    // Its browser: Hermes' built-in browser tools (browser_navigate, …),
+    // driving the image's own Chromium, headed, on the agent's desktop, so
+    // the screen shows it. Left unset, Hermes picks Browser Use mode (one
+    // browser_exec tool) whenever uvx is on PATH, which fetches its CLI,
+    // unpinned, into /data (about 490 MB) at the first call. Hermes reads
+    // `browser` from the profile's own config file alone, never from the
+    // managed overlay.
+    y.push_str("browser:\n  headed: true\n  backend: \"off\"\n");
     // Its terminal acts as the agent: the fragment CLI and the skills' helpers
     // read these from the profile's `.env` (`profile_env`), which Hermes passes
     // only to the commands of this profile's turns. Its shell's start files are
@@ -345,7 +357,15 @@ mod tests {
     #[test]
     fn configs_say_what_hermes_needs() {
         let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()]);
-        for want in ["transport: \"draft\"", "busy_input_mode: \"queue\"", "group_sessions_per_user: false", "disabled_toolsets: [\"cronjob\"]", "mode: \"smart\"", "    - \"platforms/discord\""] {
+        for want in [
+            "transport: \"draft\"",
+            "busy_input_mode: \"queue\"",
+            "group_sessions_per_user: false",
+            "disabled_toolsets: [\"cronjob\"]",
+            "mode: \"smart\"",
+            "    - \"platforms/discord\"",
+            "bot_desktop:\n  auto_start: true\n",
+        ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
@@ -357,6 +377,8 @@ mod tests {
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
+        assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
+        assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
         assert!(p.contains("\n  cwd: \"/data/work/juniper-paul\"\n"), "its terminal works in its work directory: {p}");
         assert_eq!(work_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul"));
