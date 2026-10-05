@@ -63,10 +63,19 @@ fn page(api: &Api, code: &str, session: Option<&str>) -> Result<Reply> {
 
 /// The approval form, posted from `origin`.
 fn approve(api: &Api, code: &str, session: Option<&str>, origin: &str) -> Result<Reply> {
+    approve_form(api, &format!("code={}", url_enc(code)), session, origin)
+}
+
+/// The approval form with "Run my new computers on it" ticked.
+fn approve_choosing(api: &Api, code: &str, session: &str, origin: &str) -> Result<Reply> {
+    approve_form(api, &format!("code={}&prefer=on", url_enc(code)), Some(session), origin)
+}
+
+fn approve_form(api: &Api, body: &str, session: Option<&str>, origin: &str) -> Result<Reply> {
     api.call(Call {
         method: "POST",
         url: format!("{}/nodes/pair", api.base),
-        body: Some(format!("code={}", url_enc(code)).into_bytes()),
+        body: Some(body.as_bytes().to_vec()),
         content_type: Some("application/x-www-form-urlencoded"),
         cookie: session.map(|s| format!("fragment_session={s}")),
         extra: vec![("origin", origin.to_string())],
@@ -241,6 +250,24 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
         misses.iter().all(|&m| m == 404) && r.status == 429 && r.error() == "rate_limited",
         format!("{misses:?} then {r}"),
     );
+
+    // approved with "Run my new computers on it" ticked: their choice at
+    // once, before they have a username or a computer (the shell starts the
+    // first one as they pick a username, before settings could be reached)
+    let (eve, eve_session) = person(&api)?;
+    let r = start(&api, "chosen")?;
+    let code = r.body["userCode"].as_str().unwrap_or("").to_string();
+    let shown = page(&api, &code, Some(&eve_session))?;
+    let r = approve_choosing(&api, &code, &eve_session, &platform)?;
+    let theirs = nodes(&api, &eve);
+    let chosen = theirs["nodes"].as_array().and_then(|l| l.iter().find(|n| n["name"] == "chosen")).and_then(|n| n["id"].as_str()).unwrap_or("").to_string();
+    s.ok(
+        "the approval page offers to run their new computers on it; ticked, the node is theirs and their choice in the same step",
+        shown.text.contains("name=\"prefer\"") && r.status == 200 && r.text.contains("Your new computers run on it") && !chosen.is_empty() && theirs["prefer"] == chosen.as_str(),
+        format!("{r} | {theirs}"),
+    );
+    let r = api.signed(&eve, "DELETE", &format!("/api/nodes/{chosen}"), None)?;
+    s.ok("revoked, it is no longer their choice", r.status == 200 && r.body["prefer"].is_null(), &r);
 
     // ---- sandcastle-node pair, end to end ----
     let mut node = s.node_to_pair("own")?;
