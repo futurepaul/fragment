@@ -665,6 +665,49 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
     }
 }
 
+/// Goal (I2): a turn whose run ended, but whose end a crash kept from the
+/// platform (its posts failing, the lane retrying, when the bridge dies),
+/// ends once and as itself: the state kept it, owing its end, and the next
+/// life posts that end again under the same id and body. Its run is not
+/// run again.
+#[tokio::test]
+async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("owed-end");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+    let pace = Duration::from_millis(100);
+
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+    following(&fake, 2).await;
+    let slow = fake.say(&chat, &person("paul"), json!({ "text": "slow" }));
+    let ts = turn_of("juniper", &chat, seq(&slow));
+    fake.until(WAIT, "the slow turn running", |w| w.drafts.iter().any(|d| d.2 == ts)).await;
+    // from here every post fails: the turn's reply, then its end, wait in the lane
+    let chat_posts = |w: &World| w.calls.iter().filter(|c| **c == format!("POST /api/f/{chat}/channels/chat")).count();
+    let before = fake.with(|w| {
+        w.fail_posts = 1_000;
+        chat_posts(w)
+    });
+    fake.until(WAIT, "its reply refused twice: the run is over, its end owed", |w| chat_posts(w) >= before + 2).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    fake.with(|w| {
+        assert!(ends_of(w, &chat, &ts).is_empty(), "its end never reached the platform");
+        w.fail_posts = 0;
+    });
+
+    let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+    let t2 = said_and_ended(&fake, &chat, "after").await;
+    assert_eq!(runs.all(), vec![ts.clone(), t2], "the slow turn ran once");
+    fake.with(|w| {
+        let ends = ends_of(w, &chat, &ts);
+        assert_eq!(ends, vec![json!({ "kind": "turn.end", "turn": ts, "outcome": "idle" })], "one end, its own (not lost)");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (I4): a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it.

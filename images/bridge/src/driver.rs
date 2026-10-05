@@ -276,6 +276,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
             match e {
                 Effect::Post { agent, fragment, channel, id, body, files } => lanes.push(&fragment, Job::Post { agent, channel, id, body, files }),
                 Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
+                Effect::Owed { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Owed { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime(c) => runtime_lane.push(c),
                 Effect::Keepalive(on) => {
@@ -740,6 +741,9 @@ enum Job {
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
     /// A turn's `turn.start` on `work`, whose answer the engine waits for.
     Claim { agent: String, turn: String, id: String, body: Value },
+    /// One of a turn's last records on `work`: the engine hears when the
+    /// lane is done with it.
+    Owed { agent: String, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -841,7 +845,17 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                     Err(e) => crate::ev!("draft.failed", { "fragment": fragment, "turn": turn, "error": e.to_string() }),
                 }
             }
-            Job::Post { agent, channel, id, body, files } => post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await,
+            Job::Post { agent, channel, id, body, files } => {
+                post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await;
+            }
+            Job::Owed { agent, turn, id, body } => {
+                // Done (answered, or given up after its tries) unless the
+                // bridge is stopping: then the turn keeps owing it, and the
+                // next life posts it again.
+                if post(&api, &fragment, &agent, records::WORK, &id, body, &[], stop.clone()).await {
+                    let _ = claims.inbox.send(Msg::Input(Input::Posted { turn, id })).await;
+                }
+            }
             Job::Claim { agent, turn, id, body } => {
                 let answer = claim(&api, &fragment, &agent, &id, &body, &claims.hold, stop.clone()).await;
                 // A closed inbox is an engine that has stopped.
@@ -895,8 +909,12 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, h
     unreachable!("the last try returns")
 }
 
+/// A post, tried until the platform answers it, or `POST_TRIES_MAX` times
+/// on a transport error, 429 or 5xx (a jittered backoff between: lesson 5),
+/// or refused at once: true when done so, false when the bridge stopped
+/// first.
 #[allow(clippy::too_many_arguments)]
-async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) {
+async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, mut body: Value, files: &[LocalFile], stop: watch::Receiver<bool>) -> bool {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
         let uploaded = upload(api, fragment, agent, files).await;
@@ -912,12 +930,12 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
         match result {
             Ok(replayed) => {
                 crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": replayed, "attempt": attempt });
-                return;
+                return true;
             }
             Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
                 crate::ev!("post.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
-                    return;
+                    return false;
                 }
             }
             Err(e) if e.status() == Some(409) => {
@@ -925,16 +943,17 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
                 // turn that life ended, or the records of one it claimed
                 // (one life per turn). Never retried.
                 crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
-                return;
+                return true;
             }
             Err(e) => {
                 // Out of tries, or a 403/404: it is no longer the agent's to
                 // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
-                return;
+                return true;
             }
         }
     }
+    unreachable!("the last try returns")
 }
 
 /// Uploads a reply's files as the fragment's blobs: their refs.

@@ -103,8 +103,9 @@ Bodies are JSON. `api.rs` has one method for each.
 
 `<state>/state.json`, written whole (a temporary file, synced, renamed)
 after every step that changed it and before that step's effects: the
-cursors (`agent|fragment|channel` → seq) and the open turns. It is a
-cache. The authority on which turns have started is the chat's `work`
+cursors (`agent|fragment|channel` → seq) and the turns not yet over
+(queued, running, waiting, or ended and owing their last records). It is
+a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
 (docs/explorations/pi-durable.md, P1).
@@ -138,12 +139,28 @@ cause's) is refused at start, never repaired. A state of another format
 (an older bridge's) is set aside for a fresh one: the journal says which
 turns ran.
 
-One gap is known and open: the state is written before a step's effects,
-so once a turn has ended in the state its `turn.end` lives only in its
-fragment's lane, and a crash then leaves the turn open (its start, and no
-end); a refused or queued-and-stopped turn's two records go the same way
-(`a_crash_that_drops_a_turns_end_leaves_it_open`, in engine_tests.rs,
-ignored until a choice closes it).
+- **A turn leaves the state only once its last records are answered.**
+  The state is written before a step's effects, so a turn that has ended
+  there would otherwise have its `turn.end` only in its fragment's lane,
+  and a crash then would leave it open for good (its start, and no end),
+  or leave a refused or queued-and-stopped turn with no record at all.
+  So an ended turn is kept (`ended`), holding what it owes `work`: its
+  `turn.end`, and for a turn that never ran its `turn.start` too, with
+  their bodies. It is let go once the lane is done with each: answered
+  (appended, a replay, or refused: a 409 is another life's end, a
+  403/404 a chat it may not post in), or given up by the lane's rule for
+  every post, `POST_TRIES_MAX` (10) tries with a jittered backoff on a
+  transport error, 429 or 5xx. A life that ends first leaves them to the
+  next, which posts every one again at its start under the same id and
+  body: a replay when it had landed. This closes the gap the simulation
+  found (`any_history_of_crashes_and_rollbacks_keeps_the_invariants`
+  checks I2 with no case let off; `a_crash_that_drops_a_turns_end_leaves_
+  nothing_open` and `an_end_a_crash_kept_from_the_platform_is_posted_by_
+  the_next_life` each way it happened). A record that keeps failing holds
+  its turn for one life's tries, and each later life tries it again once.
+  Not kept: the turn's last reply, and its cards' closings, posted in the
+  same step; a crash before they land loses them. A turn refused past
+  `TURNS_OPEN_MAX` is not kept either.
 
 Every bound is a const in `limits.rs`, with its reason. SIGTERM: gone
 within 3 s.

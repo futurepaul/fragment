@@ -55,7 +55,10 @@ at most 16. A turn's records, in order:
 
 Every turn has both its start and its end, one of each: a turn refused
 (too many waiting) or stopped while it waited posts its `turn.start` and
-then its `turn.end`, and runs nothing.
+then its `turn.end`, and runs nothing. The bridge keeps a turn until its
+last records are answered, and a bridge that stops before then leaves
+them to the next, which posts them again with the same ids and bodies
+(docs/bridge.md, "State").
 
 While a turn writes a reply, the chat's **draft** for it holds the
 reply's whole text so far (`PUT …/channels/chat/draft {turn, text}`,

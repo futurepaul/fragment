@@ -29,12 +29,19 @@ fn engine(agents: &[Agent]) -> Engine {
     e
 }
 
-/// `s`, with each claim it makes answered as this life's, and what each
-/// answer does (the turn handed to the runtime) added to it.
+/// `s`, with each claim it makes answered as this life's and each record it
+/// owes answered, and what each answer does (the turn handed to the
+/// runtime, an ended turn let go) added to it.
 fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
     let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
     for turn in claims {
         let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours }, now);
+        s.dirty |= more.dirty;
+        s.effects.extend(more.effects);
+    }
+    let owed: Vec<(String, String)> = s.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
+    for (turn, id) in owed {
+        let more = e.step(Input::Posted { turn, id }, now);
         s.dirty |= more.dirty;
         s.effects.extend(more.effects);
     }
@@ -57,9 +64,9 @@ fn said(e: &mut Engine, a: &Agent, v: &ChatView, seq: u64, principal: &str, body
     answered(e, s, now)
 }
 
-/// What a step posts, claims included (a claim is a `turn.start`).
+/// What a step posts, claims and owed records included.
 fn posts(s: &Step) -> Vec<(String, Value)> {
-    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } | Effect::Claim { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
+    s.effects.iter().filter_map(|e| match e { Effect::Post { id, body, .. } | Effect::Claim { id, body, .. } | Effect::Owed { id, body, .. } => Some((id.clone(), body.clone())), _ => None }).collect()
 }
 
 fn kinds(s: &Step) -> Vec<String> {
@@ -150,13 +157,19 @@ fn a_reply_streams_then_posts() {
     assert!(!d.dirty, "drafts are never stored");
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
-    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+    let end = e.step(Input::Runtime(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);
     let p = posts(&end);
     assert_eq!(p[0], (records::reply_id(&turn, 1), json!({ "text": "Hello", "turn": turn })));
     assert_eq!(p[1], (records::work_id(&turn, "end"), json!({ "kind": "turn.end", "turn": turn, "outcome": "idle" })));
     assert!(end.effects.contains(&Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: None }));
     assert_eq!(keepalive(&end), Some(false));
-    assert!(e.state().turns.is_empty());
+    // its end is owed: the turn is kept, ended, until the lane is done with it
+    let t = &e.state().turns[&turn];
+    assert_eq!((t.phase, t.owed.len()), (Phase::Ended, 1));
+    assert!(e.step(Input::Runtime(Event::Draft { turn: turn.clone(), text: "late".into() }), T0 + 4).effects.is_empty(), "an ended turn hears its runtime no more");
+    let done = e.step(Input::Posted { turn: turn.clone(), id: records::work_id(&turn, "end") }, T0 + 4);
+    assert!(done.dirty && done.effects.is_empty());
+    assert!(e.state().turns.is_empty(), "let go once its end is answered");
     // replay: a late event for the ended turn is dropped
     assert_eq!(ev(&mut e, Event::Reply { turn: turn.clone(), part: 2, text: "late".into() }, T0 + 5), Step::default());
 }
@@ -214,7 +227,7 @@ fn one_turn_at_a_time() {
     assert_eq!(posts(&over)[0], (records::work_id(&refused, "start"), json!({ "kind": "turn.start", "turn": refused, "asker": "id:paul", "agent": "id:juniper", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 100 }, "life": LIFE })));
     assert_eq!(posts(&over)[1].1["outcome"], "error");
     assert!(started(&over).is_none());
-    assert!(!e.state().turns.contains_key(&refused), "never held");
+    assert!(!e.state().turns.contains_key(&refused), "held only until both its records were answered");
 }
 
 /// Goal: only the turn's asker stops it. A Stop from anyone else is
@@ -391,7 +404,7 @@ fn a_group_picks_who_answers() {
     assert_eq!(reply["hop"], 1);
     let (byj, byr) = both(&mut e, 4, "id:juniper", reply);
     assert_eq!((byj, byr), (false, true), "rowan takes the hand-off; juniper skips its own reply");
-    assert_eq!(e.state().turns.values().find(|t| t.agent == r.fragment).expect("rowan's").hop, 1);
+    assert_eq!(e.state().turns.values().find(|t| t.agent == r.fragment && t.phase != Phase::Ended).expect("rowan's").hop, 1);
     // too deep: an agent's message past HOPS_MAX starts nothing
     let deep = json!({ "text": "@juniper again", "turn": "x", "to": ["id:juniper"], "hop": limits::HOPS_MAX + 1 });
     assert!(started(&said(&mut e, &j, &v, 5, "id:rowan", deep, T0)).is_none());
@@ -692,7 +705,7 @@ impl World {
         }
         for e in s.effects {
             match e {
-                Effect::Post { .. } | Effect::Claim { .. } => self.lane.push_back(e),
+                Effect::Post { .. } | Effect::Claim { .. } | Effect::Owed { .. } => self.lane.push_back(e),
                 Effect::Runtime(Command::Start(ts)) => {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
@@ -736,8 +749,8 @@ impl World {
     fn land(&mut self, e: &Effect) -> Answer {
         let (agent, fragment, channel, id, body) = match e {
             Effect::Post { agent, fragment, channel, id, body, .. } => (agent, fragment, *channel, id, body),
-            Effect::Claim { agent, fragment, id, body, .. } => (agent, fragment, records::WORK, id, body),
-            _ => panic!("the lane holds posts and claims: {e:?}"),
+            Effect::Claim { agent, fragment, id, body, .. } | Effect::Owed { agent, fragment, id, body, .. } => (agent, fragment, records::WORK, id, body),
+            _ => panic!("the lane holds posts, claims and owed records: {e:?}"),
         };
         let principal = self.agents.iter().find(|a| &a.fragment == agent).map(|a| a.identity.clone()).expect("an agent's post");
         let answer = self.journal.post(fragment, channel, &principal, id, body);
@@ -747,10 +760,13 @@ impl World {
         answer
     }
 
-    /// The engine is told a claim's answer (the driver's `Input::Claimed`).
+    /// The engine is told a claim's answer (the driver's `Input::Claimed`),
+    /// or that the lane is done with an owed record (`Input::Posted`).
     fn tell(&mut self, e: &Effect, answer: ClaimAnswer) {
-        if let Effect::Claim { turn, .. } = e {
-            self.step(Input::Claimed { turn: turn.clone(), answer });
+        match e {
+            Effect::Claim { turn, .. } => self.step(Input::Claimed { turn: turn.clone(), answer }),
+            Effect::Owed { turn, id, .. } => self.step(Input::Posted { turn: turn.clone(), id: id.clone() }),
+            _ => {}
         }
     }
 
@@ -795,13 +811,17 @@ impl World {
     }
 
     /// The lane's next post reaches the platform, and its answer is lost: a
-    /// claim is heard unanswered (its retry will find it a replay).
+    /// claim is heard unanswered (the next tick's claim will find it a
+    /// replay); any other post stays at the lane's head, for its retry to
+    /// find it a replay.
     fn land_unanswered_one(&mut self) {
-        if let Some(e) = self.lane.pop_front() {
-            self.land(&e);
+        let Some(e) = self.lane.front().cloned() else { return };
+        self.land(&e);
+        if matches!(e, Effect::Claim { .. }) {
+            self.lane.pop_front();
             self.tell(&e, ClaimAnswer::Unanswered);
-            self.deliver();
         }
+        self.deliver();
     }
 
     /// `who` says `body` in the chat, read at once: its seq.
@@ -869,7 +889,7 @@ impl World {
             .iter()
             .filter_map(|e| match e {
                 Effect::Claim { turn, .. } => Some(turn.clone()),
-                Effect::Post { body, .. } if body["kind"] == "turn.start" => body["turn"].as_str().map(str::to_string),
+                Effect::Post { body, .. } | Effect::Owed { body, .. } if body["kind"] == "turn.start" => body["turn"].as_str().map(str::to_string),
                 _ => None,
             })
             .collect()
@@ -938,26 +958,21 @@ impl World {
     }
 
     /// Settled, every message said has one start and one end (I2, I4), and
-    /// ran at most once (I1). Not `strict`, a message is let off whose end a
-    /// crash took from the lane before it was sent (the gap P1 leaves:
-    /// `a_crash_that_drops_a_turns_end_leaves_it_open`); how many were.
-    fn check_settled(&self, said: &[String], strict: bool) -> Result<usize, String> {
+    /// ran at most once (I1); and no turn is held any more.
+    fn check_settled(&self, said: &[String]) -> Result<(), String> {
         self.check()?;
-        let mut let_off = 0;
         for t in said {
             let (starts, ends) = (self.starts(t).len(), self.ends(t).len());
-            if (starts, ends) == (1, 1) {
-                continue;
+            if (starts, ends) != (1, 1) {
+                let dropped: Vec<&String> = self.dropped.iter().filter(|id| id.contains(t.as_str())).collect();
+                return Err(format!("I2/I4: {t} has {starts} starts and {ends} ends; crashes took its posts {dropped:?} from the lane"));
             }
-            let end_dropped = self.dropped.contains(&records::work_id(t, "end"));
-            if end_dropped && !strict {
-                let_off += 1;
-                continue;
-            }
-            let dropped: Vec<&String> = self.dropped.iter().filter(|id| id.contains(t.as_str())).collect();
-            return Err(format!("I2/I4: {t} has {starts} starts and {ends} ends; a crash took its posts {dropped:?} from the lane"));
         }
-        Ok(let_off)
+        let held = &self.engine().state().turns;
+        if !held.is_empty() {
+            return Err(format!("settled, and still holding {:?}", held.keys().collect::<Vec<_>>()));
+        }
+        Ok(())
     }
 }
 
@@ -1182,9 +1197,8 @@ const SIM_EVENTS: usize = 400;
 const SIM_SAID_MAX: usize = 40;
 
 /// One history: events chosen by `seed`, the invariants checked after each,
-/// and every message's records checked once everything settles (`strict`:
-/// see `World::check_settled`). How many messages were let off.
-fn simulate(seed: u64, strict: bool) -> Result<usize, String> {
+/// and every message's records checked once everything settles.
+fn simulate(seed: u64) -> Result<(), String> {
     // Its events would be millions of log lines.
     crate::log::set_quiet(true);
     let mut rng = Rng(seed);
@@ -1282,40 +1296,85 @@ fn simulate(seed: u64, strict: bool) -> Result<usize, String> {
         w.check().map_err(|e| format!("seed {seed}, event {n} ({what}): {e}"))?;
     }
     w.settle();
-    w.check_settled(&said, strict).map_err(|e| format!("seed {seed}, settled: {e}"))
+    w.check_settled(&said).map_err(|e| format!("seed {seed}, settled: {e}"))
 }
 
 /// Goal (I1, I2, I4): any history of messages, answers lost and late, runs,
 /// cards, Stops, crashes (each taking the lane's unsent posts with it), and
 /// lives started from any saved state or none keeps the invariants: checked
 /// after every event, and once it settles every message has one start and
-/// one end, and ran at most once. The test that finds the cases nobody
-/// listed; the one it found that P1 does not cover is let off here, counted,
-/// and is the next test's.
+/// one end, ran at most once, and no turn is held. No case is let off. The
+/// test that finds the cases nobody listed.
 #[test]
 fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
-    let results: Vec<Result<usize, String>> = (0..SIM_SEEDS).map(|seed| simulate(seed, false)).collect();
-    let failures: Vec<&String> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).map(|s| s.as_str()).collect::<Vec<_>>().join("\n"));
-    let let_off: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
-    eprintln!("{SIM_SEEDS} histories kept the invariants; {let_off} messages whose end a crash took from the lane were let off");
+    let failures: Vec<String> = (0..SIM_SEEDS).filter_map(|seed| simulate(seed).err()).collect();
+    assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
 }
 
-/// Goal (I2, I4): a turn whose end a crash took from the lane before it was
-/// sent is ended by a later life. Found by the simulation above, in about
-/// half its histories: the state is written before the step's effects, so
-/// once a turn has ended in the state its end lives only in the lane (as do
-/// a refused or queued-and-stopped turn's two records); a crash then, and
-/// no later life holds the turn or reads its record again (its cursor is
-/// past it), so it stays open (its start and no end), or a refusal leaves
-/// no record at all. P1's rule at a start ends only the turns the state
-/// holds. Stopped here and reported: closing it needs a choice (a turn
-/// kept in the state until its end is answered, a persisted outbox of
-/// posts, or each new life reading `work`'s tail for this agent's open
-/// turns).
+/// Goal (I2, I4): the case the simulation found, each way it happens: a
+/// crash takes a turn's last records from the lane after the state was
+/// written without them, and the next life (from the state the crash
+/// left) posts them again, under the same ids and bodies, so the turn ends
+/// once and as itself, never as lost. A turn that ran (its end taken; or
+/// its end landed and its answer lost, so the next life's is a replay), a
+/// refused one, and one stopped while it waited (their start and end
+/// taken). Was `a_crash_that_drops_a_turns_end_leaves_it_open`, ignored
+/// while P1 left it so.
 #[test]
-#[ignore = "P1 leaves it open: a crash that takes a turn's end from the lane, after its state forgot the turn"]
-fn a_crash_that_drops_a_turns_end_leaves_it_open() {
-    let failures: Vec<String> = (0..SIM_SEEDS).filter_map(|seed| simulate(seed, true).err()).collect();
-    assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories left a turn open; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
+fn a_crash_that_drops_a_turns_end_leaves_nothing_open() {
+    // a turn that ran: its end taken by the crash
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.answer_all();
+    w.end(&t, Outcome::Idle);
+    assert_eq!(w.engine().state().turns[&t].phase, Phase::Ended, "ended, owing its end");
+    let state = w.latest();
+    w.crash(false);
+    assert!(w.ends(&t).is_empty(), "the crash took its end");
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.ends(&t), vec![json!({ "kind": "turn.end", "turn": t, "outcome": "idle" })], "its own end, posted again");
+    assert_eq!(w.runs_of(&t), 1);
+    assert!(w.engine().state().turns.is_empty(), "let go once answered");
+
+    // its end landed, and the answer was lost with the life: a replay
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let t = w.say("id:paul", "one");
+    w.answer_all();
+    w.end(&t, Outcome::Idle);
+    w.answer_one(); // its reply
+    let state = w.latest();
+    w.crash(true); // its end lands; no one hears
+    assert_eq!(w.ends(&t).len(), 1);
+    w.start(state);
+    w.answer_all();
+    assert_eq!(w.ends(&t).len(), 1, "posted again: a replay, so one end");
+    assert!(w.engine().state().turns.is_empty());
+
+    // a refused turn, and one stopped while it waited: their two records taken
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let running = w.say("id:paul", "running");
+    w.answer_all();
+    let stopped = w.say("id:paul", "stopped");
+    // the queue full: `stopped` and these wait, the next is refused
+    for n in 1..limits::QUEUED_PER_CHAT_MAX {
+        w.say("id:paul", &format!("waiting {n}"));
+    }
+    let refused = w.say("id:paul", "refused");
+    w.say_body("id:paul", json!({ "kind": "stop", "turn": stopped }));
+    assert_eq!(w.pending_starts(), vec![refused.clone(), stopped.clone()], "both owe their start and end");
+    let state = w.latest();
+    w.crash(false);
+    w.start(state);
+    w.answer_all();
+    for (t, outcome) in [(&refused, "error"), (&stopped, "stopped")] {
+        assert_eq!((w.starts(t).len(), w.ends(t).len()), (1, 1), "{t}: both records, once");
+        assert_eq!(w.ends(t)[0]["outcome"], outcome);
+        assert_eq!(w.runs_of(t), 0, "{t}: never run");
+    }
+    assert_eq!(w.ends(&running)[0]["error"], LOST, "the one the crash cut is lost");
+    w.check().unwrap();
 }

@@ -32,6 +32,12 @@
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
 //!   waited, posts its `turn.start` and then its `turn.end`.
+//! - A turn leaves the state only once its last records are answered: an
+//!   ended turn keeps the records it owes `work` (its end; and its start,
+//!   when it never ran) until the lane is done with them, and a life that
+//!   ends first leaves them to the next, which posts them again under the
+//!   same ids and bodies (a replay when they had landed). So a crash
+//!   between the state and the platform leaves no turn open.
 //! - One turn of an agent runs in a chat at a time; the rest wait in order.
 //! - In a chat with several agents, a message is for the agents it names
 //!   (`to`, else `@mentions` of this computer's agents), else for the lead,
@@ -69,7 +75,8 @@ pub struct State {
     pub boot: u64,
     /// The last seq handled, per `agent|fragment|channel`.
     pub cursors: BTreeMap<String, u64>,
-    /// The turns admitted and not ended, by id.
+    /// The turns admitted and not over, by id: queued, running, waiting,
+    /// or ended and still owing `work` their last records.
     pub turns: BTreeMap<String, Turn>,
     /// Admissions so far: a turn's place in its chat's queue.
     pub admitted: u64,
@@ -97,6 +104,20 @@ pub enum Phase {
     Running,
     /// Waiting on a prompt's answer: the computer may sleep.
     Waiting,
+    /// Over (run and ended, or ended without running: refused, stopped
+    /// while it waited, or another life's), and its last records are owed
+    /// to `work` until the platform answers them (`Turn::owed`).
+    Ended,
+}
+
+/// One of a turn's last records, kept with the turn until the lane is done
+/// with it: its `turn.end`, and for a turn that never ran its `turn.start`
+/// too. A life that ends first leaves it to the next, which posts it again
+/// at its start under the same id and body (a replay when it had landed).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Owed {
+    pub id: String,
+    pub body: Value,
 }
 
 /// The platform's answer to a claim (`Effect::Claim`).
@@ -163,6 +184,8 @@ pub struct Turn {
     pub last_part: u32,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
+    /// What an ended turn still owes `work`, in the order posted.
+    pub owed: Vec<Owed>,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -203,6 +226,9 @@ pub enum Input {
     Runtime(Event),
     /// The platform's answer to a turn's claim.
     Claimed { turn: String, answer: ClaimAnswer },
+    /// The lane is done with an owed record (`Effect::Owed`): answered
+    /// (appended, a replay, or refused), or given up after its tries.
+    Posted { turn: String, id: String },
     /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
@@ -219,6 +245,10 @@ pub enum Effect {
     /// its fragment's order unless the computer is held, and answered back
     /// as `Input::Claimed`. The runtime hears of the turn only after.
     Claim { agent: String, fragment: String, turn: String, id: String, body: Value },
+    /// One of a turn's last records on `work` (its end; and its start, for
+    /// a turn that never ran), kept in the state until the lane is done
+    /// with it and says so (`Input::Posted`).
+    Owed { agent: String, fragment: String, turn: String, id: String, body: Value },
     /// The chat's draft for a turn (`None` stops it).
     Draft { agent: String, fragment: String, turn: String, text: Option<String> },
     Runtime(Command),
@@ -312,22 +342,29 @@ impl Engine {
         self.keepalive
     }
 
-    /// The first step of a life: a new boot number, and every turn the state
-    /// holds that is not queued is ended as lost. An earlier life claimed it
-    /// (its claim was answered, or the state would hold it queued), and the
-    /// runtime that had it died with that life: one life per turn, never
-    /// handed again. Queued turns stay queued, for this life to claim once
-    /// its runtime can take them.
+    /// The first step of a life: a new boot number; every record an ended
+    /// turn still owes is posted again, under the same id and body (a
+    /// replay when the life before had landed it, so the turn is let go);
+    /// and every turn running or waiting is ended as lost. An earlier life
+    /// claimed it (its claim was answered, or the state would hold it
+    /// queued), and the runtime that had it died with that life: one life
+    /// per turn, never handed again. Queued turns stay queued, for this
+    /// life to claim once its runtime can take them.
     pub fn recover(&mut self, now: u64) -> Step {
         self.begin(now);
         assert!(self.claiming.is_empty(), "a life recovers before it claims");
         self.state.boot += 1;
         self.dirty = true;
-        let earlier: Vec<String> = self.state.turns.values().filter(|t| t.phase != Phase::Queued).map(|t| t.id.clone()).collect();
+        let owed: Vec<(String, String, String, Owed)> = self.state.turns.values().flat_map(|t| t.owed.iter().map(|o| (t.agent.clone(), t.fragment.clone(), t.id.clone(), o.clone()))).collect();
+        for (agent, fragment, turn, o) in owed {
+            crate::ev!("owed.again", { "turn": turn, "id": o.id });
+            self.owe(&agent, &fragment, &turn, o);
+        }
+        let earlier: Vec<String> = self.state.turns.values().filter(|t| t.active()).map(|t| t.id.clone()).collect();
         for id in &earlier {
             self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
-        assert!(self.state.turns.values().all(|t| t.phase == Phase::Queued), "a recovered life holds only queued turns");
+        assert!(self.state.turns.values().all(|t| matches!(t.phase, Phase::Queued | Phase::Ended)), "a recovered life holds only queued and ended turns");
         self.pump_all();
         self.finish()
     }
@@ -340,6 +377,7 @@ impl Engine {
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::Runtime(event) => self.runtime(event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
+            Input::Posted { turn, id } => self.posted(&turn, &id),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
         }
@@ -373,6 +411,11 @@ impl Engine {
 
     fn post(&mut self, agent: &str, fragment: &str, channel: &'static str, id: String, body: Value, files: Vec<LocalFile>) {
         self.out.push(Effect::Post { agent: agent.to_string(), fragment: fragment.to_string(), channel, id, body, files });
+    }
+
+    /// Posts a record the turn keeps owing until the lane is done with it.
+    fn owe(&mut self, agent: &str, fragment: &str, turn: &str, o: Owed) {
+        self.out.push(Effect::Owed { agent: agent.to_string(), fragment: fragment.to_string(), turn: turn.to_string(), id: o.id, body: o.body });
     }
 
     fn draft(&mut self, agent: &str, fragment: &str, turn: &str, text: Option<String>) {
@@ -492,11 +535,6 @@ impl Engine {
         } else {
             None
         };
-        if let Some(why) = refusal {
-            crate::ev!("turn.refused", { "turn": id, "agent": agent.fragment, "fragment": fragment, "why": why });
-            self.end_unrun(&agent.fragment, fragment, &id, asker, &agent.identity, &cause, Outcome::Error(why.into()));
-            return;
-        }
         self.state.admitted += 1;
         let turn = Turn {
             id: id.clone(),
@@ -517,23 +555,75 @@ impl Engine {
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
+            owed: Vec::new(),
             open: None,
         };
+        self.dirty = true;
+        if let Some(why) = refusal {
+            crate::ev!("turn.refused", { "turn": id, "agent": agent.fragment, "fragment": fragment, "why": why });
+            let outcome = Outcome::Error(why.into());
+            if self.state.turns.len() < limits::TURNS_OPEN_MAX {
+                self.state.turns.insert(id.clone(), turn);
+                self.end_unrun(&id, outcome);
+            } else {
+                // Past the bound of turns held, its two records are posted
+                // and not kept: a crash before they land loses them.
+                crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
+                let start = records::turn_start(&id, asker, &agent.identity, &turn.cause, &self.life);
+                self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
+                self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
+            }
+            return;
+        }
         crate::ev!("turn.admitted", { "turn": id, "agent": agent.fragment, "fragment": fragment, "seq": turn.cause.seq, "hop": hop });
         self.state.turns.insert(id, turn);
-        self.dirty = true;
         self.pump(&agent.fragment, fragment);
     }
 
-    /// A turn that ends without running here (refused, or stopped while it
-    /// waited): its claim, then its end, so it has both records as every
-    /// turn does. When another life claimed it, the first is a 409, and so
-    /// is the second if that life ended it.
-    #[allow(clippy::too_many_arguments)]
-    fn end_unrun(&mut self, agent: &str, fragment: &str, id: &str, asker: &str, identity: &str, cause: &Cause, outcome: Outcome) {
-        let start = records::turn_start(id, asker, identity, cause, &self.life);
-        self.post(agent, fragment, records::WORK, records::work_id(id, "start"), start, Vec::new());
-        self.post(agent, fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &outcome), Vec::new());
+    /// A held turn ends without running here (refused, or stopped while it
+    /// waited): it owes its claim, then its end, so it has both records as
+    /// every turn does, and it is kept until both are answered. When
+    /// another life claimed it, the first is a 409, and so is the second if
+    /// that life ended it.
+    fn end_unrun(&mut self, id: &str, outcome: Outcome) {
+        self.claiming.remove(id);
+        let agent = self.state.turns[id].agent.clone();
+        let identity = self.agent(&agent).expect("a held turn's agent is on this computer").identity.clone();
+        let life = self.life.clone();
+        let t = self.state.turns.get_mut(id).expect("held");
+        assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
+        let start = Owed { id: records::work_id(id, "start"), body: records::turn_start(id, &t.asker, &identity, &t.cause, &life) };
+        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome) };
+        t.phase = Phase::Ended;
+        t.owed = vec![start.clone(), end.clone()];
+        let fragment = t.fragment.clone();
+        self.dirty = true;
+        self.owe(&agent, &fragment, id, start);
+        self.owe(&agent, &fragment, id, end);
+    }
+
+    /// The lane is done with one of a turn's owed records; a turn that owes
+    /// none is let go. Done means answered (appended, a replay, or refused:
+    /// a 409 is another life's end of the turn, a 403/404 a chat it may no
+    /// longer post in) or given up after the lane's tries (docs/bridge.md:
+    /// `POST_TRIES_MAX`, with jitter, on a transport error, 429 or 5xx), so
+    /// a record that keeps failing holds its turn for one life's tries at
+    /// most, then goes.
+    fn posted(&mut self, id: &str, post: &str) {
+        let Some(t) = self.state.turns.get_mut(id) else {
+            crate::ev!("owed.stale", { "turn": id, "id": post, "why": "no turn held by that id" });
+            return;
+        };
+        if t.phase != Phase::Ended || !t.owed.iter().any(|o| o.id == post) {
+            crate::ev!("owed.stale", { "turn": id, "id": post, "why": "the turn does not owe it" });
+            return;
+        }
+        t.owed.retain(|o| o.id != post);
+        self.dirty = true;
+        if t.owed.is_empty() {
+            self.state.turns.remove(id);
+            crate::ev!("turn.closed", { "turn": id });
+        }
     }
 
     /// Claims the chat's next turn when its runtime can take one and none
@@ -581,11 +671,17 @@ impl Engine {
         match answer {
             ClaimAnswer::Ours => self.hand(id),
             ClaimAnswer::Theirs => {
-                let t = self.state.turns.remove(id).expect("checked");
+                // It owes its end as lost (a 409 itself when that life ended
+                // it, and let go then like any answered end).
+                let t = self.state.turns.get_mut(id).expect("checked");
+                let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &Outcome::Error(LOST.into())) };
+                t.phase = Phase::Ended;
+                t.owed = vec![end.clone()];
+                let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
-                crate::ev!("turn.lost", { "turn": id, "agent": t.agent, "why": "another life claimed it" });
-                self.post(&t.agent, &t.fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &Outcome::Error(LOST.into())), Vec::new());
-                self.pump(&t.agent, &t.fragment);
+                crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
+                self.owe(&agent, &fragment, id, end);
+                self.pump(&agent, &fragment);
             }
             ClaimAnswer::Refused => {
                 let t = self.state.turns.remove(id).expect("checked");
@@ -648,13 +744,11 @@ impl Engine {
         match phase {
             Phase::Queued => {
                 // Never run here (a claim in flight is answered to no one).
-                let t = self.state.turns.remove(&id).expect("found");
-                self.claiming.remove(&id);
-                self.dirty = true;
                 crate::ev!("turn.stopped", { "turn": id, "phase": "queued" });
-                self.end_unrun(&agent.fragment, fragment, &id, &t.asker, &agent.identity, &t.cause, Outcome::Stopped);
+                self.end_unrun(&id, Outcome::Stopped);
                 self.pump(&agent.fragment, fragment);
             }
+            Phase::Ended => crate::ev!("stop.ignored", { "turn": id, "why": "it is over" }),
             Phase::Running | Phase::Waiting => {
                 let t = self.state.turns.get_mut(&id).expect("found");
                 if t.stop_requested {
@@ -870,17 +964,26 @@ impl Engine {
 
     /// The turn is over: its last reply, its open prompts closed as
     /// `unanswered`, its end, and its chat's next turn.
+    /// The turn's run is over: its last reply, its open prompts closed as
+    /// `unanswered`, its end (owed: kept with the turn until answered), and
+    /// its chat's next turn.
     fn end(&mut self, id: &str, outcome: Outcome, unanswered: Closed) {
         self.seal(id);
-        let t = self.state.turns.remove(id).expect("ending a held turn");
+        let t = self.state.turns.get_mut(id).expect("ending a held turn");
+        assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
+        let prompts = std::mem::take(&mut t.prompts);
+        let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome) };
+        t.phase = Phase::Ended;
+        t.owed = vec![end.clone()];
+        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
         self.dirty = true;
-        crate::ev!("turn.end", { "turn": id, "agent": t.agent, "fragment": t.fragment, "outcome": match &outcome { Outcome::Idle => "idle", Outcome::Stopped => "stopped", Outcome::Error(_) => "error" } });
-        for p in t.prompts.iter().filter(|p| !p.closed) {
-            self.post(&t.agent, &t.fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
+        crate::ev!("turn.end", { "turn": id, "agent": agent, "fragment": fragment, "outcome": match &outcome { Outcome::Idle => "idle", Outcome::Stopped => "stopped", Outcome::Error(_) => "error" } });
+        for p in prompts.iter().filter(|p| !p.closed) {
+            self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
         }
-        self.post(&t.agent, &t.fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &outcome), Vec::new());
-        self.draft(&t.agent, &t.fragment, id, None);
-        self.pump(&t.agent, &t.fragment);
+        self.owe(&agent, &fragment, id, end);
+        self.draft(&agent, &fragment, id, None);
+        self.pump(&agent, &fragment);
     }
 
     // ---- time ----
@@ -964,6 +1067,17 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         }
         if t.phase == Phase::Waiting && t.prompts.iter().all(|p| p.closed) {
             return Err(Corrupt(format!("turn {id} waits on no prompt")));
+        }
+        let ended = t.phase == Phase::Ended;
+        if ended == t.owed.is_empty() {
+            return Err(Corrupt(format!("turn {id} is {:?} and owes {} records", t.phase, t.owed.len())));
+        }
+        if t.owed.len() > 2 {
+            return Err(Corrupt(format!("turn {id} owes {} records: at most its start and its end", t.owed.len())));
+        }
+        let own = format!("wk:{id}:");
+        if let Some(o) = t.owed.iter().find(|o| !o.id.starts_with(&own) || o.body["turn"] != id.as_str()) {
+            return Err(Corrupt(format!("turn {id} owes {}, not one of its own", o.id)));
         }
     }
     Ok(())
