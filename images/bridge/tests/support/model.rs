@@ -3,10 +3,10 @@
 //!
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran`; `use the
-//!   terminal slowly`: `sleep 8` first), and one saying `risky` with one
-//!   Hermes flags (`rm -rf …`); once a tool result is in the transcript, the
-//!   answer names it;
+//!   yet, is answered with a `terminal` tool call (`echo tool-ran` after
+//!   `sleep 2`; `use the terminal slowly`: after `sleep 8`), and one saying
+//!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
+//!   the transcript, the answer names it;
 //! - `browse: <url>` is a `browser_navigate` call, and `look at your screen`
 //!   a `computer_use` capture (through Hermes' `tool_call` bridge when it
 //!   defers the tool); their answers quote what the tool said;
@@ -100,7 +100,10 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
-        Some("echo tool-ran")
+        // Hermes sends a tool's progress line (its step) only if its turn
+        // runs on past its 0.3 s progress poll (docs/technical-debt-ledger.md,
+        // "A quick tool's step can be lost in Hermes")
+        Some("sleep 2 && echo tool-ran")
     } else {
         None
     };
