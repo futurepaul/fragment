@@ -137,10 +137,11 @@ const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::
 
 /// The save checks (docs/durable-computers.md, step 1), each skipped off
 /// the stub and the fakes.
-const SAVE_CHECKS: [&str; 5] = [
+const SAVE_CHECKS: [&str; 6] = [
     "awake and idle after a turn, it has a save newer than the turn, held",
     "it keeps at most three saves, newest first, and its view lists them",
     "an always-on computer is saved without sleeping",
+    "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
     "a sleep whose save fails keeps its container, and its view says so",
     "a save that then works lets it sleep, and its view says no more of it",
 ];
@@ -187,6 +188,24 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let v = view();
     s.ok(SAVE_CHECKS[2], saved && v["phase"] == "awake" && v["restored"]["generation"] == generation, format!("{r} / {}", newest_save(api, c.id)));
     lever_with(api, c.id, json!({ "op": "always-on", "on": false }))?;
+    // what the guest's answer to the hold names is left out of its save (the
+    // stub names `*.scratch`), and the rest is kept, across a sleep and a wake
+    let said = |n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        s.eventually(c.wake, || reply_of(seq_of(&r)).is_some());
+        Ok(reply_of(seq_of(&r)).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let wrote = [said(62, "write notes/keep.txt kept")?, said(63, "write notes/gone.scratch left out")?];
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
+    let woke = api.signed(c.owner, "POST", &format!("/api/computers/{}/wake", c.id), Some(&json!({})))?;
+    let read = [said(64, "read notes/keep.txt")?, said(65, "read notes/gone.scratch")?];
+    s.ok(
+        SAVE_CHECKS[3],
+        wrote.iter().all(|w| w.starts_with("wrote ")) && slept.body["phase"] == "asleep" && woke.body["restored"]["from"] == "backup" && read == ["read notes/keep.txt: kept", "read notes/gone.scratch: none"],
+        format!("{wrote:?} / {read:?} / {}", woke.body["restored"]),
+    );
+    let generation = view()["restored"]["generation"].clone();
     // a sleep whose save fails keeps its container: the same start, awake
     std::thread::sleep(QUEUE_DRAIN);
     let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 1 }))?;
@@ -194,7 +213,7 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     let kept = lever(api, c.id, "saves")?;
     s.ok(
-        SAVE_CHECKS[3],
+        SAVE_CHECKS[4],
         failing.status == 200
             && r.body["phase"] == "awake"
             && r.body["why"].as_str().is_some_and(|w| w.contains("could not save") && w.contains("the test lever failed it"))
@@ -208,11 +227,11 @@ fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -
     let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
     let newest = newest_save(api, c.id);
     s.ok(
-        SAVE_CHECKS[4],
+        SAVE_CHECKS[5],
         r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != saves_before["id"],
         format!("{r} / {newest}"),
     );
-    Ok(2)
+    Ok(6)
 }
 
 /// The crash checks, each skipped off the stub and the fakes. The ones

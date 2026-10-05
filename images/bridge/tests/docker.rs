@@ -89,6 +89,20 @@ impl Container {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// `cmd`'s exit code and what it printed.
+    fn exec_code(&self, cmd: &[&str]) -> (i32, String) {
+        let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
+        (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    }
+
+    /// A container of `tag` that runs nothing but a sleep: a disk to restore
+    /// into and check, as a fresh start's is before its gate opens.
+    fn idle(tag: &str) -> Container {
+        let out = Command::new(docker()).args(["run", "-d", "--platform", "linux/amd64", "--entrypoint", "/bin/sleep", tag, "infinity"]).output().expect("docker runs");
+        assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
+    }
+
     fn logs(&self) -> String {
         let out = Command::new(docker()).args(["logs", &self.id]).output().expect("docker runs");
         format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
@@ -392,4 +406,217 @@ async fn the_hermes_image() {
     if took >= Duration::from_secs(5) {
         panic!("SIGTERM took {took:?}; the container said:\n{}", c.logs());
     }
+}
+
+// ---- saves under the hold (docs/computers.md, "The hold"; rung 3 of
+// docs/explorations/pi-durable.md) ----
+
+/// The platform's hold of `/data`, as the Computer DO makes it, in a
+/// running container: its answer (`held`, within 20 s) and what it names
+/// as left out.
+fn hold(c: &Container) -> Option<Vec<String>> {
+    assert!(c.exec(&["sh", "-c", "rm -f /run/computer/held && mkdir -p /run/computer && touch /run/computer/hold"]), "the hold");
+    let t = Instant::now();
+    // bounded by the DO's 20 s
+    while t.elapsed() < Duration::from_secs(20) {
+        if c.exec(&["test", "-e", "/run/computer/held"]) {
+            return Some(c.exec_out(&["cat", "/run/computer/held"]).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn unhold(c: &Container) {
+    assert!(c.exec(&["rm", "-f", "/run/computer/hold", "/run/computer/held"]), "the hold let go");
+}
+
+/// One save, as the Computer DO takes it: `/data` read out whole as a tar
+/// (the DirectoryBackup's archive, on this rung), leaving out what `left_out`
+/// names (anchored patterns, `/` being `/data`, as gitignore reads them).
+/// Its bytes.
+fn save_data(c: &Container, left_out: &[String], to: &std::path::Path) -> u64 {
+    let mut args = vec!["exec".to_string(), c.id.clone(), "tar".into(), "-C".into(), "/data".into(), "-cf".into(), "-".into(), "--anchored".into()];
+    for p in left_out {
+        assert!(p.starts_with('/'), "our image names exactly what it copied: {p}");
+        args.push(format!("--exclude=.{p}"));
+    }
+    args.push(".".into());
+    let out = Command::new(docker()).args(&args).output().expect("docker runs");
+    // 1: a file changed as it was read, which a hot save is
+    assert!(out.status.success() || out.status.code() == Some(1), "tar: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(to, &out.stdout).expect("the save written");
+    out.stdout.len() as u64
+}
+
+/// A save restored into a fresh container of `tag`, as a wake from the
+/// image and the save does, before its gate: the image's check (its exit
+/// code and what it said), then every SQLite file under `/data` with its
+/// `quick_check`, as the hermes user.
+fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<serde_json::Value>) {
+    let c = Container::idle(tag);
+    assert!(c.exec(&["mkdir", "/data"]), "the restore's target");
+    let tar = std::fs::File::open(save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
+    let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    (code, said, files)
+}
+
+/// The Hermes image, running against the fake API and the scripted model,
+/// its agent answering in its chat.
+async fn hermes_running() -> (Fake, Model, String, Container) {
+    build(&repo_dir(), "images/hermes/Dockerfile", "fragment-hermes:test");
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    (fake, model, chat, c)
+}
+
+/// A turn whose tool writes a SQLite database of its own for about six
+/// seconds (a commit every few ms), while Hermes writes its own.
+const WRITING: &str = "run: python3 -c \"import sqlite3,time;c=sqlite3.connect('tool.db');c.execute('pragma journal_mode=wal');c.execute('create table if not exists t(x)');[(c.execute('insert into t values(randomblob(8000))'),c.commit(),time.sleep(0.01)) for _ in range(500)];print('wrote')\"";
+
+/// Whether a reported file is one of Hermes' own databases (its home's
+/// `*.db`), or another SQLite file.
+fn hermes_db(file: &serde_json::Value) -> bool {
+    file["path"].as_str().is_some_and(|p| p.starts_with("/data/hermes/") && p.ends_with(".db"))
+}
+
+/// Goal (I8, F4): a save taken under the hold while turns write opens:
+/// every one of Hermes' databases in it passes `quick_check`, whatever was
+/// writing as it was taken. Method: saves taken many times during turns
+/// whose tool writes a database of its own (and Hermes its own), half under
+/// the hold (the databases copied by SQLite's online backup, their live
+/// files left out) and half hot (no hold: `/data` as it is, the platform's
+/// save before the hold), each restored into a fresh container, checked by
+/// the image's own check as the platform runs it, then every SQLite file
+/// found checked. Asserts the held saves are whole; reports the hot ones'
+/// tear rate, and any other SQLite file's (a measure, not an assertion).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_save_taken_while_it_writes_opens() {
+    const ROUNDS: u32 = 12;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("saves");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut saves = vec![];
+    for round in 0..ROUNDS {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
+        let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
+        // Hermes asks its owner before a script runs from `-c` ("script
+        // execution via -e/-c flag"): allowed for the session, once
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if let Some(card) = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t)) {
+            fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
+        }
+        // the tool writing for about six seconds: the save is taken in its midst
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let held = round % 2 == 0;
+        let t0 = Instant::now();
+        let left_out = if held { hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs())) } else { vec![] };
+        let answered_ms = t0.elapsed().as_millis();
+        let path = dir.join(format!("save-{round}.tar"));
+        let bytes = save_data(&c, &left_out, &path);
+        let saved_ms = t0.elapsed().as_millis();
+        if held {
+            unhold(&c);
+        }
+        eprintln!("save {round}: {} {bytes} bytes, answered in {answered_ms} ms, saved in {saved_ms} ms", if held { "held" } else { "hot" });
+        saves.push((held, path));
+        fake.until(120_000, "the writing turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    }
+    let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
+    for (held, path) in &saves {
+        let t = Instant::now();
+        let (code, said, files) = restore_and_check("fragment-hermes:test", path);
+        let torn: Vec<&serde_json::Value> = files.iter().filter(|f| f["ok"] != true).collect();
+        eprintln!("{}: check {code} in {} ms ({}); {} SQLite files, torn: {torn:?}", path.display(), t.elapsed().as_millis(), said.trim(), files.len());
+        let ours = files.iter().filter(|f| hermes_db(f)).count();
+        let ours_torn = torn.iter().filter(|f| hermes_db(f)).count();
+        assert!(ours > 0, "a save holds Hermes' databases: {files:?}");
+        if *held {
+            assert_eq!(code, 0, "the image's check of a held save passes: {said}");
+            (held_dbs, held_torn) = (held_dbs + ours, held_torn + ours_torn);
+        } else {
+            (hot_dbs, hot_torn) = (hot_dbs + ours, hot_torn + ours_torn);
+        }
+        others += files.len() - ours;
+        other_torn += torn.len() - ours_torn;
+    }
+    eprintln!("tear rate: Hermes' databases held {held_torn}/{held_dbs}, hot {hot_torn}/{hot_dbs}; other SQLite files {other_torn}/{others}");
+    assert_eq!(held_torn, 0, "a held save's databases are whole");
+}
+
+/// Goal (P2): once the guest says `held`, no file its save keeps changes:
+/// the bridge claims nothing, the sync, the skills and the agents' reads
+/// start no round, and the copy is done before the answer. Hermes' gateway
+/// is not paused (P2: it cannot be asked), so the hold comes between turns,
+/// and what Hermes writes on its own while idle (its kanban dispatcher opens
+/// its board's database on a timer, making its `-wal` and `-shm`) is in the
+/// files its answer names, which the save leaves out (their copies kept).
+/// Method: an idle Hermes held, a listing of the files under `/data` (each
+/// path, size and time) but those the answer names, then another five
+/// seconds later. Then a message said while it is held is not claimed
+/// until the hold goes (its bridge records it, unclaimed: its state file
+/// is rewritten, whole).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn held_nothing_under_data_changes() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let files = |leave: &[String]| -> Vec<String> {
+        let listed = c.exec_out(&["sh", "-c", "find /data -type f -printf '%p %s %T@\\n' | sort"]);
+        listed.lines().filter(|l| !leave.iter().any(|p| l.starts_with(&format!("/data{p} ")))).map(str::to_string).collect()
+    };
+    // between turns: once Hermes' start-up writes are done (its lazy
+    // packages; its kanban dispatcher makes its board's database some
+    // seconds after the gateway starts), two windows of three seconds with
+    // no file but a database's journal changed
+    let journals = |l: &String| [".db-wal ", ".db-shm ", ".db-journal "].iter().any(|s| l.contains(s));
+    let settled = |all: Vec<String>| all.into_iter().filter(|l| !journals(l)).collect::<Vec<_>>();
+    let quiet = Instant::now();
+    // bounded: two minutes
+    while !c.exec(&["test", "-f", "/data/hermes/kanban.db"]) {
+        assert!(quiet.elapsed() < Duration::from_secs(120), "Hermes never made its kanban board's database");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let mut last = settled(files(&[]));
+    let mut still = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let now = settled(files(&[]));
+        still = if now == last { still + 1 } else { 0 };
+        if still >= 2 {
+            break;
+        }
+        last = now;
+    }
+    eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
+    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper-paul/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
+    let before = files(&left_out);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after = files(&left_out);
+    let changed: Vec<_> = before.iter().zip(after.iter()).filter(|(a, b)| a != b).collect();
+    assert!(before == after, "a file the save keeps changed while held ({} before, {} after): {changed:?}", before.len(), after.len());
+    // a message as it is held: recorded, never claimed while held
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "said while held" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    fake.with(|w| assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["turn"] != t), "held, the message is not claimed"));
+    unhold(&c);
+    fake.until(120_000, "the message answered once the hold goes", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!c.exec(&["test", "-e", "/data/held-copies"]), "the copies go with the hold");
 }

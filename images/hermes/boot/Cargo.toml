@@ -15,6 +15,10 @@ bytes.workspace = true
 fragment-bridge = { path = "../../bridge" }
 futures-util.workspace = true
 libc = "0.2"
+# SQLite's online backup and quick_check (held.rs): Hermes' databases are
+# copied whole under the hold. SQLite built in (bundled): the image's
+# musl build has no system library to link.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "backup"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

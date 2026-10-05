@@ -264,8 +264,9 @@ class ContainerHost {
     return false;
   }
 
-  // Runs `argv` in the container, answering within `ms` when it is given.
-  async exec(generation, argv, ms) {
+  // Runs `argv` in the container, answering within `ms` when it is given,
+  // with the last `keep` bytes of its output (4 KiB unless named).
+  async exec(generation, argv, ms, keep) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     const run = (async () => (await this.#c.exec(argv, { stderr: "combined" })).output())();
     // a late failure, once the bound answered, is no one's to hear
@@ -276,7 +277,7 @@ class ContainerHost {
     });
     try {
       const out = await (ms ? Promise.race([run, late]) : run);
-      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-4096) };
+      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-(keep || 4096)) };
     } finally {
       clearTimeout(timer);
     }

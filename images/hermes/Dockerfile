@@ -56,6 +56,11 @@ COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/
 ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
 COPY --from=build /out/ /opt/fragment/bin/
+# The check the platform runs after it restores /data, before the gate
+# (docs/computers.md): the last hold's copies of Hermes' databases put back,
+# then each one's quick_check (hermes-boot's held.rs).
+RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate (docs/computers.md).\nexec /opt/fragment/bin/hermes-boot check-restore\n' > /usr/local/bin/computer-check \
+ && chmod 755 /usr/local/bin/computer-check
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/screen /opt/fragment/screen

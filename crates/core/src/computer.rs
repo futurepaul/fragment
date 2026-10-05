@@ -942,6 +942,40 @@ impl Lifecycle {
 
 /// Records one save holds at most: one per directory it saves.
 pub const SAVE_RECORDS_MAX: usize = 4;
+/// A guest's answer to the hold is at most this long, and names at most
+/// `LEFT_OUT_MAX` patterns of at most `LEFT_OUT_PATTERN_MAX_BYTES` each:
+/// room for an image that names each file it copied (ours: four lines a
+/// database, for up to 128 databases).
+pub const HELD_ANSWER_MAX_BYTES: usize = 64 * 1024;
+pub const LEFT_OUT_MAX: usize = 512;
+pub const LEFT_OUT_PATTERN_MAX_BYTES: usize = 256;
+const _: () = assert!(LEFT_OUT_MAX * 2 <= HELD_ANSWER_MAX_BYTES, "the answer's bound fits its patterns' count");
+
+/// What a guest's answer to the hold (`/run/computer/held`, docs/computers.md)
+/// names as left out of its save: one gitignore pattern a line, relative to
+/// `/data`, of letters, digits and `._-/*?[]` (empty lines skipped). These
+/// are files the guest copied under the hold to names the save keeps (our
+/// Hermes image: its SQLite databases, by SQLite's online backup), so a
+/// hot copy of them, which could tear, is never what a wake restores. An
+/// answer past its bounds, or with any other line, is refused: the guest is
+/// then saved whole, losing nothing.
+pub fn left_out(answer: &str) -> Result<Vec<String>, String> {
+    if answer.len() > HELD_ANSWER_MAX_BYTES {
+        return Err(format!("an answer of {} bytes, past {HELD_ANSWER_MAX_BYTES}", answer.len()));
+    }
+    let mut patterns = Vec::new();
+    for line in answer.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let ok = line.len() <= LEFT_OUT_PATTERN_MAX_BYTES && line.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b));
+        if !ok {
+            return Err(format!("{line:?} is no pattern of letters, digits and ._-/*?[] of at most {LEFT_OUT_PATTERN_MAX_BYTES} bytes"));
+        }
+        patterns.push(line.to_string());
+    }
+    if patterns.len() > LEFT_OUT_MAX {
+        return Err(format!("{} patterns, past {LEFT_OUT_MAX}", patterns.len()));
+    }
+    Ok(patterns)
+}
 
 /// A save of `/data`, as the Computer DO keeps it: the `DirectoryBackup`
 /// records it was taken as (the authority on what a wake restores, handed
@@ -2142,6 +2176,22 @@ mod tests {
         // a record stored before it kept several saves is not read: a hard cut
         let old: Saves = serde_json::from_value(json!({ "backup": { "id": "x", "generation": 1, "atMs": T }, "snapshot": null, "starting": null, "ended": null, "restored": null, "running": null, "rollbacks": 0 })).unwrap();
         assert_eq!((old.current(), old.plan(Some(IMAGE))), (None, Plan::Nothing));
+    }
+
+    /// Valid and invalid answers to the hold: the patterns a guest names
+    /// (an empty answer names none), and every answer the platform refuses,
+    /// which saves the guest whole.
+    #[test]
+    fn a_guest_names_what_its_save_leaves_out() {
+        assert_eq!(left_out(""), Ok(vec![]));
+        assert_eq!(left_out("*.db\n*.db-wal\n\n  *.db-shm\n*.db-journal\n"), Ok(vec!["*.db".into(), "*.db-wal".into(), "*.db-shm".into(), "*.db-journal".into()]));
+        assert_eq!(left_out("/work/\nprofiles/*/cache/[ab]?.tmp"), Ok(vec!["/work/".into(), "profiles/*/cache/[ab]?.tmp".into()]));
+        let too_long = "x".repeat(LEFT_OUT_PATTERN_MAX_BYTES + 1);
+        let too_many = "a\n".repeat(LEFT_OUT_MAX + 1);
+        let too_big = "a\n".repeat(HELD_ANSWER_MAX_BYTES);
+        for bad in ["!keep.db", "a b", "$(rm -rf /)", "*.db;rm", "é", too_long.as_str(), too_many.as_str(), too_big.as_str()] {
+            assert!(left_out(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

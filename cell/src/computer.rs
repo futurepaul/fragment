@@ -131,6 +131,14 @@ const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/resto
 const HOLD_MARK: &str = "rm -f /run/computer/held && mkdir -p /run/computer && touch /run/computer/hold";
 const HOLD_UNMARK: &str = "rm -f /run/computer/hold /run/computer/held";
 const HELD_TEST: &str = "test -e /run/computer/held";
+const HELD_READ: &str = "cat /run/computer/held";
+/// The image's check of what a start restored (docs/computers.md, "Data and
+/// the restore gate"), when it carries one: run after the restore and
+/// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
+/// unusable; any other but 0 says the check itself failed.
+const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
+const CHECK_EXEC_MS: i64 = 120_000;
+const CHECK_UNUSABLE: i64 = 3;
 /// What a save saves: `/data`, whole (docs/computers.md, "Saves and what a
 /// wake restores").
 const SAVED_DIRS: [&str; 1] = ["/data"];
@@ -783,6 +791,15 @@ impl ComputerCell {
                         return Err(Unstarted::Unusable(format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"))));
                     }
                 }
+                // the image's check, behind the gate: nothing reads /data yet
+                let argv = js::to_js(&json!(["sh", "-c", CHECK]));
+                let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(CHECK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+                let said = out["output"].as_str().unwrap_or("").trim().chars().rev().take(300).collect::<String>().chars().rev().collect::<String>();
+                match out["exitCode"].as_i64() {
+                    Some(0) => {}
+                    Some(CHECK_UNUSABLE) => return Err(Unstarted::Unusable(format!("save {}'s check: {said}", save.number))),
+                    code => return Err(CellError::host(format!("the image's check of save {} exited {code:?}: {said}", save.number)).into()),
+                }
                 self.mark(&g, RESTORED_MARK).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
             }
             Restore::Snapshot { .. } => {
@@ -879,9 +896,11 @@ impl ComputerCell {
             console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "failed": "the test lever failed it", "left": n - 1 }));
             return Event::SaveFailed { generation, seq, why: "the test lever failed it".into() };
         }
+        // what a held guest copied to names the save keeps, it leaves out
+        let left_out = if held { self.left_out(&g).await } else { vec![] };
         let mut records: Vec<Value> = Vec::with_capacity(SAVED_DIRS.len());
         for dir in SAVED_DIRS {
-            let exclude = js::to_js(&json!([]));
+            let exclude = js::to_js(&json!(left_out));
             match self.call("backup", &[g.clone(), dir.into(), exclude]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => records.push(record),
                 Err(e) => {
@@ -897,7 +916,7 @@ impl ComputerCell {
         match self.keep_save(generation, records, held).await {
             Ok(save) => {
                 // one line per save (lesson 14): which, how big, how long
-                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "bytes": bytes, "ms": js::now_ms() - t0 }));
+                console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0 }));
                 Event::Saved { generation, seq }
             }
             Err(e) => {
@@ -905,6 +924,32 @@ impl ComputerCell {
                 Event::SaveFailed { generation, seq, why: e.message }
             }
         }
+    }
+
+    /// What the held guest of start `g` names as left out of its save (its
+    /// answer's lines: `fragment_core::computer::left_out`). An answer the
+    /// DO cannot read, or refuses, leaves nothing out: the guest is saved
+    /// whole, and the refusal logged.
+    async fn left_out(&self, g: &JsValue) -> Vec<String> {
+        let argv = js::to_js(&json!(["sh", "-c", HELD_READ]));
+        // one byte past the bound: an answer that long is refused, never cut
+        let keep = JsValue::from_f64((fragment_core::computer::HELD_ANSWER_MAX_BYTES + 1) as f64);
+        let read = self.call("exec", &[g.clone(), argv, JsValue::from_f64(MARK_EXEC_MS as f64), keep]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let answer = match read {
+            Ok(out) if out["exitCode"] == 0 => out["output"].as_str().unwrap_or_default().to_string(),
+            Ok(out) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "held": "unread", "exit": out["exitCode"] }));
+                return vec![];
+            }
+            Err(e) => {
+                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "held": "unread", "error": e.message }));
+                return vec![];
+            }
+        };
+        fragment_core::computer::left_out(&answer).unwrap_or_else(|why| {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "held": "refused", "why": why }));
+            vec![]
+        })
     }
 
     /// A save worked: it is the newest save, and the ones it pushed out of

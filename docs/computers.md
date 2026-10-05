@@ -132,7 +132,19 @@ that names a PID from before a sleep can name a live process after it.
   the DO removes them from a container started from a snapshot (the sleep
   that took the snapshot held it) before that start is ready. A container
   that outlives its sleep (a destroy that did not take) has them removed.
-  Our bridge answers for both our images (docs/bridge.md, `BRIDGE_HELD`).
+- **What the save leaves out.** The guest's `held` may name, one per
+  line, what its save leaves out: gitignore patterns relative to `/data`,
+  of letters, digits and `._-/*?[]`, at most 512 of at most 256 bytes, the
+  answer at most 64 KiB (`fragment_core::computer::left_out`). They are
+  files it copied under the hold to names the save keeps (our Hermes
+  image: its SQLite databases, below), so a hot copy of one, which could
+  tear (F4), is never what a wake restores. An empty answer leaves nothing
+  out; an answer the DO refuses saves the guest whole; a save not held
+  leaves nothing out. Our bridge answers for the stub, naming what
+  `BRIDGE_HELD_LEAVE_OUT` names (the stub's `*.scratch`, only so the
+  platform's lanes can see a save leave something out), and for our Hermes
+  image, which answers itself once its bridge has (docs/bridge.md,
+  `BRIDGE_HELD`).
 
 ### Data and the restore gate
 
@@ -144,6 +156,15 @@ that names a PID from before a sleep can name a live process after it.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).
+- **The restore's check** (optional): an image may carry an executable
+  `/usr/local/bin/computer-check`. The DO runs it, as root, after it
+  restores `/data` and before it opens the gate, so nothing reads `/data`
+  meanwhile (at most 2 minutes). It may put what it copied under the hold
+  back in place, and check what it restored. Exit 0: whole. Exit 3: the
+  save is unusable, and the DO marks it so and starts again from the save
+  before it. Any other exit: the check itself failed, a failed start like
+  any (tried again, on the same save). Our Hermes image's puts its
+  databases' copies back and runs `PRAGMA quick_check` on each.
 - The hold (above, `/run/computer/hold`) is read the same way: our
   bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
@@ -498,6 +519,32 @@ settings and state):
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
+  Its saves (`images/hermes/boot/src/held.rs`; "The hold", above): its
+  bridge answers to `/var/lib/fragment-run/bridge-held`, and `hermes-boot`
+  answers the platform. Held, it starts no new round of its repo sync, its
+  skills install or its agents' reads, and waits (at most 8 s) for those
+  under way. Once its bridge has answered it copies every `*.db` under
+  `/data` (Hermes' `state.db` of each profile, and whatever else Hermes or
+  a plugin keeps) with SQLite's online backup, one step each (one read
+  transaction: a copy of one moment whatever writes beside it, never
+  restarted), as the hermes user, into `/data/held-copies/<n>.sqlite`,
+  and writes its manifest last; then it answers, naming exactly what it
+  copied as left out: each database's path and its `-wal`, `-shm` and
+  `-journal`, anchored (`/hermes/state.db`, …). A database Hermes makes
+  after the copy (its kanban board appears a few seconds after a first
+  start) is named by none, so the save keeps it hot rather than losing it;
+  so is one whose path no pattern can name. A copy that fails answers
+  nothing: the platform then saves it whole, not held. Hermes'
+  own `hermes backup --quick` was not used: it copies a fixed list of files
+  under one home, and its `_safe_copy_db` copies 256 pages a step with
+  0.1 s between, which a busy database restarts. Once the hold goes the
+  copies go. At a start, before the gateway opens a database, the copies
+  go back over their live paths (each one's `-wal`, `-shm` and `-journal`
+  removed, its owner and mode as they were): after a restore its
+  `computer-check` does it, then `quick_check`s every database as the
+  hermes user and exits 3 on one that fails; after a snapshot, `pre-init`
+  does it, so both wakes leave the same `/data`.
+
   Its agents change while it runs (`images/hermes/boot/src/agents.rs`),
   and nothing restarts for it: no container, gateway or bridge, so no
   other agent's turn is cut or waits. `hermes-boot` reads `GET
@@ -663,3 +710,14 @@ and how a runtime finds them, is the image's.
   the fake API and a scripted model on the host
   (`cargo test -p fragment-bridge --test docker -- --ignored`), real
   Hermes included. These are lower rung: fakes at the platform's edge.
+  Among them, saves of our Hermes image taken as the DO takes them
+  (`a_save_taken_while_it_writes_opens`: during turns whose tool writes a
+  SQLite database every few ms, half under the hold and half hot, each
+  restored into a fresh container, its `computer-check` run, every SQLite
+  file then `quick_check`ed; and `held_nothing_under_data_changes`: once
+  held, no file the save keeps changes). Measured 2026-10-05: none of 54
+  held databases tore, and none of 54 hot ones either (a WAL database's
+  hot copy rarely tears; the hold makes it never). Hermes itself writes
+  while held, which is why a save names what it copied: its kanban
+  dispatcher makes its board's database some seconds after a first start,
+  and opens it on a timer.
