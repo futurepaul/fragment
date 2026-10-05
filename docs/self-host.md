@@ -1488,6 +1488,39 @@ These are listed as found. Each names where it bites and what to do.
     (the script runtime's `ask-me`); live on Bonsai, an open question, a
     Stop while asking, and "Other" then typed (docs/self-host-lan.md,
     Evidence, 2026-10-05).
+28. **Master's secrets moved into its Secrets Store, which celld lacks**
+    (the rebase onto #134 and #147, 2026-10-05). The deployment's secrets
+    became Secrets Store bindings the cell reads by `get()`, and celld
+    refuses `secrets_store_secrets`. The cell now stands in for them on
+    celld itself (seam 12). The spike's own secrets followed master's
+    model: the sign-in client's secret (`OIDC_CLIENT_SECRET`, the deploy
+    config's `workos.oauth_client_secret` a store name; the OAuth
+    application's client id is plain config, as an authorize URL shows it)
+    and a model upstream's key (`MODEL_KEY`). WorkOS's client id is a store
+    secret now, so the deploy cannot spell out whom AuthKit's people are
+    keyed as: `FRAGMENT_OIDC_KEYED_AS=workos` names the bound environment,
+    and the registry reads its client id at the exchange. Reads that became
+    async (a node's pairing, its secret, a logout's id_token) write only
+    after their await, and only over what they read.
+29. **A computer had no `/data` until its bridge first wrote** (on master
+    too: #151). Master's contract is that the image makes `/data` on a
+    first start; the bridge made it only with its first state write, after
+    reading the platform. Since #147 a sleep whose save fails keeps its
+    container, and the save of a `/data` that is not there fails, so a
+    computer slept before its bridge first wrote stayed awake for half an
+    hour. The restart and pairing sections, which sleep agentless stubs on
+    nodes, found it. The bridge now makes its state directory as it starts,
+    past the restore gate.
+30. **Hermes' desktop never started in a microVM** (master's screen
+    checks, #143, first run on the real engine, 2026-10-05). The VM's
+    `/dev` is a bare devtmpfs, without the links a container's has
+    (`/dev/fd`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`), so the
+    desktop launcher's process substitution failed ("/dev/fd/63: No such
+    file or directory", then "Xvnc exited during startup", in its
+    `launcher.log` in the VM). The screen's control socket passed through
+    the same port, so the node's port path is not it. sandcastle#7 makes
+    the links in the guest's init; the box's installed engine is the
+    `node` branch's, so the three checks fail here until it carries it.
 
 ## The spike, on this box
 
@@ -1527,6 +1560,34 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
 - **S7. The uplink.** The node dials out. Exit: S2's checks with the
   node behind NAT and no inbound port, then against a Cloudflare preview
   (the first real blend; deploying a preview is Paul's call).
+
+### Rebased onto master, 2026-10-05
+
+Onto 5f05b81: #134 (the secrets in Cloudflare's Secrets Store), the
+desktop and gws (#143), durable computers' saves (#147) and what a held
+save leaves out (#148), the crash lever (f233f33) and the bridge's turns.
+The backup before it is the tag `pre-rebase-2026-10-05b`.
+
+- **Dropped as master's:** "an agent asking in words" and "login opens
+  the link" (the same patches as 98b7980 and 7fcfb90); the bridge's
+  terminal step was master's eb84d7c, so only its sandcastle.rs part
+  stays. The two Hermes-install commits are one, #146's net (still open).
+- **Kept, still needed:** an exit's report comes back in as a request of
+  its own (found 21: master's reports still continue the start's call),
+  and a node's wait outlives a fetch's bound (found 22, node.mjs alone).
+- **Layered on master's shapes:** placement runs in master's `plan`
+  (before the image's reference is read), with the node's notes beside
+  the saves' in the view; the secrets are seam 12 and found 28.
+- **Evidence:** `cargo xtask check`, 539 passed, 0 failed. Two nodes
+  (computers, chat, shell-ui, placement, pairing, restart): 333 passed, 0
+  failed. The real engine (computers, chat, hermes): 242 passed, 3
+  failed, master's new screen checks (found 30). Run on 653f9bd, before
+  #148, which changes computers alone: on celld, the core sections (auth,
+  signin, create, deploy, live, channels, jobs, blobs, secrets, keys,
+  site, ledger, restart) 528 passed, 0 failed (3 skips: a node's checks,
+  in the two-node run), and codestore against macrofiche 22 and 0; on
+  `wrangler dev`, the sections #134 touched (auth, signin, keys,
+  secrets), 135 and 0.
 
 ### Status, 2026-10-04
 
