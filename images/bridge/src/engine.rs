@@ -121,6 +121,10 @@ pub struct Turn {
     pub last_part: u32,
     pub prompts: Vec<Prompt>,
     pub stop_requested: bool,
+    /// It asked its asker something to answer in words (`Event::Asked`):
+    /// their next message in the chat is its answer, not a turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asking: bool,
     #[serde(skip)]
     pub open: Option<OpenReply>,
 }
@@ -375,7 +379,11 @@ impl Engine {
         match records::said(&record.body) {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
-                if let Some(hop) = self.addressed(agent, &view, &record.principal, &m) {
+                let hop = self.addressed(agent, &view, &record.principal, &m);
+                if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
+                    return;
+                }
+                if let Some(hop) = hop {
                     let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
                     self.admit(agent, fragment, cause, &record.principal, asker_name, &m, hop, false);
@@ -460,6 +468,7 @@ impl Engine {
             last_part: 0,
             prompts: Vec::new(),
             stop_requested: false,
+            asking: false,
             open: None,
         };
         crate::ev!("turn.admitted", { "turn": id, "agent": agent.fragment, "fragment": fragment, "seq": turn.cause.seq, "hop": hop });
@@ -504,6 +513,28 @@ impl Engine {
     }
 
     // ---- Stop and answers ----
+
+    /// A message from the asker of the agent's turn in this chat that asked
+    /// them something (`asking`): handed to that turn as its answer (true),
+    /// never queued behind it, where the turn would wait for it forever.
+    fn told(&mut self, agent: &Agent, fragment: &str, principal: &str, view: &ChatView, m: &Message, seq: u64) -> bool {
+        if m.text.trim().is_empty() {
+            return false;
+        }
+        let found = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.asking && t.active()).map(|t| (t.id.clone(), t.asker.clone()));
+        let Some((id, asker)) = found else { return false };
+        if asker != principal {
+            return false;
+        }
+        let t = self.state.turns.get_mut(&id).expect("found");
+        t.asking = false;
+        t.last_ms = self.now;
+        self.dirty = true;
+        crate::ev!("turn.told", { "turn": id, "seq": seq });
+        let by_name = view.names.get(principal).cloned().unwrap_or_else(|| "someone".into());
+        self.out.push(Effect::Runtime(Command::Tell { turn: id, seq, by: principal.to_string(), by_name, text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES) }));
+        true
+    }
 
     fn stop(&mut self, agent: &Agent, fragment: &str, principal: &str, named: Option<&str>) {
         let target = self
@@ -592,7 +623,7 @@ impl Engine {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
                 Event::Accepted { turn } | Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
-                Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::End { turn, .. } => Some(turn.clone()),
+                Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::Asked { turn } | Event::End { turn, .. } => Some(turn.clone()),
                 Event::Say { .. } => None,
             }
         };
@@ -639,6 +670,16 @@ impl Engine {
                 }
             }
             Event::Prompt { turn, prompt, text, options, ttl_ms } => self.prompt(&turn, prompt, text, options, ttl_ms),
+            Event::Asked { turn } => {
+                // the question shows before the answer it waits for
+                self.seal(&turn);
+                let t = self.state.turns.get_mut(&turn).expect("checked");
+                if !t.asking {
+                    t.asking = true;
+                    self.dirty = true;
+                    crate::ev!("turn.asked", { "turn": turn });
+                }
+            }
             Event::End { turn, outcome } => self.end(&turn, outcome, Closed::Expired),
             Event::Say { agent, fragment, text } => {
                 if self.agent(&agent).is_none() || text.trim().is_empty() {
@@ -769,7 +810,9 @@ impl Engine {
             for p in t.prompts.iter().filter(|p| !p.closed && p.expires_at <= now) {
                 expired.push((t.id.clone(), p.id.clone()));
             }
-            let idle = matches!(t.phase, Phase::Handed | Phase::Running) && now.saturating_sub(t.last_ms) > self.settings.turn_idle_ms;
+            // a turn asking its person waits as long as a prompt would
+            let bound = if t.asking { self.settings.turn_idle_ms.max(self.settings.prompt_ttl_ms) } else { self.settings.turn_idle_ms };
+            let idle = matches!(t.phase, Phase::Handed | Phase::Running) && now.saturating_sub(t.last_ms) > bound;
             if idle {
                 quiet.push(t.id.clone());
             }

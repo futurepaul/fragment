@@ -10,6 +10,12 @@
 //!   `edit`s: each new line a step;
 //! - an approval is a `prompt` frame; the owner's answer goes back as an
 //!   inbound `prompt_response`, at once, mid-turn;
+//! - a question to answer in words (an open `clarify`, `❓ …`, or the
+//!   `✏️ Type your answer:` after "Other") is a `send`: a reply part, and
+//!   the turn asks (`Event::Asked`); the asker's next message comes back as
+//!   an inbound in the same chat at once (`Command::Tell`), which Hermes'
+//!   clarify intercept takes as the answer mid-turn. A Stop while it asks
+//!   interrupts, then answers "Stop." so the waiting clarify lets go;
 //! - `👀` on, then off as the turn ends, then `✅` or `❌`: its end (a
 //!   stopped turn gets only the `👀` off). Hermes brackets one message more
 //!   than once: its multiplexed gateway's dispatch is a bracket of its own,
@@ -135,6 +141,8 @@ struct Inflight {
     /// It said something: a reply, a draft, a step, a prompt, a file.
     said: bool,
     stopped: bool,
+    /// It asked its asker something to answer in words, not yet told.
+    asking: bool,
 }
 
 impl Inflight {
@@ -365,8 +373,14 @@ impl Loop {
                     // its ack or the next dial, should this one be lost.
                     f.stopped = true;
                     let frame = wire::interrupt(&f.profile, &f.chat);
+                    // a clarify waiting on the person's words never sees
+                    // the interrupt: words let it go, and the turn stops
+                    let asking = f.asking.then(|| (f.start.asker.clone(), f.start.asker_name.clone()));
                     crate::ev!("relay.interrupt", { "turn": turn });
                     self.send(frame);
+                    if let Some((by, by_name)) = asking {
+                        self.tell(&turn, 0, &by, &by_name, wire::STOP_WORDS);
+                    }
                 } else {
                     // Never sent: it never starts.
                     self.forget(&turn);
@@ -386,7 +400,22 @@ impl Loop {
                 self.answers.push(PendingAnswer { buffer, frame });
             }
             Command::Forget { turn } => self.forget(&turn),
+            Command::Tell { turn, seq, by, by_name, text } => self.tell(&turn, seq, &by, &by_name, &text),
         }
+    }
+
+    /// The asker's words for a turn that asked them (`Command::Tell`): an
+    /// inbound in the turn's chat, kept until Hermes acks it.
+    fn tell(&mut self, turn: &str, seq: u64, by: &str, by_name: &str, text: &str) {
+        let Some(f) = self.inflight.get_mut(turn) else { return };
+        f.asking = false;
+        let message_id = format!("{turn}-t{seq}");
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[] };
+        let buffer = format!("t-{turn}-{seq}");
+        let frame = wire::inbound(&m, &buffer);
+        crate::ev!("relay.told", { "turn": turn, "seq": seq });
+        let _ = self.send(frame.clone());
+        self.answers.push(PendingAnswer { buffer, frame });
     }
 
     fn forget(&mut self, turn: &str) {
@@ -421,7 +450,7 @@ impl Loop {
         self.next_order += 1;
         let turn = ts.turn.clone();
         let sent = self.send(frame.clone());
-        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, outcome: None, said: false, stopped: false });
+        self.inflight.insert(turn.clone(), Inflight { start: ts, chat: chat.clone(), profile, order: self.next_order, frame, acked: false, sent, parts: HashMap::new(), progress: HashMap::new(), next_part: 1, ending_since: None, outcome: None, said: false, stopped: false, asking: false });
         self.by_chat.insert(chat, turn.clone());
         crate::ev!("relay.inbound", { "turn": turn, "sent": sent });
     }
@@ -545,7 +574,16 @@ impl Loop {
                     return json!({ "success": true, "message_id": id });
                 };
                 let f = self.inflight.get_mut(&turn).expect("by_chat names a held turn");
-                if reply {
+                if let Some(question) = wire::question(&text) {
+                    // asked in words: the question shows as the agent's,
+                    // and the asker's next message is its answer
+                    let part = f.next_part;
+                    f.next_part += 1;
+                    f.parts.insert(id.clone(), part);
+                    f.asking = true;
+                    self.emit(Event::Reply { turn: turn.clone(), part, text: question }).await;
+                    self.emit(Event::Asked { turn }).await;
+                } else if reply {
                     let part = f.next_part;
                     f.next_part += 1;
                     f.parts.insert(id.clone(), part);

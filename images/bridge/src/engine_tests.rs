@@ -461,3 +461,80 @@ fn attachments_ride_along() {
     let files = end.effects.iter().find_map(|e| match e { Effect::Post { files, .. } if !files.is_empty() => Some(files.clone()), _ => None });
     assert_eq!(files, Some(vec![file]));
 }
+
+/// Goal: a turn that asks its asker something in words (Hermes' open
+/// clarify) shows the question at once, and the asker's next message is
+/// handed to that turn as its answer, never queued behind it (where the
+/// turn would wait for it forever). Invalid: someone else's message, an
+/// empty one, or one to another agent is not the answer. Replay: the
+/// message again (behind the cursor) tells nothing twice. Restart: the
+/// turn ends as any running one does.
+#[test]
+fn a_question_is_answered_by_the_next_message() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "keep my garden notes" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Accepted { turn: turn.clone() }, T0);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "What do you plant?".into() }, T0 + 1);
+    let asked = ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2);
+    assert_eq!(posts(&asked), vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn }))], "the question shows at once");
+    assert!(asked.dirty);
+    assert!(e.state().turns[&turn].asking);
+    assert_eq!(keepalive(&asked), None, "still running: the computer stays up");
+
+    // invalid: another person's message, an empty one, one to the other agent
+    let skyler = said(&mut e, &a, &v, 2, "id:skyler", json!({ "text": "tomatoes?" }), T0 + 3);
+    assert!(commands(&skyler).is_empty(), "queued behind it, as any message is");
+    let empty = said(&mut e, &a, &v, 3, "id:paul", json!({ "text": " ", "attachments": [{ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": "p.png" }] }), T0 + 4);
+    assert!(!commands(&empty).iter().any(|c| matches!(c, Command::Tell { .. })), "no words, no answer");
+    let other = said(&mut e, &b, &v, 4, "id:paul", json!({ "text": "@rowan hi" }), T0 + 5);
+    assert!(!commands(&other).iter().any(|c| matches!(c, Command::Tell { .. })));
+    let to_rowan = said(&mut e, &a, &v, 4, "id:paul", json!({ "text": "@rowan hi" }), T0 + 5);
+    assert!(commands(&to_rowan).is_empty(), "not addressed to juniper");
+
+    // valid: the asker's next message is the answer
+    let told = said(&mut e, &a, &v, 5, "id:paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "id:paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into() }]);
+    assert!(posts(&told).is_empty(), "no turn of its own");
+    assert!(told.dirty && !e.state().turns[&turn].asking);
+    // replay: behind the cursor, nothing
+    assert_eq!(said(&mut e, &a, &v, 5, "id:paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 7), Step::default());
+    // asked no longer, the next message queues as before
+    let next = said(&mut e, &a, &v, 6, "id:paul", json!({ "text": "and basil" }), T0 + 8);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "queued");
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 9);
+    let queued: Vec<String> = commands(&end).iter().filter_map(|c| match c { Command::Start(t) => Some(t.text.clone()), _ => None }).collect();
+    assert_eq!(queued, vec!["tomatoes?".to_string()], "skyler's message runs next; then paul's empty one, then 'and basil'");
+
+    // the state round-trips with a turn asking, and a restart ends it
+    let t2 = started(&said(&mut e, &a, &v, 7, "id:paul", json!({ "text": "x" }), T0 + 10));
+    assert!(t2.is_none(), "behind the others");
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(&saved, e.state());
+}
+
+/// Goal: a turn waiting on its asker's words outlasts the idle bound up to
+/// a prompt's lifetime, then ends as quiet; Stop still reaches it.
+#[test]
+fn a_question_waits_as_long_as_a_prompt() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 3_600_000, turn_idle_ms: 600_000 }).expect("a fresh state");
+    e.step(Input::Agents(vec![a.clone()]), T0);
+    e.recover(T0);
+    let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "hi" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Accepted { turn: turn.clone() }, T0);
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Which one?".into() }, T0);
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0);
+    assert!(commands(&e.step(Input::Tick, T0 + 600_001)).is_empty(), "past the idle bound, still asking");
+    let quiet = e.step(Input::Tick, T0 + 3_600_001);
+    assert_eq!(commands(&quiet), vec![Command::Forget { turn: turn.clone() }]);
+    assert_eq!(posts(&quiet).last().expect("its end").1["outcome"], "error");
+
+    let t2 = started(&said(&mut e, &a, &v, 2, "id:paul", json!({ "text": "again" }), T0 + 3_600_002)).expect("started").turn;
+    ev(&mut e, Event::Asked { turn: t2.clone() }, T0 + 3_600_003);
+    let stop = said(&mut e, &a, &v, 3, "id:paul", json!({ "kind": "stop" }), T0 + 3_600_004);
+    assert_eq!(commands(&stop), vec![Command::Stop { turn: t2 }]);
+}

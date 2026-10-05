@@ -111,6 +111,11 @@ pub enum Command {
     /// The bridge ended the turn itself (it went quiet too long, or was lost
     /// in a restart): forget it.
     Forget { turn: String },
+    /// The asker's next message in the turn's chat, while the turn asked
+    /// them something to answer in words (`Event::Asked`): the answer,
+    /// handed to the running turn at once, never a turn of its own. `seq`
+    /// is the message's record (a fresh message id).
+    Tell { turn: String, seq: u64, by: String, by_name: String, text: String },
 }
 
 /// What a runtime tells the bridge. Every event names its turn; one for a
@@ -134,6 +139,11 @@ pub enum Event {
     Step { turn: String, step: Step },
     /// A question with buttons; the turn waits for its answer.
     Prompt { turn: String, prompt: String, text: String, options: Vec<PromptOption>, ttl_ms: Option<u64> },
+    /// The turn asked its asker something to answer in words (the question
+    /// itself is a reply part before this): it waits, running, for their
+    /// next message in its chat, which the bridge hands it (`Command::Tell`)
+    /// instead of queueing it as a turn behind this one.
+    Asked { turn: String },
     /// The turn is over.
     End { turn: String, outcome: crate::records::Outcome },
     /// Something the runtime said with no turn running (a reminder it set):
