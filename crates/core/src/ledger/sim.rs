@@ -11,6 +11,8 @@
 //!   included credit, less expired credit, less every charge, and every
 //!   charge passed through the store;
 //! - no reference is charged twice, and a charge never changes;
+//! - own hardware's rows (a computer on its owner's own node) are charged
+//!   nothing, and each is tracked once, at its list price;
 //! - holds are never negative, each is its entry's, and none outlives a
 //!   sweep past `HOLD_MAX_MS`;
 //! - the standing is the pure function of the plan, the seat, the balance
@@ -111,6 +113,11 @@ struct Audited {
     inner: Memory,
     charges: BTreeMap<String, u32>,
     charged: i64,
+    /// Own hardware's rows kept, the list price of each (as each was first
+    /// kept), and what the store was told to track: they agree.
+    own_rows: u64,
+    own_listed: i64,
+    own_tracked: i64,
 }
 
 impl Store for Audited {
@@ -120,6 +127,13 @@ impl Store for Audited {
 
     fn put_entry(&mut self, reference: &str, entry: Entry) {
         let before = self.inner.entry(reference).and_then(|e| e.charge());
+        if let (None, Entry::Row { row, priced, charge, .. }) = (&before, &entry) {
+            if row.own_node.is_some() {
+                assert_eq!(*charge, 0, "own hardware's row {reference} was charged");
+                self.own_rows += 1;
+                self.own_listed += priced.list;
+            }
+        }
         match (before, entry.charge()) {
             (None, Some(charge)) => {
                 let times = self.charges.entry(reference.to_string()).or_insert(0);
@@ -167,6 +181,16 @@ impl Store for Audited {
 
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>) {
         self.inner.set_cap(fragment, micros);
+    }
+
+    fn own_hardware(&self, month: Month) -> i64 {
+        self.inner.own_hardware(month)
+    }
+
+    fn add_own_hardware(&mut self, month: Month, list_micros: i64) {
+        assert!(list_micros > 0, "only a list price tracks");
+        self.own_tracked += list_micros;
+        self.inner.add_own_hardware(month, list_micros);
     }
 
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
@@ -246,6 +270,7 @@ pub(super) struct Stats {
     forgotten: u64,
     cap_reached: u64,
     credit_short: u64,
+    own_rows: u64,
 }
 
 struct Sim {
@@ -607,6 +632,7 @@ impl Sim {
         l.assert_valid();
         let model = &self.model;
         assert_eq!(m.totals.charged, self.store.charged, "every charge passed through the store, once");
+        assert_eq!(self.store.own_tracked, self.store.own_listed, "own hardware is tracked at list, once a row, and never charged");
         assert_eq!(m.totals.purchased, model.purchased, "each grant counts once");
         assert_eq!(m.balance(), model.purchased + m.totals.included - m.totals.expired - self.store.charged, "the balance is grants less charges");
         assert_eq!((m.plan, m.seat, m.seat_seq, m.overdraft), (model.plan, model.seat, model.seat_seq, model.overdraft));
@@ -712,7 +738,9 @@ impl Sim {
         };
         let fragment = self.rng.chance(80).then(|| FRAGMENTS[self.rng.below(4) as usize].to_string());
         let at_ms = self.now - self.rng.range(0, 600_000) as i64;
-        let row = MeterRow { reference, usage, fragment, agent: None, computer: Some("computer:0a1b".into()), at_ms };
+        // a computer on its owner's own node: tracked, never charged
+        let own_node = (matches!(usage, Usage::Awake { .. }) && self.rng.chance(40)).then(|| "paired-0a1b2c3d4e5f6071".to_string());
+        let row = MeterRow { reference, usage, fragment, agent: None, computer: Some("computer:0a1b".into()), at_ms, own_node };
         if self.rows.len() < RECENT_MAX {
             self.rows.push(row.clone());
         } else {
@@ -874,11 +902,12 @@ impl Sim {
 pub(super) fn simulate(seed: u64, steps: u64) -> Stats {
     let mut sim = Sim::new(seed);
     sim.run(steps);
+    sim.stats.own_rows = sim.store.own_rows;
     sim.stats
 }
 
 impl Stats {
-    fn named(&self) -> [(&'static str, u64); 17] {
+    fn named(&self) -> [(&'static str, u64); 18] {
         [
             ("steps", self.steps),
             ("rollovers", self.rollovers),
@@ -897,6 +926,7 @@ impl Stats {
             ("references forgotten", self.forgotten),
             ("caps reached", self.cap_reached),
             ("reservations short of credit", self.credit_short),
+            ("own hardware's rows tracked", self.own_rows),
         ]
     }
 }

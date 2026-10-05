@@ -40,6 +40,14 @@
 //! guest makes no fragment either, whose hosting would bill them. They
 //! edit the fragments shared with them, which bill those fragments'
 //! owners.
+//!
+//! Own hardware (docs/self-host.md, seams 2 and 10; Paul, 2026-10-05: "not
+//! actually billed, but it's useful to keep track of usage"): a row that
+//! names the payer's own node (`MeterRow::own_node`, a node they paired) is
+//! metered and kept as every row is, priced at list, and charged nothing:
+//! its list price is tallied by month instead, and the status shows it in
+//! points (`price::points`). A computer there wakes past the want of
+//! credit (`Refused::want_of_credit`).
 
 use std::collections::BTreeMap;
 
@@ -228,6 +236,13 @@ pub struct MeterRow {
     pub computer: Option<String>,
     /// When it happened (a sample's time), Unix ms.
     pub at_ms: i64,
+    /// The payer's own node it ran on (a node they paired:
+    /// `pairing::is_paired_id`), so own hardware: tracked in points, never
+    /// charged. `None`: the platform's hardware (Cloudflare's, or one of the
+    /// deployment's nodes), charged. Left out when `None`, so every row
+    /// from before it reads, and replays, as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_node: Option<String>,
 }
 
 /// A new price book from the deploy's configuration.
@@ -390,6 +405,8 @@ pub enum Invalid {
     Time,
     /// A seat change at order 0 (orders start at 1).
     Order,
+    /// A row's own node that is no paired node's id.
+    OwnNode,
 }
 
 impl From<PriceError> for Refused {
@@ -426,6 +443,16 @@ impl Refused {
             Refused::GuestPayer | Refused::GuestCreates => ErrorCode::Forbidden,
             Refused::AgentsStopped { .. } | Refused::ReadOnly { .. } | Refused::CreditShort { .. } | Refused::CapReached { .. } => ErrorCode::BudgetUsedUp,
         }
+    }
+
+    /// Whether this refuses for want of credit alone: agents stopped at no
+    /// credit, fragments read-only past the overdraft, or a reservation
+    /// short of what is available. A computer on its owner's own hardware
+    /// wakes past it (its awake time is tracked in points, never charged:
+    /// the module's docs); a guest, or a canceled seat, is no want of
+    /// credit, and stays refused there too.
+    pub fn want_of_credit(self) -> bool {
+        matches!(self, Refused::AgentsStopped { why: Why::NoCredit } | Refused::ReadOnly { why: Why::Overdrawn } | Refused::CreditShort { .. })
     }
 
     /// The refusal for people (the shell shows it).
@@ -477,7 +504,7 @@ pub enum Entry {
     /// A reservation, and its end once it has one.
     Reservation { reserve: Reserve, amount: i64, at_ms: i64, end: Option<End> },
     /// A meter row: its price under the book of the time, and its charge
-    /// (the price's, or nothing for a waived meter).
+    /// (the price's, or nothing for a waived meter or own hardware).
     Row { row: MeterRow, priced: Priced, charge: i64, book: u32 },
 }
 
@@ -548,10 +575,14 @@ pub trait Store {
     fn spends(&self, month: Month, limit: usize) -> Vec<(String, i64)>;
     fn cap(&self, fragment: &str) -> Option<i64>;
     fn set_cap(&mut self, fragment: &str, micros: Option<i64>);
+    /// Own hardware's use that reached the ledger in a month, at list price
+    /// (micro-dollars): what its points are counted from.
+    fn own_hardware(&self, month: Month) -> i64;
+    fn add_own_hardware(&mut self, month: Month, list_micros: i64);
     /// Forgets the entries and batches from before `before_ms` (never a
     /// held reservation: the sweep expired those first) and the months of
-    /// spend before `before_month`; answers how many entries and batches
-    /// it forgot.
+    /// spend and own hardware before `before_month`; answers how many
+    /// entries and batches it forgot.
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64;
 }
 
@@ -563,6 +594,7 @@ pub struct Memory {
     commands: BTreeMap<String, CommandRecord>,
     spent: BTreeMap<Month, BTreeMap<String, i64>>,
     caps: BTreeMap<String, i64>,
+    own_hardware: BTreeMap<Month, i64>,
 }
 
 impl Store for Memory {
@@ -616,6 +648,14 @@ impl Store for Memory {
         };
     }
 
+    fn own_hardware(&self, month: Month) -> i64 {
+        self.own_hardware.get(&month).copied().unwrap_or(0)
+    }
+
+    fn add_own_hardware(&mut self, month: Month, list_micros: i64) {
+        *self.own_hardware.entry(month).or_insert(0) += list_micros;
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let (entries, batches) = (self.entries.len(), self.batches.len());
         self.entries.retain(|_, e| {
@@ -625,6 +665,7 @@ impl Store for Memory {
         });
         self.batches.retain(|_, b| b.at_ms >= before_ms);
         self.spent.retain(|m, _| *m >= before_month);
+        self.own_hardware.retain(|m, _| *m >= before_month);
         ((entries - self.entries.len()) + (batches - self.batches.len())) as u64
     }
 }
@@ -894,6 +935,7 @@ impl Ledger {
             standing: money.standing(),
             price_book: self.book.version,
             fragments,
+            own_hardware_points: price::points(store.own_hardware(money.month)),
         }
     }
 
@@ -925,11 +967,13 @@ impl Ledger {
         self.money.roll(Month::of(now_ms));
     }
 
-    /// A usage's price, and its charge here: a $200 seat's awake time is
-    /// not metered (decision 25; one computer per person, decision 13).
-    fn charge_for(&self, usage: &Usage) -> Result<(Priced, i64), PriceError> {
+    /// A usage's price, and its charge here: nothing on the payer's own
+    /// hardware (`own`: tracked in points instead), and a $200 seat's awake
+    /// time is not metered (decision 25; one computer per person, decision
+    /// 13).
+    fn charge_for(&self, usage: &Usage, own: bool) -> Result<(Priced, i64), PriceError> {
         let priced = self.book.price(usage)?;
-        let waived = matches!(usage, Usage::Awake { .. }) && self.money.plan == Plan::SeatAlwaysOn;
+        let waived = own || (matches!(usage, Usage::Awake { .. }) && self.money.plan == Plan::SeatAlwaysOn);
         Ok((priced, if waived { 0 } else { priced.charge }))
     }
 
@@ -1106,7 +1150,7 @@ impl Ledger {
             };
         }
         gate(&self.money, r.spend)?;
-        let (_, amount) = self.charge_for(&r.worst)?;
+        let (_, amount) = self.charge_for(&r.worst, false)?;
         if amount > RESERVATION_MAX {
             return Err(Refused::TooLarge);
         }
@@ -1150,7 +1194,7 @@ impl Ledger {
         }
         let (priced, charge, basis) = match &s.usage {
             None => (None, amount, Basis::Reservation),
-            Some(usage) => match self.charge_for(usage) {
+            Some(usage) => match self.charge_for(usage, false) {
                 Ok((priced, charge)) => (Some(priced), charge, Basis::Usage),
                 // the call was made, with a usage the book cannot price:
                 // its worst case, failing closed
@@ -1236,6 +1280,9 @@ impl Ledger {
         if !valid_id(&row.reference) || !valid_names([&row.fragment, &row.agent, &row.computer]) {
             return Err(invalid(Invalid::Id));
         }
+        if row.own_node.as_deref().is_some_and(|n| !crate::pairing::is_paired_id(n)) {
+            return Err(invalid(Invalid::OwnNode));
+        }
         row.usage.validate().map_err(|fault| invalid(Invalid::Usage(fault)))?;
         if row.at_ms < 0 || row.at_ms > now_ms + CLOCK_SKEW_MS {
             return Err(invalid(Invalid::Time));
@@ -1246,13 +1293,25 @@ impl Ledger {
         match store.entry(&row.reference) {
             None => {}
             Some(Entry::Row { row: first, .. }) if first == *row => return Ok(None),
-            // another body under this reference, or a reservation's
+            // another body under this reference (own hardware's row sent
+            // again as the platform's, or the reverse), or a reservation's
             Some(_) => return Err(Refused::ConflictingBody),
         }
-        let (priced, charge) = self.charge_for(&row.usage)?;
-        // a row counts in its own month: a late one from last month does
-        // not spend this month's cap
-        self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));
+        let own = row.own_node.is_some();
+        let (priced, charge) = self.charge_for(&row.usage, own)?;
+        if own {
+            assert_eq!(charge, 0, "own hardware is never charged");
+            // tracked in the month it reached the ledger, as the balance
+            // draws a charge: the status shows this month's alone, so every
+            // point is seen once
+            if priced.list > 0 {
+                store.add_own_hardware(self.money.month, priced.list);
+            }
+        } else {
+            // a row counts in its own month: a late one from last month does
+            // not spend this month's cap
+            self.charge(store, charge, row.fragment.as_deref(), Month::of(row.at_ms));
+        }
         store.put_entry(&row.reference, Entry::Row { row: row.clone(), priced, charge, book: self.book.version });
         Ok(Some(charge))
     }

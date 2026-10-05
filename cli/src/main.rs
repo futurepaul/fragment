@@ -15,7 +15,7 @@ use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN};
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
-use fragment_core::price::{dollars, USD};
+use fragment_core::price::{dollars, POINT_MICROS, USD};
 use fragment_proto::ledger::{LedgerStatus, Standing};
 use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
@@ -389,6 +389,10 @@ enum AgentCmd {
 
 #[derive(Subcommand)]
 enum LedgerCmd {
+    /// Read someone's ledger (the deployment's operators): who used what,
+    /// their own machines' points included. A username, an identity
+    /// (id:…), or `me`
+    Show { who: String },
     /// Grant someone credit (the deployment's operators): a username, an
     /// identity (id:…), or `me`
     Grant {
@@ -410,6 +414,22 @@ fn micros_of(usd: f64) -> Result<i64> {
         return Err(usage("a positive number of dollars"));
     }
     Ok((usd * USD as f64).round() as i64)
+}
+
+/// A ledger's status, for people: what is left, what it stops, this
+/// month's spend by fragment, and their own machines' points (tracked,
+/// never charged: docs/self-host.md, seam 10).
+fn print_ledger(v: &LedgerStatus) -> Result<()> {
+    let plan = serde_json::to_value(v.plan)?.as_str().unwrap_or("").to_string();
+    println!("{}: {} available ({} balance, {} held by calls running now), plan {plan}", v.month, dollars(v.available_micros.max(0)), dollars(v.balance_micros), dollars(v.reserved_micros));
+    println!("{}", standing_text(&v.standing));
+    for f in &v.fragments {
+        println!("  {}\t{} of its {} cap", f.fragment, dollars(f.spent_micros), dollars(f.cap_micros));
+    }
+    if v.own_hardware_points > 0 {
+        println!("own machines: {} points this month, tracked, not charged (a point is {} at list price)", v.own_hardware_points, dollars(POINT_MICROS));
+    }
+    Ok(())
 }
 
 /// What a standing stops, for people.
@@ -1305,12 +1325,13 @@ fn run(cli: Cli) -> Result<()> {
             None => {
                 let v: LedgerStatus = c.call_as(c.get("/api/ledger")?)?;
                 json_exit(j, &v);
-                let plan = serde_json::to_value(v.plan)?.as_str().unwrap_or("").to_string();
-                println!("{}: {} available ({} balance, {} held by calls running now), plan {plan}", v.month, dollars(v.available_micros.max(0)), dollars(v.balance_micros), dollars(v.reserved_micros));
-                println!("{}", standing_text(&v.standing));
-                for f in &v.fragments {
-                    println!("  {}\t{} of its {} cap", f.fragment, dollars(f.spent_micros), dollars(f.cap_micros));
-                }
+                print_ledger(&v)?;
+            }
+            Some(LedgerCmd::Show { who }) => {
+                let v: LedgerStatus = c.call_as(c.get(&format!("/api/ledger/{who}"))?)?;
+                json_exit(j, &v);
+                println!("{who}'s ledger");
+                print_ledger(&v)?;
             }
             Some(LedgerCmd::Grant { who, usd, why, id }) => {
                 let me: IdentityView = c.call_as(c.get("/api/identities/me")?)?;

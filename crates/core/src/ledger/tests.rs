@@ -82,7 +82,7 @@ fn release(reference: &str) -> Op {
 }
 
 fn row(reference: &str, usage: Usage, fragment: Option<&str>, at_ms: i64) -> MeterRow {
-    MeterRow { reference: reference.into(), usage, fragment: fragment.map(str::to_string), agent: None, computer: None, at_ms }
+    MeterRow { reference: reference.into(), usage, fragment: fragment.map(str::to_string), agent: None, computer: None, at_ms, own_node: None }
 }
 
 fn meter(batch: &str, rows: Vec<MeterRow>) -> Op {
@@ -832,6 +832,141 @@ fn an_always_on_seats_awake_time_is_not_charged() {
     assert_eq!(answer, Outcome::Metered(Metered { charged: 96_336, rows_new: 1, rows_before: 0, refused: vec![] }));
 }
 
+// Own hardware (docs/self-host.md, seams 2 and 10)
+
+/// A person's own node, as pairing names it.
+const MAC: &str = "paired-0a1b2c3d4e5f6071";
+
+/// An hour awake on the default computer: $0.064224 at list, charged
+/// $0.096336 on the platform's hardware.
+fn awake_hour() -> Usage {
+    Usage::Awake { instance: "2vcpu-6gib".into(), ms: 3_600_000 }
+}
+
+/// A computer's awake time on its owner's own node.
+fn own(reference: &str, usage: Usage, at_ms: i64) -> MeterRow {
+    MeterRow { own_node: Some(MAC.into()), computer: Some("computer:0a1b".into()), ..row(reference, usage, None, at_ms) }
+}
+
+/// Goal (valid): awake time on the payer's own node is metered and kept as
+/// every row is, priced at list, and charged nothing: the balance stays
+/// where it was, and the status shows it in points. The same hour on the
+/// platform's hardware, beside it, is charged as it always was.
+#[test]
+fn own_hardware_is_tracked_in_points_and_never_charged() {
+    let mut w = World::seat();
+    let answer = w.ok(meter("b1", vec![own("awake:c:1", awake_hour(), T0), row("awake:c:2", awake_hour(), None, T0)]));
+    assert_eq!(answer, Outcome::Metered(Metered { charged: 96_336, rows_new: 2, rows_before: 0, refused: vec![] }));
+    assert_eq!(w.balance(), 50 * USD - 96_336, "only the platform's hour moved the balance");
+    let Some(Entry::Row { priced, charge, row: kept, .. }) = w.store.entry("awake:c:1") else { panic!("own hardware's row is kept") };
+    assert_eq!((priced.list, priced.charge, charge, kept.own_node.as_deref()), (64_224, 96_336, 0, Some(MAC)));
+    let status = w.status();
+    assert_eq!(status.own_hardware_points, 65, "64,224 micro-dollars at list, a point a tenth of a cent, rounded up");
+    assert!(status.fragments.is_empty(), "own hardware spends in no fragment");
+    // more of it adds up, at list; the dollars never move
+    let minute = Usage::Awake { instance: "2vcpu-6gib".into(), ms: 60_000 };
+    w.ok(meter("b2", vec![own("awake:c:3", minute, T0)]));
+    assert_eq!(w.status().own_hardware_points, price::points(64_224 + 1_071));
+    assert_eq!((w.balance(), w.ledger.totals().charged), (50 * USD - 96_336, 96_336));
+}
+
+/// Goal: at no credit, and past the overdraft, own hardware is tracked all
+/// the same and the balance stays where it was. Those refusals are the
+/// want of credit a computer on its owner's own node wakes past
+/// (`want_of_credit`); a guest's, a canceled seat's, and every other are
+/// not.
+#[test]
+fn own_hardware_at_no_credit_is_tracked_and_the_balance_stays() {
+    let mut w = World::seat();
+    w.spend("b0", 50 * USD);
+    let stopped = w.ledger.gate(Spend::Wake, w.now);
+    assert_eq!(stopped, Err(Refused::AgentsStopped { why: Why::NoCredit }));
+    assert!(stopped.unwrap_err().want_of_credit());
+    let before = w.status();
+    w.ok(meter("b1", vec![own("awake:c:1", awake_hour(), T0)]));
+    let after = w.status();
+    assert_eq!((after.balance_micros, after.standing, after.own_hardware_points), (before.balance_micros, before.standing, 65));
+    w.spend("b2", 2 * USD);
+    let overdrawn = w.ledger.gate(Spend::Wake, w.now);
+    assert_eq!(overdrawn, Err(Refused::ReadOnly { why: Why::Overdrawn }));
+    assert!(overdrawn.unwrap_err().want_of_credit());
+    w.ok(meter("b3", vec![own("awake:c:2", awake_hour(), T0)]));
+    assert_eq!((w.balance(), w.status().own_hardware_points), (-2 * USD, 129));
+    assert!(Refused::CreditShort { available: 0, needed: 1 }.want_of_credit());
+    for r in [
+        Refused::GuestPayer,
+        Refused::AgentsStopped { why: Why::Guest },
+        Refused::AgentsStopped { why: Why::SeatCanceled },
+        Refused::CapReached { cap: 1, spent: 1 },
+        Refused::ConflictingBody,
+        Refused::Invalid { what: Invalid::OwnNode },
+    ] {
+        assert!(!r.want_of_credit(), "{r:?}");
+    }
+    let mut c = World::seat();
+    c.ok(seat("s1", SeatState::Canceled, 1));
+    assert!(!c.ledger.gate(Spend::Wake, c.now).unwrap_err().want_of_credit(), "a canceled seat stays refused, own hardware or not");
+}
+
+/// Goal (invalid): a row's own node is a paired node's id; another is
+/// refused alone, tracking and charging nothing. A guest pays for
+/// nothing, own hardware's rows included.
+#[test]
+fn own_hardware_names_a_paired_node() {
+    let mut w = World::seat();
+    let bad = |id: &str| MeterRow { own_node: Some(id.into()), ..own("awake:c:1", awake_hour(), T0) };
+    let rows = vec![bad("box"), bad("paired-0A1B2C3D4E5F6071"), bad(""), bad("paired-0a1b")];
+    let Outcome::Metered(m) = w.replays(meter("b1", rows)) else { panic!("a batch answers Metered") };
+    assert_eq!(m.refused.iter().map(|r| (r.index, r.why)).collect::<Vec<_>>(), (0..4).map(|i| (i, Refused::Invalid { what: Invalid::OwnNode })).collect::<Vec<_>>());
+    assert_eq!((m.rows_new, w.status().own_hardware_points, w.balance()), (0, 0, 50 * USD));
+    assert_eq!(w.store.entry("awake:c:1"), None, "a refused row is not kept");
+    let mut g = World::guest();
+    g.refused(meter("b1", vec![own("awake:c:1", awake_hour(), T0)]), Refused::GuestPayer);
+}
+
+/// Goal (replay, restart): own hardware's batch sent again answers as it
+/// did and tracks nothing twice, before and after a restart; its row in
+/// another batch is a row seen before; and its reference sent as the
+/// platform's (or a platform row's as own hardware's) is another body,
+/// refused: a row is tracked or charged, once, never both.
+#[test]
+fn own_hardware_replayed_is_tracked_once() {
+    let mut w = World::seat();
+    let batch = meter("awake:c:1-1", vec![own("awake:c:1", awake_hour(), T0)]);
+    let first = w.replays(batch.clone());
+    let points = w.status().own_hardware_points;
+    let again = w.ok(meter("awake:c:1-2", vec![own("awake:c:1", awake_hour(), T0)]));
+    assert_eq!(again, Outcome::Metered(Metered { charged: 0, rows_new: 0, rows_before: 1, refused: vec![] }));
+    let Outcome::Metered(m) = w.ok(meter("awake:c:1-3", vec![row("awake:c:1", awake_hour(), None, T0)])) else { panic!("a batch answers Metered") };
+    assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }]);
+    let mut w = w.restarted();
+    assert_eq!(w.ok(batch), first, "after a restart, the same answer");
+    assert_eq!((w.status().own_hardware_points, w.balance()), (points, 50 * USD));
+    w.ok(meter("b9", vec![row("awake:d:1", awake_hour(), None, T0)]));
+    let Outcome::Metered(m) = w.ok(meter("b10", vec![own("awake:d:1", awake_hour(), T0)])) else { panic!("a batch answers Metered") };
+    assert_eq!(m.refused, [RowRefused { index: 0, why: Refused::ConflictingBody }]);
+    assert_eq!((w.status().own_hardware_points, w.ledger.totals().charged), (points, 96_336));
+}
+
+/// Goal: own hardware is counted by the month it reached the ledger (a
+/// late row from October, metered in November, is November's, as its
+/// charge would draw November's credit); a month starts at none; and the
+/// sweep forgets a month's count once all of it is past the ledger's
+/// memory, as it does a fragment's spend.
+#[test]
+fn own_hardware_counts_by_month() {
+    let mut w = World::seat();
+    w.ok(meter("b1", vec![own("awake:c:1", awake_hour(), T0)]));
+    w.now = NOVEMBER;
+    assert_eq!(w.status().own_hardware_points, 0, "November starts at none");
+    w.ok(meter("b2", vec![own("awake:c:2", awake_hour(), NOVEMBER - 60_000)]));
+    assert_eq!(w.status().own_hardware_points, 65);
+    assert_eq!((w.store.own_hardware(Month::of(T0)), w.store.own_hardware(Month::of(NOVEMBER))), (64_224, 64_224));
+    w.now = NOVEMBER + REF_KEEP_MS;
+    w.ok(Op::Sweep);
+    assert_eq!((w.store.own_hardware(Month::of(T0)), w.store.own_hardware(Month::of(NOVEMBER))), (0, 64_224), "October is forgotten once all of it is");
+}
+
 // Sweeps
 
 #[test]
@@ -915,6 +1050,8 @@ fn every_mutation_answers_the_same_after_a_restart() {
         (31 * DAY_MS, settle("r3", None)),
         (31 * DAY_MS + 1, plan("p2", Plan::SeatAlwaysOn)),
         (31 * DAY_MS + 2, meter("b2", vec![row("awake:1", Usage::Awake { instance: "2vcpu-6gib".into(), ms: 60_000 }, None, T0 + 31 * DAY_MS)])),
+        (31 * DAY_MS + 3, meter("b3", vec![own("awake:2", awake_hour(), T0 + 31 * DAY_MS)])),
+        (31 * DAY_MS + 4, meter("b4", vec![own("awake:2", awake_hour(), T0 + 31 * DAY_MS), own("awake:3", awake_hour(), T0 + 31 * DAY_MS)])),
     ];
     let run = |w: &mut World, part: &[(i64, Op)]| -> Vec<Result<Outcome, Refused>> {
         part.iter()

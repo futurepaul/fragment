@@ -478,7 +478,12 @@ fragment ledger                    # your credit, your plan, what is stopped, th
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
+fragment ledger show ann           # operators only: ann's ledger, who used what
 ```
+
+A computer on a machine of your own (a node you paired, where the
+platform allows it) is never charged: its use is tracked in points, a
+point $0.001 of list price, and `fragment ledger` shows this month's.
 
 ## You and your keys
 
@@ -541,7 +546,7 @@ fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
 fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
-fragment ledger [grant <who> <usd> --why W]
+fragment ledger [show <who> | grant <who> <usd> --why W]
 fragment cap <name> <usd>|default
 fragment host [<url>]                    fragment runs <name> [<run>] [--status S] [--limit N]
 fragment init <name> [--template T]      fragment replay <name> <run>

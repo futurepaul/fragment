@@ -272,6 +272,17 @@ pair it with their fragment account and it becomes avail as a resource";
   its interval (5 s) answers `slow_down` and adds 5 s. A person may try 5
   wrong codes in 10 minutes; past that, nothing is looked up. A person
   holds at most 8 live nodes, and 32 rows with revoked ones.
+- **Names, one per person.** A node is named by `sandcastle-node pair`
+  (the machine's host name, or `--name`). A person's live nodes are named
+  apart (`pairing::approvable`, `same_name`: whatever the case, or spaces
+  around): a pairing named as one of theirs is refused, at the page and at
+  the approval (409 `already_exists`), naming that node by the end of its
+  id and saying how to go on: revoke it in settings, or pair under another
+  name with `--name`. A revoked node's name is free again; another person
+  may use any name. Settings show each of a person's nodes with the last 6
+  characters of its id beside its name (`pairing::id_suffix`), in the list
+  and in "New computers run on", so two named alike before this rule
+  (Paul's two "mac"s, one down, one up) are told apart.
 - **Ids.** A deployment node may not begin `paired-` (its list is refused
   at the first request), and a person's node never has another's id: the
   uplink checks a paired id's dial against the secret the registry holds
@@ -301,6 +312,22 @@ pair it with their fragment account and it becomes avail as a resource";
   answers `no_node`, each node's reason given, the choice's first. A
   fallback is for life, as every placement is; a laptop that sleeps is the
   case to know.
+- **Own hardware is tracked in points, never charged** (seam 10; Paul,
+  2026-10-05: "not actually billed, but it's useful to keep track of
+  usage"). The notion rides on the placement: a computer placed on a
+  paired node meters its awake time as every computer does (the same
+  intervals, the same `awake:<computer>:<from>` rows to its owner's
+  ledger), and each row names the node (`MeterRow::own_node`). The ledger
+  prices it at list, keeps it, charges nothing, and adds its list price
+  to the month's own-hardware count, which the status shows in points.
+  Its wake is never refused for want of credit (no credit, past the
+  overdraft): the ledger's refusal is passed over when the computer is on
+  its owner's node, or, not placed yet, when their chosen node of theirs
+  can take it now (placed there and only there: a refused wake pins
+  nothing to the deployment's nodes). A guest's or a canceled seat's
+  refusal still stands. Its agents' model calls are the platform's and
+  billed as ever. A computer on one of the deployment's nodes is billed
+  exactly as before.
 - **Experimental, and why.** A person has one computer today, placed once.
   So the choice matters for a computer that has not started yet (a new
   person's, or after a choice is set before the first agent); an existing
@@ -1013,6 +1040,40 @@ The ledger meters wherever fragment runs.
 
 A local model has no list price, so its prices come from configuration
 (the price book's defaults are already a debt-ledger entry).
+
+**A person's own hardware: points, not dollars (built, branch
+`selfhost-points`).** A computer on a node its owner paired (bring your
+own computer, seam 2) costs the platform nothing to keep awake, so it is
+never charged, and a wake there is never refused for want of credit. Its
+use is still tracked, so a company can see who used what:
+
+- **One notion, carried by the placement.** The computer's node is a
+  paired one (`paired-…`): its awake rows name it (`own_node`), and that
+  is all the ledger needs. No parallel ledger: the same rows, kept as
+  every row is (replayed once by reference, forgotten after 90 days), each
+  with its list price and a charge of 0, and a per-month count of their
+  list price beside the fragments' spend (`Store::own_hardware`; the
+  Ledger DO's `own_hardware` table). A row counts in the month it reached
+  the ledger, as a charge draws that month's credit, so every point shows
+  in some month's status.
+- **The conversion: 1 point = $0.001 of list price, rounded up**
+  (`fragment_core::price::points`, `POINT_MICROS`: the one place). List
+  price, not the charge, so the operator's margin moves no points and
+  people's points compare across a deployment and over time. An hour of
+  the default computer (2 vCPU, 6 GiB: $0.064224) is about 64 points; an
+  always-on month about 46,000. Rounded up once on the month's total, so
+  any use shows.
+- **Shown as points wherever usage is shown.** The status
+  (`GET /api/ledger`) carries `ownHardwarePoints`, this month's, beside
+  dollars that it is in none of. Settings' Credit says "Your own machines:
+  N points this month, not charged"; the Computer section says its use is
+  tracked in points; each of the person's nodes says so. `fragment ledger`
+  prints it. Operators read anyone's status (`GET /api/ledger/<person>`,
+  `fragment ledger show <person>`): who used what, points included.
+- **What stays in dollars.** A deployment node's computer is billed
+  exactly as before; so is everything else on own hardware's computers
+  that is not the machine itself (their agents' model calls, operator
+  keys).
 
 ### 11. Nothing calls home
 

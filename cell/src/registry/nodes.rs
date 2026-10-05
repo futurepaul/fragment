@@ -10,11 +10,12 @@
 //! - `paired_nodes`: each person's nodes, their secrets sealed for the
 //!   node's id (`keys::seal`, scope `PairedNode:<id>`). A revoked node keeps
 //!   its row (so its computers can say what became of it) and loses its
-//!   secret.
+//!   secret. A person's live nodes are named apart: approving one named as
+//!   another of theirs is refused (`pairing::approvable`).
 //! - `pair_misses`: each wrong code a person tried, for `MISSES_MAX`.
 //! - `node_prefs`: the node a person chose for their new computers.
 
-use fragment_core::pairing::{self, Holder, Load, PairError, Paired, Pending, Polled};
+use fragment_core::pairing::{self, Holder, LiveNode, Load, PairError, Paired, Pending, Polled};
 use fragment_core::placement::{Arch, Byoc};
 use fragment_proto::nodes::PairPolled;
 
@@ -80,6 +81,12 @@ struct PrefRow {
     node: String,
 }
 
+#[derive(Deserialize)]
+struct LiveRow {
+    id: String,
+    name: String,
+}
+
 /// A refusal of pairing, as the platform answers it.
 fn refused(e: PairError) -> CellError {
     let code = match e {
@@ -88,6 +95,7 @@ fn refused(e: PairError) -> CellError {
         PairError::Invalid(_) | PairError::Expired | PairError::Used | PairError::Full(_) => ErrorCode::InvalidRequest,
         PairError::NoSuchCode | PairError::NotYours(_) => ErrorCode::NotFound,
         PairError::Revoked(_) => ErrorCode::NodeRevoked,
+        PairError::NameTaken { .. } => ErrorCode::AlreadyExists,
     };
     CellError::new(code, e.to_string())
 }
@@ -113,12 +121,15 @@ impl RegistryCell {
             .transpose()
     }
 
-    /// `by`'s count of nodes and wrong codes, as approving needs it.
-    fn holder(&self, by: &str, now: i64) -> CellResult<Holder> {
-        let live = self.count("SELECT COUNT(*) AS n FROM paired_nodes WHERE owner = ? AND revoked_at IS NULL", vec![by.into()])?;
+    /// `by`'s nodes and wrong codes, as approving needs them: their live
+    /// nodes (bounded: `ROWS_MAX` rows in all), counted with the rest.
+    fn holder(&self, by: &str, now: i64) -> CellResult<(Holder, Vec<LiveNode>)> {
+        let live = self.rows::<LiveRow>("SELECT id, name FROM paired_nodes WHERE owner = ? AND revoked_at IS NULL ORDER BY paired_at, id", vec![by.into()])?;
+        let live: Vec<LiveNode> = live.into_iter().map(|r| LiveNode { id: r.id, name: r.name }).collect();
         let rows = self.count("SELECT COUNT(*) AS n FROM paired_nodes WHERE owner = ?", vec![by.into()])?;
+        assert!(live.len() as u64 <= rows && rows <= pairing::ROWS_MAX, "a person's live nodes are among their rows, at most ROWS_MAX");
         let misses = self.count("SELECT COUNT(*) AS n FROM pair_misses WHERE identity = ? AND at > ?", vec![by.into(), SqlStorageValue::Integer(now - pairing::MISS_WINDOW_MS)])?;
-        Ok(Holder { live, rows, misses })
+        Ok((Holder { live: live.len() as u64, rows, misses }, live))
     }
 
     /// A wrong code `by` tried: counted, and the window's older ones dropped.
@@ -135,10 +146,10 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::Forbidden, "a person pairs their own nodes"));
         }
         let now = js::now_ms();
-        let holder = self.holder(&who.id, now)?;
+        let (holder, live) = self.holder(&who.id, now)?;
         // past the bound, nothing is looked up: a guess costs the same
         let found = if holder.misses >= pairing::MISSES_MAX { None } else { pairing::parse_user_code(code).map(|c| self.pending_by_code(&c)).transpose()?.flatten() };
-        match pairing::approvable(self.byoc(), found.as_ref(), holder, now) {
+        match pairing::approvable(self.byoc(), found.as_ref(), holder, &live, now) {
             Ok(()) => Ok((who, found.expect("approvable found a pairing"))),
             Err(e) => {
                 if e == PairError::NoSuchCode {
