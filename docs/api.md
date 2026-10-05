@@ -1507,7 +1507,7 @@ is docs/computers.md; the routes here are its owner's.
 | `POST /api/computers` | a person | → `{computer, owner, image, node?, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner). `node`, where computers run on sandcastle nodes (`FRAGMENT_NODES`; docs/self-host.md, seam 2): the node its first start placed it on, for its life |
 | `GET /api/computers` | a person | → `{computers: [ComputerView], defaultImage}`: `defaultImage` is the image a new computer is pinned to; one pinned to another may update to it (the shell asks) |
 | `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; anyone else 404 |
-| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start; on sandcastle nodes, 503 `node_down` when its node does not answer (within seconds; it stays placed there) and `no_node` when no node can take a new one (each node's reason in the message) |
+| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start; on sandcastle nodes, 503 `node_down` when its node does not answer (within seconds; it stays placed there), `no_node` when no node can take a new one (each node's reason in the message), and 410 `node_revoked` when it is placed on a node of its owner's they revoked (below). Once placed, the view's `placed` says how: `as its owner chose`, `by the deployment's rule`, or the rule and why their choice was passed over |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
@@ -1516,6 +1516,23 @@ is docs/computers.md; the routes here are its owner's.
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+
+### A person's nodes (bring your own computer, experimental)
+
+Where people may pair sandcastle nodes of their own (`FRAGMENT_BYOC=on`;
+docs/self-host.md, seam 2, Bring your own computer). Off, a start is 403
+`forbidden`, saying so, and `GET /api/nodes` answers `byoc: false` with the
+deployment's nodes alone.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/nodes/pair` | anyone (a node; unsigned) | `{name, arch}` → `{userCode, deviceCode, verifyUrl, expiresInS, intervalS}`; 429 `rate_limited` past 32 waiting or 10 begun a minute |
+| `POST /api/nodes/pair/poll` | the node (its device code) | `{deviceCode}` → `{state: "pending" \| "slow_down", intervalS}`, `{state: "expired"}`, or once `{state: "approved", node, secret}`; after that, or for a code never made, 404 |
+| `GET /nodes/pair?code=` | a signed-in person (a page) | the node's name, architecture and code, and a button; signed out, sign-in first |
+| `POST /nodes/pair` | the same, from the platform's own origin | form `code` → the node is theirs (`paired-<16 hex>`); a wrong code 404 (five in ten minutes, then 429), used 400, expired 400 |
+| `GET /api/nodes` | a person | → `{byoc, prefer, nodes: [{id, name, kind: "deployment" \| "own", arch, state: "up" \| "down" \| "revoked", why?, computers, pairedAt?}]}` (proto's `NodesView`): the deployment's nodes, then theirs |
+| `PUT /api/nodes/prefer` | a person | `{node: id \| null}` → the same: where their new computers run (null: the deployment's rule). A node that is not one they may use is 404, a body without `node` 400 |
+| `DELETE /api/nodes/{id}` | its owner | → the same: revoked (its secret dropped, its uplink cut; its computers' wakes answer 410 `node_revoked`); anyone else's, or none, 404 |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
 sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by
