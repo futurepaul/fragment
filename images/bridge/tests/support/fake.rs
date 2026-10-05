@@ -84,6 +84,9 @@ pub struct World {
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
     pub fail_posts: u32,
+    /// Each post to a `work` channel (a claim, among others) is answered
+    /// this much later: a claim held in flight.
+    pub work_post_delay_ms: u64,
     /// Records per `__live` page (the platform's is 1000).
     pub page: usize,
     live: Vec<LiveSock>,
@@ -361,12 +364,16 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
     let path = req.uri().path().to_string();
     let q = req.uri().query().unwrap_or("").to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
-    {
+    let delay_ms = {
         let mut w = world.lock().expect("the world");
         w.calls.push(format!("{method} {path}"));
         if w.down {
             return refuse(StatusCode::SERVICE_UNAVAILABLE, "the fake is down");
         }
+        if method == Method::POST && path.ends_with("/channels/work") { w.work_post_delay_ms } else { 0 }
+    };
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     }
     let parts: Vec<String> = path.trim_start_matches('/').split('/').map(str::to_string).collect();
     let p: Vec<&str> = parts.iter().map(String::as_str).collect();

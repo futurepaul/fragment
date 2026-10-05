@@ -44,11 +44,22 @@ container starts until someone asks again).
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
   never sleeps (decision 25).
-- **Sleep**, driven by the DO, in order: hold the guest (touch
-  `/run/computer/hold`, below), save `/data` (`DirectoryBackup`), take a
-  container snapshot (only after a save that worked), send SIGTERM, wait
-  up to 5 s for the guest to exit, destroy. An idle stop by the runtime is
-  only the safety net.
+- **Saved** (below, "Saves and what a wake restores"): when its work
+  ends (the guest's last keepalive closes, and 30 s pass with none opened
+  again), every 15 minutes while a keepalive stays open, and at every
+  sleep. Awake, a save is the hold (below), the save, and the hold let go.
+- **Sleep**, driven by the DO, in order: hold the guest (below), save
+  `/data` (`DirectoryBackup`), take a container snapshot (only after a
+  save that worked), send SIGTERM, wait up to 5 s for the guest to exit,
+  destroy. A keepalive that opens while an idle sleep holds its guest
+  cancels the sleep: the guest took work as it was held, so it stays
+  awake, and the hold is let go (its owner's sleep goes on). A sleep whose
+  save fails keeps its container: it is awake again, held no more, its
+  view's `why` says so, and its sleep is tried again after a pause (a
+  minute, doubled each time, at most 15); after
+  `computers.unsaved_max_ms` (30 minutes by default) of failed tries it
+  sleeps unsaved, says so, and its next wake is a rollback. An idle stop
+  by the runtime is only the safety net.
 - **Wake from a snapshot** when it caches the current save for the pinned
   image (`start({containerSnapshot})`; below, "Saves and what a wake
   restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
@@ -56,7 +67,11 @@ container starts until someone asks again).
   "temporarily unavailable" is retried with backoff. A start from the
   snapshot that fails (or whose container stops before it comes up)
   forgets the snapshot, and the computer starts again from the image and
-  the save in the same wake, with no strike against it.
+  the save in the same wake, with no strike against it. A start whose
+  save will never restore (its archive is gone or altered: the SDK's
+  `BACKUP_NOT_FOUND` or `BACKUP_INTEGRITY`) marks that save unusable and
+  starts again at once from the save before it, no strike either; with
+  none left, it is a strike like any.
 - **A crash** (the container stopped on its own while starting or awake)
   counts against its starts, and the computer starts again while
   something wants it. A guest that died holding its keepalive (busy) is
@@ -97,21 +112,27 @@ that names a PID from before a sleep can name a live process after it.
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
   DO's `DirectoryBackup` saves and restores `/data` through it.
-- `sh`, `true`, `mkdir`, `touch` and `rm`: the DO polls with `true`,
-  opens the restore gate and marks a sleep's hold with `touch`, and lets
-  go of a hold with `rm`.
-- **The sleep's hold**, `/run/computer/hold`. The DO touches it at the
-  start of every sleep, before its save. While it exists the guest claims
-  no new turn (our bridge: docs/bridge.md); what it already claimed may
-  run on, and is cut with the container. So the save of a sleep has every
-  turn its guest claimed, and a message that arrives as it goes to sleep
-  is left for the next life. A fresh container never has it: an image's
-  is made without it, and the DO removes it from a container started from
-  a snapshot (the sleep that took the snapshot had touched it) before that
-  start is ready. A container that outlives its sleep (a destroy that did
-  not take) has it removed. An image that ignores it loses nothing it did
-  not lose before. P2 of docs/explorations/pi-durable.md makes this a
-  handshake (the guest answers `held`); it is a mark for now.
+- `sh` (and its `test`), `true`, `mkdir`, `touch` and `rm`: the DO polls
+  with `true`, opens the restore gate and makes a hold with `touch`, reads
+  the guest's answer with `test -e`, and lets go of a hold with `rm`.
+- **The hold**, a handshake before every save (P2 of
+  docs/explorations/pi-durable.md). The DO removes `/run/computer/held`,
+  touches `/run/computer/hold`, and waits up to 20 s for the guest to
+  touch `/run/computer/held`: its answer that it claims nothing now (no
+  claim in flight, none new while the hold exists) and has copied what it
+  keeps that a hot copy would tear. Then the DO saves. An awake save then
+  lets go (it removes both files); a sleep keeps the hold until its
+  container is gone. An image that never answers is saved anyway, the
+  save recorded as not held. What the guest already claimed may run on: a
+  sleep cuts it with the container, and an awake save saves it as it is.
+  So a save has every turn its guest claimed, and a message that arrives
+  as it goes to sleep is left for the next life (or, at an idle sleep's
+  hold, wakes the guest's keepalive, which cancels the sleep). A fresh
+  container never has either file: an image's is made without them, and
+  the DO removes them from a container started from a snapshot (the sleep
+  that took the snapshot held it) before that start is ready. A container
+  that outlives its sleep (a destroy that did not take) has them removed.
+  Our bridge answers for both our images (docs/bridge.md, `BRIDGE_HELD`).
 
 ### Data and the restore gate
 
@@ -123,21 +144,45 @@ that names a PID from before a sleep can name a live process after it.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).
-- The sleep's hold (above, `/run/computer/hold`) is read the same way:
-  our bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
+- The hold (above, `/run/computer/hold`) is read the same way: our
+  bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
   before the signal; whatever is written after it may be lost.
 
 ### Saves and what a wake restores
 
-P3 and P7 of docs/explorations/pi-durable.md. A computer keeps one save
-of `/data`, and a snapshot is only ever a cache of it:
+P2, P3 and P7 of docs/explorations/pi-durable.md, and step 1 of
+docs/durable-computers.md. A computer keeps its newest three saves of
+`/data`, and a snapshot is only ever a cache of the current one:
 
-- **The save** is the backup its last sleep that saved took
-  (`DirectoryBackup`'s record, kept by the Computer DO with when it was
-  taken and the start it was of). A sleep whose save fails keeps the save
-  before it, notes why (the view's `why`), and still goes to sleep (F6:
-  P2 changes that).
+- **A save** is a `DirectoryBackup` of `/data`, taken under the hold
+  (above). The Computer DO keeps its record with a number (1 for the
+  computer's first, one more for each after), when it was taken, the
+  start it was of, and whether its guest answered the hold (`held`). It
+  keeps the newest three and deletes each older one's archive as a new
+  one is kept. The view lists them (`saves`), newest first.
+- **When.** A save is asked for when the computer's work ends (its
+  guest's last keepalive closes, and 30 s pass with none opened again, so
+  turns back to back save once), every 15 minutes while a keepalive stays
+  open (Cloudflare's auto-save guide: a computer that never goes idle is
+  saved on a timer), and at every sleep. An always-on computer, which
+  never sleeps, is saved the same way. A save that fails awake is tried
+  again after a pause (a minute, doubled each time, at most 15). So a
+  crash loses what its life did since its last save, at most a turn and
+  its settle, or 15 minutes of one.
+- **A sleep whose save fails** keeps its container (I5): it is awake
+  again, held no more, and its view's `why` says so; its sleep is tried
+  again after the same pause. Only after `computers.unsaved_max_ms` (30
+  minutes by default: a default for Paul to confirm) of failed tries does
+  it sleep unsaved, its `why` saying so until a save works, and its next
+  wake is a rollback.
+- **A wake restores the current save:** the newest one not found
+  unusable. A start whose save will never restore (its archive gone or
+  altered) marks it unusable and starts again at once from the save before
+  it (F5), with no strike against the computer; with none left to try, it
+  is a strike like any other failed start. A start that fails for another
+  reason (an image pull, the platform) is a strike, and tries the same
+  save again.
 - **The snapshot's record** is `{id, image, save}`: the image's reference
   its start ran (a pin while it runs is the next start's) and the id of
   the save its sleep took just before it. A wake uses it only when `save`
@@ -147,11 +192,9 @@ of `/data`, and a snapshot is only ever a cache of it:
   its own save. So a snapshot only ever makes a wake faster, never
   different (I9).
 - **Why the two agree.** The snapshot is taken after the backup within
-  one sleep, with the guest running between them, so they agree only
-  because the guest is held from before the backup (the sleep's hold,
-  above): it claims no new turn in between. Its writes in flight (a turn
-  it had claimed) can still land between the two; P2's full hold is what
-  stops those.
+  one sleep, with the guest held from before the backup (the hold, above)
+  until it is gone: it claims no new turn in between. A turn it had
+  claimed before the hold can still write between the two.
 - **A broken snapshot** (one that will not start: expired, say) is
   forgotten as its start fails, and the same wake starts the image and
   restores the save, with no strike against the computer (F7). Only the
@@ -165,9 +208,10 @@ of `/data`, and a snapshot is only ever a cache of it:
   logs one line (`"restored"`) and shows it in its owner's view
   (`restored`, docs/api.md). A start that went back in time is a
   **rollback**, counted in the view's `rollbacks`: the life before it
-  ended by a crash, or by a sleep whose save failed, so what that life did
-  since its own start is in no save. A start after a sleep that saved is
-  none. Nothing's correctness depends on the guest reading either.
+  ended by a crash, or by a sleep that slept unsaved, or its start fell
+  back to a save older than that life's newest, so what that life did
+  since some save is in none. A start from the save its life's sleep took
+  is none. Nothing's correctness depends on the guest reading either.
 
 ### The fragment API
 
@@ -569,14 +613,23 @@ and how a runtime finds them, is the image's.
 - `crates/core`: the lifecycle as a pure state machine (wake racing
   sleep, the newest push wins, a deadman alarm, a failing wake sealed, a
   crash while busy started again, a broken snapshot's fallback, each life
-  ending once), and its saves (which a wake restores, the snapshot as a
-  cache of one save and one image, a slow sleep asked twice, what a wake
-  restored and its rollbacks), under seeded interleavings with crashes.
+  ending once; saved when work ends, on its busy timer and always on, a
+  sleep's hold, save and stop, a keepalive that cancels an idle sleep's
+  hold, a failed sleep's save keeping its container within its bound, a
+  save that will not restore falling back to the one before), and its
+  saves (three kept, which a wake restores, the snapshot as a cache of one
+  save and one image, a slow sleep asked twice, what a wake restored and
+  its rollbacks), under seeded interleavings with crashes, holds the
+  guest answers or not, and saves that fail; among their invariants, a
+  computer is never asleep with work newer than its newest save unless a
+  crash or the bounded failure put it there.
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker. A crash is the
   lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
-  the guest's PID 1, so the real exit is reported), and a check of what
-  ran counts runs (the model fake's calls, the ledger's rows, the
+  the guest's PID 1, so the real exit is reported), and wakes from the
+  save its last turn's end took; a failed save is the lever's
+  (`fail-saves`), and so is an always-on plan (`always-on`). A check of
+  what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the

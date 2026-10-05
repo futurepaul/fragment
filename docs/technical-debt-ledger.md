@@ -788,25 +788,6 @@ fragment.club until cutover (decisions 34–35).
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
 
-## A computer's `/data` is saved only when it sleeps
-
-- **Observed:** 2026-10-05 (docs/explorations/pi-durable.md, F1 and F6).
-  `ComputerCell::sleep` (cell/src/computer.rs) holds the only `backup`
-  call, and the lifecycle has no action that saves (crates/core
-  `computer::Action`), where decision 18 has `/data` saved "every few
-  minutes while written". A sleep whose backup fails writes a note and
-  destroys the container all the same.
-- **Risk:** a crash, or a sleep whose save failed, wakes with the `/data`
-  of the last sleep that saved; an always-on computer never sleeps, so it
-  is never saved; a computer that crashes before its first sleep wakes
-  empty.
-- **First proof:** a hosted computer's container exiting on its own while
-  awake (`"event":"exited"` in its Computer DO's log line).
-- **Delete when:** `/data` is saved when a computer's work ends and at
-  its sleep, a sleep whose save fails keeps its container, and the
-  computers lane kills a container and finds its last turn's save (the
-  exploration's P2, and its rung 4).
-
 ## Litestream's replicas are written and never read
 
 - **Observed:** 2026-10-05 (docs/explorations/pi-durable.md, F8).
