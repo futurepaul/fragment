@@ -224,6 +224,50 @@ async fn media_both_ways() {
     bridge.stop().await;
 }
 
+/// Goal (I3, through the relay): Hermes hears each message once across a
+/// crash of the bridge and a rollback of its state. Method: two turns, a
+/// save after the first, a kill after the second, the save put back and a
+/// new life on the same port (Hermes dials it again); a third message's
+/// end proves the older records were read again first. Hermes' own record
+/// of what it heard is the count of runs.
+#[tokio::test]
+#[ignore = "P1: a rolled-back cursor hands Hermes the second message again (F2)"]
+async fn hermes_hears_each_message_once_across_a_rollback() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("relay-rollback");
+    let listen = free_port();
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    let ended = |w: &World, turn: &str| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == turn);
+    let say = |text: &str| {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+    };
+
+    let bridge = support::start(cfg.clone(), relay(listen, &dir));
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let t1 = say("one");
+    fake.until(WAIT, "one's end", |w| ended(w, &t1)).await;
+    let saved = support::save_state(&dir);
+    let t2 = say("two");
+    fake.until(WAIT, "two's end", |w| ended(w, &t2)).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+
+    support::restore_state(&dir, &saved);
+    let bridge = support::start(cfg, relay(listen, &dir));
+    let t3 = say("three");
+    fake.until(WAIT, "three's end, Hermes dialing the new life", |w| ended(w, &t3)).await;
+    hermes.with(|s| {
+        let heard: Vec<&str> = s.heard.iter().filter_map(|e| e["message_id"].as_str()).collect();
+        assert_eq!(heard, vec![t1.as_str(), t2.as_str(), t3.as_str()], "each message once");
+        assert!(s.dials >= 2, "it dialed the new life");
+    });
+    fake.with(|w| assert_eq!(replies(w, &chat).len(), 3, "one reply each"));
+    bridge.stop().await;
+}
+
 /// Invalid: a dial with another secret is closed 4401 `unauthorized`, and
 /// no message reaches it.
 #[tokio::test]
