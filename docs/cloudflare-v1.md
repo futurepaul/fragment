@@ -237,6 +237,9 @@ speaking Cloudflare's APIs) returns once this product works.
     self is in its fragment. CI runs a restore drill into an empty
     computer.
 
+    *The design of record is now docs/durable-computers.md (Paul,
+    2026-10-05): A+ now, toward E; messengers outside the computer (F).*
+
     *Status (2026-10-05, #136 and #137).* The hold, the snapshot as a
     cache of the save, and a wake that says what it restored are built.
     `/data` is still saved only at sleep, not every few minutes, and
