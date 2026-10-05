@@ -73,6 +73,8 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
     let _ = std::fs::create_dir_all(&cfg.scratch);
     let mut turns: HashMap<String, mpsc::Sender<Heard>> = HashMap::new();
     let mut shutdown = io.shutdown.clone();
+    // In process, it can take a turn from its start.
+    let _ = io.events.send(Event::Connected(true)).await;
     // bounded by the bridge's life: one command per pass
     loop {
         let c = tokio::select! {
@@ -222,7 +224,6 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             let _ = events.send(e).await;
         }
     };
-    emit(Event::Accepted { turn: id.clone() }).await;
     let text = ts.text.to_lowercase();
     if text.contains("fail") {
         emit(Event::End { turn: id, outcome: Outcome::Error("the script was asked to fail".into()) }).await;

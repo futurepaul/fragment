@@ -126,6 +126,15 @@ async fn the_stub_image() {
     fake.until(20_000, "the stub's reply", |w| w.bodies(&chat, "chat", "reply").len() == 1).await;
     eprintln!("stub: message to reply: {} ms", asked.elapsed().as_millis());
     fake.with(|w| assert_eq!(w.bodies(&chat, "chat", "reply")[0]["text"], "echo: [paul] hello stub"));
+    // Its turn's last posts (its end, then its draft stopped) answered, so
+    // none is still in flight when the gate's count below begins (the
+    // blocking `docker` calls hold this runtime, and the fake with it).
+    fake.until(20_000, "the stub's turn to end and its draft to stop", |w| {
+        let end = w.records(&chat, "work").iter().find(|r| r["body"]["kind"] == "turn.end").and_then(|r| r["seq"].as_u64());
+        let ended_at = end.and_then(|seq| w.log.iter().position(|l| *l == format!("record {chat} work {seq}")));
+        ended_at.is_some_and(|i| w.log[i + 1..].iter().any(|l| l.starts_with(&format!("draft {chat} ")) && l.ends_with(" null")))
+    })
+    .await;
     // Its screen port serves its page.
     assert!(c.exec_out(&["wget", "-qO-", "http://127.0.0.1:6080/"]).contains("This computer has no screen"));
     let (took, code) = c.sigterm();
@@ -137,7 +146,7 @@ async fn the_stub_image() {
     let calls_before = fake.with(|w| w.calls.len());
     let gated = Container::run("fragment-stub:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(fake.with(|w| w.calls.len()), calls_before, "the gate holds: {}", gated.logs());
+    assert_eq!(fake.with(|w| w.calls.len()), calls_before, "the gate holds: {:?}\n{}", fake.with(|w| w.calls[calls_before.min(w.calls.len())..].to_vec()), gated.logs());
     let opened = Instant::now();
     assert!(gated.exec(&["touch", "/run/computer/restored"]), "the marker, as the DO touches it");
     fake.until(30_000, "the gated stub to follow", |w| w.live_sockets() >= 2).await;

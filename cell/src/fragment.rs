@@ -743,7 +743,6 @@ impl FragmentCell {
         let Some(principal) = caller.principal() else {
             return Ok(Standing { member: None, owns_member_agent: false, link, signed: false, cap: None, held: None });
         };
-        let held = caller.signed.as_ref().and_then(|s| s.held);
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
             return self.standing_for(signed, link);
         }
@@ -758,7 +757,9 @@ impl FragmentCell {
         )?;
         let row = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let member = row.role.as_deref().and_then(Role::parse);
-        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held })
+        // as itself, a hold limits nothing: it caps an agent acting for
+        // someone (`standing_for`), never its own memberships
+        Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
     /// An agent acting for someone (ROADMAP decision 17), in one statement:
