@@ -507,6 +507,100 @@ fn attachments_ride_along() {
     assert_eq!(files, Some(vec![file]));
 }
 
+/// Goal: a turn that asks its asker something in words (Hermes' open
+/// clarify) shows the question at once, and the asker's next message is
+/// handed to that turn as its answer, never queued behind it (where the
+/// turn would wait for it forever). Invalid: someone else's message, an
+/// empty one, or one to another agent is not the answer. Replay: the
+/// message again (behind the cursor) tells nothing twice. Restart: the
+/// turn ends as lost, as any running one does (P1; across lives,
+/// `a_question_cut_by_a_restart_is_lost_and_its_answer_runs_once`).
+#[test]
+fn a_question_is_answered_by_the_next_message() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "keep my garden notes" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "What do you plant?".into() }, T0 + 1);
+    let asked = ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2);
+    assert_eq!(posts(&asked), vec![(records::reply_id(&turn, 1), json!({ "text": "What do you plant?", "turn": turn }))], "the question shows at once");
+    assert!(asked.dirty);
+    assert!(e.state().turns[&turn].asking);
+    assert_eq!(keepalive(&asked), None, "still running: the computer stays up");
+
+    // invalid: another person's message, an empty one, one to the other agent
+    let skyler = said(&mut e, &a, &v, 2, "id:skyler", json!({ "text": "tomatoes?" }), T0 + 3);
+    assert!(commands(&skyler).is_empty(), "queued behind it, as any message is");
+    let empty = said(&mut e, &a, &v, 3, "id:paul", json!({ "text": " ", "attachments": [{ "sha256": "c".repeat(64), "size": 1, "type": "image/png", "name": "p.png" }] }), T0 + 4);
+    assert!(!commands(&empty).iter().any(|c| matches!(c, Command::Tell { .. })), "no words, no answer");
+    let other = said(&mut e, &b, &v, 4, "id:paul", json!({ "text": "@rowan hi" }), T0 + 5);
+    assert!(!commands(&other).iter().any(|c| matches!(c, Command::Tell { .. })));
+    let to_rowan = said(&mut e, &a, &v, 4, "id:paul", json!({ "text": "@rowan hi" }), T0 + 5);
+    assert!(commands(&to_rowan).is_empty(), "not addressed to juniper");
+
+    // valid: the asker's next message is the answer
+    let told = said(&mut e, &a, &v, 5, "id:paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 6);
+    assert_eq!(commands(&told), vec![Command::Tell { turn: turn.clone(), seq: 5, by: "id:paul".into(), by_name: "paul".into(), text: "Tomatoes, at dawn".into() }]);
+    assert!(posts(&told).is_empty(), "no turn of its own");
+    assert!(told.dirty && !e.state().turns[&turn].asking);
+    // replay: behind the cursor, nothing
+    assert_eq!(said(&mut e, &a, &v, 5, "id:paul", json!({ "text": "Tomatoes, at dawn" }), T0 + 7), Step::default());
+    // asked no longer, the next message queues as before
+    let next = said(&mut e, &a, &v, 6, "id:paul", json!({ "text": "and basil" }), T0 + 8);
+    assert!(commands(&next).is_empty() && started(&next).is_none(), "queued");
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 9);
+    let queued: Vec<String> = commands(&end).iter().filter_map(|c| match c { Command::Start(t) => Some(t.text.clone()), _ => None }).collect();
+    assert_eq!(queued, vec!["tomatoes?".to_string()], "skyler's message runs next; then paul's empty one, then 'and basil'");
+
+    // the state round-trips with a turn asking, and a restart ends it as
+    // lost: a new life never tells a turn an earlier life ran
+    let t2 = started(&said(&mut e, &a, &v, 7, "id:paul", json!({ "text": "x" }), T0 + 10));
+    assert!(t2.is_none(), "behind the others");
+    let skylers = records::turn_id(&a.fragment, "talk.paul", "chat", 2);
+    ev(&mut e, Event::Reply { turn: skylers.clone(), part: 1, text: "Which tomatoes?".into() }, T0 + 11);
+    ev(&mut e, Event::Asked { turn: skylers.clone() }, T0 + 11);
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    assert_eq!(&saved, e.state());
+    assert!(saved.turns[&skylers].asking, "kept asking");
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    e2.step(Input::Agents(vec![a.clone(), b.clone()]), T0 + 12);
+    let r = e2.recover(T0 + 12);
+    assert!(posts(&r).contains(&(records::work_id(&skylers, "end"), json!({ "kind": "turn.end", "turn": skylers, "outcome": "error", "error": LOST }))), "ended as lost: {:?}", posts(&r));
+    assert!(!e2.state().turns[&skylers].asking, "over, it asks nothing");
+    e2.step(Input::Runtime(Event::Connected(true)), T0 + 12);
+    let answer = said(&mut e2, &a, &v, 8, "id:skyler", json!({ "text": "cherry ones" }), T0 + 13);
+    assert!(!commands(&answer).iter().any(|c| matches!(c, Command::Tell { .. })), "never told to a turn of another life");
+}
+
+/// Goal: a turn waiting on its asker's words outlasts the idle bound up to
+/// a prompt's lifetime, then ends as quiet; Stop still reaches it.
+#[test]
+fn a_question_waits_as_long_as_a_prompt() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = Engine::new(State::default(), Settings { prompt_ttl_ms: 3_600_000, turn_idle_ms: 600_000 }, LIFE).expect("a fresh state");
+    e.step(Input::Agents(vec![a.clone()]), T0);
+    e.recover(T0);
+    e.step(Input::Runtime(Event::Connected(true)), T0);
+    let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "hi" }), T0)).expect("started").turn;
+    ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Which one?".into() }, T0);
+    ev(&mut e, Event::Asked { turn: turn.clone() }, T0);
+    assert!(commands(&e.step(Input::Tick, T0 + 600_001)).is_empty(), "past the idle bound, still asking");
+    let quiet = e.step(Input::Tick, T0 + 3_600_001);
+    assert_eq!(commands(&quiet), vec![Command::Forget { turn: turn.clone() }]);
+    assert_eq!(posts(&quiet).last().expect("its end").1["outcome"], "error");
+
+    let t2 = started(&said(&mut e, &a, &v, 2, "id:paul", json!({ "text": "again" }), T0 + 3_600_002)).expect("started").turn;
+    ev(&mut e, Event::Asked { turn: t2.clone() }, T0 + 3_600_003);
+    let stop = said(&mut e, &a, &v, 3, "id:paul", json!({ "kind": "stop" }), T0 + 3_600_004);
+    assert_eq!(commands(&stop), vec![Command::Stop { turn: t2 }]);
+    // the Stop answered the question (Relay says "Stop." to it): the
+    // asker's next message is a turn of its own, queued behind it
+    let after = said(&mut e, &a, &v, 4, "id:paul", json!({ "text": "never mind" }), T0 + 3_600_005);
+    assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");
+}
+
 // ---- across lives (docs/explorations/pi-durable.md, rung 1) ----
 //
 // The engine inside a model of what is around it: the platform's channels
@@ -566,12 +660,27 @@ impl Journal {
     }
 }
 
-/// A turn the model runtime holds: the prompt it waits on, and whether its
-/// asker pressed Stop.
+/// A turn the model runtime holds: the prompt it waits on, whether it asked
+/// its asker in words and waits for their answer (`Event::Asked`), whether
+/// its asker pressed Stop, and the reply parts it has said.
 #[derive(Debug, Default, Clone)]
 struct Held {
     prompted: Option<String>,
+    asking: bool,
     stop: bool,
+    parts: u32,
+}
+
+/// A message the engine told a turn as its answer (`Command::Tell`): the
+/// life that told it, the turn, the message's seq, and, at that moment, the
+/// turn's claim on `work` and whether this life's runtime held the turn.
+#[derive(Debug, Clone)]
+struct Told {
+    life: u64,
+    turn: String,
+    seq: u64,
+    claim: Option<Value>,
+    held: bool,
 }
 
 struct World {
@@ -589,6 +698,8 @@ struct World {
     /// At each run, the turn's `turn.start` on `work` as it stood then.
     claims_at_run: Vec<(u64, String, Option<Value>)>,
     held: BTreeMap<String, Held>,
+    /// Each message told to a turn as its answer, in order.
+    tells: Vec<Told>,
     /// Posts on `chat` the platform answered 409: one id, two bodies.
     conflicts_on_chat: Vec<String>,
     /// The ids of the posts a crash took from the lane before they were sent.
@@ -611,6 +722,7 @@ impl World {
             runs: Vec::new(),
             claims_at_run: Vec::new(),
             held: BTreeMap::new(),
+            tells: Vec::new(),
             conflicts_on_chat: Vec::new(),
             dropped: Vec::new(),
             now: T0,
@@ -724,6 +836,17 @@ impl World {
                 }
                 Effect::Runtime(Command::Forget { turn }) => {
                     self.held.remove(&turn);
+                }
+                Effect::Runtime(Command::Tell { turn, seq, .. }) => {
+                    let claim = self.journal.work(&turn, "turn.start").into_iter().next();
+                    let held = match self.held.get_mut(&turn) {
+                        Some(h) => {
+                            h.asking = false;
+                            true
+                        }
+                        None => false,
+                    };
+                    self.tells.push(Told { life: self.lives, turn, seq, claim, held });
                 }
                 Effect::Draft { .. } | Effect::Keepalive(_) | Effect::Discover { .. } => {}
             }
@@ -843,11 +966,29 @@ impl World {
 
     /// The runtime ends a turn it holds: with an answer (idle), or without.
     fn end(&mut self, turn: &str, outcome: Outcome) {
-        assert!(self.held.remove(turn).is_some(), "the runtime holds {turn}");
+        let h = self.held.remove(turn).unwrap_or_else(|| panic!("the runtime holds {turn}"));
         if outcome == Outcome::Idle {
-            self.step(Input::Runtime(Event::Reply { turn: turn.into(), part: 1, text: format!("an answer to {turn}") }));
+            self.step(Input::Runtime(Event::Reply { turn: turn.into(), part: h.parts + 1, text: format!("an answer to {turn}") }));
         }
         self.step(Input::Runtime(Event::End { turn: turn.into(), outcome }));
+    }
+
+    /// The runtime asks its asker something to answer in words (Hermes'
+    /// open clarify): the question is a reply part, and the turn waits,
+    /// running, for their next message (`Command::Tell`).
+    fn ask_in_words(&mut self, turn: &str) {
+        let h = self.held.get_mut(turn).expect("held");
+        h.asking = true;
+        h.parts += 1;
+        let part = h.parts;
+        self.step(Input::Runtime(Event::Reply { turn: turn.into(), part, text: format!("a question of {turn}") }));
+        self.step(Input::Runtime(Event::Asked { turn: turn.into() }));
+    }
+
+    /// Whether the message whose turn (were it one) is `turn` was told to a
+    /// turn as its answer, in any life.
+    fn was_told(&self, turn: &str) -> bool {
+        self.tells.iter().any(|t| self.turn_of(t.seq) == turn)
     }
 
     /// The runtime asks its owner something; the turn waits.
@@ -904,7 +1045,8 @@ impl World {
         assert_eq!(self.journal.post(CHAT, records::WORK, &lead.identity, &records::work_id(turn, "start"), &body), Answer::Appended);
     }
 
-    /// What may be checked at any moment (I1, I2, and F11's ids).
+    /// What may be checked at any moment (I1, I2, F11's ids, and where an
+    /// answer in words goes).
     fn check(&self) -> Result<(), String> {
         let mut seen = BTreeSet::new();
         for (_, t) in &self.runs {
@@ -928,6 +1070,28 @@ impl World {
         }
         if !self.conflicts_on_chat.is_empty() {
             return Err(format!("an id on chat posted with two bodies: {:?}", self.conflicts_on_chat));
+        }
+        // An answer in words goes only to a turn this life claimed and its
+        // runtime holds; a message is told at most once in a life, and never
+        // also run there as a turn of its own.
+        let mut told_in: BTreeSet<(u64, u64)> = BTreeSet::new();
+        for t in &self.tells {
+            if !t.held {
+                return Err(format!("Tell: life {} told {} message {}, which its runtime does not hold", t.life, t.turn, t.seq));
+            }
+            if !self.runs.contains(&(t.life, t.turn.clone())) {
+                return Err(format!("Tell: life {} told {} message {}, a turn it never ran", t.life, t.turn, t.seq));
+            }
+            if !t.claim.as_ref().is_some_and(|c| c["life"] == json!(World::life_of(t.life))) {
+                return Err(format!("Tell: life {} told {} message {}, a turn not claimed as its own (work held {:?})", t.life, t.turn, t.seq, t.claim));
+            }
+            if !told_in.insert((t.life, t.seq)) {
+                return Err(format!("Tell: life {} told message {} twice", t.life, t.seq));
+            }
+            let own = self.turn_of(t.seq);
+            if self.runs.contains(&(t.life, own.clone())) {
+                return Err(format!("Tell: life {} told message {} to {} and ran it as {own} too", t.life, t.seq, t.turn));
+            }
         }
         Ok(())
     }
@@ -958,11 +1122,16 @@ impl World {
     }
 
     /// Settled, every message said has one start and one end (I2, I4), and
-    /// ran at most once (I1); and no turn is held any more.
+    /// ran at most once (I1), or it was the answer a turn asked for in words
+    /// (told to that turn, in the life that ran it) and started no turn of
+    /// its own; and no turn is held any more.
     fn check_settled(&self, said: &[String]) -> Result<(), String> {
         self.check()?;
         for t in said {
             let (starts, ends) = (self.starts(t).len(), self.ends(t).len());
+            if (starts, ends) == (0, 0) && self.was_told(t) {
+                continue;
+            }
             if (starts, ends) != (1, 1) {
                 let dropped: Vec<&String> = self.dropped.iter().filter(|id| id.contains(t.as_str())).collect();
                 return Err(format!("I2/I4: {t} has {starts} starts and {ends} ends; crashes took its posts {dropped:?} from the lane"));
@@ -1173,6 +1342,69 @@ fn what_an_agent_says_unasked_survives_a_rollback() {
     w.check().unwrap();
 }
 
+/// Goal (P1, with a question in flight): a turn that asks its asker in
+/// words is a running turn of its life. A restart ends it as lost, whatever
+/// state the next life wakes with (the one the crash left, one from before
+/// the turn was said, or none), and the answer said after is never told to
+/// a turn the new life does not own: it is a turn of its own, claimed and
+/// run once. Rollback: an answer told in its turn's life, read again by a
+/// life a rollback sent back before it, finds no turn of that life asking,
+/// and is that life's own turn, run once; the asking turn's end stands.
+#[test]
+fn a_question_cut_by_a_restart_is_lost_and_its_answer_runs_once() {
+    for wake in ["latest", "before", "none"] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let before = w.latest();
+        let asked = w.say("id:paul", "name my plant");
+        w.answer_all();
+        w.ask_in_words(&asked);
+        w.answer_all();
+        assert!(w.engine().state().turns[&asked].asking, "{wake}: it asks");
+        let state = match wake {
+            "latest" => w.latest(),
+            "before" => before,
+            _ => None,
+        };
+        w.crash(false);
+        w.start(state);
+        w.answer_all();
+        assert_eq!(w.runs_of(&asked), 1, "{wake}: never run again");
+        assert_eq!(w.ends(&asked), vec![json!({ "kind": "turn.end", "turn": asked, "outcome": "error", "error": LOST })], "{wake}: ended once, as lost");
+        let answer = w.say("id:paul", "Fernando");
+        w.answer_all();
+        assert!(w.tells.is_empty(), "{wake}: never told to a turn of another life");
+        assert_eq!(w.runs_of(&answer), 1, "{wake}: the answer runs as a turn of its own");
+        w.end(&answer, Outcome::Idle);
+        w.settle();
+        assert_eq!((w.runs_of(&answer), w.starts(&answer).len(), w.ends(&answer)[0]["outcome"].clone()), (1, 1, json!("idle")), "{wake}: once");
+        w.check_settled(&[asked, answer]).unwrap_or_else(|e| panic!("{wake}: {e}"));
+    }
+
+    // told in its turn's life, then a rollback to before it was read
+    let mut w = World::new(&["juniper"]);
+    w.start(None);
+    let asked = w.say("id:paul", "name my plant");
+    w.answer_all();
+    w.ask_in_words(&asked);
+    w.answer_all();
+    let asking = w.latest();
+    let answer = w.say("id:paul", "Fernando");
+    assert_eq!(w.tells.iter().map(|t| (t.life, t.turn.clone(), w.turn_of(t.seq))).collect::<Vec<_>>(), vec![(1, asked.clone(), answer.clone())], "told to the asking turn");
+    w.end(&asked, Outcome::Idle);
+    w.answer_all();
+    assert!(w.starts(&answer).is_empty(), "the answer started no turn of its own");
+    w.crash(false);
+    w.start(asking);
+    w.answer_all();
+    assert_eq!(w.ends(&asked), vec![json!({ "kind": "turn.end", "turn": asked, "outcome": "idle" })], "its own end stands (the new life's, as lost, is a 409)");
+    assert_eq!(w.runs_of(&asked), 1, "never run again");
+    assert_eq!(w.runs_of(&answer), 1, "read again, the answer is the new life's own turn");
+    assert_eq!(w.tells.len(), 1, "told once, in the life that ran the asking turn");
+    w.settle();
+    w.check_settled(&[asked, answer]).unwrap();
+}
+
 /// A small deterministic generator (splitmix64): one seed, one history.
 struct Rng(u64);
 
@@ -1196,9 +1428,18 @@ const SIM_SEEDS: u64 = 120;
 const SIM_EVENTS: usize = 400;
 const SIM_SAID_MAX: usize = 40;
 
+/// What a history reached, beyond its invariants: answers told to a turn
+/// asking in words, and those a later life read again and ran as a turn of
+/// their own (a rollback to before the life that told them).
+#[derive(Debug, Default, Clone, Copy)]
+struct Reached {
+    told: usize,
+    told_then_run: usize,
+}
+
 /// One history: events chosen by `seed`, the invariants checked after each,
 /// and every message's records checked once everything settles.
-fn simulate(seed: u64) -> Result<(), String> {
+fn simulate(seed: u64) -> Result<Reached, String> {
     // Its events would be millions of log lines.
     crate::log::set_quiet(true);
     let mut rng = Rng(seed);
@@ -1244,11 +1485,14 @@ fn simulate(seed: u64) -> Result<(), String> {
                 56..=70 if !w.held.is_empty() => {
                     let held: Vec<(String, Held)> = w.held.iter().map(|(t, h)| (t.clone(), h.clone())).collect();
                     let (t, h) = held[rng.below(held.len() as u64) as usize].clone();
-                    match (h.stop, h.prompted.is_some(), rng.below(10)) {
+                    // a turn waits on its card's answer, or on its asker's
+                    // words (the next message paul says is them)
+                    match (h.stop, h.prompted.is_some() || h.asking, rng.below(10)) {
                         (true, _, _) => w.end(&t, Outcome::Stopped),
                         (false, true, _) => {}
                         (false, false, 0..=1) => w.ask(&t),
                         (false, false, 2) => w.end(&t, Outcome::Error("it failed".into())),
+                        (false, false, 3..=4) => w.ask_in_words(&t),
                         (false, false, _) => w.end(&t, Outcome::Idle),
                     }
                     "the runtime"
@@ -1296,19 +1540,27 @@ fn simulate(seed: u64) -> Result<(), String> {
         w.check().map_err(|e| format!("seed {seed}, event {n} ({what}): {e}"))?;
     }
     w.settle();
-    w.check_settled(&said).map_err(|e| format!("seed {seed}, settled: {e}"))
+    w.check_settled(&said).map_err(|e| format!("seed {seed}, settled: {e}"))?;
+    let told_then_run = w.tells.iter().filter(|t| w.runs.iter().any(|(life, run)| *life > t.life && *run == w.turn_of(t.seq))).count();
+    Ok(Reached { told: w.tells.len(), told_then_run })
 }
 
 /// Goal (I1, I2, I4): any history of messages, answers lost and late, runs,
-/// cards, Stops, crashes (each taking the lane's unsent posts with it), and
-/// lives started from any saved state or none keeps the invariants: checked
-/// after every event, and once it settles every message has one start and
-/// one end, ran at most once, and no turn is held. No case is let off. The
-/// test that finds the cases nobody listed.
+/// cards, questions in words and their answers (`Asked`, `Tell`), Stops,
+/// crashes (each taking the lane's unsent posts with it), and lives started
+/// from any saved state or none keeps the invariants: checked after every
+/// event (an answer in words told only to a turn its life claimed and
+/// runs), and once it settles every message has one start and one end, ran
+/// at most once, or was an answer told to a turn and started none of its
+/// own; and no turn is held. No case is let off. The test that finds the
+/// cases nobody listed.
 #[test]
 fn any_history_of_crashes_and_rollbacks_keeps_the_invariants() {
-    let failures: Vec<String> = (0..SIM_SEEDS).filter_map(|seed| simulate(seed).err()).collect();
+    let histories: Vec<Result<Reached, String>> = (0..SIM_SEEDS).map(simulate).collect();
+    let failures: Vec<String> = histories.iter().filter_map(|h| h.clone().err()).collect();
     assert!(failures.is_empty(), "{} of {SIM_SEEDS} histories broke an invariant; the first:\n{}", failures.len(), failures.iter().take(5).cloned().collect::<Vec<_>>().join("\n"));
+    let reached = histories.iter().filter_map(|h| h.as_ref().ok()).fold(Reached::default(), |a, r| Reached { told: a.told + r.told, told_then_run: a.told_then_run + r.told_then_run });
+    assert!(reached.told > 0 && reached.told_then_run > 0, "the histories answer questions in words, and a rollback reads some answers again: {reached:?}");
 }
 
 /// Goal (I2, I4): the case the simulation found, each way it happens: a

@@ -30,6 +30,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Stop {turn}` | the asker pressed Stop |
 | `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
 | `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
+| `Tell {turn, seq, by, text}` | the asker's next message while the turn asked them in words (`Asked`): its answer, handed to the running turn, never a turn of its own; only ever to a turn this life runs |
 
 | Event | |
 |---|---|
@@ -39,6 +40,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, text}` | a tool call |
 | `Prompt {prompt, text, options, ttl?}` | a card; the turn waits (and the computer may sleep) |
+| `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running: a turn of its own |
 
@@ -131,6 +133,15 @@ earlier save, or lost, costs reads and runs nothing twice
   and any later life may run it.
 - **Every turn has both records**: a refusal, and a Stop of a turn that
   waited, post its `turn.start` and then its `turn.end`.
+- **An answer in words goes only to its turn's life.** A turn that asks
+  its asker something in words (`Asked`) is a running turn of its life,
+  and their next message to the agent in that chat is its answer
+  (`Tell`), starting no turn. A restart ends it as lost, as it ends every
+  running turn, so a later life tells it nothing: the message, read
+  there, is a turn of its own, claimed and run once. So is one a rollback
+  sends a cursor back before, though an earlier life told it (a Tell
+  writes nothing on `work`). A Stop answers the question too (Relay says
+  "Stop."), so the asker's next message queues behind the stopping turn.
 - What the runtime says unasked is a turn of the life's counter and the
   life, so a counter a rollback sent back collides with nothing.
 
@@ -190,7 +201,17 @@ get_chat_info`.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
   token.
-- Stop is `interrupt_inbound` for the profile's session key.
+- A question to answer in words: an open `clarify` (`❓ …`, the base
+  adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
+  clarify's card. It is a `send`: the bridge shows it as a reply part and
+  the turn asks (`Asked`). Hermes blocks until the person's next message,
+  which its gateway's clarify intercept takes even mid-turn, so the
+  asker's next message goes back at once as an inbound in the same chat
+  (`Tell`), not queued as a turn behind this one (which would wait out
+  Hermes' clarify timeout, an hour).
+- Stop is `interrupt_inbound` for the profile's session key. A clarify
+  waiting on words never sees it, so a Stop while the turn asks is
+  followed by the words "Stop.", which let the wait go.
 - The end: `👀` on, `👀` off, then `✅` or `❌`. Hermes' multiplexed
   gateway brackets a message twice, an empty dispatch bracket first, so
   a turn ends at `✅` only once it said something, after
