@@ -741,6 +741,42 @@ fn skill_installs_release(skill: &str, workflow: &str, copies: &[(&str, String)]
     Ok(())
 }
 
+/// `cargo xtask node-images [--tag <tag>] [--engine <dir>]`: the computer
+/// images a sandcastle node on this machine runs (docs/self-host.md,
+/// Running it): the cell's (the stub) and our Hermes image, built for this
+/// machine's architecture into local Docker as `fragment-<name>:<tag>`
+/// (default `local`), then loaded into the engine whose sockets are in
+/// `<dir>` (default `SANDCASTLE_ENGINE_DIR`, else /var/lib/sandcastle). It
+/// prints the `images` a node list (`FRAGMENT_NODES_FILE`) names them by.
+/// Run with Docker reachable (the docker group) and the engine's socket
+/// this user's.
+fn node_images(args: &[String]) -> Result<()> {
+    let mut tag = "local".to_string();
+    let mut engine = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/lib/sandcastle".into());
+    let mut rest = args.iter();
+    // bounded: the arguments
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--tag" => tag = rest.next().context("--tag names a tag")?.clone(),
+            "--engine" => engine = rest.next().context("--engine names the engine's directory")?.into(),
+            other => bail!("usage: cargo xtask node-images [--tag <tag>] [--engine <dir>], not {other}"),
+        }
+    }
+    anyhow::ensure!(!tag.is_empty() && tag.len() <= 64 && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'), "a tag is 1 to 64 of A-Z, a-z, 0-9, '.', '-' and '_', not {tag:?}");
+    let mut images = devstack::sandcastle::cell_images(&devstack::cell_dir())?;
+    images.retain(|name, _| name == "stub");
+    images.insert("hermes".into(), devstack::sandcastle::hermes_image(None));
+    let t0 = std::time::Instant::now();
+    let built = devstack::sandcastle::build_images(&images, &tag)?;
+    println!("built {} in {:.1?}", built.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(", "), t0.elapsed());
+    let tags: Vec<String> = built.iter().map(|(_, t)| t.clone()).collect();
+    devstack::sandcastle::load_images(&engine, &tags, &devstack::repo_root().join("target/devstack/images"))?;
+    let listed: serde_json::Map<String, serde_json::Value> = built.iter().map(|(name, t)| (name.clone(), serde_json::json!(format!("docker.io/library/{t}")))).collect();
+    println!("the node list's images (FRAGMENT_NODES_FILE), for {}:", std::env::consts::ARCH);
+    println!("  \"images\": {}", serde_json::Value::Object(listed));
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -751,9 +787,10 @@ fn main() -> Result<()> {
         Some("e2e-summary") => summary::e2e_summary(&args[1..]),
         Some("check") => check(),
         Some("secret") => secret::secret(&args[1..]),
+        Some("node-images") => node_images(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] [--lan] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] [--runtime wrangler|celld] [--lan] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | secret set <name> | gen <name> | list --config <file> | node-images [--tag <tag>] [--engine <dir>] | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 

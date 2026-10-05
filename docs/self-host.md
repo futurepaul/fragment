@@ -1274,6 +1274,83 @@ These are listed as found. Each names where it bites and what to do.
       kill); on the real engine, computers and chat 176 of 176, the killed
       microVM's computer up again in 0.5 s; on wrangler dev, placement,
       computers and chat 190 of 190.
+22. **On celld, every computer on a node that listens was started over
+    two minutes into its life.** A node's `wait` is a long poll that lasts
+    the container's life. celld bounds an outbound fetch at 120 s
+    (`CELLD_FETCH_TIMEOUT_S`), so the poll failed at 120 s, `monitor()`
+    reported an exit, and the object started the computer again: 409,
+    destroy, start. The stub came back unnoticed. Hermes lost the turn it
+    was running, its bridge's queue filled ("too many messages are waiting
+    for this agent"), and after three of these it was "won't wake: its
+    container kept stopping". workerd's fetch has no such bound, and a
+    corporate proxy may cut a quiet connection the same way.
+    - Fixed in `NodeContainer` (`#waited`): a poll cut without an answer
+      asks the node whether the container still runs, and waits on it
+      again. A refusal of the node's own, a container no longer running,
+      a node that does not answer the look, or a fourth cut in a row
+      within 5 s each is thrown, as before. Each cut is logged
+      (`waitCut`). It fired once in each long run below, and the
+      computer stayed up.
+    - A model call through the route is under the same bound on celld: a
+      model slower than 120 s to finish a call needs
+      `CELLD_FETCH_TIMEOUT_S` raised. Bonsai on the GPU took at most 7 s.
+23. **On the Docker double, Hermes never started.** The double ran each
+    container with `docker run --init`, so the image's entrypoint was PID
+    2. s6-overlay must be PID 1, and Hermes' image exited 100 at once
+    ("s6-overlay-suexec: fatal: can only run as pid 1"). In the engine's
+    guest and on Cloudflare the entrypoint is PID 1. Fixed in sandcastle
+    (branch `hermes-node`, off `node`): no `--init`. A signal the
+    entrypoint has no handler for is now dropped, as in the guest. The
+    bridge handles SIGTERM, so the stub lanes are unchanged.
+24. **A scripted tool turn on a node was over before Hermes showed its
+    step.** Hermes' gateway looks for tool progress every 0.3 s while a
+    turn runs. On a node, against the scripted model, a whole tool turn
+    took 0.1 s, so it posted no progress and no step. The lane's command
+    now takes a second, as real ones do.
+25. **The bridge read a terminal command as two steps** (on master too:
+    PR #138). Hermes shows a command as `💻 terminal`, then the command in
+    a fenced block. The bridge made each line a step, so `uname -a &&
+    nproc` was "terminal" with no arguments and a tool called "uname".
+    The block is now its header's arguments. The lane checks for one
+    terminal step naming its command; before, it only asked for a step
+    named terminal.
+26. **What a real model showed** (Bonsai-2-27B under NInfer; S3's live
+    run, below). Hermes, the bridge and the route worked with it: OpenAI
+    tool calls streamed (each call's arguments in one chunk), reasoning in
+    `reasoning_content`, usage on a last chunk with no choices, and a
+    262,144-token window for Hermes' 12,000-token prompt (25 tools). What
+    broke, or surprised:
+    - **Session titles fail on every turn.** Hermes names a chat with an
+      auxiliary call that asks for `response_format: json_schema`
+      (strict). NInfer answers 400 `response_format_not_supported`
+      ("only text"). The turn is not affected; the title is never set.
+      vLLM and llama.cpp support it. A deployment whose server does not
+      could have the route drop `response_format` by configuration, or
+      the image turn titles off. Not done.
+    - **A clarify card's "Other (type your answer)" cannot carry the
+      answer.** Hermes asks with choices and a free-text "other". The
+      chat's `prompt_response` has no text, so the bridge answers
+      "other". Hermes then asks "Type your answer:", which the bridge
+      records as a step. The person's next message queues as a new turn.
+      The asking turn ends after the bridge's watchdog ("the agent stopped
+      answering"), and the next turn's ✅ names the old message, so it
+      never ends. Needs a `prompt_response` with text for "other", and a
+      text box on the chat's card.
+    - **Writes outside `/data/hermes` are refused** (the image sets
+      `HERMES_WRITE_SAFE_ROOT`), and `/data` is root's. Asked to write
+      `/data/notes/…`, Hermes said so and offered `/data/hermes/notes/…`
+      (once), or tried `mkdir`, `sudo`, then asked where (once).
+    - **Smart approvals are the model's call.** With a real model as the
+      guardian, `mkdir -p /tmp/x && rm -rf /tmp/x` ran without a card. The
+      scripted lane's guardian always escalates.
+    - **Hermes improves itself between turns.** After a turn, its review
+      wrote a skill (`system-ops`) with several more model calls, and the
+      bridge synced it to the agent's fragment, with one sync conflict
+      kept as `SKILL.md.local-…`. Each such call is metered as a turn's.
+    - **One stream ended without a `finish_reason`**, which Hermes took as
+      a dropped stream and asked again. The cause was not found: asked
+      directly through the intercept, the route's stream ends with its
+      finish reason, the usage and `[DONE]`.
 ## The spike, on this box
 
 This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
@@ -1346,12 +1423,49 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
   - The whole run took about 25 s, the stack ready in 4.6 s.
   - Without the bridge, everything but the model call passed, and the
     agent said in the chat that the model had failed.
-- **S2 and S3:** built, but not run.
-  - Built: `sandcastle-node` (sandcastle's branch `node`, its tests and
-    clippy clean), `NodeContainer`, the egress route, libkrun at the
-    pinned commit, and the guest.
-  - Not run: the engine jails each VM as root, and building the computer
-    images needs Docker. Both are Paul's sudo.
+- **S2: run on the real engine** (2026-10-05): the computers and chat
+  sections on one node in front of this box's engine, every computer a
+  jailed microVM, 176 of 176 (found 21; sandcastle's docs/node.md,
+  Computers on the real engine).
+- **S3: done, on the scripted model and live on Bonsai** (2026-10-05;
+  branch `selfhost-hermes`, and sandcastle's `hermes-node`).
+  - The Hermes lane runs on sandcastle nodes: the images it stages are
+    built for the nodes (the double runs them in Docker; the real engine
+    loads them). The engine admits the image: its limits are 32 GiB a
+    `docker save` tar and 16 GiB a layer, and Hermes' is 1.36 GB (its
+    layers compressed; 5.5 GB unpacked). Its first load took 25 s (23 s
+    of it the VM building its disk), and later loads of the same image
+    1.2 s. `hermes-next` built in 22 s.
+  - **On the real engine (`FRAGMENT_E2E_NODES=real`, on celld): 44
+    passed, 0 failed, 0 skipped**, the section in 284 s. Reply, steps,
+    approvals, Stop, the restart mid-turn, sleep and wake with `/data`
+    restored, upgrade and rollback, a second profile, and the routine.
+    The microVM was ready in 0.35 s; Hermes followed its chat 1.1 s
+    after the wake and answered the first message in 3.2 s.
+  - On the Docker double (`two`, celld): 44 of 44, in 304 s.
+  - Found on the way: celld's 120 s fetch bound cut every node's `wait`
+    (found 22), the double's `--init` (23), the lane's 0.3 s race (24),
+    and the bridge's steps (25, on master too).
+  - **Live, on Bonsai-2-27B**: the dev stack on celld, its computers on
+    the real engine through one node, a person and a Hermes agent made
+    as the shell makes them (`makeAgent`, tier medium), driven over the
+    shell's own API. Each time is from the message to the turn's end:
+
+    | Said | Took | Steps | Juniper (Hermes on Bonsai) |
+    |---|---|---|---|
+    | its job, as the shell's first message (the computer cold: VM, `/data`, Hermes) | 8.1 s | | "Hello, Paul — I'm Juniper, a careful gardener who keeps notes on this computer; I can browse the web, run tools and code, manage files…" |
+    | What is 17 times 23? | 0.6 s | | "391" |
+    | Use your terminal to run `uname -a` and `nproc` … | 2.0 s | terminal, and "uname" (found 25) | "It's a Linux machine (kernel 6.12.91, x86_64) … in what appears to be a container …, with 2 CPU cores." |
+    | Write `/data/notes/tomatoes.md` … | 5.1 s | Writing | "I can't write there — the system blocks file writes outside the safe root (`/data/hermes`). Want me to write it to `/data/hermes/notes/tomatoes.md` instead?" |
+    | (asleep, then) Which vegetable did my note mention …? | 5.1 s | | "Your note mentioned **tomatoes**, to be watered **at dawn**." |
+    | Delete `/tmp/juniper-scratch` with `rm -rf` … | 4.1 s | terminal, and "mkdir" (found 25) | "Done — I created `/tmp/juniper-scratch` and then deleted it; `rm -rf` finished with exit code 0." |
+    | (asleep, on the fixed bridge) show the memory with `free -m` | 6.5 s | terminal `free -m` | "about 5.9 GB of RAM, of which almost all is available …" |
+    | Make `/data/hermes/garden`, write a plan, list it, show it | 6.6 s | Writing, terminal `ls -la /data/hermes/garden`, Reading | the folder, and the plan's three bullets |
+    | How many bullet points, and the second? | 4.8 s | | "Three bullet points. The second one: 'Check for new growth and any pest damage.'" |
+
+    A model call took 0.5 to 7 s (Bonsai on the GPU, about 150 tokens a
+    second, its prompt cache on the agent's session). What broke with a
+    real model, and what was fixed, is found 26.
 - **S7: done locally, against the fake engine.** The node dials
   `/api/nodes/uplink`, and a `Node` Durable Object serves the node's API
   over it (`cell/uplink.mjs`, and sandcastle's `crates/node/src/uplink`;
@@ -1549,6 +1663,26 @@ hands it to the cell as `FRAGMENT_NODE_SECRET_<ID>`:
     { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8, "secret_file": "/home/me/.config/fragment/nodes/mac.secret" } ],
   "images": { "stub": { "x86_64": "docker.io/library/fragment-stub:1", "aarch64": "docker.io/library/fragment-stub:1-arm64" } } }
 ```
+
+**Hermes on this box's node** (S3), with the agents' model on Bonsai:
+
+```sh
+# the stub and Hermes, built here and loaded into the engine (Docker: the docker group);
+# it prints the "images" to put in the node list
+cargo xtask node-images            # --tag <tag> (default local), --engine <dir> (default /var/lib/sandcastle)
+# the node, in front of the engine (its config: listen, engine, ports, egress, secret_file, platform)
+sandcastle-node serve --config ~/.local/opt/sandcastle/node.json &
+FRAGMENT_NODES_FILE=~/.local/opt/sandcastle/nodes.json FRAGMENT_COMPUTER_IMAGE=hermes \
+  FRAGMENT_MODEL_URL=http://bonsai.localhost/v1 \
+  FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}' \
+  CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+`FRAGMENT_COMPUTER_IMAGE` is the image a new computer is pinned to, one
+of the node list's (default `stub`); the shell offers a person's existing
+computer the move to it. The node's `platform` is the stack's URL, and
+the list names the node's `url` and `secret_file`. A new agent from the
+shell is then Hermes, and every one of its model calls goes to Bonsai.
 
 The e2e starts two nodes of its own with `FRAGMENT_E2E_NODES=two`: one
 that listens, and one that dials in. Each is a `sandcastle-node` in front

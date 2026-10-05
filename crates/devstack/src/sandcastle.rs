@@ -710,31 +710,60 @@ fn destroy_since(sock: &Path, since_ms: u64) -> Result<()> {
 /// Docker for its nodes to run, each tagged `fragment-<name>:e2e-<run>`:
 /// (name, tag). Every layer a build before made is a cache hit.
 pub fn build_cell_images(project: &Path, run: &str) -> Result<Vec<(String, String)>> {
+    build_images(&cell_images(project)?, &format!("e2e-{run}"))
+}
+
+/// The `containers` images a cell project's config names, by name, their
+/// paths absolute.
+pub fn cell_images(project: &Path) -> Result<serde_json::Map<String, Value>> {
     let mut config = crate::read_config(project)?;
     crate::absolute_images(&mut config, project)?;
+    let mut images = serde_json::Map::new();
+    for container in config["containers"].as_array().into_iter().flatten() {
+        for (name, image) in container["images"].as_object().into_iter().flatten() {
+            images.insert(name.clone(), image.clone());
+        }
+    }
+    Ok(images)
+}
+
+/// Our Hermes image (`images/hermes`) as a config names an image: it builds
+/// from the repo's root, as it carries the fragment CLI; `version` is its
+/// `IMAGE_VERSION` (another build of the same image, for an upgrade).
+pub fn hermes_image(version: Option<&str>) -> Value {
+    let root = crate::repo_root();
+    let mut image = json!({ "dockerfile": root.join("images/hermes/Dockerfile"), "build_context": root });
+    if let Some(v) = version {
+        image["build_vars"] = json!({ "IMAGE_VERSION": v });
+    }
+    image
+}
+
+/// `images` (name to a config's image: its dockerfile, context and build
+/// vars), built for this machine's architecture into local Docker, each
+/// tagged `fragment-<name>:<tag>`: (name, tag).
+pub fn build_images(images: &serde_json::Map<String, Value>, tag: &str) -> Result<Vec<(String, String)>> {
     let platform = match std::env::consts::ARCH {
         "x86_64" => "linux/amd64",
         "aarch64" => "linux/arm64",
         other => bail!("no computer images for {other}"),
     };
     let mut built = vec![];
-    // bounded: the images one config names
-    for container in config["containers"].as_array().into_iter().flatten() {
-        for (name, image) in container["images"].as_object().into_iter().flatten() {
-            let tag = format!("fragment-{name}:e2e-{run}");
-            let dockerfile = image["dockerfile"].as_str().context("an image names its dockerfile")?;
-            let context = image["build_context"].as_str().context("an image names its build context")?;
-            let mut cmd = Command::new("docker");
-            cmd.args(["build", "--load", "--platform", platform, "--provenance=false", "-t", &tag, "-f", dockerfile]);
-            for (k, v) in image["build_vars"].as_object().into_iter().flatten() {
-                cmd.arg("--build-arg").arg(format!("{k}={}", v.as_str().with_context(|| format!("build var {k} is a string"))?));
-            }
-            let out = cmd.arg(context).stdin(Stdio::null()).output().context("run docker build (is Docker running, and may this user reach it?)")?;
-            if !out.status.success() {
-                bail!("docker build of {name} failed: {}\n{}{}", out.status, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            }
-            built.push((name.clone(), tag));
+    // bounded: the images given
+    for (name, image) in images {
+        let tag = format!("fragment-{name}:{tag}");
+        let dockerfile = image["dockerfile"].as_str().context("an image names its dockerfile")?;
+        let context = image["build_context"].as_str().context("an image names its build context")?;
+        let mut cmd = Command::new("docker");
+        cmd.args(["build", "--load", "--platform", platform, "--provenance=false", "-t", &tag, "-f", dockerfile]);
+        for (k, v) in image["build_vars"].as_object().into_iter().flatten() {
+            cmd.arg("--build-arg").arg(format!("{k}={}", v.as_str().with_context(|| format!("build var {k} is a string"))?));
         }
+        let out = cmd.arg(context).stdin(Stdio::null()).output().context("run docker build (is Docker running, and may this user reach it?)")?;
+        if !out.status.success() {
+            bail!("docker build of {name} failed: {}\n{}{}", out.status, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        }
+        built.push((name.clone(), tag));
     }
     Ok(built)
 }

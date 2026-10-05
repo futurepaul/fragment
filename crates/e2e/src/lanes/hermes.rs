@@ -77,12 +77,9 @@ fn said_count(text: &str) -> Option<u32> {
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    // the Hermes image builds from the repo's root: it carries the fragment CLI
-    let root = fragment_devstack::repo_root();
-    let dockerfile = root.join("images/hermes/Dockerfile");
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), fragment_devstack::sandcastle::hermes_image(None));
+    images.insert("hermes-next".into(), fragment_devstack::sandcastle::hermes_image(Some("2")));
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
