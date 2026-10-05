@@ -3,12 +3,18 @@
 //! decisions 4 and 20).
 //!
 //! A deployment's configuration is a file outside the repo (JSONC, keys as
-//! in `Deployment`), its secrets files named by path in it, so anyone
-//! deploys their own without a fork. From it and the checked-in configs
-//! (`cell/wrangler.jsonc`, `agent/wrangler.jsonc`) this renders each
-//! Worker's own wrangler config under `target/deploy/<name>/`, makes the
-//! bucket and queues it names, and runs `wrangler deploy` with the secrets
-//! in a file of mode 600 that is removed after.
+//! in `Deployment`), so anyone deploys their own without a fork. Its
+//! secrets live in the account's Cloudflare Secrets Store (docs/secrets.md;
+//! `cargo xtask secret` sets them), and the config names each by its store
+//! name: the deploy reads no secret's value. It first lists the store
+//! (read-only) and refuses, before anything is built or made, when a
+//! secret the config names is not there. From the config and the
+//! checked-in configs (`cell/wrangler.jsonc`, `agent/wrangler.jsonc`) it
+//! renders each Worker's own wrangler config under `target/deploy/<name>/`,
+//! the store secrets bound by name (`secrets_store_secrets`), makes the
+//! bucket and queues it names, and runs `wrangler deploy`. Only a branch's
+//! test secret is still a Worker secret, uploaded from a file of mode 600
+//! that is removed after.
 //!
 //! A branch deployment (`--branch b`) is a complete copy beside the others
 //! in one account and zone: its Workers, Durable Objects, Workflow, queues
@@ -45,10 +51,17 @@ struct Deployment {
     fragment_suffix: Option<String>,
     /// A Cloudflare API token with DNS Edit on the zones, by path: with it,
     /// a deploy makes the proxied record its routes need when it is
-    /// missing (xtask/src/dns.rs). Without it, they are made by hand.
+    /// missing (xtask/src/dns.rs). Without it, they are made by hand. The
+    /// deploying machine's own credential, which xtask itself uses: no
+    /// Worker holds it, so it is no store secret.
     dns_token_file: Option<PathBuf>,
-    /// Files holding the secrets.
-    host_secret_file: PathBuf,
+    /// The host secret's name in the account's Secrets Store: 32 random
+    /// bytes or more (`cargo xtask secret gen`), which seal every value at
+    /// rest. Rotated by name, never in place (docs/secrets.md).
+    host_secret: String,
+    /// The host secret before a rotation, by name: bound while values it
+    /// sealed are resealed under `host_secret`.
+    host_secret_previous: Option<String>,
     codestorage: CodeStorage,
     workos: WorkOs,
     /// Who may grant credit, set plans, and release usernames (npubs).
@@ -65,7 +78,8 @@ struct Deployment {
     /// The provider catalog a computer's swap offers (decisions 22 and 37;
     /// `fragment_core::catalog`): each row a connection, an operator key or
     /// an own key, with its hosts, placements, environment variables and
-    /// (an operator key's) price, and an operator key's `key_file`.
+    /// (an operator key's) price, and an operator key's `key`: its name in
+    /// the store.
     #[serde(default)]
     providers: Vec<Value>,
     /// The price book's version: raise it with every change to a key's
@@ -75,7 +89,49 @@ struct Deployment {
     /// the file of a secret of 32 bytes or more, with which the hosted e2e
     /// signs its people in and pulls its levers there. Only a `--branch`
     /// deploy takes it: a deployment of its own (production) is refused.
+    /// A file, not a store secret: the hosted e2e runner sends its value,
+    /// and a store gives no value back.
     test_secret_file: Option<PathBuf>,
+}
+
+/// The fields a config named before the deployment's secrets moved to its
+/// Secrets Store (2026-10-05), each by where it sat and what replaced it:
+/// a config that still names one is refused, saying so (a hard cut: no
+/// file is read in its place).
+const REPLACED_FIELDS: [(&str, &str, &str); 4] = [
+    ("", "host_secret_file", "host_secret"),
+    ("codestorage", "private_key_file", "private_key"),
+    ("workos", "client_id_file", "client_id"),
+    ("workos", "api_key_file", "api_key"),
+];
+
+/// Refuses a config (its JSON) that names a field the store replaced
+/// (`REPLACED_FIELDS`, and a provider's `key_file`), naming its
+/// replacement and the command that moves the file it names into the store.
+fn refuse_replaced(v: &Value, config: &Path) -> Result<()> {
+    let moved = |at: String, instead: String, file: &Value| {
+        let file = file.as_str().unwrap_or("<its file>");
+        anyhow::anyhow!(
+            "{at} is gone: the deployment's secrets live in its Cloudflare Secrets Store now (docs/secrets.md). Move the file in once, \
+             `cargo xtask secret set <name> --config {} --from-file {file}`, and name that secret as {instead}",
+            config.display()
+        )
+    };
+    for (within, field, instead) in REPLACED_FIELDS {
+        let object = if within.is_empty() { Some(v) } else { v.get(within) };
+        if let Some(file) = object.and_then(|o| o.get(field)) {
+            let at = if within.is_empty() { field.to_string() } else { format!("{within}.{field}") };
+            let instead = if within.is_empty() { instead.to_string() } else { format!("{within}.{instead}") };
+            return Err(moved(at, instead, file));
+        }
+    }
+    for row in v["providers"].as_array().into_iter().flatten() {
+        if let Some(file) = row.get("key_file") {
+            let name = row["name"].as_str().unwrap_or("?");
+            return Err(moved(format!("providers: {name}'s key_file"), "its key".to_string(), file));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -102,34 +158,35 @@ struct Image {
     build_vars: BTreeMap<String, String>,
 }
 
-/// The deployment's catalog, and the file each operator key's value is
-/// in: a row's `key_file` is the deploy's (its secret), the rest the
+/// The deployment's catalog, and the store secret each operator key's
+/// value is in: a row's `key` is the deploy's (it binds it), the rest the
 /// cell's (`FRAGMENT_PROVIDERS`). An operator key names one; no other row
 /// may.
-fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(String, PathBuf)>)> {
+fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Vec<(String, String)>)> {
     let mut rows = vec![];
-    let mut key_files = vec![];
+    let mut keys = vec![];
     for row in &d.providers {
         let mut row = row.clone();
         let name = row["name"].as_str().unwrap_or("?").to_string();
-        let key_file = row.as_object_mut().and_then(|o| o.remove("key_file"));
-        match (row["kind"].as_str(), key_file) {
-            (Some("operator"), Some(Value::String(f))) => key_files.push((name.clone(), PathBuf::from(f))),
-            (Some("operator"), _) => bail!("providers: the operator key {name} names its key_file"),
-            (_, Some(_)) => bail!("providers: {name} is no operator key, so it names no key_file"),
+        let key = row.as_object_mut().and_then(|o| o.remove("key"));
+        match (row["kind"].as_str(), key) {
+            (Some("operator"), Some(Value::String(k))) => keys.push((name.clone(), k)),
+            (Some("operator"), _) => bail!("providers: the operator key {name} names its key (its secret's name in the store)"),
+            (_, Some(_)) => bail!("providers: {name} is no operator key, so it names no key"),
             (_, None) => {}
         }
         rows.push(serde_json::from_value(row).with_context(|| format!("providers: {name}"))?);
     }
     let catalog = fragment_core::catalog::Catalog::of(rows).map_err(|e| anyhow::anyhow!("providers: {e}"))?;
-    Ok((catalog, key_files))
+    Ok((catalog, keys))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeStorage {
     org: String,
-    private_key_file: PathBuf,
+    /// The org's signing key (PKCS#8 P-256, in PEM): its name in the store.
+    private_key: String,
     /// The API base (default `https://api.<org>.code.storage`).
     api: Option<String>,
 }
@@ -137,20 +194,106 @@ struct CodeStorage {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkOs {
-    client_id_file: PathBuf,
-    api_key_file: PathBuf,
+    /// The environment's client id and API key: their names in the store.
+    client_id: String,
+    api_key: String,
+}
+
+/// The store secrets the deployment's Workers are bound to, by name.
+fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
+    let (_, operator_keys) = catalog_of(d)?;
+    Ok(devstack::store::Bound {
+        host_secret: d.host_secret.clone(),
+        host_secret_previous: d.host_secret_previous.clone(),
+        codestorage_key: d.codestorage.private_key.clone(),
+        workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
+        operator_keys,
+    })
+}
+
+/// Each store secret the config names, with the field that names it.
+fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
+    let mut named = vec![("host_secret".to_string(), b.host_secret.as_str())];
+    if let Some(previous) = &b.host_secret_previous {
+        named.push(("host_secret_previous".into(), previous.as_str()));
+    }
+    named.push(("codestorage.private_key".into(), b.codestorage_key.as_str()));
+    if let Some((client, key)) = &b.workos {
+        named.push(("workos.client_id".into(), client.as_str()));
+        named.push(("workos.api_key".into(), key.as_str()));
+    }
+    for (provider, name) in &b.operator_keys {
+        named.push((format!("providers: {provider}'s key"), name.as_str()));
+    }
+    named
+}
+
+/// Every name the config gives a store secret is one (the store's
+/// characters, `devstack::store::valid_name`), and the host secret and the
+/// one before it are two.
+fn check_names(b: &devstack::store::Bound) -> Result<()> {
+    for (field, name) in named_secrets(b) {
+        if !devstack::store::valid_name(name) {
+            let path = if name.contains('/') || name.starts_with('~') {
+                " It looks like a file's path: the secrets are no files now. Move the file into the store (cargo xtask secret set <name> --config <file> --from-file <path>) and name it here"
+            } else {
+                ""
+            };
+            bail!("{field} is {name:?}, which is no Secrets Store secret's name (1-{} of A-Z, a-z, 0-9, _ and -).{path}", devstack::store::NAME_MAX_BYTES);
+        }
+    }
+    if b.host_secret_previous.as_deref() == Some(b.host_secret.as_str()) {
+        bail!("host_secret_previous names the host secret itself: a rotation names the new one as host_secret and the one before as host_secret_previous");
+    }
+    Ok(())
+}
+
+/// What a deploy says when the store lacks secrets the config names (or
+/// there is no store): each one, the field naming it, and the command that
+/// sets it.
+fn refusal(config: &Path, store: Option<&devstack::store::AccountStore>, missing: &[(String, &str)]) -> String {
+    assert!(!missing.is_empty(), "a refusal names what is missing");
+    let head = match store {
+        Some(s) => format!("the account's Secrets Store {} ({}) lacks {} of the secrets this config names", s.name, s.id, missing.len()),
+        None => "the account has no Secrets Store yet (the first `cargo xtask secret set` makes it), so it lacks every secret this config names".to_string(),
+    };
+    format!(
+        "{head}; nothing was built or deployed. Set each, then deploy again:\n{}\n(set asks for the value in a terminal, reads it from standard input, or takes --from-file <path>; `cargo xtask secret gen <name>` makes a host secret; docs/secrets.md)",
+        set_commands(config, missing).join("\n")
+    )
+}
+
+/// A line for each missing secret: the field naming it, and the command
+/// that sets it.
+pub(crate) fn set_commands<S: AsRef<str>>(config: &Path, missing: &[(String, S)]) -> Vec<String> {
+    let width = missing.iter().map(|(field, _)| field.len()).max().unwrap_or(0);
+    missing.iter().map(|(field, name)| format!("  {field:width$}  cargo xtask secret set {} --config {}", name.as_ref(), config.display())).collect()
+}
+
+/// The account's store, holding every secret `bound` names: read-only,
+/// before anything is built or made. Refused (`refusal`) otherwise.
+fn preflight(tools: &devstack::Tools, d: &Deployment, config: &Path, bound: &devstack::store::Bound) -> Result<devstack::store::AccountStore> {
+    let named = named_secrets(bound);
+    let Some(store) = devstack::store::account_store(tools, &d.account_id)? else { bail!("{}", refusal(config, None, &named)) };
+    let listed = devstack::store::list(tools, &devstack::store::Store::Account { account_id: &d.account_id, store_id: &store.id })?;
+    let missing = devstack::store::missing(&named, &listed);
+    if !missing.is_empty() {
+        bail!("{}", refusal(config, Some(&store), &missing));
+    }
+    Ok(store)
 }
 
 use devstack::valid_branch;
 
-fn expand(path: &Path) -> PathBuf {
+pub(crate) fn expand(path: &Path) -> PathBuf {
     match path.strip_prefix("~") {
         Ok(rest) => PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(rest),
         Err(_) => path.to_path_buf(),
     }
 }
 
-/// A secret's value, read from its file (never printed).
+/// A local file's secret (the DNS token's, a branch's test secret's; never
+/// printed): the two the deploying machine holds itself.
 fn read_secret(path: &Path) -> Result<String> {
     let path = expand(path);
     let text = fs::read_to_string(&path).with_context(|| format!("read the secret file {}", path.display()))?;
@@ -245,15 +388,44 @@ fn read_test_secret(file: &Path) -> Result<String> {
 }
 
 fn load(config: &Path) -> Result<Deployment> {
-    let text = fs::read_to_string(config).with_context(|| format!("read {}", config.display()))?;
-    let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))?;
+    let v = read_json(config)?;
+    refuse_replaced(&v, config).with_context(|| format!("check {}", config.display()))?;
+    let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
 }
 
+/// A config file's JSON (its comments dropped), unchecked.
+fn read_json(config: &Path) -> Result<Value> {
+    let text = fs::read_to_string(config).with_context(|| format!("read {}", config.display()))?;
+    serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))
+}
+
+/// What `cargo xtask secret` takes from a deployment's config: read as
+/// leniently as a migration needs (a config still naming its secrets'
+/// files works, to move them into the store).
+pub(crate) struct SecretsOf {
+    pub account_id: String,
+    /// The host secret's names (`host_secret`, `host_secret_previous`):
+    /// secrets never set again in place.
+    pub host_secrets: Vec<String>,
+    /// Each store secret the config names, with the field naming it; or
+    /// why the config does not load as a deploy loads it.
+    pub named: Result<Vec<(String, String)>, String>,
+}
+
+pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
+    let v = read_json(config)?;
+    let account_id = v["account_id"].as_str().filter(|a| !a.is_empty()).with_context(|| format!("{} names no account_id", config.display()))?.to_string();
+    let host_secrets = ["host_secret", "host_secret_previous"].iter().filter_map(|k| v[*k].as_str().map(str::to_string)).collect();
+    let named = load(config).and_then(|d| bound(&d)).map(|b| named_secrets(&b).into_iter().map(|(f, n)| (f, n.to_string())).collect()).map_err(|e| format!("{e:#}"));
+    Ok(SecretsOf { account_id, host_secrets, named })
+}
+
 /// What the cell would refuse at its first request, refused before a
-/// deploy: the provider catalog, and a default image it has.
+/// deploy: the provider catalog, a default image it has, and its store
+/// secrets' names.
 fn checked(d: Deployment) -> Result<Deployment> {
-    catalog_of(&d)?;
+    check_names(&bound(&d)?)?;
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -324,26 +496,72 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     let (config, branch) = args(rest)?;
     let d = load(&config)?;
     let n = names(&d, branch.as_deref())?;
-    // every secret is read before anything is built or made
-    let host_secret = read_secret(&d.host_secret_file)?;
-    let org_key = read_secret(&d.codestorage.private_key_file)?;
-    let workos_client = read_secret(&d.workos.client_id_file)?;
-    let workos_key = read_secret(&d.workos.api_key_file)?;
+    // the two local files are read before anything is built or made
     let dns_token = d.dns_token_file.as_deref().map(read_secret).transpose()?;
     let test_secret = test_secret_file(&d, branch.as_deref())?.map(read_test_secret).transpose()?;
     if let Some(p) = &d.default_plan {
         anyhow::ensure!(matches!(p.as_str(), "guest" | "seat" | "seat_always_on"), "default_plan is guest, seat or seat_always_on, not {p:?}");
     }
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
-    let (catalog, key_files) = catalog_of(&d)?;
-    let operator_keys: Vec<(String, String)> = key_files.iter().map(|(name, file)| Ok((fragment_core::catalog::key_secret_name(name), read_secret(file)?))).collect::<Result<_>>()?;
+    let bound = bound(&d)?;
     let tools = devstack::Tools::locate()?;
+    // and every store secret the Workers are bound to is there (read-only)
+    let store = preflight(&tools, &d, &config, &bound)?;
+    println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     crate::build()?;
     let deploy_id = git_head()?;
     let dir = devstack::repo_root().join("target/deploy").join(&n.cell);
     fs::create_dir_all(&dir)?;
-    let root = devstack::repo_root();
+    let (agent, cell) = worker_configs(&d, &n, &store.id, &deploy_id, &devstack::repo_root())?;
+    let agent_config = dir.join("agent.json");
+    fs::write(&agent_config, serde_json::to_string_pretty(&agent)?)?;
+    let cell_config = dir.join("cell.json");
+    fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
+    let platform_url = format!("https://{}", n.platform_host);
 
+    println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
+    match &dns_token {
+        Some(token) => crate::dns::ensure(token, &d.account_id, &n.dns)?,
+        None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
+    }
+    ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
+    for q in [&n.dead, &n.deliveries, &n.ledger] {
+        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
+    }
+    // its secrets are bindings in its config: no Worker secret
+    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&agent_config))?;
+    let mut deploy_cell = wrangler(&tools, &d.account_id)?;
+    deploy_cell.arg("deploy").arg("-c").arg(&cell_config);
+    // a preview's levers (cell/src/levers.rs), a branch's alone (checked
+    // above), are the one Worker secret left
+    let test_secrets = match &test_secret {
+        Some(secret) => {
+            assert!(n.label_suffix.is_some(), "only a branch deployment takes a test secret");
+            let file = SecretFile::write(dir.join("cell-secrets.json"), &json!({ "FRAGMENT_TEST_SECRET": secret }))?;
+            deploy_cell.arg("--secrets-file").arg(&file.0);
+            Some(file)
+        }
+        None => None,
+    };
+    crate::run(&mut deploy_cell)?;
+    drop(test_secrets);
+    println!("deployed {deploy_id}:");
+    println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
+    if test_secret.is_some() {
+        println!("  test levers   on (test_secret_file): cargo xtask e2e --hosted --config <this config> --branch {}", branch.as_deref().unwrap_or(""));
+    }
+    println!("  fragments     https://<label>--<username>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
+    println!("  check         curl -sI {platform_url}/healthz | grep x-fragment-deploy");
+    Ok(())
+}
+
+/// The agents' Worker's config and the platform Worker's, rendered from
+/// the deployment's and the checked-in ones (`root`'s `agent/` and
+/// `cell/`), their store secrets bound by name in the store `store_id`.
+/// No value of a secret is in either.
+fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<(Value, Value)> {
+    let bound = bound(d)?;
+    let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
     let mut agent = devstack::read_config(&root.join("agent"))?;
     agent["name"] = json!(n.agent);
@@ -352,8 +570,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     agent["preview_urls"] = json!(false);
     agent["observability"] = json!({ "enabled": true });
     agent["vars"] = json!({ "FRAGMENT_API": platform_url, "AGENT_URL": platform_url });
-    let agent_config = dir.join("agent.json");
-    fs::write(&agent_config, serde_json::to_string_pretty(&agent)?)?;
+    agent["secrets_store_secrets"] = devstack::store::bindings_json(store_id, &bound.agent());
 
     let mut cell = devstack::read_config(&root.join("cell"))?;
     let c = cell.as_object_mut().context("cell/wrangler.jsonc is an object")?;
@@ -407,7 +624,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         "FRAGMENT_HOST_SUFFIX": n.suffix,
         "FRAGMENT_PLATFORM_URL": platform_url,
         "CODESTORAGE_ORG": d.codestorage.org,
-        "WORKOS_CLIENT_ID": workos_client,
     });
     let v = vars.as_object_mut().expect("an object");
     if let Some(s) = &n.label_suffix {
@@ -438,45 +654,9 @@ pub fn deploy(rest: &[String]) -> Result<()> {
         v.insert("FRAGMENT_PRICE_BOOK_VERSION".into(), json!(version.to_string()));
     }
     c.insert("vars".into(), vars);
-    let cell_config = dir.join("cell.json");
-    fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
-
-    println!("deploying {} ({deploy_id}) to {platform_url}", n.cell);
-    match &dns_token {
-        Some(token) => crate::dns::ensure(token, &d.account_id, &n.dns)?,
-        None => println!("dns: no dns_token_file, so these must be proxied by hand: {}", n.dns.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")),
-    }
-    ensure(wrangler(&tools, &d.account_id)?.args(["r2", "bucket", "create", &n.bucket]), "the bucket")?;
-    for q in [&n.dead, &n.deliveries, &n.ledger] {
-        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
-    }
-    let agent_secrets = SecretFile::write(dir.join("agent-secrets.json"), &json!({ "FRAGMENT_HOST_SECRET": host_secret }))?;
-    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&agent_config).arg("--secrets-file").arg(&agent_secrets.0))?;
-    drop(agent_secrets);
-    let mut secrets = json!({
-        "FRAGMENT_HOST_SECRET": host_secret,
-        "CODESTORAGE_PRIVATE_KEY": org_key,
-        "WORKOS_API_KEY": workos_key,
-    });
-    for (name, key) in operator_keys {
-        secrets[name] = json!(key);
-    }
-    // a preview's levers (cell/src/levers.rs): a branch's alone, checked above
-    if let Some(secret) = &test_secret {
-        assert!(n.label_suffix.is_some(), "only a branch deployment takes a test secret");
-        secrets["FRAGMENT_TEST_SECRET"] = json!(secret);
-    }
-    let cell_secrets = SecretFile::write(dir.join("cell-secrets.json"), &secrets)?;
-    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&cell_config).arg("--secrets-file").arg(&cell_secrets.0))?;
-    drop(cell_secrets);
-    println!("deployed {deploy_id}:");
-    println!("  the platform  {platform_url}/  (sign-in redirect: {platform_url}/auth/callback)");
-    if test_secret.is_some() {
-        println!("  test levers   on (test_secret_file): cargo xtask e2e --hosted --config <this config> --branch {}", branch.as_deref().unwrap_or(""));
-    }
-    println!("  fragments     https://<label>--<username>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
-    println!("  check         curl -sI {platform_url}/healthz | grep x-fragment-deploy");
-    Ok(())
+    anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
+    c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
+    Ok((agent, cell))
 }
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
@@ -551,9 +731,10 @@ mod tests {
             platform_host: platform.map(str::to_string),
             fragment_suffix: suffix.map(str::to_string),
             dns_token_file: None,
-            host_secret_file: "h".into(),
-            codestorage: CodeStorage { org: "o".into(), private_key_file: "k".into(), api: None },
-            workos: WorkOs { client_id_file: "c".into(), api_key_file: "a".into() },
+            host_secret: "fragment-host-secret".into(),
+            host_secret_previous: None,
+            codestorage: CodeStorage { org: "o".into(), private_key: "fragment-codestorage-private-key".into(), api: None },
+            workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
             operators: vec![],
             ai_gateway: None,
             default_plan: None,
@@ -675,20 +856,155 @@ mod tests {
 
     /// The example and the hosted e2e's configs parse and check, each with
     /// the platform's catalog: Google, and the four operator keys at their
-    /// list prices, each key's file named.
+    /// list prices, each key's store secret named; and every name they give
+    /// a secret is the one dev and the e2e bind locally
+    /// (`store::Bound::conventional`), so the three never drift apart.
     #[test]
     fn the_example_and_e2e_configs_parse() {
         for file in ["deploy/example.jsonc", "deploy/e2e.jsonc"] {
-            let text = fs::read_to_string(devstack::repo_root().join(file)).unwrap();
-            let d: Deployment = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+            let path = devstack::repo_root().join(file);
+            let d = load(&path).unwrap();
             assert!(names(&d, Some("dev")).is_ok(), "{file}");
-            let d = checked(d).unwrap();
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
-            let (catalog, files) = catalog_of(&d).unwrap();
+            let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
             assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
-            assert_eq!(files.len(), 4, "{file}: each operator key's file");
+            assert_eq!(keys.len(), 4, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
+            let conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);
+            assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
+        }
+    }
+
+    /// The store's hard cut: a config that still names a secret's file is
+    /// refused, naming what replaced the field and the command that moves
+    /// the file in; nothing reads the file instead.
+    #[test]
+    fn a_config_naming_a_secrets_file_is_refused() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
+        let fresh: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let refused = |edit: &dyn Fn(&mut Value), test: &str| {
+            let mut v = fresh.clone();
+            edit(&mut v);
+            load(&config_file(test, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default()
+        };
+        let r = refused(&|v| v["host_secret_file"] = json!("~/.config/fragment/secrets/host-secret"), "old-host");
+        assert!(r.contains("host_secret_file is gone") && r.contains("as host_secret") && r.contains("--from-file ~/.config/fragment/secrets/host-secret"), "{r}");
+        let r = refused(&|v| v["codestorage"]["private_key_file"] = json!("~/k.pem"), "old-codestorage");
+        assert!(r.contains("codestorage.private_key_file is gone") && r.contains("as codestorage.private_key"), "{r}");
+        let r = refused(&|v| v["workos"]["client_id_file"] = json!("~/c"), "old-workos-client");
+        assert!(r.contains("workos.client_id_file is gone") && r.contains("as workos.client_id"), "{r}");
+        let r = refused(&|v| v["workos"]["api_key_file"] = json!("~/a"), "old-workos-key");
+        assert!(r.contains("workos.api_key_file is gone") && r.contains("as workos.api_key"), "{r}");
+        let r = refused(&|v| v["providers"][1]["key_file"] = json!("~/p"), "old-provider");
+        assert!(r.contains("perplexity's key_file is gone") && r.contains("as its key"), "{r}");
+        // and a config of the old shape whole (no new fields) says the same
+        let r = refused(
+            &|v| {
+                let o = v.as_object_mut().unwrap();
+                o.remove("host_secret");
+                o.insert("host_secret_file".into(), json!("~/h"));
+            },
+            "old-whole",
+        );
+        assert!(r.contains("host_secret_file is gone"), "{r}");
+        assert!(load(&config_file("fresh", &fresh)).is_ok());
+    }
+
+    /// Every name a config gives a store secret is one: a path (the old
+    /// fields' values pasted into the new ones) or anything outside the
+    /// store's characters is refused with its field, and a rotation names
+    /// two host secrets, not one twice.
+    #[test]
+    fn a_name_that_is_no_store_name_is_refused() {
+        let refused = |edit: &dyn Fn(&mut Deployment)| {
+            let mut d = deployment(None, None);
+            edit(&mut d);
+            checked(d).err().map(|e| e.to_string()).unwrap_or_default()
+        };
+        let r = refused(&|d| d.host_secret = "~/.config/fragment/secrets/host-secret".into());
+        assert!(r.contains("host_secret is \"~/.config") && r.contains("looks like a file's path"), "{r}");
+        let r = refused(&|d| d.workos.api_key = "workos api key".into());
+        assert!(r.contains("workos.api_key is \"workos api key\"") && !r.contains("file's path"), "{r}");
+        let r = refused(&|d| d.codestorage.private_key = String::new());
+        assert!(r.contains("codestorage.private_key"), "{r}");
+        let r = refused(&|d| d.host_secret_previous = Some("fragment-host-secret".into()));
+        assert!(r.contains("names the host secret itself"), "{r}");
+        let r = refused(&|d| d.providers = vec![json!({ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"], "key": "x/y" })]);
+        assert!(r.contains("providers: xai's key is \"x/y\""), "{r}");
+        assert!(refused(&|d| d.host_secret_previous = Some("fragment-host-secret-2026-09".into())).is_empty(), "a rotation's two names");
+    }
+
+    /// The preflight: a store holding every secret the config names lets
+    /// the deploy on; one lacking some is refused, naming each missing
+    /// secret, its field, and the command that sets it; no store at all is
+    /// refused the same way, every secret named.
+    #[test]
+    fn the_preflight_names_each_missing_secret() {
+        let mut d = deployment(None, None);
+        d.host_secret_previous = Some("fragment-host-secret-old".into());
+        d.providers = vec![json!({ "name": "xai", "kind": "operator", "hosts": ["api.x.ai"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" })];
+        let b = bound(&checked(d).unwrap()).unwrap();
+        let named = named_secrets(&b);
+        let listed = |names: &[&str]| names.iter().map(|n| devstack::store::Listed { name: n.to_string(), id: "0".into(), created: String::new(), modified: String::new() }).collect::<Vec<_>>();
+        let all = ["fragment-host-secret", "fragment-host-secret-old", "fragment-codestorage-private-key", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-xai-api-key", "another-projects-secret"];
+        assert!(devstack::store::missing(&named, &listed(&all)).is_empty(), "every one there: the deploy goes on");
+
+        let missing = devstack::store::missing(&named, &listed(&all[..4]));
+        let config = Path::new("/home/p/.config/finite-next/e2e.jsonc");
+        let store = devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() };
+        let said = refusal(config, Some(&store), &missing);
+        assert!(said.starts_with("the account's Secrets Store fragment (0f0e) lacks 2 of the secrets this config names; nothing was built or deployed"), "{said}");
+        assert!(said.contains("workos.api_key        cargo xtask secret set fragment-workos-api-key --config /home/p/.config/finite-next/e2e.jsonc"), "{said}");
+        assert!(said.contains("providers: xai's key  cargo xtask secret set fragment-xai-api-key --config /home/p/.config/finite-next/e2e.jsonc"), "{said}");
+        assert!(!said.contains("fragment-host-secret "), "what is there is not named: {said}");
+
+        let said = refusal(config, None, &named);
+        assert!(said.starts_with("the account has no Secrets Store yet"), "{said}");
+        assert_eq!(said.matches("cargo xtask secret set ").count(), named.len(), "{said}");
+    }
+
+    /// The Workers' configs a deploy writes: every secret a binding to its
+    /// store secret by name (the agents' Worker the host secrets alone),
+    /// no secret's value and no old name anywhere in either, and the WorkOS
+    /// client id no longer a variable.
+    #[test]
+    fn the_deploy_binds_its_secrets_by_name() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["host_secret_previous"] = json!("fragment-host-secret-old");
+        let d = load(&config_file("bindings", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        let (agent, cell) = worker_configs(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
+        assert_eq!(
+            agent["secrets_store_secrets"],
+            json!([
+                { "binding": "HOST_SECRET", "store_id": "0f0e0d0c", "secret_name": "fragment-host-secret" },
+                { "binding": "HOST_SECRET_PREVIOUS", "store_id": "0f0e0d0c", "secret_name": "fragment-host-secret-old" },
+            ])
+        );
+        let bound: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
+        assert_eq!(
+            bound,
+            [
+                ("HOST_SECRET", "fragment-host-secret"),
+                ("HOST_SECRET_PREVIOUS", "fragment-host-secret-old"),
+                ("CODESTORAGE_KEY", "fragment-codestorage-private-key"),
+                ("WORKOS_CLIENT", "fragment-workos-client-id"),
+                ("WORKOS_KEY", "fragment-workos-api-key"),
+                ("OPERATOR_KEY_PERPLEXITY", "fragment-perplexity-api-key"),
+                ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
+                ("OPERATOR_KEY_XAI", "fragment-xai-api-key"),
+                ("OPERATOR_KEY_ELEVENLABS", "fragment-elevenlabs-api-key"),
+            ]
+        );
+        assert!(cell["secrets_store_secrets"].as_array().unwrap().iter().all(|b| b["store_id"] == "0f0e0d0c"));
+        assert!(cell["vars"].get("WORKOS_CLIENT_ID").is_none(), "the client id is a binding now");
+        let providers = cell["vars"]["FRAGMENT_PROVIDERS"].as_str().unwrap();
+        assert!(bound[5..].iter().all(|(_, name)| !providers.contains(name)), "a key's store name is the deploy's, not the cell's");
+        let whole = format!("{agent}{cell}");
+        for old in ["FRAGMENT_HOST_SECRET", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "FRAGMENT_KEY_", "key_file", "secrets/"] {
+            assert!(!whole.contains(old), "{old} is in a rendered config");
         }
     }
 
@@ -703,7 +1019,7 @@ mod tests {
         assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
     }
 
-    /// The provider catalog, its key files, and a default image are
+    /// The provider catalog, its keys' store names, and a default image are
     /// checked before anything deploys.
     #[test]
     fn a_bad_catalog_or_image_is_refused_before_a_deploy() {
@@ -717,17 +1033,17 @@ mod tests {
             d.providers = rows;
             d
         };
-        let d = with(vec![row(json!({ "key_file": "~/.config/fragment/secrets/perplexity-api-key" }))]);
-        let (catalog, files) = catalog_of(&d).unwrap();
+        let d = with(vec![row(json!({ "key": "fragment-perplexity-api-key" }))]);
+        let (catalog, keys) = catalog_of(&d).unwrap();
         assert_eq!(catalog.get("perplexity").unwrap().price.map(|p| (p.micros, p.per)), Some((5_000_000, 1_000)), "the price book's list price");
-        assert_eq!(files, vec![("perplexity".to_string(), PathBuf::from("~/.config/fragment/secrets/perplexity-api-key"))]);
-        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("key_file"), "the key's file is the deploy's, never the cell's");
+        assert_eq!(keys, vec![("perplexity".to_string(), "fragment-perplexity-api-key".to_string())]);
+        assert!(!serde_json::to_string(catalog.providers()).unwrap().contains("fragment-perplexity-api-key"), "the key's store name is the deploy's, never the cell's");
         assert!(checked(d).is_ok());
-        assert!(checked(with(vec![row(json!({}))])).is_err(), "an operator key names its file");
-        assert!(checked(with(vec![row(json!({ "key_file": "k", "name": "Perplexity" }))])).is_err());
-        assert!(checked(with(vec![row(json!({ "key_file": "k", "hosts": ["localhost"] }))])).is_err());
-        let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key_file": "k" });
-        assert!(checked(with(vec![google])).is_err(), "a connection has no key file");
+        assert!(checked(with(vec![row(json!({}))])).is_err(), "an operator key names its store secret");
+        assert!(checked(with(vec![row(json!({ "key": "k", "name": "Perplexity" }))])).is_err());
+        assert!(checked(with(vec![row(json!({ "key": "k", "hosts": ["localhost"] }))])).is_err());
+        let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key": "k" });
+        assert!(checked(with(vec![google])).is_err(), "a connection has no key");
         let mut d = deployment(None, None);
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new() });
         assert!(checked(d).is_err());

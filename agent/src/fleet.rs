@@ -41,9 +41,9 @@ pub struct Signer {
 }
 
 impl Signer {
-    pub fn sign(&self, what: Sign<'_>) -> anyhow::Result<String> {
+    pub async fn sign(&self, what: Sign<'_>) -> anyhow::Result<String> {
         let sealed = kv_get(&self.sql, "secret")?.context("the agent has no key")?;
-        let signed = keys::nostr_sign(&self.env, &self.scope, &sealed, what)?;
+        let signed = keys::nostr_sign(&self.env, &self.scope, &sealed, what).await?;
         if let Some(fresh) = signed.resealed {
             kv_set(&self.sql, "secret", fresh)?;
         }
@@ -69,10 +69,10 @@ impl Fleet {
     /// A path's URL and its signature over `body`, for a call made by hand
     /// and read as it streams (model.rs): `for` is in the URL when the
     /// fleet acts for someone.
-    pub fn signed(&self, method: &str, path: &str, body: &[u8]) -> anyhow::Result<(String, String)> {
+    pub async fn signed(&self, method: &str, path: &str, body: &[u8]) -> anyhow::Result<(String, String)> {
         let url = self.url(path)?;
         let payload = (!body.is_empty()).then(|| hex::encode(Sha256::digest(body)));
-        let auth = self.signer.sign(Sign::Header { method, url: &url, payload })?;
+        let auth = self.signer.sign(Sign::Header { method, url: &url, payload }).await?;
         Ok((url, auth))
     }
 
@@ -86,7 +86,7 @@ impl Fleet {
         };
         let headers = Headers::new();
         let payload = (!bytes.is_empty()).then(|| hex::encode(Sha256::digest(&bytes)));
-        let auth = self.signer.sign(Sign::Header { method: method.as_ref(), url: &url, payload })?;
+        let auth = self.signer.sign(Sign::Header { method: method.as_ref(), url: &url, payload }).await?;
         headers.set("authorization", &auth).map_err(|e| anyhow!("{e}"))?;
         let mut init = RequestInit::new();
         init.with_method(method);

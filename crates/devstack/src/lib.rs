@@ -1,7 +1,9 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
-//! (`cell/`) and the agents' Worker (`agent/`) together, with each one's
-//! variables and secrets rendered into its `.dev.vars`. `xtask dev` runs it
-//! in the foreground; the e2e starts, crashes, and restarts it.
+//! (`cell/`) and the agents' Worker (`agent/`) together, each one's
+//! variables rendered into its `.dev.vars` and its secrets seeded into
+//! wrangler's local Secrets Store, bound by name as a deploy binds them
+//! (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
+//! crashes, and restarts it.
 
 use std::fs;
 use std::io::Write;
@@ -16,6 +18,7 @@ use anyhow::{bail, Context, Result};
 
 pub mod node;
 mod node_release;
+pub mod store;
 pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
@@ -159,18 +162,38 @@ pub fn absolute_images(config: &mut serde_json::Value, from: &Path) -> Result<()
 /// instead (`FRAGMENT_AI_URL`), and the cell never reads the binding then.
 const REMOTE_ONLY_BINDINGS: [&str; 1] = ["ai"];
 
-/// The project's config as a local node runs it: `wrangler.local.jsonc`,
-/// beside its own (so its paths resolve the same), less the remote-only
-/// bindings.
-fn local_config(project: &Path) -> Result<PathBuf> {
+/// Where a project's config, as a local node runs it, is written
+/// (`write_local_config`): beside its own, so its paths resolve the same.
+pub fn local_config(project: &Path) -> PathBuf {
+    project.join("wrangler.local.jsonc")
+}
+
+/// The project's config as a local node runs it (`local_config`): less the
+/// remote-only bindings, and its secrets bound by name (`secrets`, each a
+/// binding and its secret's name) in wrangler's local store, as a deploy
+/// binds them in the account's.
+fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
     }
-    let path = project.join("wrangler.local.jsonc");
+    anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
+    obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
+    let path = local_config(project);
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
     Ok(path)
+}
+
+/// Discards a project's local state (its Durable Objects, R2, Workflows,
+/// queues, and the local store's secrets): before its fleet is configured,
+/// which seeds the store again.
+pub fn clear_state(project: &Path) -> Result<()> {
+    let state = state_dir(project);
+    if state.exists() {
+        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    }
+    Ok(())
 }
 
 /// A copy of the built agent project at `dir`.
@@ -251,10 +274,13 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
 }
 
 /// What a local deployment is configured with. The cell reads its
-/// settings as Worker variables and its keys as Worker secrets
-/// (cell/src/keys.rs); under `wrangler dev` both come from `.dev.vars`
-/// (mode 600). A dev or test deployment points code.storage at the fake in
-/// `crates/fakes`.
+/// settings as Worker variables, from `.dev.vars` (mode 600) under
+/// `wrangler dev`, and its keys from Secrets Store bindings
+/// (cell/src/keys.rs), which a local node reads from wrangler's local
+/// store in its state directory: `configure` seeds it with these values,
+/// under the names `store::Bound::conventional` gives them, and binds
+/// them as a deploy does. A dev or test deployment points code.storage at
+/// the fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -324,14 +350,33 @@ pub struct WorkOsVars {
 }
 
 impl Fleet {
-    /// Renders the deployment's settings and secrets into the project's
-    /// `.dev.vars`.
-    pub fn configure(&self, project: &Path) -> Result<()> {
+    /// The store secrets its Workers are bound to, by name.
+    pub fn bound(&self) -> store::Bound {
+        let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
+        store::Bound::conventional(self.workos.is_some(), &providers)
+    }
+
+    /// Renders the deployment for a node on `project`: its settings into
+    /// the project's `.dev.vars`, its secrets into wrangler's local store
+    /// in the project's state directory (`store::seed_local`, which skips
+    /// values it holds already), and their bindings into its local config
+    /// (`local_config`). Clear the state first (`clear_state`), not after.
+    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
+        let bound = self.bound();
+        let mut values: Vec<(&str, &str)> = vec![(bound.host_secret.as_str(), self.host_secret.as_str()), (bound.codestorage_key.as_str(), self.codestorage_key_pem.as_str())];
+        if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
+            values.push((client.as_str(), w.client_id.as_str()));
+            values.push((key.as_str(), w.api_key.as_str()));
+        }
+        for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
+            values.push((name.as_str(), value.as_str()));
+        }
+        assert_eq!(values.len(), bound.cell().len(), "every binding has its value");
+        store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+        write_local_config(project, &bound.cell())?;
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
-            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
-            ("CODESTORAGE_PRIVATE_KEY", self.codestorage_key_pem.as_str()),
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
@@ -367,12 +412,8 @@ impl Fleet {
         if let Some(s) = &self.host_label_suffix {
             vars.push(("FRAGMENT_HOST_LABEL_SUFFIX", s.as_str()));
         }
-        if let Some(w) = &self.workos {
-            vars.push(("WORKOS_CLIENT_ID", w.client_id.as_str()));
-            vars.push(("WORKOS_API_KEY", w.api_key.as_str()));
-            if let Some(u) = &w.api_url {
-                vars.push(("WORKOS_API_URL", u.as_str()));
-            }
+        if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
+            vars.push(("WORKOS_API_URL", u.as_str()));
         }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
@@ -396,10 +437,6 @@ impl Fleet {
         if let Some(p) = &self.providers {
             vars.push(("FRAGMENT_PROVIDERS", p.as_str()));
         }
-        let key_names: Vec<String> = self.operator_key_values.iter().map(|(name, _)| fragment_core::catalog::key_secret_name(name)).collect();
-        for ((_, value), name) in self.operator_key_values.iter().zip(&key_names) {
-            vars.push((name.as_str(), value.as_str()));
-        }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
@@ -408,9 +445,10 @@ impl Fleet {
 }
 
 /// What an agent fleet is configured with: the platform it acts on (its
-/// model calls are the platform's model route's), and its own host secret.
+/// model calls are the platform's model route's). Its host secret is the
+/// platform's, bound to the same secret in the same local store
+/// (`Fleet::bound`), as a deploy binds both Workers to one.
 pub struct AgentFleet {
-    pub host_secret: String,
     /// The fragment platform's base URL (`FRAGMENT_API`).
     pub fragment_api: String,
     /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
@@ -421,15 +459,12 @@ pub struct AgentFleet {
 }
 
 impl AgentFleet {
-    /// Renders the fleet into the project's `.dev.vars`.
-    pub fn configure(&self, project: &Path) -> Result<()> {
-        let mut vars = vec![
-            ("FRAGMENT_HOST_SECRET", self.host_secret.as_str()),
-            ("FRAGMENT_API", self.fragment_api.as_str()),
-            ("AGENT_URL", self.agent_url.as_str()),
-        ];
+    /// Renders the fleet into the project's `.dev.vars`, and its bindings
+    /// (`bound.agent()`, the platform fleet's names) into its local config.
+    pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
+        write_local_config(project, &bound.agent())?;
+        let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
         if self.test_hooks {
-
             vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
         write_dev_vars(project, &vars)
@@ -461,13 +496,14 @@ pub fn dev_secret(name: &str, make: impl FnOnce() -> String) -> Result<String> {
 
 pub struct NodeOptions {
     /// The platform Worker's project: `cell/` for `xtask dev`, a staged
-    /// copy for the e2e. Its state (`.wrangler/state`) lives there.
+    /// copy for the e2e. Its state (`.wrangler/state`) lives there, the
+    /// local Secrets Store's among it. Its fleet is configured first
+    /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
     pub port: u16,
-    /// Discard the local state first.
-    pub clean: bool,
     /// Projects run beside it for its service bindings (`wrangler dev -c`
-    /// again): the agents' Worker.
+    /// again), each configured first: the agents' Worker
+    /// (`AgentFleet::configure`).
     pub with: Vec<PathBuf>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`).
     pub log_dir: PathBuf,
@@ -522,17 +558,15 @@ pub struct Node {
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-        if opts.clean {
-            let state = state_dir(&opts.project);
-            if state.exists() {
-                fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
-            }
+        let configs: Vec<PathBuf> = std::iter::once(&opts.project).chain(&opts.with).map(|p| local_config(p)).collect();
+        if let Some(missing) = configs.iter().find(|c| !c.is_file()) {
+            bail!("{} is not there: configure the fleet first (Fleet::configure, AgentFleet::configure)", missing.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = tools.wrangler()?;
-        cmd.arg("dev").arg("-c").arg(local_config(&opts.project)?);
-        for other in &opts.with {
-            cmd.arg("-c").arg(other.join("wrangler.jsonc"));
+        cmd.arg("dev");
+        for config in &configs {
+            cmd.arg("-c").arg(config);
         }
         cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
         cmd.args(["--inspector-port", &free_port()?.to_string()]);

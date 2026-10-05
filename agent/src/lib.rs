@@ -431,7 +431,7 @@ impl Agent {
             return Err(Fail::invalid(format!("instructions are at most {INSTRUCTIONS_MAX} bytes")));
         }
         // the key's secret is kept only sealed for this cell
-        let (pubkey, sealed) = keys::nostr_keypair(&self.env, &keys::scope(&self.state)).map_err(Fail::host)?;
+        let (pubkey, sealed) = keys::nostr_keypair(&self.env, &keys::scope(&self.state)).await.map_err(Fail::host)?;
         if kv_get(&sql, "created_at")?.is_some() {
             return Err(Fail::new(ErrorCode::AlreadyExists, format!("agent {} already exists", body.name)));
         }

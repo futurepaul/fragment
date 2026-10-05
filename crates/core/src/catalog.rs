@@ -388,13 +388,6 @@ impl Catalog {
     }
 }
 
-/// The worker secret that holds operator key `name` (`perplexity` →
-/// `FRAGMENT_KEY_PERPLEXITY`).
-pub fn key_secret_name(name: &str) -> String {
-    assert!(valid_name(name), "a key's name is checked before its secret is named");
-    format!("FRAGMENT_KEY_{}", name.to_ascii_uppercase().replace('-', "_"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,6 +494,5 @@ mod tests {
         for bad in ["localhost", "API.github.com", "*.github.com", "api.github.com:443", "a..b", "-a.b"] {
             assert!(!valid_host(bad), "{bad}");
         }
-        assert_eq!(key_secret_name("google-places"), "FRAGMENT_KEY_GOOGLE_PLACES");
     }
 }

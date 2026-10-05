@@ -1283,7 +1283,7 @@ impl FragmentCell {
     pub(crate) async fn open_secret(&self, name: &str) -> CellResult<Option<Vec<u8>>> {
         let rows = self.rows("SELECT sealed FROM secrets WHERE name = ?", vec![name.into()])?;
         let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
-        let opened = keys::open(&self.env, &self.scope(), &sealed).map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
+        let opened = keys::open(&self.env, &self.scope(), &sealed).await.map_err(|e| CellError::host(format!("secret {name}: {}", e.message)))?;
         if let Some(fresh) = opened.resealed {
             self.exec("UPDATE secrets SET sealed = ? WHERE name = ? AND sealed = ?", vec![fresh.into(), name.into(), sealed.into()])?;
             self.event("secret.resealed", &format!("secret {name} resealed under the current host secret"), json!({ "name": name }));

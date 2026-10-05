@@ -269,7 +269,7 @@ pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
 }
 
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
-    let workos = cfg.workos()?;
+    let workos = crate::keys::workos(env, cfg).await?;
     let platform = cfg.platform(url);
     let return_to = site::return_path(query(url, "return").as_deref());
     let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
@@ -292,7 +292,7 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> Cell
 }
 
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
-    let workos = cfg.workos()?;
+    let workos = crate::keys::workos(env, cfg).await?;
     if let Some(error) = query(url, "error") {
         let why = query(url, "error_description").unwrap_or_default();
         return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
@@ -304,7 +304,8 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     }
     let code = query(url, "code").ok_or_else(|| CellError::invalid("the callback carries no code"))?;
     // the registry exchanges the code: WorkOS's API key is the node's (KEYS)
-    let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id.clone(), issuer: workos.issuer() }).await?;
+    let issuer = workos.issuer();
+    let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await?;
     redirect(
         &back_to(&format!("{}/", cfg.platform(url)), Some(&done.return_to))?,
         &[
