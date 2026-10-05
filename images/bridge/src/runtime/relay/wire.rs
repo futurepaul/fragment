@@ -367,11 +367,49 @@ pub fn uncursored(content: &str) -> (&str, bool) {
     }
 }
 
-/// Hermes' tool progress is one message whose lines grow: the lines past
-/// the first `seen`.
-pub fn new_lines(content: &str, seen: usize) -> Vec<String> {
+/// Hermes' tool progress is one message whose lines grow, a step each
+/// (`step_of`): its steps past the first `seen`, as (tool, arguments).
+/// A terminal command comes as a fenced block (Hermes v0.21.5's
+/// `_progress_terminal_blocks`, on a platform with code blocks, as Relay
+/// is): `💻 terminal`, then the command between fences, which is that
+/// step's arguments, never a step of its own. Back to back, a command's
+/// header is dropped, and its block is a step of the tool before it. A
+/// header whose block has not closed yet (an edit cut inside it) is no
+/// step until it has.
+pub fn new_steps(content: &str, seen: usize) -> Vec<(String, String)> {
     let (text, _) = uncursored(content);
-    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```")).skip(seen).map(str::to_string).collect()
+    let mut steps: Vec<(String, String)> = Vec::new();
+    // whether the last step is a header waiting for its block
+    let mut header = false;
+    let mut block: Option<Vec<&str>> = None;
+    // bounded by the message's lines
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("```") {
+            let Some(cmd) = block.take() else {
+                block = Some(Vec::new());
+                continue;
+            };
+            let cmd = cmd.join("\n");
+            match steps.last_mut() {
+                Some(last) if header => last.1 = cmd,
+                last => {
+                    let tool = last.map_or_else(|| "terminal".to_string(), |s| s.0.clone());
+                    steps.push((tool, cmd));
+                }
+            }
+            header = false;
+        } else if let Some(cmd) = block.as_mut() {
+            cmd.push(line);
+        } else if !line.is_empty() {
+            let (tool, args) = step_of(line);
+            header = args.is_empty();
+            steps.push((tool, args));
+        }
+    }
+    if block.is_some() && header {
+        steps.pop();
+    }
+    steps.into_iter().skip(seen).collect()
 }
 
 /// A progress line as a step: its tool (the first word after the emoji)
@@ -483,10 +521,22 @@ mod tests {
     fn progress_grows_into_steps() {
         assert_eq!(uncursored("Hello wo ▉"), ("Hello wo", true));
         assert_eq!(uncursored("Hello world"), ("Hello world", false));
-        let progress = "💻 terminal: `ls`\n```\nls\n```\n🔍 web_search: \"rust\" ▉";
-        assert_eq!(new_lines(progress, 0), vec!["💻 terminal: `ls`", "ls", "🔍 web_search: \"rust\""]);
-        assert_eq!(new_lines(progress, 2), vec!["🔍 web_search: \"rust\""]);
-        assert!(new_lines(progress, 3).is_empty());
+        let step = |t: &str, a: &str| (t.to_string(), a.to_string());
+        // a terminal command's block is its header's arguments, never a step
+        let progress = "💻 terminal\n```\nuname -a && nproc\n```\n🔍 web_search: \"rust\" ▉";
+        assert_eq!(new_steps(progress, 0), vec![step("terminal", "uname -a && nproc"), step("web_search", "\"rust\"")]);
+        assert_eq!(new_steps(progress, 1), vec![step("web_search", "\"rust\"")]);
+        assert!(new_steps(progress, 2).is_empty());
+        // back to back, the header is dropped: the block is the tool before it's
+        let twice = "💻 terminal\n```\nls\n```\n```\ncat notes.md\n```";
+        assert_eq!(new_steps(twice, 0), vec![step("terminal", "ls"), step("terminal", "cat notes.md")]);
+        // a header whose block has not closed is no step until it has
+        assert!(new_steps("💻 terminal\n```\nls", 0).is_empty());
+        assert_eq!(new_steps("💻 terminal\n```\nls\n```", 0), vec![step("terminal", "ls")]);
+        // the inline form, a friendly verb, a header with no block, a repeat's count
+        assert_eq!(new_steps("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`"), step("Writing", "/data/hermes/notes.md"), step("thinking...", "")]);
+        assert_eq!(new_steps("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls")]);
+        assert!(new_steps("", 0).is_empty());
         assert_eq!(step_of("💻 terminal: `ls -la`"), ("terminal".into(), "`ls -la`".into()));
         assert_eq!(step_of("🔍 web_search(\"q\")"), ("web_search".into(), "(\"q\")".into()));
         assert_eq!(step_of("⚙️ thinking..."), ("thinking...".into(), String::new()));

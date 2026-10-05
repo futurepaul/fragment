@@ -183,7 +183,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
-    s.ok("Hermes' terminal call is a step on work", steps.iter().any(|r| r["body"]["tool"] == "terminal"), json!(steps));
+    // Hermes shows the command as a fenced block under its header: the
+    // block is the step's arguments, never a step of its own
+    s.ok(
+        "Hermes' terminal call is one step on work, its command the step's arguments",
+        steps.len() == 1 && steps[0]["body"]["tool"] == "terminal" && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo tool-ran")),
+        json!(steps),
+    );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
 
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
