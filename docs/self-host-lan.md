@@ -107,6 +107,8 @@ export FRAGMENT_LAN_BIN=/usr/local/lib/fragment-lan/fragment-lan   # step 1b's (
 export CELLD_BIN=$HOME/dev/finite/celld/target/release/celld
 export FRAGMENT_MODEL_URL=http://bonsai.localhost/v1
 export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
+export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json   # step 8: the box's own node
+export FRAGMENT_BYOC=on    # people pair machines of their own (the Mac, step 5); a company leaves it off
 cargo xtask dev --lan
 ```
 
@@ -224,14 +226,32 @@ fragment login        # approve the key in the browser, signed in through Dex
 fragment whoami
 ```
 
-**Its sandcastle node, later** (the Mac runner): it dials the box, so the
-Mac needs no open port. In its config, `"uplink": {"url":
-"wss://fragment.home.arpa/api/nodes/uplink", "id": "mac"}`, `"platform":
-"https://fragment.home.arpa"` and `"ca_file": "<the fragment-ca PEM>"`. On
-the box, a row in the node list (step 8): `{"id": "mac", "uplink": true,
-"arch": "aarch64", "capacity": 8, "secret_file": "<its secret>"}`, with
-the images' arm64 references (docs/self-host.md, seam 2, Placement). The
-uplink through the front door was tested (below).
+**Its sandcastle node: pair it** (the Mac runner; experimental:
+docs/self-host.md, seam 2, Bring your own computer). It dials the box, so
+the Mac needs no open port, and it becomes your node, for your computers
+alone. With sandcastle's engine running in the Mac's Linux VM
+(sandcastle's docs/mac.md, steps 1 to 6), in the VM:
+
+```sh
+sudo install -d -m 0700 -o "$(id -un)" /etc/sandcastle-node   # once: the node (you, not root) writes its config and secret here
+sandcastle-node pair https://fragment.home.arpa --config /etc/sandcastle-node/node.json --name mac \
+  --ca-file /etc/sandcastle/home-ca.pem \
+  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \
+  --egress /run/sandcastle-node/egress.sock
+```
+
+It prints a link and a code. Open the link on the iPhone or the Mac,
+signed in as you, check the page shows the same code, and tap "Add this
+node". The command ends having written `/etc/sandcastle-node/node.json`
+(the platform, its uplink as the id the box gave it, `ca_file`) and the
+secret (`node.secret`, 0600; never shown). Start it (`sandcastle-node
+serve --config /etc/sandcastle-node/node.json`, or docs/mac.md's unit). In Settings,
+Computers (experimental), it shows as yours and up; choose it under "New
+computers run on" for your next computer. The box needs the stub's
+arm64 reference in its node list's `images` (step 8), for the Mac's
+architecture. Revoke it there, and it is cut off at once.
+
+The uplink through the front door was tested (below).
 
 ## 6. Sign in from the iPhone
 
@@ -293,12 +313,19 @@ export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
 before `cargo xtask dev --lan`. The node's own `platform` is the front door,
 `https://fragment.home.arpa`, with `"ca_file"` the root's PEM. The platform
 takes a node's intercepts (`/api/nodes/egress`) on its own host alone, so
-the cell's loopback port is not enough. The Mac's row (step 5) joins the
-same list, and computers are placed on either. Today its engine's VMs die before they are
+the cell's loopback port is not enough. The Mac pairs instead (step 5):
+it is not a row of this list, and runs only the computers you choose for
+it. Today its engine's VMs die before they are
 ready (the engine fix waits on its restart, which needs root); until then a
 computer's wake fails and says so, and nothing else changes. A computer's
 own origin is `https://<id>--computer.fragment.home.arpa`, under the same
 certificate.
+
+A computer is placed once, at its first start, and stays: yours, if it
+already started on the box, stays on the box (moving is not built). To
+try the Mac, choose it before a computer's first start: a second person
+(`FRAGMENT_LAN_USERS=paul,mac-test`) who pairs the Mac and chooses it
+before making their first agent.
 
 ## 9. Undo it all
 
