@@ -106,6 +106,11 @@ pub enum ClaimAnswer {
     Ours,
     /// 409: another life's claim holds the id.
     Theirs,
+    /// 403 or 404: the agent may not post on the chat's `work` (it left
+    /// the chat, or its owner holds it below editor). Nothing runs, nothing
+    /// can be recorded there, and the turn is dropped, as a fragment the
+    /// agent is gone from drops its turns.
+    Refused,
     /// No answer after the lane's tries, or never sent (the computer is
     /// held): nothing is known, so nothing starts.
     Unanswered,
@@ -580,6 +585,12 @@ impl Engine {
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": t.agent, "why": "another life claimed it" });
                 self.post(&t.agent, &t.fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &Outcome::Error(LOST.into())), Vec::new());
+                self.pump(&t.agent, &t.fragment);
+            }
+            ClaimAnswer::Refused => {
+                let t = self.state.turns.remove(id).expect("checked");
+                self.dirty = true;
+                crate::ev!("turn.dropped", { "turn": id, "agent": t.agent, "why": "the agent may not post on the chat's work" });
                 self.pump(&t.agent, &t.fragment);
             }
             ClaimAnswer::Unanswered => crate::ev!("claim.unanswered", { "turn": id }),

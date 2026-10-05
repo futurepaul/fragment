@@ -1012,6 +1012,32 @@ fn a_claim_another_life_holds_ends_the_turn() {
     assert_eq!(w.runs_of(&next), 1, "the next message runs");
 }
 
+/// Goal (P1): a claim the platform refuses (403 or 404: the agent left the
+/// chat, or its owner holds it below editor) runs nothing and is not asked
+/// again: the turn is dropped, the chat's next turn is claimed, and the
+/// computer is let go once none is left (never held awake for a claim that
+/// cannot land).
+#[test]
+fn a_claim_the_agent_may_not_post_drops_the_turn() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let say = |e: &mut Engine, seq: u64, text: &str| e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "id:paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, T0);
+    let one = say(&mut e, 1, "one");
+    let t1 = records::turn_id(&a.fragment, "talk.paul", "chat", 1);
+    assert_eq!(kinds(&one), vec!["turn.start"]);
+    assert!(say(&mut e, 2, "two").effects.iter().all(|x| !matches!(x, Effect::Claim { .. })), "two waits behind one's claim");
+    let r = e.step(Input::Claimed { turn: t1.clone(), answer: ClaimAnswer::Refused }, T0 + 1);
+    assert!(started(&r).is_none(), "refused: not run");
+    let t2 = records::turn_id(&a.fragment, "talk.paul", "chat", 2);
+    assert_eq!(posts(&r), vec![(records::work_id(&t2, "start"), posts(&r)[0].1.clone())], "no end for one (it cannot be posted), and two is claimed");
+    assert!(r.dirty && !e.state().turns.contains_key(&t1), "one is dropped");
+    let r2 = e.step(Input::Claimed { turn: t2.clone(), answer: ClaimAnswer::Refused }, T0 + 2);
+    assert_eq!(keepalive(&r2), Some(false), "nothing left: the computer may sleep");
+    assert!(e.state().turns.is_empty());
+    assert!(e.step(Input::Tick, T0 + 3).effects.is_empty(), "and nothing is asked again");
+}
+
 /// Goal (P1): a claim the lane gave up on (no answer) starts nothing; the
 /// turn stays queued, unclaimed, and is claimed again at the next tick.
 #[test]

@@ -62,7 +62,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
 | `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages |
 | `GET /f/{f}/__live?v=2`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
-| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{replayed}`; retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
+| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{replayed}`; retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
@@ -113,9 +113,11 @@ earlier save, or lost, costs reads and runs nothing twice
   bits of its own, never written to `/data`. A turn is run only by the
   life whose claim, its `turn.start` naming the life, the platform
   answered as its own (docs/chat-records.md); a 409 is another life's,
-  and the turn is ended as lost; no answer runs nothing, and the turn is
-  claimed again at the next tick. A cursor a rollback sent back reads a
-  record again, and its claim is the 409.
+  and the turn is ended as lost; a 403/404 (the agent may not post on the
+  chat's `work`) drops the turn, run and recorded nowhere, and is not
+  asked again; no answer runs nothing, and the turn is claimed again at
+  the next tick. A cursor a rollback sent back reads a record again, and
+  its claim is the 409.
 - **At a start**, every turn the state holds that is not queued belongs
   to an earlier life and is ended (`error: lost when the computer
   restarted`, its cards `expired`), never handed again: this is the

@@ -724,6 +724,35 @@ async fn a_claim_the_platform_never_answers_runs_nothing() {
     bridge.stop().await;
 }
 
+/// Goal (P1): a claim the platform refuses (403: the agent is held below
+/// editor in the chat, so `work` is not its to post on) runs nothing, is
+/// asked once, and lets the computer go; once the agent may post there
+/// again, the next message runs, and the refused one was never asked again.
+#[tokio::test]
+async fn a_claim_the_agent_may_not_post_runs_nothing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("refused-claim");
+    let runs = support::Runs::default();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let role = |w: &mut World, role: &str| w.fragments.get_mut(&chat).expect("the chat").members.iter_mut().find(|m| m.principal == "id:juniper").expect("juniper's membership").role = role.to_string();
+    fake.with(|w| role(w, "viewer"));
+    let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
+    let t1 = turn_of("juniper", &chat, seq(&one));
+    fake.until(WAIT, "the computer held for it, then let go", |w| w.keepalive_log.len() >= 2 && w.keepalive_log.last() == Some(&false) && w.keepalive_open == 0).await;
+    assert_eq!(runs.of(&t1), 0, "refused: not run");
+    fake.with(|w| assert_eq!(work_posts(w, &chat), 1, "its claim, once"));
+    fake.with(|w| role(w, "editor"));
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(runs.all(), vec![t2], "only the message the agent could claim ran");
+    fake.with(|w| {
+        assert!(starts_of(w, &chat, &t1).is_empty() && ends_of(w, &chat, &t1).is_empty(), "nothing of one's on work");
+        assert_eq!(work_posts(w, &chat), 3, "one's refused claim, then two's claim and end: never one's again");
+    });
+    bridge.stop().await;
+}
+
 /// Goal (P1's hold): while the platform holds the computer (the mark a
 /// sleep makes before its save), the bridge claims nothing. A message is
 /// kept, unclaimed, while the computer is held awake for it (its keepalive,

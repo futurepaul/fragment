@@ -141,7 +141,9 @@ only once the platform answers it as this life's (appended, or a replay
 of this life's own retry). A 409 is another life's claim of the turn, so
 this life never runs it, posts its `turn.end` as lost (a 409 too when
 that life ended it), and forgets it; no answer runs nothing, and the turn
-is claimed again. So a turn runs in one life at most, whatever `/data` a
+is claimed again. An agent that may not post on `work` (its owner holds it
+below editor) claims nothing, so it runs no turn in the chat: its turn is
+dropped, with no record. So a turn runs in one life at most, whatever `/data` a
 computer wakes with, an older one or none: a turn whose life ended before
 it did is lost, and said so, never run twice. A turn is claimed only
 while its runtime can take it, and never while the platform holds the

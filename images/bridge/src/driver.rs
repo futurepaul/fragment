@@ -871,6 +871,12 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, h
                 crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id" });
                 return ClaimAnswer::Theirs;
             }
+            Err(e) if e.gone() => {
+                // Not the agent's to post in (it left, or is held below
+                // editor): an answer, and asking again changes nothing.
+                crate::ev!("claim.refused", { "fragment": fragment, "id": id, "error": e.to_string() });
+                return ClaimAnswer::Refused;
+            }
             Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
                 crate::ev!("claim.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
                 if !backoff.wait(stop.clone()).await {
@@ -878,9 +884,9 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, h
                 }
             }
             Err(e) => {
-                // Out of tries, or refused (the agent gone from the fragment,
-                // which its follower hears too): nothing is known, so it fails
-                // closed. The engine claims it again at its next tick.
+                // Out of tries, or an answer that is none of the above:
+                // nothing is known, so it fails closed. The engine claims it
+                // again at its next tick.
                 crate::ev!("claim.unanswered", { "fragment": fragment, "id": id, "error": e.to_string() });
                 return ClaimAnswer::Unanswered;
             }
