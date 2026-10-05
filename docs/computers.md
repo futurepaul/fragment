@@ -45,8 +45,10 @@ container starts until someone asks again).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
   never sleeps (decision 25).
 - **Sleep**, driven by the DO, in order: save `/data` (`DirectoryBackup`),
-  take a container snapshot, send SIGTERM, wait up to 5 s for the guest
-  to exit, destroy. An idle stop by the runtime is only the safety net.
+  take a container snapshot (unless the guest asked for a fresh root:
+  `/run/computer/no-snapshot`, below), send SIGTERM, wait up to 5 s for
+  the guest to exit, destroy. An idle stop by the runtime is only the
+  safety net.
 - **Wake from a snapshot** when the snapshot's image is the pinned image
   (`start({containerSnapshot})`); otherwise start the image with
   `RESTORE_PENDING=1`, restore `/data`, then touch
@@ -87,13 +89,18 @@ that names a PID from before a sleep can name a live process after it.
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
   DO's `DirectoryBackup` saves and restores `/data` through it.
-- `sh`, `true`, `mkdir` and `touch`: the DO polls with `true` and opens
-  the restore gate with `touch`.
+- `sh`, `true`, `mkdir` and `touch`: the DO polls with `true`, opens
+  the restore gate with `touch`, and reads a guest's ask for a fresh root
+  with `sh`'s `test`.
 
 ### Data and the restore gate
 
 - `/data` is the only directory kept across sleeps. Everything else is
-  the image's. The image does not ship `/data`: the restore makes it,
+  the image's, with one exception: a container snapshot is the whole
+  writable root (Cloudflare's, and sandcastle's), so a wake from one
+  carries what the life before it wrote anywhere, unless the guest asked
+  for a fresh root (below, "A fresh root, asked for"). A start
+  from the image has only the image's. The image does not ship `/data`: the restore makes it,
   swapping a restored directory into place, which overlayfs refuses for
   a directory from an image layer (EXDEV); on a first start the image
   makes it itself.
@@ -102,6 +109,20 @@ that names a PID from before a sleep can name a live process after it.
   snapshot wake, or a first start with an empty `/data`).
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
   before the signal; whatever is written after it may be lost.
+
+### A fresh root, asked for
+
+A container snapshot is the whole writable root (Cloudflare's, and
+sandcastle's), so a wake from one carries what the life before it wrote
+outside `/data` too. A guest that changed there what must not reach its
+next life (software installed as root, say) makes
+`/run/computer/no-snapshot`. Its sleep then saves `/data`, takes no
+snapshot and forgets the one it kept (`"snapshot": "declined"` in the
+log), so the next wake starts from the image and the backup. The DO asks
+with `test -e`, an exec after the save; an exec that fails asks nothing.
+A fresh container never has it. It costs that one wake the snapshot's
+speed. Our Hermes image asks whenever its agent runs anything as root
+(below, "Root in our Hermes image").
 
 ### The fragment API
 
@@ -474,6 +495,44 @@ and how a runtime finds them, is the image's.
   stock `curl` or a vendor's SDK in the terminal finds its variable, with
   no header of ours (`profile.credentials` in the events).
 
+### Root in our Hermes image
+
+Paul, 2026-10-05: "hermes needs to be able to install binaries (not
+persisted)".
+
+- **Passwordless sudo.** Hermes runs as its unprivileged user, as
+  upstream runs it, and its user may run anything as root with `sudo`
+  (no password, so Hermes' terminal runs `sudo` as written, never asking
+  for one). The system's directories stay root's, as on a CI
+  runner, so `sudo apt-get install`, `sudo install … /usr/local/bin/`
+  and `sudo npm install -g` are how an agent installs software for the
+  session. The computer is one person's VM with no secret in it
+  (decisions 13, 43), and one person's agents are not fenced from each
+  other (decision 44), so root inside it opens nothing of anyone else's.
+  It can change the image's own programs, and its owner's managed skills
+  (read-only to Hermes' user, not to root), for this life only.
+- **Gone at the next start.** sudo logs every command to
+  `/run/computer/no-snapshot` (`/etc/sudoers.d/hermes`; `hermes-boot`
+  makes the directory at each start), which is the guest's ask for a
+  fresh root (above, "A fresh root, asked for"). So after a life
+  that ran anything as root, the next wake starts from the image and the
+  save, with nothing installed. What Hermes writes to its home without
+  root is kept as its home is (`pip install --user`, `uv tool install`,
+  `~/.local/bin`, first on its `PATH`): an agent that wants a tool kept
+  installs it there.
+- **Hermes' own settings.** Its file tools (`write_file`, `patch`) may
+  write `/tmp` as well as its home (`HERMES_WRITE_SAFE_ROOT`, which binds
+  only them, not the terminal: defense in depth, as Hermes says), for the
+  scratch an install is made from; they run as its user, so `/usr/local`
+  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  Hermes' own optional backends (providers, platforms, speech), which a
+  computer configures none of.
+- **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
+  intercept catches (decision 43); the image keeps apt's lists as of its
+  build, so `apt-get update` first is the agent's habit, and a `.deb` on
+  disk installs offline (`sudo apt-get install ./x.deb`). An intranet
+  computer needs an apt mirror (and PyPI's and npm's) named in the image.
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
@@ -510,7 +569,11 @@ and how a runtime finds them, is the image's.
   against `images/stub/` under `wrangler dev` with Docker.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
-  first's turn runs included.
+  first's turn runs included, and an install as root (a `.deb` through
+  apt and a program into `/usr/local/bin`, offline) that its guest asks a
+  fresh root for and that a sleep and a wake leave gone, its home kept.
+  The DO's half, the declined snapshot, no lane shows yet: local workerd
+  takes no snapshots, and the hosted lane runs no Hermes.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API, with the

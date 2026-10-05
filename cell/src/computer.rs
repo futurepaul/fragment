@@ -121,6 +121,12 @@ const RUNTIME_IDLE_MS: i64 = fragment_core::computer::IDLE_MS + 10 * 60_000;
 const EXEC_READY_MS: i64 = 120_000;
 /// A signalled guest exits within this (docs/computers.md: five seconds).
 const EXIT_WAIT_MS: i64 = 5_000;
+/// The guest's ask for a fresh root (docs/computers.md, "A fresh root,
+/// asked for"): it changed outside `/data` what must not reach its next
+/// life (our Hermes image: anything run as root), so its sleep takes no
+/// snapshot and forgets the one kept, and the next wake starts from the
+/// image and the backup. `test` is `sh`'s own; it answers 0 only when asked.
+const NO_SNAPSHOT_ASKED: &str = "test -e /run/computer/no-snapshot";
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -760,9 +766,21 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// Whether the guest asked for a fresh root (`NO_SNAPSHOT_ASKED`). An
+    /// exec that fails asks nothing, as before there was an ask.
+    async fn fresh_root_asked(&self, g: &JsValue) -> bool {
+        let argv = js::to_js(&json!(["sh", "-c", NO_SNAPSHOT_ASKED]));
+        match self.call("exec", &[g.clone(), argv]).await {
+            Ok(out) => js::from_js(&out).is_ok_and(|out| out["exitCode"] == 0),
+            Err(_) => false,
+        }
+    }
+
     /// The sleep sequence (docs/computers.md): save `/data`, snapshot,
     /// signal, give the guest five seconds, destroy. A save that fails
-    /// keeps the backup before it and is noted; the sleep goes on.
+    /// keeps the backup before it and is noted; the sleep goes on. A guest
+    /// that asked for a fresh root (`NO_SNAPSHOT_ASKED`) gets no snapshot,
+    /// and the one kept is forgotten.
     async fn sleep(&self, generation: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         if let Ok(true) = self.call("running", &[]).await.map(|r| r.as_bool() == Some(true)) {
@@ -778,7 +796,11 @@ impl ComputerCell {
                     let _ = self.set_meta(MetaKey::Note, &format!("the last sleep could not save /data: {}", e.message));
                 }
             }
-            if self.cfg.computer_snapshots {
+            if self.cfg.computer_snapshots && self.fresh_root_asked(&g).await {
+                // asked after the save: a turn may still have run as root
+                let _ = self.del_meta(MetaKey::Snapshot);
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "declined", "generation": generation, "why": "the guest asked for a fresh root" }));
+            } else if self.cfg.computer_snapshots {
                 let name = format!("{}-{generation}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default().replace(':', "-"));
                 match self.call("snapshot", &[g.clone(), name.into()]).await.map(|s| s.as_string()) {
                     Ok(Some(id)) => {
