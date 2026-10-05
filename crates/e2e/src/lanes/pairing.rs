@@ -101,16 +101,19 @@ fn computer(api: &Api, who: &Keys) -> Result<String> {
 }
 
 /// A `sandcastle-node serve` that dials as `id` with a secret of its own
-/// making (not the node's): what the platform tells it, from its log.
-fn impostor(s: &Suite, id: &str) -> Result<String> {
+/// making (not the node's): what the platform tells it, from its log. Its
+/// directory is named `label`, short: a socket's path inside it must fit a
+/// unix socket's (a person's node's id, in a deep checkout, did not).
+fn impostor(s: &Suite, id: &str, label: &str) -> Result<String> {
     let tools = s.sandcastle.as_ref().context("sandcastle's binaries")?;
-    let dir = s.scratch.join("n").join(format!("impostor-{id}"));
+    let dir = s.scratch.join("n").join(format!("x-{label}"));
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("node.secret"), fragment_devstack::random_hex(32))?;
     std::fs::set_permissions(dir.join("node.secret"), std::fs::Permissions::from_mode(0o600))?;
     let platform = s.platform();
+    let sock = |name: &str| fragment_devstack::sandcastle::socket_path(&dir, name);
     let config = json!({
-        "engine": dir.join("engine.sock"), "ports": dir.join("ports.sock"), "egress": dir.join("egress.sock"),
+        "engine": sock("engine.sock")?, "ports": sock("ports.sock")?, "egress": sock("egress.sock")?,
         "secret_file": dir.join("node.secret"), "platform": platform,
         "uplink": { "url": format!("{}/api/nodes/uplink", platform.replacen("http", "ws", 1)), "id": id },
     });
@@ -221,11 +224,11 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
         format!("{theirs} | {prefer} | {revoke}"),
     );
     // no node dials as another's
-    let log = impostor(s, &raw)?;
+    let log = impostor(s, &raw, "own")?;
     s.ok("a node that dials as a person's node, without its secret, is refused", log.contains("refused the dial: 401"), log.lines().last().unwrap_or(""));
-    let log = impostor(s, "uplink")?;
+    let log = impostor(s, "uplink", "uplink")?;
     s.ok("a node that dials as the deployment's own node, without its secret, is refused", log.contains("refused the dial: 401"), log.lines().last().unwrap_or(""));
-    let log = impostor(s, "direct")?;
+    let log = impostor(s, "direct", "direct")?;
     s.ok("a node that dials as a deployment node that does not dial in is refused", log.contains("refused the dial: 403"), log.lines().last().unwrap_or(""));
     let r = api.signed(&ann, "DELETE", &format!("/api/nodes/{raw}"), None)?;
     s.ok("its owner revokes it: listed as revoked", r.status == 200 && node_in(&r.body, &raw).is_some_and(|n| n["state"] == "revoked"), &r);
