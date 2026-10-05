@@ -1265,8 +1265,15 @@ These are listed as found. Each names where it bites and what to do.
       the object's namespace, a request of its own. The placement section
       now kills each computer's container under it while it is awake (on
       the node that listens, and on the one that dials in) and waits for
-      it to come up again: both checks failed before the fix (stuck
-      `starting`), and pass after.
+      it to come up again, and the computers section does the same on any
+      node the run started, the real engine's included. Before the fix
+      both placement checks failed on celld (stuck `starting`); on
+      wrangler dev they pass with or without it.
+    - After: on the double, computers, pairing and placement passed six
+      runs in a row, every check (158 with the computers section's own
+      kill); on the real engine, computers and chat 176 of 176, the killed
+      microVM's computer up again in 0.5 s; on wrangler dev, placement,
+      computers and chat 190 of 190.
 ## The spike, on this box
 
 This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
