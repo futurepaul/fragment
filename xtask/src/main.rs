@@ -190,6 +190,7 @@ fn dev(args: &[String]) -> Result<()> {
     // (celld runs no containers of its own: its computers are a node's)
     let docker = !celld && nodes.is_none() && Command::new(std::env::var("WRANGLER_DOCKER_BIN").unwrap_or_else(|_| "docker".into())).arg("info").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     let computers = nodes.is_some() || docker;
+    let computer_image = dev_computer_image(nodes.as_ref())?;
     let mut fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: store.org.clone(),
@@ -217,7 +218,7 @@ fn dev(args: &[String]) -> Result<()> {
         operators: None,
         signins_pending_max: None,
         test_secret: None,
-        computer_image: computers.then(|| "stub".into()),
+        computer_image: computers.then(|| computer_image.clone()),
         computer_snapshots: false,
         providers: None,
         operator_key_values: vec![],
@@ -289,7 +290,7 @@ fn dev(args: &[String]) -> Result<()> {
         Err(_) => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
     }
     match (std::env::var(devstack::sandcastle::NODES_FILE_VAR), docker) {
-        (Ok(f), _) => println!("  computers:    the sandcastle nodes {f} lists{}", if byoc()? { ", and people's own (FRAGMENT_BYOC=on: sandcastle-node pair <platform>)" } else { "" }),
+        (Ok(f), _) => println!("  computers:    the sandcastle nodes {f} lists, new ones on its image {computer_image}{}", if byoc()? { ", and people's own (FRAGMENT_BYOC=on: sandcastle-node pair <platform>)" } else { "" }),
         (Err(_), true) => println!("  computers:    local Docker (the stub image)"),
         (Err(_), false) => println!("  computers:    none (no {}, and {})", devstack::sandcastle::NODES_FILE_VAR, if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
@@ -514,6 +515,24 @@ fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Opt
         None => None,
     };
     Ok((model, nodes))
+}
+
+/// The image a new computer is pinned to: `FRAGMENT_COMPUTER_IMAGE`, one of
+/// the images the node list names (`hermes`, for a stack whose agents are
+/// Hermes: docs/self-host.md, S3), else the stub. Local Docker runs the
+/// stub alone.
+fn dev_computer_image(nodes: Option<&devstack::sandcastle::NodesVars>) -> Result<String> {
+    let Some(image) = std::env::var("FRAGMENT_COMPUTER_IMAGE").ok().filter(|v| !v.trim().is_empty()) else {
+        return Ok("stub".into());
+    };
+    let Some(nodes) = nodes else {
+        bail!("FRAGMENT_COMPUTER_IMAGE needs {}, whose images it names: local Docker runs the stub alone", devstack::sandcastle::NODES_FILE_VAR);
+    };
+    let listed = fragment_core::placement::Nodes::parse(&nodes.nodes, fragment_core::placement::Byoc::On).map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !listed.image_names().any(|n| n == image) {
+        bail!("FRAGMENT_COMPUTER_IMAGE {image:?} is none of the images {} names ({})", devstack::sandcastle::NODES_FILE_VAR, listed.image_names().collect::<Vec<_>>().join(", "));
+    }
+    Ok(image)
 }
 
 /// `FRAGMENT_BYOC` (on or off; off unless said): whether the stack's

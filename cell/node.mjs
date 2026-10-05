@@ -42,6 +42,10 @@ const START_MS = 120_000;
 // an exec's socket, closed from this end as its process exits, has closed
 // within this, or its exit is answered all the same
 const CLOSE_WAIT_MS = 2000;
+// a `wait` cut short sooner than this after it was asked is a quick one; at
+// most WAIT_QUICK_MAX of those in a row are asked again (`#waited`)
+const WAIT_QUICK_MS = 5000;
+const WAIT_QUICK_MAX = 3;
 const enc = new TextEncoder();
 
 // A sandcastle node that did not answer, or answered that it is unreachable:
@@ -561,11 +565,40 @@ export class NodeContainer {
       // `arm` throws it), never an exit of a container that ran
       throw Object.assign(new Error(String((e && e.message) || e)), { startFailed: true });
     }
-    const exit = await this.#json("GET", `/v1/containers/${this.#name}/wait`, undefined, null);
+    const exit = await this.#waited();
     this.#running = false;
     if (exit.error) throw new Error(exit.error);
     if (exit.destroyed || exit.code === 0) return;
     throw new Error(exit.signal != null ? `the container was killed by signal ${exit.signal}` : `the container exited with code ${exit.code}`);
+  }
+
+  // The container's exit, from the node's `wait`: a long poll for the
+  // container's life. A transport may end it first (celld bounds an
+  // outbound fetch at 120 s, CELLD_FETCH_TIMEOUT_S; a proxy may close a
+  // quiet connection), and that is no exit: the node is asked whether the
+  // container still runs, and one that does is waited on again
+  // (docs/self-host.md, found 22). Thrown: a refusal of the node's own; a
+  // cut poll when the container no longer runs there, or the node does not
+  // answer the look; and the fourth quick cut in a row (a node that answers
+  // its look but drops its wait).
+  async #waited() {
+    let quick = 0;
+    // bounded: each pass is a poll the container outlived, the quick ones
+    // (under WAIT_QUICK_MS) at most WAIT_QUICK_MAX in a row
+    for (;;) {
+      const asked = Date.now();
+      try {
+        return await this.#json("GET", `/v1/containers/${this.#name}/wait`, undefined, null);
+      } catch (e) {
+        if (e.status !== undefined) throw e;
+        quick = Date.now() - asked < WAIT_QUICK_MS ? quick + 1 : 0;
+        if (quick > WAIT_QUICK_MAX) throw e;
+        const look = await this.#call("GET", `/v1/containers/${this.#name}`, undefined, [404], HEALTH_MS).catch(() => null);
+        const running = look !== null && look.status === 200 && (await look.json().catch(() => ({}))).running === true;
+        console.log(JSON.stringify({ node: this.#node.id, container: this.#name, waitCut: String((e && e.message) || e), afterMs: Date.now() - asked, stillRunning: running }));
+        if (!running) throw e;
+      }
+    }
   }
 
   async destroy(error) {
