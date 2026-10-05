@@ -474,7 +474,11 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
     // ---- revoked ----
     let r = api.signed(&ann, "DELETE", &format!("/api/nodes/{id}"), None)?;
     s.ok("its owner revokes it in settings: revoked, and no longer their choice", r.status == 200 && node_in(&r.body, &id).is_some_and(|n| n["state"] == "revoked") && r.body["prefer"].is_null(), &r);
-    let cut = s.eventually(Duration::from_secs(30), || node.log_text().contains("node_revoked"));
+    // its next dial may be a whole pause away: a node redials after at most
+    // a minute (sandcastle's RECONNECT_MAX), and an uplink that lived under
+    // half a minute (this one, dialed again since the restart) keeps the
+    // pause it had grown to
+    let cut = s.eventually(Duration::from_secs(75), || node.log_text().contains("node_revoked"));
     s.ok("its uplink is cut: its next dial is refused, saying it was revoked", cut, node.log_text().lines().rev().find(|l| l.contains("uplink")).unwrap_or(""));
     let r = wake(&api, &ann, &c)?;
     s.ok("a wake of its computer answers 410 node_revoked, typed", r.status == 410 && r.error() == "node_revoked", &r);
