@@ -376,9 +376,18 @@ mod tests {
     /// A stand-in router on UDP and TCP: it answers every query NXDOMAIN
     /// with the query's id, or stays silent when `silent`.
     async fn router(silent: bool) -> SocketAddr {
-        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = udp.local_addr().unwrap();
-        let tcp = TcpListener::bind(addr).await.unwrap();
+        // a free UDP port whose TCP twin is free too: another process on
+        // the box may hold the TCP one, so a few are tried
+        let mut tries = 0;
+        let (udp, addr, tcp) = loop {
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let addr = udp.local_addr().unwrap();
+            match TcpListener::bind(addr).await {
+                Ok(tcp) => break (udp, addr, tcp),
+                Err(_) if tries < 16 => tries += 1,
+                Err(e) => panic!("no UDP and TCP port pair free in 16 tries: {e}"),
+            }
+        };
         let answer = |q: &[u8]| {
             let m = Message::from_vec(q).unwrap();
             let mut out = Message::error_msg(m.metadata.id, OpCode::Query, ResponseCode::NXDomain);
