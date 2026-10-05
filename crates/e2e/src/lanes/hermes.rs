@@ -89,6 +89,60 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     answered
 }
 
+/// Its screen through the platform (docs/computers.md, Ports; Paul,
+/// 2026-10-05), before the agent has used its desktop: the first agent's
+/// desktop starts for the screen's first viewer, its RFB stream and its
+/// control socket pass through the computer's port, each server's first
+/// word included, and in a frame of the platform's page (as the shell's
+/// "Its computer's screen" opens it) the page connects and takes over.
+/// That input then reaches the screen is the lower rung's
+/// (`images/bridge/tests/docker.rs`, `the_hermes_desktop`).
+fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str) -> Result<()> {
+    let ticket = || -> Result<String> {
+        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
+        anyhow::ensure!(r.status == 200, "a ticket: {r}");
+        Ok(r.body["url"].as_str().unwrap_or("").to_string())
+    };
+    let first = ticket()?;
+    let origin = first.split("/__ticket").next().unwrap_or("").to_string();
+    let r = api.call(Call { method: "GET", url: first, ..Call::default() })?;
+    let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string());
+    let socket = |path: &str| Socket::connect(api, &format!("{origin}/p/6080/{path}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let t = std::time::Instant::now();
+    let greeting = socket("websockify?viewer=e2e").and_then(|mut rfb| {
+        rfb.patience(Duration::from_secs(30))?;
+        let version = rfb.bytes(12)?;
+        rfb.close();
+        Ok(String::from_utf8_lossy(&version).into_owned())
+    });
+    println!("      (the screen's first viewer to its RFB greeting: {:.1?})", t.elapsed());
+    s.ok("its screen's RFB stream opens through its port before the agent used its desktop: the desktop starts for its first viewer", greeting.as_deref().is_ok_and(|g| g.starts_with("RFB 003.")), format!("{greeting:?}"));
+    let control = socket("control?viewer=e2e").and_then(|mut c| {
+        let first = c.next()?;
+        c.close();
+        Ok(first)
+    });
+    s.ok("its control socket says who holds the screen, through its port", control.as_ref().is_ok_and(|c| c["type"] == "control" && c["holder"].is_null()), format!("{control:?}"));
+
+    let Some(mut chrome) = super::frames::safari_like(s)? else {
+        s.ok("Chrome is installed for the computer's screen (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let session = api.sign_in(&Api::email_of(owner))?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let shell = super::frames::platform_page(&mut chrome, api, super::frames::SIGNED_IN)?;
+    super::isolation::frame(&mut chrome, &shell, &ticket()?)?;
+    let computer = origin.split("//").nth(1).unwrap_or("").to_string();
+    let wait = Duration::from_secs(60);
+    let watching = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "Watching the agent's screen", wait);
+    let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "document.getElementById('status')?.textContent ?? ''").unwrap_or_default();
+    s.ok("in a frame of the platform's page, the screen's page connects to it (noVNC through the port)", watching, said(&mut chrome));
+    chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
+    let taken = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "You have the screen", Duration::from_secs(20));
+    s.ok("and Take over gives the person the screen", taken, said(&mut chrome));
+    Ok(())
+}
+
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -136,6 +190,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     });
     println!("      (Hermes following its chat {:.1?} after the wake)", t0.elapsed());
     s.ok("Hermes' bridge follows the chat as the agent", subscribed, "");
+    screen(s, api, &owner, &id)?;
 
     let say = |n: u32, text: &str| api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("h{n}"), "body": { "text": text } })));
     let turn_for = |r: &crate::api::Reply| turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
