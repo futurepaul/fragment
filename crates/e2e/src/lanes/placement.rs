@@ -56,6 +56,24 @@ fn version(api: &Api, owner: &Keys, origin: &str) -> String {
     api.call(Call { method: "GET", url: format!("{origin}/p/6080/version.txt"), keys: Some(owner), ..Call::default() }).map(|r| r.text.trim().to_string()).unwrap_or_default()
 }
 
+/// Kills the one container running on node `node` that started at or
+/// after `since_ms` (computer `id`'s, awake there with a backup to restore)
+/// under it, behind the platform's back, and waits up to WAKE for the
+/// computer to start it again there by itself and come up, its screen
+/// serving the stub's first build: whether it did, and its view and how
+/// long it took.
+pub(crate) fn killed_comes_back(s: &Suite, api: &Api, owner: &Keys, id: &str, node: &str, origin: &str, since_ms: u64) -> Result<(bool, String)> {
+    let running = s.node_running_since(node, since_ms)?;
+    anyhow::ensure!(running.len() == 1, "the node {node} runs one container started since {since_ms}: {running:?}");
+    std::thread::sleep(BOOTED);
+    let killed_at = fragment_devstack::sandcastle::now_ms();
+    s.node_kill(node, &running[0])?;
+    let t0 = Instant::now();
+    let back = s.eventually(WAKE, || s.node_running_since(node, killed_at).is_ok_and(|c| c.len() == 1) && view(api, owner, id)["phase"] == "awake" && version(api, owner, origin) == "1");
+    let v = view(api, owner, id);
+    Ok((back && v["node"] == node && v["why"].is_null(), format!("{v} in {:.1?}", t0.elapsed())))
+}
+
 pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("placement", &[crate::Need::Nodes, crate::Need::Computers, crate::Need::Node]) {
         return Ok(());
@@ -102,21 +120,8 @@ pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
     // with a backup to restore: an exec first), and it comes up
     for (id, owner, pinned, origin) in [(na.clone(), &a, ca.clone(), oa.clone()), (nb.clone(), &b, cb.clone(), ob.clone())] {
         let reach = s.node_reach(&id);
-        let running = s.node_running_since(&id, woken_at)?;
-        anyhow::ensure!(running.len() == 1, "the node {id} runs one container started by the wake: {running:?}");
-        std::thread::sleep(BOOTED);
-        let killed_at = fragment_devstack::sandcastle::now_ms();
-        s.node_kill(&id, &running[0])?;
-        let t0 = Instant::now();
-        let back = s.eventually(WAKE, || {
-            s.node_running_since(&id, killed_at).is_ok_and(|c| c.len() == 1) && view(api, owner, &pinned)["phase"] == "awake" && version(api, owner, &origin) == "1"
-        });
-        let v = view(api, owner, &pinned);
-        s.ok(
-            &format!("its container killed under it, awake (on the node that {reach}), the computer starts it again there by itself, and it comes up"),
-            back && v["node"] == id.as_str() && v["why"].is_null(),
-            format!("{} in {:.1?}", v, t0.elapsed()),
-        );
+        let (back, shown) = killed_comes_back(s, api, owner, &pinned, &id, &origin, woken_at)?;
+        s.ok(&format!("its container killed under it, awake (on the node that {reach}), the computer starts it again there by itself, and it comes up"), back, shown);
     }
     sleep(api, &a, &ca)?;
     sleep(api, &b, &cb)?;
