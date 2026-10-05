@@ -281,6 +281,7 @@ impl SandcastleNode {
             config: spec.dir.join("node.json"),
             log: log_of("node"),
             engine: Some(engine),
+            real: None,
             node: None,
         };
         let sock = engine_dir.join("engine.sock");
@@ -357,6 +358,11 @@ impl SandcastleNode {
             None => row["uplink"] = json!(true),
         }
         row
+    }
+
+    /// Whether it fronts the machine's real engine (`Engine::Real`).
+    pub fn is_real(&self) -> bool {
+        self.real.is_some()
     }
 
     /// Whether the node process runs (not `down`).
