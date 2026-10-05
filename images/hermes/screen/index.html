@@ -38,23 +38,33 @@
   };
   const status = document.getElementById("status");
   const button = document.getElementById("control");
-  let mine = false;
+  // The screen is shown once its RFB stream connects; Take over works once
+  // the control socket is open too (a click before would be lost).
+  let shown = false, closed = null, mine = false, holder = null;
+  const control = new WebSocket(socket("control"));
+  const show = () => {
+    const ready = shown && control.readyState === WebSocket.OPEN;
+    button.disabled = !ready || closed !== null;
+    status.textContent = closed ?? (!shown ? "Connecting to the screen…" : mine ? "You have the screen" : holder ? "Someone else has the screen" : "Watching the agent's screen");
+  };
 
   const rfb = new RFB(document.getElementById("screen"), socket("websockify"), { shared: true });
   rfb.viewOnly = true;
   rfb.scaleViewport = true;
-  rfb.addEventListener("connect", () => { status.textContent = "Watching the agent's screen"; button.disabled = false; });
-  rfb.addEventListener("disconnect", () => { status.textContent = "The screen closed. Reload to see it again."; button.disabled = true; });
+  rfb.addEventListener("connect", () => { shown = true; show(); });
+  rfb.addEventListener("disconnect", () => { closed = "The screen closed. Reload to see it again."; show(); });
 
-  const control = new WebSocket(socket("control"));
+  control.addEventListener("open", show);
+  control.addEventListener("close", () => { closed ??= "Take over is unavailable. Reload to try again."; show(); });
   control.addEventListener("message", (e) => {
     const m = JSON.parse(e.data);
     if (m.type !== "control") return;
-    mine = m.holder === viewer;
+    holder = m.holder;
+    mine = holder === viewer;
     rfb.viewOnly = !mine;
     button.textContent = mine ? "Give back" : "Take over";
     button.setAttribute("aria-pressed", String(mine));
-    status.textContent = mine ? "You have the screen" : m.holder ? "Someone else has the screen" : "Watching the agent's screen";
+    show();
   });
   button.addEventListener("click", () => control.send(JSON.stringify({ type: mine ? "give" : "take" })));
 </script>

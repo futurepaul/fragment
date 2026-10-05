@@ -138,9 +138,11 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str) -> R
     super::isolation::frame(&mut chrome, &shell, &ticket()?)?;
     let computer = origin.split("//").nth(1).unwrap_or("").to_string();
     let wait = Duration::from_secs(60);
-    let watching = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "Watching the agent's screen", wait);
+    // shown, and Take over ready: its button is enabled once both sockets are open
+    let ready = "document.getElementById('status')?.textContent === \"Watching the agent's screen\" && !document.getElementById('control').disabled";
+    let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, ready).ok() == Some(json!(true)));
     let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "document.getElementById('status')?.textContent ?? ''").unwrap_or_default();
-    s.ok("in a frame of the platform's page, the screen's page connects to it (noVNC through the port)", watching, said(&mut chrome));
+    s.ok("in a frame of the platform's page, the screen's page connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
     chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
     let taken = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "You have the screen", Duration::from_secs(20));
     s.ok("and Take over gives the person the screen", taken, said(&mut chrome));
