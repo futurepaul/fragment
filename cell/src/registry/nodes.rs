@@ -212,6 +212,14 @@ impl RegistryCell {
             vec![id.as_str().into(), who.id.as_str().into(), p.name.as_str().into(), p.arch.name().into(), SqlStorageValue::Integer(now), sealed.into()],
         )?;
         self.exec("UPDATE pairings SET node = ? WHERE user_code = ?", vec![id.as_str().into(), p.user_code.as_str().into()])?;
+        if b.prefer {
+            // their own node, just approved: choosable by them alone (the
+            // same row `prefer_node` writes after its checks)
+            self.exec(
+                "INSERT INTO node_prefs (owner, node) VALUES (?, ?) ON CONFLICT (owner) DO UPDATE SET node = excluded.node",
+                vec![who.id.as_str().into(), id.as_str().into()],
+            )?;
+        }
         Ok(PairApproved { node: id, name: p.name })
     }
 
