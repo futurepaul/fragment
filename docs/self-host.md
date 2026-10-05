@@ -1006,24 +1006,21 @@ that also makes Cloudflare simpler or safer:
    for the test levers (`config.rs`). An intranet needs local egress
    without being a test fleet, so these should be two settings.
 7. **Push has no "unreachable" state** (seam 8).
-8. **In sandcastle:** the engine hard-codes Debian's library paths
-   (`crates/engine/src/linux/engine.rs`, `system_libs`), so it fails on
-   Arch, this box. It also hard-codes amd64 and x86_64 throughout, so a
-   Mac (aarch64, Hypervisor.framework) needs its own jail and egress
-   path.
-9. **`ContainerHost` reports to routes the cell does not have.**
-   `entry.mjs` posts `container/exited` and `container/tab`, but the
-   Computer's routes are `computer/exited` and `computer/tab`, and
-   `routed.rs` refuses the first two names. So on master:
-   - every WebSocket to a computer's port answers 500;
-   - no exit is ever reported.
+8. **In sandcastle:** the engine assumed Debian's library paths and
+   `/lib64` link, so every VM on Arch (this box) died before ready, and
+   said nothing; and it assumed x86_64 throughout. Fixed: sandcastle#1
+   and #2 (merged), and the arm64 port on its `node` branch.
+9. **`ContainerHost` reported to routes the cell does not have**
+   (`container/exited` for `computer/exited`): every WebSocket to a
+   computer's port answered 500, and no exit was reported. Fixed on
+   master (#126).
+10. **The CLI trusted the public roots alone**, so it could not reach a
+    platform behind a company's CA. Fixed on master (#130).
 
-   The fix is the commit "computer: the container's reports reach their
-   routes", ready to cherry-pick.
-10. **The CLI trusted the public roots alone** (webpki-roots), so it could
-    not reach a platform behind a company's CA. On `selfhost-lan` it trusts
-    the OS's store beside them, as a company's clients must; the change is
-    two features in `cli/Cargo.toml`.
+**Decided (Paul, 2026-10-05):** `FRAGMENT_MODEL_URL` (seam 3) and
+`FRAGMENT_BROWSER_URL` (seam 7) go to master, but not yet: they land when
+self-hosting does, once master is live on Cloudflare. Until then they stay
+on this branch.
 
 ## What the spike found (running it)
 
