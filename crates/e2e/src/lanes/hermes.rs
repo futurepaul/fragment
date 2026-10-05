@@ -148,6 +148,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let seq = records(api, &owner, &chat_name, "chat").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
     page.send(&json!({ "type": "subscribe", "channel": "chat", "after": seq }))?;
     page.until("subscribed", 20)?;
+    // the model fake keeps every section's calls: this check reads its own
+    let calls_at_start = s.ai.calls().len();
     let t1 = std::time::Instant::now();
     let r = say(1, "hello hermes")?;
     let first = turn_for(&r);
@@ -169,7 +171,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": reply_of(&first), "record": format!("{record:?}") }),
     );
     s.ok("its turn ends idle", s.eventually(TURN, || ended(&first) == Some(json!("idle"))), json!(work_of(&records(api, &owner, &chat_name, "work"), &first)));
-    let calls = s.ai.calls();
+    let calls = s.ai.calls().split_off(calls_at_start);
     s.ok(
         "every model call went through the platform's route, on the agent's tier, as the agent",
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
