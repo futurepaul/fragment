@@ -107,8 +107,9 @@ export FRAGMENT_LAN_BIN=/usr/local/lib/fragment-lan/fragment-lan   # step 1b's (
 export CELLD_BIN=$HOME/dev/finite/celld/target/release/celld
 export FRAGMENT_MODEL_URL=http://bonsai.localhost/v1
 export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
-export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json   # step 8: the box's own node
-export FRAGMENT_BYOC=on    # people pair machines of their own (the Mac, step 5); a company leaves it off
+# once step 8's list is written: the box's own node, and the images (an arm64 one for the Mac)
+export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
+export FRAGMENT_BYOC=on    # people pair machines of their own (the Mac, step 5); needs the list; a company leaves it off
 cargo xtask dev --lan
 ```
 
