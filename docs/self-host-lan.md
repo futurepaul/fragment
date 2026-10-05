@@ -1,7 +1,8 @@
 # fragment on the home network, run as an intranet
 
-Status: **built 2026-10-04, tested on high ports from this box** (branch
-`selfhost`, the spike; never merged). The steps marked **sudo** and
+Status: **built 2026-10-04; rehearsed end to end 2026-10-05** from this box
+on high ports, short of sudo, the router and the devices (Evidence, below;
+branch `selfhost`, the spike, never merged). The steps marked **sudo** and
 the router's and the phone's are Paul's: this guide is them, in order.
 docs/self-host.md is the design (seams 4 and 9, "What corporate networks
 bring"); this is how the home network plays a company's.
@@ -15,6 +16,7 @@ bring"); this is how the home network plays a company's.
 | puts one TLS edge in front of the apps | `fragment-lan`'s front door on :443: `https://fragment.home.arpa`, fragments at `https://<label>--<user>.fragment.home.arpa`, Dex at `https://dex.fragment.home.arpa`; WebSockets and event streams pass through |
 | runs an identity provider | Dex v2.45.1 (pinned by digest), one static user per person, passwords in files |
 | runs the model on its own network | Bonsai (`http://bonsai.localhost/v1`) |
+| runs the workloads on its own machines | sandcastle's engine on the box (microVMs, jailed) behind a `sandcastle-node`; a person's own machine (the Mac) paired to them |
 | opens the firewall to the office subnet only | ufw: 53, 80 and 443 from 192.168.50.0/24 |
 
 ## What runs on the box
@@ -28,8 +30,12 @@ beside it:
 | Dex | 127.0.0.1:8800 | the issuer `https://dex.fragment.home.arpa`, behind the door |
 | celld | 127.0.0.1:8790 | the cell and the agents' Worker, on loopback: devices reach them only through the door |
 | the code store, the model fake | 127.0.0.1:8792, :8796 | as `cargo xtask dev` (the model fake answers only image steps; Bonsai answers text) |
+| the card renderer | 127.0.0.1, a free port | preview cards: the pinned chrome-headless-shell, which reaches fragments through the door and trusts the root |
 
-State lives in `FRAGMENT_LAN_STATE` (the guide uses
+and in a second terminal, `sandcastle-node serve` on 127.0.0.1:8798, in
+front of the engine (`/var/lib/sandcastle`): the box's computers.
+
+State lives in `FRAGMENT_LAN_STATE` (this guide uses
 `~/.local/state/fragment-lan`, so `cargo clean` never takes the CA the
 devices trust):
 
@@ -38,7 +44,9 @@ devices trust):
   `zone.key`), issued fresh at each start for 397 days (iOS allows 825);
 - `dex/`: `dex.yaml` (0600), the client's secret, and `passwords/<name>`
   (0600), one per person;
-- `serve.json`: the front door's config.
+- `serve.json`: the front door's config;
+- `nodes.json` and `node.json`: the node list and the box's node (step 2,
+  written by you).
 
 Logs: `target/devstack/lan-door.log` (a device that does not trust the
 root yet shows there as `TLS from <addr> failed: … UnknownCA` or
@@ -47,7 +55,11 @@ banner names.
 
 ## 1. The box, once (sudo)
 
-Run these from the spike's checkout, `~/dev/finite/fragment-selfhost`.
+Run these from the spike's checkout, up to date:
+
+```sh
+cd ~/dev/finite/fragment-selfhost && git pull --ff-only
+```
 
 **1a. A fixed address.** The zone answers 192.168.50.7, so the box must
 keep it. On the ASUS router (http://192.168.50.1): LAN, DHCP Server,
@@ -82,8 +94,9 @@ sudo ufw status numbered
 ```
 
 **1d. The box's own resolver.** The cell fetches Dex at
-`https://dex.fragment.home.arpa`, so the box asks its own DNS for the zone
-(and the router for everything else, as now):
+`https://dex.fragment.home.arpa`, and the box's node calls the front door,
+so the box asks its own DNS for the zone (and the router for everything
+else, as now):
 
 ```sh
 sudo mkdir -p /etc/systemd/resolved.conf.d
@@ -91,33 +104,97 @@ printf '[Resolve]\nDNS=192.168.50.7\nDomains=~fragment.home.arpa\n' | sudo tee /
 sudo systemctl restart systemd-resolved
 ```
 
-Check it once the stack runs (step 2): `resolvectl query
+Check it once the stack runs (step 3): `resolvectl query
 dex.fragment.home.arpa` answers 192.168.50.7.
 
 **1e. Optional: the box's browser.** Chromium on the box trusts the root
-with no sudo: `certutil -d sql:$HOME/.pki/nssdb -A -t C,, -n 'fragment LAN
-CA' -i ~/.local/state/fragment-lan/ca/ca.pem` (after step 2 makes it).
+with no sudo, once step 3 has made it: `mkdir -p ~/.pki/nssdb && certutil
+-d sql:$HOME/.pki/nssdb -A -t C,, -n 'fragment LAN CA' -i
+~/.local/state/fragment-lan/ca/ca.pem` (restart Chromium after).
 
-## 2. Start the stack
+## 2. Computers on this box, once (no sudo)
+
+New computers run Hermes (our image) in microVMs on this box's engine,
+through a `sandcastle-node` in front of it (docs/self-host.md, seam 2,
+Placement). Three things, once; run `node-images` again after each `git
+pull` that changes `images/` (a computer takes the new image at its next
+wake):
+
+```sh
+cd ~/dev/finite/fragment-selfhost
+export FRAGMENT_LAN_STATE=$HOME/.local/state/fragment-lan
+mkdir -p -m 700 $FRAGMENT_LAN_STATE
+# 1. the stub and Hermes, built here and loaded into the engine (Docker: your user
+#    in the docker group); a few minutes, most of it Hermes' build
+cargo xtask node-images
+# 2. the node list: this box's node, and the images node-images printed
+cat > $FRAGMENT_LAN_STATE/nodes.json <<JSON
+{ "nodes": [
+    { "id": "box", "url": "http://127.0.0.1:8798", "arch": "x86_64", "capacity": 16,
+      "secret_file": "$HOME/.local/opt/sandcastle/node.secret" } ],
+  "images": { "stub": "docker.io/library/fragment-stub:local", "hermes": "docker.io/library/fragment-hermes:local" } }
+JSON
+# 3. the node's config: its computers' requests go to the front door, under the root
+cat > $FRAGMENT_LAN_STATE/node.json <<JSON
+{ "listen": "127.0.0.1:8798",
+  "engine": "/var/lib/sandcastle/engine.sock", "ports": "/var/lib/sandcastle/ports.sock",
+  "egress": "$XDG_RUNTIME_DIR/fragment-lan-node/egress.sock",
+  "secret_file": "$HOME/.local/opt/sandcastle/node.secret",
+  "platform": "https://fragment.home.arpa", "ca_file": "$FRAGMENT_LAN_STATE/ca/ca.pem" }
+JSON
+```
+
+The heredocs fill in `$HOME` and the rest as they write. The node's secret
+is S2's, `~/.local/opt/sandcastle/node.secret` (if it is not there:
+`(umask 077; openssl rand -hex 32 > ~/.local/opt/sandcastle/node.secret)`).
+Leave `~/.local/opt/sandcastle/node.json` as it is: it is the dev stack's
+(`platform` its loopback port), and this one is the LAN's. The node's
+`platform` must be the front door, not the cell's port: the platform takes
+a node's intercepts (`/api/nodes/egress`) on its own host alone. The
+engine takes Hermes' image (1.36 GB as `docker save` writes it) in about
+25 s the first time, as it builds its disk; again, at once. Its capacity
+is the engine's `vms_max` (16 here).
+
+## 3. Start it
+
+**Terminal 1, the stack:**
 
 ```sh
 cd ~/dev/finite/fragment-selfhost
 export FRAGMENT_LAN_STATE=$HOME/.local/state/fragment-lan
 export FRAGMENT_LAN_BIN=/usr/local/lib/fragment-lan/fragment-lan   # step 1b's (omit with the sysctl)
+export FRAGMENT_LAN_USERS=paul,mac-test   # the people; mac-test tries the Mac (step 7)
 export CELLD_BIN=$HOME/dev/finite/celld/target/release/celld
 export FRAGMENT_MODEL_URL=http://bonsai.localhost/v1
 export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
-# once step 8's list is written: the box's own node, and the images (an arm64 one for the Mac)
-export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
-export FRAGMENT_COMPUTER_IMAGE=hermes   # new computers run Hermes (step 8), the agents' model Bonsai
-export FRAGMENT_BYOC=on    # people pair machines of their own (the Mac, step 5); needs the list; a company leaves it off
+export FRAGMENT_NODES_FILE=$FRAGMENT_LAN_STATE/nodes.json   # step 2's list
+export FRAGMENT_COMPUTER_IMAGE=hermes   # new computers run Hermes, its model Bonsai
+export FRAGMENT_BYOC=on                 # people pair machines of their own (the Mac, step 7); a company leaves it off
 cargo xtask dev --lan
 ```
 
+**Terminal 2, the box's node,** once terminal 1 prints its banner (the
+first start makes the root the node trusts):
+
+```sh
+~/.local/opt/sandcastle/bin/sandcastle-node serve --config ~/.local/state/fragment-lan/node.json
+```
+
+It says `serving on 127.0.0.1:8798, intercepts on … to
+https://fragment.home.arpa`. Check that Bonsai answers too: `curl -s
+http://bonsai.localhost/v1/models` names `bonsai-2-27b`.
+
 The first start makes the CA and fetches Dex. The banner says where
 everything is: the front door, the DNS server and its upstream, the root's
-page with its **SHA-256 fingerprint** (write it down: step 4 compares it),
-and each person with their password's file. Ctrl-C stops all of it.
+page with its **SHA-256 fingerprint** (write it down: step 5 compares it),
+and each person with their password's file.
+
+**Stopping:** Ctrl-C in each terminal. The stack's takes a second, or up
+to 25 s while a computer is awake (celld lets its calls to the node drain),
+and frees every port. Computers that were awake keep running on the engine
+while the stack is down; the next start finds them, and they sleep when
+idle. To see them: `curl -s --unix-socket /var/lib/sandcastle/engine.sock
+http://engine/v1/containers`.
 
 The people are `FRAGMENT_LAN_USERS` (default `paul`; a comma-separated
 list). Each signs in as `<name>@fragment.home.arpa` with the password in
@@ -137,16 +214,20 @@ Every setting, with its default: `FRAGMENT_LAN_ZONE` (fragment.home.arpa),
 gateway, :53), `FRAGMENT_LAN_HTTPS_PORT` (443), `FRAGMENT_LAN_HTTP_PORT` (80,
 0 for none), `FRAGMENT_LAN_DNS_PORT` (53, 0 for none), `DEX_BIN` (the pinned
 Dex), and `FRAGMENT_DEV_PORT` (8790: the cell, and its fakes and Dex above
-it).
+it). Preview cards reach fragments through the door (its first address, on
+the https port) and trust the root, unless `FRAGMENT_BROWSER_UPSTREAM` or
+`FRAGMENT_BROWSER_CA_FILE` say otherwise.
 
 From the box, once 1d is done:
 
 ```sh
 resolvectl query todo--paul.fragment.home.arpa              # 192.168.50.7
-curl --cacert $FRAGMENT_LAN_STATE/ca/ca.pem -sI https://fragment.home.arpa/ | head -1   # HTTP/1.1 200 OK
+curl --cacert $FRAGMENT_LAN_STATE/ca/ca.pem -s -o /dev/null -w '%{http_code}\n' https://fragment.home.arpa/   # 200
 ```
 
-## 3. Point the iPhone at the box's DNS
+(`curl -I` asks with HEAD, which the shell answers 404: use the line above.)
+
+## 4. Point the iPhone at the box's DNS
 
 **On the iPhone alone** (start here): Settings, Wi-Fi, the (i) beside the
 home network, Configure DNS, **Manual**. Delete the servers listed, Add
@@ -173,7 +254,7 @@ service restart_dnsmasq
 Safari cannot find `fragment.home.arpa`, turn it off for this network:
 Settings, Wi-Fi, (i), "iCloud Private Relay" off.
 
-## 4. Trust the root on the iPhone
+## 5. Trust the root on the iPhone
 
 1. In **Safari** (profiles download only there), open
    `http://192.168.50.7/ca`. Tap "iPhone, iPad or Mac: the profile", then
@@ -191,7 +272,44 @@ Settings, Wi-Fi, (i), "iCloud Private Relay" off.
 The root says, inside it, that it is valid for `fragment.home.arpa` and the
 names under it only: the phone will not trust it for any other site.
 
-## 5. The Mac
+## 6. Sign in from the iPhone, and talk to Hermes
+
+1. Safari: `https://fragment.home.arpa` (type the `https://`; a bare name
+   may go to a search). The padlock is the root's. "Agents that work for
+   you, and the apps they make": **Sign in**.
+2. Dex asks for an email and a password: `paul@fragment.home.arpa` and the
+   password from step 3. Let iCloud Keychain keep it.
+3. **Choose a username** (`paul`): your fragments are then
+   `https://<label>--paul.fragment.home.arpa`. The shell then makes your
+   first agent by itself, with a name it picks ("Creating your agent…
+   Starting its computer"), and opens its chat. Your computer is a Hermes
+   microVM on the box (step 2); its model is Bonsai.
+4. **Talk to it.** A plain answer takes about 1 to 6 s, a turn with a
+   terminal command about 9 s, each tool a step under the reply ("Worked
+   through 1 step"). A computer left idle sleeps; your next message wakes
+   it.
+   - **When it asks you something, answer in the chat**: your next message
+     is the answer, while its turn waits (an open question, or "Other" on
+     a card of choices: tap it, then type). Stop works while it waits.
+   - Ask it to keep files under `/data/hermes` (say `/data/hermes/notes/`):
+     it may write nowhere else, and it will say so.
+5. **New agent**: the **+** at the top left. Give it a job (it becomes its
+   `SOUL.md`) and a name, Make it. Its chat opens with the job as your
+   first message, and it answers on the computer you already have.
+6. **An app**: open the sidebar (top left), the **+** beside Apps, and
+   **Make it** under Todo (rename it first if you like). It opens in a
+   window; the sidebar shows its preview card once it is shot.
+7. **Live**: in a second Safari tab, open
+   `https://todo--paul.fragment.home.arpa` ("you and 1 other here"). Add a
+   todo in one; it shows in the other at once.
+
+Add the shell to the home screen (Share, Add to Home Screen) for an app of
+its own. Push notifications need Apple's push service and the internet;
+offline, the shell's live channel tells an open tab instead
+(docs/self-host.md, seam 8). A computer made before step 2 runs the stub;
+the shell shows an update pill that moves it to Hermes.
+
+## 7. The Mac
 
 **DNS, for the zone only** (the rest stays as it is; this is split DNS, as
 a company's VPN does it):
@@ -211,82 +329,71 @@ everything else use it.)
 curl -sO http://192.168.50.7/ca/fragment-ca.crt
 openssl x509 -inform der -in fragment-ca.crt -noout -fingerprint -sha256   # the banner's
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain fragment-ca.crt
+curl -so home-ca.pem http://192.168.50.7/ca/ca.pem    # the same root as PEM, for the Mac's Linux VM (below)
 ```
 
 Or open the profile (`http://192.168.50.7/ca`) and install it in System
 Settings, General, Device Management. Firefox keeps its own store: in
 `about:config`, `security.enterprise_roots.enabled` true.
 
-**The CLI**, built from this branch (it trusts the OS's roots beside the
-public ones, as master will with PR #130; the released CLI trusts the public
-roots alone):
+**The CLI**, built from this branch or master (it trusts the OS's roots
+beside the public ones since master's PR #130; a CLI released before that
+trusts the public roots alone):
 
 ```sh
 cargo build --release -p fragment-cli && cp target/release/fragment ~/.local/bin/
 export FRAGMENT_HOST=https://fragment.home.arpa
-fragment login        # approve the key in the browser, signed in through Dex
+fragment login        # it opens the link; approve the key, signed in through Dex
 fragment whoami
 ```
 
 **Its sandcastle node: pair it** (the Mac runner; experimental:
 docs/self-host.md, seam 2, Bring your own computer). It dials the box, so
 the Mac needs no open port, and it becomes your node, for your computers
-alone. With sandcastle's engine running in the Mac's Linux VM
-(sandcastle's docs/mac.md, steps 1 to 6), in the VM:
+alone. With sandcastle's engine running in the Mac's Linux VM (sandcastle's
+docs/mac.md, steps 1 to 6, and its "The CA" with `home-ca.pem` from above):
 
-```sh
-sudo install -d -m 0700 -o "$(id -un)" /etc/sandcastle-node   # once: the node (you, not root) writes its config and secret here
-sandcastle-node pair https://fragment.home.arpa --config /etc/sandcastle-node/node.json --name mac \
-  --ca-file /etc/sandcastle/home-ca.pem \
-  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \
-  --egress /run/sandcastle-node/egress.sock
-```
+1. The images, in the VM (with Docker and Rust), from a checkout of this
+   branch: `cargo xtask node-images`. It builds them for arm64 there and loads them into the
+   VM's engine under the same names as the box's list (`…:local`), so the
+   list needs no change. (The arm64 Hermes image has not been built whole
+   yet; its stages have.)
+2. Pair, in the VM:
 
-It prints a link and a code. Open the link on the iPhone or the Mac,
-signed in as you, check the page shows the same code, and tap "Add this
-node". The command ends having written `/etc/sandcastle-node/node.json`
-(the platform, its uplink as the id the box gave it, `ca_file`) and the
-secret (`node.secret`, 0600; never shown). Start it (`sandcastle-node
-serve --config /etc/sandcastle-node/node.json`, or docs/mac.md's unit). In Settings,
-Computers (experimental), it shows as yours and up; choose it under "New
-computers run on" for your next computer. The box needs the stub's
-arm64 reference in its node list's `images` (step 8), for the Mac's
-architecture. Revoke it there, and it is cut off at once.
+   ```sh
+   sudo install -d -m 0700 -o "$(id -un)" /etc/sandcastle-node   # once: the node (you, not root) writes its config and secret here
+   sandcastle-node pair https://fragment.home.arpa --config /etc/sandcastle-node/node.json --name mac \
+     --ca-file /etc/sandcastle/home-ca.pem \
+     --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \
+     --egress /run/sandcastle-node/egress.sock
+   ```
 
-The uplink through the front door was tested (below).
+   It prints a link and a code.
+3. **Who it is for.** A computer is placed once, at its first start, and
+   stays (moving is not built), and the shell starts your first one as
+   you pick a username. Yours already runs on the box, so try the Mac with
+   the second person, `mac-test` (step 3's `FRAGMENT_LAN_USERS`): on the
+   Mac, in a private window, open the link, sign in as
+   `mac-test@fragment.home.arpa` (its password is
+   `$FRAGMENT_LAN_STATE/dex/passwords/mac-test` on the box), check the page
+   shows the same code, tick **Run my new computers on it**, and tap **Add
+   this node**. The command ends having written
+   `/etc/sandcastle-node/node.json` (the platform, its uplink as the id the
+   box gave it, `ca_file`) and the secret (`node.secret`, 0600; never
+   shown).
+4. Start it with docs/mac.md's unit (its `RuntimeDirectory` makes
+   `/run/sandcastle-node`), on `/etc/sandcastle-node/node.json`, and wait
+   for its log's `uplink: connected`. **Before step 5**: a first computer
+   whose chosen node is down goes to the box instead, for good.
+5. "Node added" says "Your new computers run on it": **Open the shell**,
+   choose a username, and mac-test's first agent starts on the Mac.
+   Settings, Computers (experimental) shows the box, and `mac` (yours, Up,
+   "Your computer runs here"). Revoke it there, and it is cut off at once.
 
-## 6. Sign in from the iPhone
+You pair a node for yourself the same way; the tick only matters for a
+person with no computer yet (yours stays on the box).
 
-1. Safari: `https://fragment.home.arpa` (type the `https://`; a bare name
-   may go to a search). The padlock is the root's.
-2. Sign in. Dex asks for an email and a password: `paul@fragment.home.arpa`
-   and the password from step 2. Let iCloud Keychain keep it.
-3. The first time, choose a username (`paul`): your fragments are then
-   `https://<label>--paul.fragment.home.arpa`.
-4. Make a fragment from the shell's catalog, or with the CLI from the Mac
-   or the box.
-5. **Talk to Hermes**: in the shell, New agent; give it a job (it becomes
-   its `SOUL.md`) and a name. The shell makes the agent, puts it on your
-   computer (Hermes, in a microVM on the box: step 8) and opens its chat
-   with the job as your first message. The first answer takes about 8 s
-   (the VM boots, `/data` comes back, Hermes starts); after that a plain
-   answer takes about 1 s and a turn with tools 2 to 7 s, each tool a
-   step under the reply. A computer left idle sleeps; your next message
-   wakes it, about 5 s. Its model is Bonsai on the box.
-   - Ask it to keep files under `/data/hermes` (say `/data/hermes/notes/`):
-     it may write nowhere else, and it will say so.
-   - When it asks with choices, tap one. "Other (type your answer)" does
-     not work yet: the answer cannot be typed (docs/self-host.md, found
-     26), and the chat then waits on that turn.
-   - A computer that existed before step 8 still runs the stub; the shell
-     shows an update pill that moves it to Hermes.
-
-Add the shell to the home screen (Share, Add to Home Screen) for an app of
-its own. Push notifications need Apple's push service and the internet;
-offline, the shell's live channel tells an open tab instead
-(docs/self-host.md, seam 8).
-
-## 7. The WAN-unplugged test
+## 8. The WAN-unplugged test
 
 It shows the whole loop needs nothing outside the house.
 
@@ -301,7 +408,7 @@ It shows the whole loop needs nothing outside the house.
 4. On the box, nothing of the stack holds a connection past the house:
 
    ```sh
-   ss -tnp state established '( not dst 192.168.50.0/24 and not dst 127.0.0.0/8 and not dst [::1] )' | grep -E 'celld|dex|fragment-lan|ninfer'
+   ss -tnp state established '( not dst 192.168.50.0/24 and not dst 127.0.0.0/8 and not dst [::1] )' | grep -E 'celld|dex|fragment-lan|sandcastle|ninfer'
    ```
 
    prints nothing. The door's log shows the DNS forwards that failed (other
@@ -310,49 +417,6 @@ It shows the whole loop needs nothing outside the house.
    back to the system's (docs/self-host.md, seam 11); an agent's skills that
    fetch from npm or a CDN fail; push is off.
 6. Plug the WAN back in (and Cellular Data back on).
-
-## 8. Computers on this box
-
-The local sandcastle node (`~/.local/opt/sandcastle/node.json`, on
-127.0.0.1:8798) joins through a node list, `FRAGMENT_NODES_FILE`
-(docs/self-host.md, seam 2, Placement):
-
-```sh
-# the stub and Hermes, built and loaded into the engine (in the docker group); it prints the "images"
-cd ~/dev/finite/fragment-selfhost && cargo xtask node-images
-cat > ~/.local/opt/sandcastle/nodes.json <<'JSON'
-{ "nodes": [
-    { "id": "box", "url": "http://127.0.0.1:8798", "arch": "x86_64", "capacity": 16,
-      "secret_file": "/home/futurepaul/.local/opt/sandcastle/node.secret" } ],
-  "images": { "stub": "docker.io/library/fragment-stub:local", "hermes": "docker.io/library/fragment-hermes:local" } }
-JSON
-export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
-export FRAGMENT_COMPUTER_IMAGE=hermes
-sandcastle-node serve --config ~/.local/opt/sandcastle/node.json &   # the node, before the stack
-```
-
-The engine takes Hermes' image (1.36 GB as `docker save` writes it) in
-about 25 s the first time, as it builds its disk; again, at once. Its
-capacity is the engine's `vms_max` (16 here). Run `node-images` again
-after pulling a new Hermes or bridge; a computer takes the new image at
-its next wake.
-
-before `cargo xtask dev --lan`. The node's own `platform` is the front door,
-`https://fragment.home.arpa`, with `"ca_file"` the root's PEM. The platform
-takes a node's intercepts (`/api/nodes/egress`) on its own host alone, so
-the cell's loopback port is not enough. The Mac pairs instead (step 5):
-it is not a row of this list, and runs only the computers you choose for
-it. Today its engine's VMs die before they are
-ready (the engine fix waits on its restart, which needs root); until then a
-computer's wake fails and says so, and nothing else changes. A computer's
-own origin is `https://<id>--computer.fragment.home.arpa`, under the same
-certificate.
-
-A computer is placed once, at its first start, and stays: yours, if it
-already started on the box, stays on the box (moving is not built). To
-try the Mac, choose it before a computer's first start: a second person
-(`FRAGMENT_LAN_USERS=paul,mac-test`) who pairs the Mac and chooses it
-before making their first agent.
 
 ## 9. Undo it all
 
@@ -364,7 +428,7 @@ sudo ufw delete <n>
 sudo rm -r /usr/local/lib/fragment-lan            # 1b, setcap's way
 sudo rm /etc/sysctl.d/50-fragment-lan.conf && sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024   # 1b, the sysctl's way
 certutil -d sql:$HOME/.pki/nssdb -D -n 'fragment LAN CA'                  # 1e
-rm -r ~/.local/state/fragment-lan                 # the CA, Dex's secrets: every device's trust in it ends here
+rm -r ~/.local/state/fragment-lan                 # the CA, Dex's secrets, step 2's files: every device's trust in it ends here
 # the Mac
 sudo rm /etc/resolver/fragment.home.arpa
 sudo security delete-certificate -c 'fragment LAN CA (omarchy)' /Library/Keychains/System.keychain
@@ -381,15 +445,90 @@ sudo security delete-certificate -c 'fragment LAN CA (omarchy)' /Library/Keychai
 
 | What you see | Why, and what to do |
 |---|---|
-| Safari: "This Connection Is Not Private" | the root is installed but not trusted: step 4.3. The door's log says `UnknownCA` or `BadCertificate` for the phone's address |
-| Safari: "Safari can't find the server" | DNS: step 3's server (`192.168.50.7` alone); Private Relay; the stack is not running |
+| Safari: "This Connection Is Not Private" | the root is installed but not trusted: step 5.3. The door's log says `UnknownCA` or `BadCertificate` for the phone's address |
+| Safari: "Safari can't find the server" | DNS: step 4's server (`192.168.50.7` alone); Private Relay; the stack is not running |
 | `fragment-lan serve` exited: permission denied on :53, :80 or :443 | step 1b; with setcap, `FRAGMENT_LAN_BIN` must name the installed copy |
 | xtask: `… says "", not "fragment-lan 1"` | the installed `fragment-lan` is older than this checkout: step 1b's install and setcap again |
 | `fragment-lan`: the address is in use | another server holds 53, 80 or 443 on 192.168.50.7 |
+| xtask: `read …/nodes.json (FRAGMENT_NODES_FILE)` | step 2's list is not written yet |
+| `sandcastle-node: ca_file: … No such file or directory` | terminal 2 started before the stack's first start made the root: start the stack, then the node |
+| a new agent's chat says its computer could not start, or `node_down` | terminal 2's node is not running, or its `platform` is not the front door (step 2) |
 | Sign-in: "the sign-in provider's metadata did not answer" | the box cannot resolve the zone (step 1d), or Dex is down (`lan-dex.log`) |
 | Dex: "Invalid Email Address and password" | the email is `<name>@fragment.home.arpa`; the password is the file's |
-| the CLI: "unreachable, or it dropped the connection" | its machine does not trust the root yet (step 5), or cannot resolve the zone |
+| an app's row shows its icon, never its card | the card renderer could not reach the door: see the stack's output for `card browser:` lines |
+| the CLI: "unreachable, or it dropped the connection" | its machine does not trust the root yet (step 7), or cannot resolve the zone |
 | "the cell is not answering" (502) | the stack is starting or stopped; see the node log |
+
+## Evidence, 2026-10-05: the guide rehearsed
+
+From a worktree of `selfhost` (`../fragment-rehearse`, branch
+`selfhost-rehearse`) rather than `~/dev/finite/fragment-selfhost`, with
+the state, the node list and the node's config in its scratch rather than
+`~/.local/state/fragment-lan`. In place of Paul's steps:
+
+- **1b and 1c**: high ports, `FRAGMENT_LAN_HTTPS_PORT=9543
+  FRAGMENT_LAN_HTTP_PORT=9580 FRAGMENT_LAN_DNS_PORT=9553`, the door on
+  192.168.50.7 alone (the default bind).
+- **1d**: every process of the stack, both nodes and the CLI ran in a mount
+  namespace whose `/etc/hosts` mapped `fragment.home.arpa` and
+  `dex.fragment.home.arpa` to 192.168.50.7 (`unshare -rm`, then an inner
+  user namespace mapping back to uid 1000: Chrome's sandbox refuses root).
+- **The iPhone**: headless Chromium 152 at 390×844 (3×), touch, Safari's
+  user agent, its own NSS database trusting the root (step 1e's
+  `certutil`), and `--host-resolver-rules` for the zone.
+- **The Mac**: sandcastle's Docker engine double and `sandcastle-node`
+  built from sandcastle's `node` (cf61527), in the same namespace.
+
+The real engine (`/var/lib/sandcastle`, jailed microVMs) ran the box's
+computers, Bonsai-2-27B answered, and the engine was empty before and
+after. Screenshots: `target/rehearse/shots/` in that worktree.
+
+| Step | What happened |
+|---|---|
+| 2 | `node-images`: 15 s with Docker's cache; 183 s after a change to the bridge (Hermes' load 23.6 s, 22.3 s of it its disk) |
+| 3 | the stack ready 1.5 s after its build (the first build of a fresh checkout, cell and agents, about 50 s; chrome-headless-shell and Dex fetched once); the node in front of the engine |
+| 6.1–6.3 | the shell, signed in through Dex's form; a username; the first agent's chat open 2.3 s after Continue, its computer awake on the engine |
+| 6.4 | "What is 17 times 23?": 391, the turn over in 5.6 s; "run `uname -a` and `nproc`": one terminal step, "an x86_64 Linux machine (kernel 6.12.91) with 2 CPUs", 9.0 s |
+| 6.5 | New agent, made in 0.6 s, its chat open with the job; Hermes' first answer began 13.6 s after Make it (the computer warm); another with three tool steps answered in 41 s |
+| 6.4, asking | an open clarify asked in 5.5 s; the answer typed in the chat ended the turn 10.6 s later, the file written; Stop while it asked ended the turn in 0.4 s; "Other" on a card of choices, then a typed answer: done in 1.8 s |
+| 6.6–6.7 | Todo from the catalog, its window at once; a todo added in one tab showed in the other 54 ms later, "you and 1 other here"; its card shot in 1.2 s |
+| 7 | `fragment login` approved through the door, `whoami` paul; `sandcastle-node pair` printed the link and code, mac-test signed in through Dex from the link, ticked the box and added the node; the config and its 0600 secret written; the uplink up; mac-test's first agent placed on the Mac ("as its owner chose"), and it ran `hostname` there in 9.7 s; Settings, Computers: "Your computer runs here" |
+| 3, stopping | Ctrl-C freed every port, in 1 s once and 19 s once (celld's drain, one call to the node in flight); each node stopped on Ctrl-C; the engine double removed its containers |
+
+**What the rehearsal found, and what changed** (each fixed here; the first
+two are on master too, with PRs of their own):
+
+- **An agent asking in words deadlocked its chat** (found 26's "Other",
+  and more). Hermes' `clarify` with no choices sends `❓ <question>` and
+  waits for the person's next message; the bridge showed the question as a
+  step and queued the next message as a turn behind the asking one, which
+  waited an hour (Hermes' clarify timeout), and Stop could not end it. The
+  first agent Juniper did exactly this on its first message. Now the
+  bridge shows the question as the agent's reply, hands the asker's next
+  message to the running turn (`Command::Tell`; Hermes' clarify intercept
+  takes it), and answers a Stop's interrupt with "Stop." so the wait lets
+  go. "Other" on a card works the same way.
+- **`fragment login` on Linux waited for the browser it opened** to exit
+  (`xdg-open` runs a browser in the foreground when none is running), so it
+  never finished after the approval. It no longer waits for the opener.
+- **Preview cards on the LAN** were never shot: the renderer reached
+  fragments at 127.0.0.1 on the door's port, where the door does not
+  listen, and did not trust the root. On the LAN both default to the
+  door's (its first address, and the root).
+- **The Mac could never hold a second person's computer**: the shell
+  starts a person's first computer as they pick a username, before
+  settings, where the choice was. The pairing page now offers "Run my new
+  computers on it", which chooses the node as it is added.
+- **The guide**: step 2 exported `FRAGMENT_NODES_FILE` before step 8 wrote
+  it (the stack refused to start); the node's config was never written
+  down (its `platform` must be the front door, with `ca_file`), and the
+  node could not start before the stack's first start made the root; the
+  first agent is made at the username, not by New agent; `curl -I` is the
+  shell's 404; stale lines about VMs dying and master's PR #130.
+
+Not rehearsed: ports 53, 80 and 443 (sudo), systemd-resolved, ufw, the
+router, the iPhone's Safari itself (its profile, Private Relay, the home
+screen), the Mac's Linux VM and the arm64 images, and the WAN unplugged.
 
 ## Evidence, 2026-10-04 (this box, high ports, no sudo)
 
