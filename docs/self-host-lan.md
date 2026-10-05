@@ -109,6 +109,7 @@ export FRAGMENT_MODEL_URL=http://bonsai.localhost/v1
 export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
 # once step 8's list is written: the box's own node, and the images (an arm64 one for the Mac)
 export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
+export FRAGMENT_COMPUTER_IMAGE=hermes   # new computers run Hermes (step 8), the agents' model Bonsai
 export FRAGMENT_BYOC=on    # people pair machines of their own (the Mac, step 5); needs the list; a company leaves it off
 cargo xtask dev --lan
 ```
@@ -263,7 +264,22 @@ The uplink through the front door was tested (below).
 3. The first time, choose a username (`paul`): your fragments are then
    `https://<label>--paul.fragment.home.arpa`.
 4. Make a fragment from the shell's catalog, or with the CLI from the Mac
-   or the box. Talk to an agent: its model is Bonsai on the box.
+   or the box.
+5. **Talk to Hermes**: in the shell, New agent; give it a job (it becomes
+   its `SOUL.md`) and a name. The shell makes the agent, puts it on your
+   computer (Hermes, in a microVM on the box: step 8) and opens its chat
+   with the job as your first message. The first answer takes about 8 s
+   (the VM boots, `/data` comes back, Hermes starts); after that a plain
+   answer takes about 1 s and a turn with tools 2 to 7 s, each tool a
+   step under the reply. A computer left idle sleeps; your next message
+   wakes it, about 5 s. Its model is Bonsai on the box.
+   - Ask it to keep files under `/data/hermes` (say `/data/hermes/notes/`):
+     it may write nowhere else, and it will say so.
+   - When it asks with choices, tap one. "Other (type your answer)" does
+     not work yet: the answer cannot be typed (docs/self-host.md, found
+     26), and the chat then waits on that turn.
+   - A computer that existed before step 8 still runs the stub; the shell
+     shows an update pill that moves it to Hermes.
 
 Add the shell to the home screen (Share, Add to Home Screen) for an app of
 its own. Push notifications need Apple's push service and the internet;
@@ -302,14 +318,24 @@ The local sandcastle node (`~/.local/opt/sandcastle/node.json`, on
 (docs/self-host.md, seam 2, Placement):
 
 ```sh
+# the stub and Hermes, built and loaded into the engine (in the docker group); it prints the "images"
+cd ~/dev/finite/fragment-selfhost && cargo xtask node-images
 cat > ~/.local/opt/sandcastle/nodes.json <<'JSON'
 { "nodes": [
-    { "id": "box", "url": "http://127.0.0.1:8798", "arch": "x86_64", "capacity": 32,
+    { "id": "box", "url": "http://127.0.0.1:8798", "arch": "x86_64", "capacity": 16,
       "secret_file": "/home/futurepaul/.local/opt/sandcastle/node.secret" } ],
-  "images": { "stub": "<the reference the node holds>" } }
+  "images": { "stub": "docker.io/library/fragment-stub:local", "hermes": "docker.io/library/fragment-hermes:local" } }
 JSON
 export FRAGMENT_NODES_FILE=$HOME/.local/opt/sandcastle/nodes.json
+export FRAGMENT_COMPUTER_IMAGE=hermes
+sandcastle-node serve --config ~/.local/opt/sandcastle/node.json &   # the node, before the stack
 ```
+
+The engine takes Hermes' image (1.36 GB as `docker save` writes it) in
+about 25 s the first time, as it builds its disk; again, at once. Its
+capacity is the engine's `vms_max` (16 here). Run `node-images` again
+after pulling a new Hermes or bridge; a computer takes the new image at
+its next wake.
 
 before `cargo xtask dev --lan`. The node's own `platform` is the front door,
 `https://fragment.home.arpa`, with `"ca_file"` the root's PEM. The platform
