@@ -43,6 +43,7 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
         ("/api/test/people", unlocked(api, "/api/test/people", None)?),
         ("/api/test/people", unlocked(api, "/api/test/people", Some(String::new()))?),
         ("/api/test/signin", unlocked(api, "/api/test/signin", Some("f".repeat(64)))?),
+        ("/api/test/computer", unlocked(api, "/api/test/computer", None)?),
     ];
     // the router's 404 names the path it has no route for
     let as_missing = |path: &str, r: &Reply| r.status == 404 && r.text == missing.text.replace("/api/no-such-route", path);

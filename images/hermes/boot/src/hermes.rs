@@ -118,9 +118,11 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // The guest holds no credential: the intercept strips auth and adds its own.
     y.push_str("  api_key: \"fragment-model\"\n  context_length: 262144\n");
     y.push_str(&format!("  default_headers:\n    x-fragment-agent: {}\n", q(&agent.fragment)));
-    // The managed skills (skills.rs), after the profile's own `skills/`:
-    // Hermes takes the first skill of a name, so an agent's own wins.
-    y.push_str(&format!("skills:\n  external_dirs: [{}]\n", q(crate::skills::MANAGED_DIR)));
+    // The managed skills, then the platform skill (skills.rs), after the
+    // profile's own `skills/`: Hermes takes the first skill of a name, so an
+    // agent's own wins, and a managed one over the platform's.
+    let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
+    y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
     // the screen shows it. Left unset, Hermes picks Browser Use mode (one
@@ -354,7 +356,7 @@ mod tests {
         assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
-        assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\"]\n"), "the managed skills, after its own: {p}");
+        assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");

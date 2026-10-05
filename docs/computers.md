@@ -44,14 +44,24 @@ container starts until someone asks again).
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
   never sleeps (decision 25).
-- **Sleep**, driven by the DO, in order: save `/data` (`DirectoryBackup`),
-  take a container snapshot, send SIGTERM, wait up to 5 s for the guest
-  to exit, destroy. An idle stop by the runtime is only the safety net.
-- **Wake from a snapshot** when the snapshot's image is the pinned image
-  (`start({containerSnapshot})`); otherwise start the image with
-  `RESTORE_PENDING=1`, restore `/data`, then touch
-  `/run/computer/restored`. A start answered "temporarily unavailable" is
-  retried with backoff.
+- **Sleep**, driven by the DO, in order: hold the guest (touch
+  `/run/computer/hold`, below), save `/data` (`DirectoryBackup`), take a
+  container snapshot (only after a save that worked), send SIGTERM, wait
+  up to 5 s for the guest to exit, destroy. An idle stop by the runtime is
+  only the safety net.
+- **Wake from a snapshot** when it caches the current save for the pinned
+  image (`start({containerSnapshot})`; below, "Saves and what a wake
+  restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
+  `/data`, then touch `/run/computer/restored`. A start answered
+  "temporarily unavailable" is retried with backoff. A start from the
+  snapshot that fails (or whose container stops before it comes up)
+  forgets the snapshot, and the computer starts again from the image and
+  the save in the same wake, with no strike against it.
+- **A crash** (the container stopped on its own while starting or awake)
+  counts against its starts, and the computer starts again while
+  something wants it. A guest that died holding its keepalive (busy) is
+  held as a record holds it, so it starts again however long its turn
+  ran, and its next life ends what was cut.
 - **A new isolate** that finds the container running attaches its
   monitor, timeout and intercepts again and never destroys it (lesson 6).
   After any `destroy()` it waits for `running` to be false before
@@ -87,8 +97,21 @@ that names a PID from before a sleep can name a live process after it.
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
   DO's `DirectoryBackup` saves and restores `/data` through it.
-- `sh`, `true`, `mkdir` and `touch`: the DO polls with `true` and opens
-  the restore gate with `touch`.
+- `sh`, `true`, `mkdir`, `touch` and `rm`: the DO polls with `true`,
+  opens the restore gate and marks a sleep's hold with `touch`, and lets
+  go of a hold with `rm`.
+- **The sleep's hold**, `/run/computer/hold`. The DO touches it at the
+  start of every sleep, before its save. While it exists the guest claims
+  no new turn (our bridge: docs/bridge.md); what it already claimed may
+  run on, and is cut with the container. So the save of a sleep has every
+  turn its guest claimed, and a message that arrives as it goes to sleep
+  is left for the next life. A fresh container never has it: an image's
+  is made without it, and the DO removes it from a container started from
+  a snapshot (the sleep that took the snapshot had touched it) before that
+  start is ready. A container that outlives its sleep (a destroy that did
+  not take) has it removed. An image that ignores it loses nothing it did
+  not lose before. P2 of docs/explorations/pi-durable.md makes this a
+  handshake (the guest answers `held`); it is a mark for now.
 
 ### Data and the restore gate
 
@@ -100,12 +123,51 @@ that names a PID from before a sleep can name a live process after it.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).
-- While `/run/computer/hold` exists, a sleep has begun and its save comes
-  next: the image takes no new work. Our bridge claims no turn while it
-  does (docs/bridge.md, `BRIDGE_HOLD`), so a message that arrives then is
-  left for the next start.
+- The sleep's hold (above, `/run/computer/hold`) is read the same way:
+  our bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
   before the signal; whatever is written after it may be lost.
+
+### Saves and what a wake restores
+
+P3 and P7 of docs/explorations/pi-durable.md. A computer keeps one save
+of `/data`, and a snapshot is only ever a cache of it:
+
+- **The save** is the backup its last sleep that saved took
+  (`DirectoryBackup`'s record, kept by the Computer DO with when it was
+  taken and the start it was of). A sleep whose save fails keeps the save
+  before it, notes why (the view's `why`), and still goes to sleep (F6:
+  P2 changes that).
+- **The snapshot's record** is `{id, image, save}`: the image's reference
+  its start ran (a pin while it runs is the next start's) and the id of
+  the save its sleep took just before it. A wake uses it only when `save`
+  is the current save and `image` the pinned image's reference; otherwise
+  it is the image and the save. A sleep whose save failed takes none, and
+  a snapshot that fails forgets nothing: the one kept is still a cache of
+  its own save. So a snapshot only ever makes a wake faster, never
+  different (I9).
+- **Why the two agree.** The snapshot is taken after the backup within
+  one sleep, with the guest running between them, so they agree only
+  because the guest is held from before the backup (the sleep's hold,
+  above): it claims no new turn in between. Its writes in flight (a turn
+  it had claimed) can still land between the two; P2's full hold is what
+  stops those.
+- **A broken snapshot** (one that will not start: expired, say) is
+  forgotten as its start fails, and the same wake starts the image and
+  restores the save, with no strike against the computer (F7). Only the
+  hosted lane can show what Cloudflare answers for one (local workerd
+  takes no snapshots: the lifecycle's fallback is proven pure, in
+  `crates/core`).
+- **What a wake restored.** Each start that comes up records which save
+  it restored (`snapshot`, `backup`, or `nothing`: a computer never
+  saved), that save's id, when it was taken and how old it was, and how
+  the life before it ended (`sleep`, `exit`, or none for its first). It
+  logs one line (`"restored"`) and shows it in its owner's view
+  (`restored`, docs/api.md). A start that went back in time is a
+  **rollback**, counted in the view's `rollbacks`: the life before it
+  ended by a crash, or by a sleep whose save failed, so what that life did
+  since its own start is in no save. A start after a sleep that saved is
+  none. Nothing's correctness depends on the guest reading either.
 
 ### The fragment API
 
@@ -447,18 +509,39 @@ and how a runtime finds them, is the image's.
   `/data/hermes/managed-skills`, `skills/<category>/<name>/…` as
   `<category>/<name>/…`, and removes what the listing no longer has; no
   skills fragment means no managed skills. It does so off the boot's path,
-  at each start and every ten minutes while awake (`skills.installed`,
-  `skills.failed`); `/data` keeps the last install, so a wake fetches only
-  what a release changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all
-  (`skills.rs`); a file past one, or at a path that is no safe relative
-  path, is refused and the rest installs.
-- **Every profile** names that directory in `skills.external_dirs`, after
-  its own `skills/` (its agent fragment's, synced both ways: an agent's
-  own skills are versioned in its fragment). Hermes takes the first skill
-  of a name, so an agent's own wins over a managed one. Hermes' bundled
-  skills are the default profile's only; an agent's profile has its own
-  and the managed set, which is what the shell's Skills section lists. A
-  managed skill a session has not yet seen appears at its next session.
+  at each start and every ten minutes while awake, or every minute while
+  the owner has no skills fragment (`skills.installed`, `skills.failed`);
+  `/data` keeps the last install, so a wake fetches only what a release
+  changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all (`skills.rs`);
+  a file past one, or at a path that is no safe relative path, is refused
+  and the rest installs. A person whose agents predate their skills
+  fragment (setup makes it since 2026-10-03) gets one as the shell loads,
+  once, from the blessed template, as setup makes it (shell.js,
+  `backfillSkills`); their awake computers install it within the minute.
+- **The platform skill**, `fragment`, is every profile's, whatever the
+  skills fragment holds: what an agent knows of the platform it is on. It
+  is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
+  what a fragment is, the commands for the agent's fragments) after a page
+  of what the computer adds (`images/hermes/boot/src/computer.md`: that it
+  is an agent on a Fragment computer acting for its owner with no login,
+  the apps and brain skills to load, its connections as placeholders in
+  its environment, `GOOGLE_OAUTH_ACCESS_TOKEN` and the Google Workspace
+  skill, and its desktop, which its owner watches and can take over from
+  "Its computer's screen"), with a description for Hermes' skills index.
+  `hermes-boot build-info` writes it at the image's build
+  (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
+  agents), so it is always the binary's in the image, and costs a boot
+  nothing; the build fails if `fragment skill` is no skill named
+  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
+- **Every profile** names the managed directory, then the platform skill's,
+  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
+  synced both ways: an agent's own skills are versioned in its fragment).
+  Hermes takes the first skill of a name, so an agent's own wins over a
+  managed one, and either over the platform skill. Hermes' bundled skills
+  are the default profile's only; an agent's profile has its own, the
+  managed set, which is what the shell's Skills section lists, and the
+  platform skill. A managed skill a session has not yet seen appears at its
+  next session.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner
@@ -525,9 +608,17 @@ and how a runtime finds them, is the image's.
 ## Tests
 
 - `crates/core`: the lifecycle as a pure state machine (wake racing
-  sleep, the newest push wins, a deadman alarm, a failing wake sealed).
+  sleep, the newest push wins, a deadman alarm, a failing wake sealed, a
+  crash while busy started again, a broken snapshot's fallback, each life
+  ending once), and its saves (which a wake restores, the snapshot as a
+  cache of one save and one image, a slow sleep asked twice, what a wake
+  restored and its rollbacks), under seeded interleavings with crashes.
 - The e2e on workerd: the Computer DO's routes and its intercepts,
-  against `images/stub/` under `wrangler dev` with Docker.
+  against `images/stub/` under `wrangler dev` with Docker. A crash is the
+  lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
+  the guest's PID 1, so the real exit is reported), and a check of what
+  ran counts runs (the model fake's calls, the ledger's rows, the
+  computer's `uses`), never records, which a second run replays.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
   first's turn runs included.

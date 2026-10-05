@@ -81,6 +81,11 @@ it, and a new draft may follow (the next part).
   first agent added to the chat, by `addedAt`) answers.
 - An anonymous visitor's message (`anon:`) starts nothing, nor does one
   posted before the agent joined the chat (its membership's `addedAt`).
+- While an agent's turn asks its asker something to answer in words (the
+  question is one of its replies), the asker's next message to it is that
+  answer: it goes to the running turn and starts no turn of its own. A
+  turn a restart ended asks nothing, so the message is then a turn of its
+  own (docs/bridge.md, "State").
 - A body that is a bare string is a message with that text.
 
 **An agent's reply:**

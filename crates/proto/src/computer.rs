@@ -200,6 +200,64 @@ pub struct ComputerView {
     /// or not (so an image can pass them all through, once).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_env: Vec<String>,
+    /// What its last start that came up restored (docs/computers.md, "What
+    /// a wake restored"); none before its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<ComputerRestore>,
+    /// Its starts that went back in time: each woke with a `/data` older
+    /// than the end of the life before it (a crash, or a sleep whose save
+    /// failed).
+    #[serde(default)]
+    pub rollbacks: u64,
+}
+
+/// Where a start's `/data` came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreSource {
+    /// A container snapshot, a cache of the save it names, for one image.
+    Snapshot,
+    /// The save itself (`DirectoryBackup`), into the image.
+    Backup,
+    /// Nothing: a computer never saved (its first start, or one whose saves
+    /// all failed).
+    Nothing,
+}
+
+/// How one of a computer's lives (a start that came up) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifeEnd {
+    /// Its sleep (the Computer DO's sequence, which saves first).
+    Sleep,
+    /// It stopped on its own: a crash, or the runtime's idle stop.
+    Exit,
+}
+
+/// What one start restored, as the Computer DO recorded it as it came up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerRestore {
+    /// The start (the Computer DO's generation).
+    pub generation: u64,
+    pub from: RestoreSource,
+    /// The save's id (its backup record's), when it restored one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save: Option<String>,
+    /// When that save was taken, and how old it was at this start (ms);
+    /// none for nothing, or a save made before the platform kept its time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_ms: Option<i64>,
+    /// How the life before it ended; none for its first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<LifeEnd>,
+    /// Whether it went back in time: the life before it ended other than
+    /// by a sleep that saved, so what it did since its own start was lost.
+    pub rollback: bool,
+    /// When it came up (ms).
+    pub at: i64,
 }
 
 /// `POST /api/computers/{id}/ports/{port}/ticket` → a one-time link that

@@ -250,10 +250,22 @@ class ContainerHost {
     return false;
   }
 
-  async exec(generation, argv) {
+  // Runs `argv` in the container, answering within `ms` when it is given.
+  async exec(generation, argv, ms) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    const out = await (await this.#c.exec(argv, { stderr: "combined" })).output();
-    return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-4096) };
+    const run = (async () => (await this.#c.exec(argv, { stderr: "combined" })).output())();
+    // a late failure, once the bound answered, is no one's to hear
+    run.catch(() => {});
+    let timer;
+    const late = new Promise((_, reject) => {
+      if (ms) timer = setTimeout(() => reject(new Error(`${argv.join(" ")}: no answer within ${ms} ms`)), ms);
+    });
+    try {
+      const out = await (ms ? Promise.race([run, late]) : run);
+      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-4096) };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async backup(generation) {
@@ -276,14 +288,19 @@ class ContainerHost {
     return s.id;
   }
 
+  // Sends signal `n` to the guest's PID 1 (from outside its PID namespace,
+  // so SIGKILL lands as a crash's would). Answers whether it was sent.
   signal(generation, n) {
-    if (generation === this.#generation && this.#c.running) this.#c.signal(n);
+    if (generation !== this.#generation || !this.#c.running) return false;
+    this.#c.signal(n);
+    return true;
   }
 
-  // Destroys the container if it is still this generation's, and waits for
+  // Destroys the container if it is still this generation's (`0`: whatever
+  // runs, an earlier start's or one an earlier isolate left), and waits for
   // it to be gone (lesson 6: never start before `running` is false).
   async destroy(generation, reason) {
-    if (generation !== this.#generation) return false;
+    if (generation !== 0 && generation !== this.#generation) return false;
     if (this.#c.running) await this.#c.destroy(reason).catch(() => {});
     for (let i = 0; i < 100 && this.#c.running; i++) await new Promise((r) => setTimeout(r, 100));
     return !this.#c.running;

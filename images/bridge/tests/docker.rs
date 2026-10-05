@@ -272,32 +272,50 @@ async fn the_hermes_image() {
         let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills.paul/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
         assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=id%3Apaul") && r.2.as_deref() == Some("juniper.paul") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
     });
-    assert!(c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\"]")), "its profile names the managed skills");
-    // what Hermes itself finds for the profile: its own first, then the managed set
-    let found = c.exec_out(&[
-        "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
-        "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
-    ]);
-    let found: serde_json::Value = serde_json::from_str(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"));
+    assert!(
+        c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"/opt/fragment/skills\"]")),
+        "its profile names the managed skills, then the platform skill"
+    );
+    // what Hermes itself finds for the profile: its own first, then the
+    // managed set, then the platform skill (the image's: its CLI's own)
+    let hermes_finds = || {
+        let found = c.exec_out(&[
+            "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
+            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
+        ]);
+        serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
+    };
+    let found = hermes_finds();
     eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
     assert!(found["arxiv-finite"].as_str().is_some_and(|d| d.contains("Search arXiv")), "a managed skill: {found}");
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
+    assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
+    let platform = c.exec_out(&["cat", "/opt/fragment/skills/platform/fragment/SKILL.md"]);
+    let cli = c.exec_out(&["fragment", "skill"]);
+    let cli_body = cli.split_once("\n---\n").map_or("", |(_, body)| body.trim());
+    assert!(platform.contains("# Your computer") && !cli_body.is_empty() && platform.contains(cli_body), "the platform skill is the image's CLI's own, after the computer's page:\n{platform}");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /opt/fragment/skills/platform/fragment/SKILL.md"]), "the platform skill is read-only to the agents");
 
     let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:paul fragment login 2>&1; echo exit=$?"]);
     assert!(login.contains("needs no login") && login.contains("exit=2"), "an agent logs in to nothing: {login}");
 
-    // a change to the managed set is followed while it runs
+    // a change to the managed set is followed while it runs: one skill
+    // changed, a file gone, and a managed `fragment`, which shadows the
+    // platform's
     fake.with(|w| {
         let f = w.fragments.get_mut(&skills).unwrap();
         f.files.insert("skills/research/arxiv-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: arxiv-finite\ndescription: Search arXiv, again.\n---\n"));
         f.files.remove("skills/research/arxiv-finite/scripts/search.py");
+        f.files.insert("skills/fragment/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: fragment\ndescription: The managed fragment, which wins.\n---\n"));
     });
     let t_follow = Instant::now();
-    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py")) {
+    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py") && installed("fragment/SKILL.md")) {
         assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    let found = hermes_finds();
+    assert!(found["fragment"].as_str().is_some_and(|d| d.contains("which wins")), "a managed `fragment` shadows the platform skill: {found}");
 
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));

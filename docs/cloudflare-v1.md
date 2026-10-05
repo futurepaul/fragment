@@ -182,21 +182,48 @@ speaking Cloudflare's APIs) returns once this product works.
     - Missing: image editing (FLUX.1 [schnell] is text to image), other
       vendors' models in the model council, and operator keys or
       connections a deployment does not offer (the README's table).
+
+    Status, 2026-10-05 (branch `claude/agents-know-the-platform`; Paul, on
+    p5 before a demo: the agent knew nothing of fragment or of its Google
+    connection):
+    - Built: a platform skill, `fragment`, in every profile of our Hermes
+      image whatever the skills fragment holds: the image's CLI's own
+      `fragment skill` after a page of the computer's (acting for its
+      owner, the apps and brain skills, connections and
+      `GOOGLE_OAUTH_ACCESS_TOKEN`, its desktop), written at the image's
+      build, named after the managed set in `skills.external_dirs` so a
+      managed or own `fragment` wins (docs/computers.md). The shell makes
+      a skills fragment, once, for a person with an agent and none (set up
+      before 2026-10-03), and an awake computer looks for one every minute
+      while its owner has none.
+    - Evidence: hermes-boot's tests (the platform skill with no skills
+      fragment, a managed one shadowing it); shell-ui (the backfill); the
+      real-Hermes lane (with no skills fragment Hermes lists `fragment` in
+      its model's skills index, and a skills fragment made while awake is
+      installed within the minute: 46 and 50 s). Sections shell, shell-ui,
+      computers and hermes: 257 passed, 0 failed.
+    - Not yet: the same on a preview (the hosted lane), and the platform
+      skill in the shell's Skills list.
 18. **Backups are a computer feature.** `/data` is saved with
     `DirectoryBackup` every few minutes while written. A sleep is driven
     by the Computer DO, in this order:
-    1. it saves `/data`;
-    2. it signals the guest;
-    3. it waits for the guest to exit;
-    4. it destroys the container.
+    1. it holds the guest: it touches `/run/computer/hold`, and the
+       guest claims no new turn (docs/computers.md);
+    2. it saves `/data`;
+    3. it takes the snapshot (below);
+    4. it signals the guest;
+    5. it waits for the guest to exit;
+    6. it destroys the container.
 
     The inactivity timeout is only a safety net. An idle stop gives the
     guest about 5 seconds of SIGTERM, and the DO can't exec during it.
 
     **A wake starts from a per-computer snapshot.** At sleep, after the
     save, the DO takes `snapshotContainer()` (5–6 s, about 12 MB). A wake
-    then calls `start({containerSnapshot})` when the computer's pinned
-    image matches the snapshot. Otherwise it starts the image and
+    then calls `start({containerSnapshot})` when the snapshot is of the
+    newest save and of the computer's pinned image (the snapshot is a
+    cache of the save; a start from one that fails falls back to the
+    image and the save in the same wake). Otherwise it starts the image and
     restores: the container starts with `RESTORE_PENDING=1`, the DO
     restores `/data`, and it touches `/run/computer/restored`, which the
     image waits for before its own init runs. The DO retries a
@@ -209,6 +236,14 @@ speaking Cloudflare's APIs) returns once this product works.
     about 3 s per database, so it stays off the wake path. The agent's
     self is in its fragment. CI runs a restore drill into an empty
     computer.
+
+    *Status (2026-10-05, #136 and #137).* The hold, the snapshot as a
+    cache of the save, and a wake that says what it restored are built.
+    `/data` is still saved only at sleep, not every few minutes, and
+    Litestream's replicas are never read: both are open in
+    docs/explorations/pi-durable.md (P2, P4) and in the debt ledger. A
+    rolled-back or lost `/data` no longer runs a turn again: a turn runs
+    only in the life that claimed it on `work` (lesson 2's journal).
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

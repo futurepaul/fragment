@@ -167,6 +167,79 @@ async fn an_approval_expired() {
     bridge.stop().await;
 }
 
+/// Goal: a turn that asks its asker something in words (Hermes' open
+/// clarify) posts the question, and the asker's next message is its
+/// answer, mid-turn: the turn ends saying it, and the message starts no
+/// turn of its own. Someone else's message meanwhile waits its turn.
+#[tokio::test]
+async fn a_question_answered_in_words() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("question");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
+    let turn = turn_of("juniper", &chat, seq(&asked));
+    fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+    let other = fake.say(&chat, &person("skyler"), json!({ "text": "hello juniper" }));
+    let answer = fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    fake.until(WAIT, "the asking turn's end, then skyler's", |w| w.bodies(&chat, "work", "turn.end").len() == 2).await;
+    fake.with(|w| {
+        let r = replies(w, &chat);
+        assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }));
+        assert_eq!(r[1], json!({ "text": "echo: [paul] name my plant, ask-me (told: Fernando)", "turn": turn }));
+        let started: Vec<Value> = w.bodies(&chat, "work", "turn.start").iter().map(|b| b["turn"].clone()).collect();
+        assert_eq!(started, vec![json!(turn), json!(turn_of("juniper", &chat, seq(&other)))], "the answer started no turn; skyler's ran after");
+        assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
+        assert!(w.bodies(&chat, "work", "turn.end").iter().all(|e| e["outcome"] == "idle"));
+    });
+    bridge.stop().await;
+}
+
+/// Goal (P1, with a question in flight): a turn asking in words that a
+/// crash cuts ends once, as lost, and is never run again, whether the next
+/// life wakes with the state the crash left (the turn asking), one from
+/// before it, or none; and the asker's answer, said to the next life, is
+/// told to no turn that life does not own: it is a turn of its own,
+/// answered once.
+#[tokio::test]
+async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
+    for wakes in ["during", "before", "none"] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("question-cut-{wakes}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let runs = support::Runs::default();
+
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+        following(&fake, 2).await;
+        let before = support::save_state(&dir);
+        let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
+        let turn = turn_of("juniper", &chat, seq(&asked));
+        fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        match wakes {
+            "before" => support::restore_state(&dir, &before),
+            "during" => {}
+            _ => support::lose_state(&dir),
+        }
+
+        let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+        fake.until(WAIT, "the cut turn's end", |w| !ends_of(w, &chat, &turn).is_empty()).await;
+        let answer = said_and_ended(&fake, &chat, "Fernando").await;
+        assert_eq!(runs.all(), vec![turn.clone(), answer.clone()], "{wakes}: the asking turn ran once, and the answer is a turn of its own");
+        fake.with(|w| {
+            assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
+            let r = replies(w, &chat);
+            assert_eq!(r, vec![json!({ "text": "What should I call it?", "turn": turn }), json!({ "text": "echo: [paul] Fernando", "turn": answer })], "{wakes}: the question, then the answer's own reply");
+            assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
+        });
+        bridge.stop().await;
+    }
+}
+
 /// Goal: only the turn's asker stops it; a Stop from anyone else is
 /// ignored and the turn answers.
 #[tokio::test]
