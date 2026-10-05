@@ -793,7 +793,11 @@ persisted)".
   the owner's wake is refused with the ledger's reason (402
   `budget_used_up` at zero credit or a canceled seat; 403 for a guest,
   who pays for nothing), which the view's `why` keeps; a record, a join or a page wakes nothing; no model call or
-  key call is made. A computer already awake runs on until it sleeps.
+  key call is made. A computer already awake runs on until it sleeps. A
+  computer on its owner's own node (bring your own computer:
+  docs/self-host.md, seams 2 and 10) wakes past the want of credit (zero,
+  or the overdraft): its awake time there is tracked in points, never
+  charged. A guest's or a canceled seat's refusal stands there too.
 
 ## Tests
 

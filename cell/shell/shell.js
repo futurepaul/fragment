@@ -974,21 +974,35 @@ async function openSettings(push = true) {
   actions.append(link, signout);
   account.append(actions);
   const standing = ledger?.standing?.standing;
+  // a computer on a machine of theirs is never charged: its use is tracked
+  // in points (a point is $0.001 at list: crates/core/src/price.rs `points`)
+  const points = ledger?.ownHardwarePoints ?? 0;
+  const ownsMachines = (nodes?.nodes ?? []).some((n) => n.kind === "own");
   const credit = ledger
     ? section(
         "Credit",
         line("Plan", ledger.plan === "seat_always_on" ? "Always-on seat" : ledger.plan === "seat" ? "Seat" : "Guest"),
         line("This month", `${usd(ledger.availableMicros ?? ledger.balanceMicros ?? 0)} left`),
+        ...(points > 0 || ownsMachines ? [line("Your own machines", `${points.toLocaleString()} ${points === 1 ? "point" : "points"} this month, not charged`)] : []),
         ...(standing && standing !== "ok"
           ? [el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + ".")]
           : []),
       )
     : section("Credit", el("p", "muted", "Your credit could not be read."));
+  credit.id = "settings-credit";
   const c = state.computer;
+  const onOwn = c?.node && nodes?.nodes?.some((n) => n.id === c.node && n.kind === "own");
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []), ...(c.placed ? [line("Placed", c.placed)] : []), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [
+          line("State", c.phase.replace("_", " ")),
+          line("Version", c.image),
+          ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []),
+          ...(onOwn ? [line("Its use", "Tracked in points, not charged: it runs on your own machine")] : []),
+          ...(c.placed ? [line("Placed", c.placed)] : []),
+          ...(c.why ? [el("p", "settings-warning", c.why)] : []),
+        ]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   if (c) {
@@ -1026,9 +1040,13 @@ async function openSettings(push = true) {
 // node it first started on; the choice is for the next. A person has one
 // computer today: several, one per machine, is the experimental part.
 const NODE_STATE = { up: "Up", down: "Down", revoked: "Revoked" };
+// the end of a node's id, beside its name: two of a person's nodes named
+// alike before names were each person's own are told apart by it
+// (crates/core/src/pairing.rs `id_suffix`, ID_SUFFIX_CHARS)
+const nodeSuffix = (id) => `…${id.slice(-6)}`;
 const nodeName = (nodes, id) => {
   const n = nodes?.nodes?.find((x) => x.id === id);
-  return n ? (n.kind === "own" ? `${n.name} (yours)` : n.name) : id;
+  return n ? (n.kind === "own" ? `${n.name} ${nodeSuffix(n.id)} (yours)` : n.name) : id;
 };
 function nodesSection(nodes) {
   if (!nodes || (!nodes.nodes.length && !nodes.byoc)) return [];
@@ -1064,17 +1082,18 @@ function nodesSection(nodes) {
     row.dataset.node = n.id;
     row.dataset.state = n.state;
     const head = el("div", "provider-head");
-    head.append(el("span", "provider-name", n.name), el("span", "provider-kind", `${n.kind === "own" ? "Yours" : "The platform's"} · ${n.arch}`));
+    head.append(el("span", "provider-name", n.name), el("span", "provider-kind", n.kind === "own" ? `Yours · ${n.arch} · ${nodeSuffix(n.id)}` : `The platform's · ${n.arch}`));
     head.append(el("span", `provider-state ${n.state === "up" ? "connected" : "needs_reauthorization"}`, NODE_STATE[n.state] ?? n.state));
     row.append(head);
     if (n.why && n.state === "down") row.append(el("span", "muted", n.why));
     if (n.computers.length) row.append(el("span", "muted", n.computers.length === 1 ? "Your computer runs here." : `${n.computers.length} of your computers run here.`));
+    if (n.kind === "own" && n.state !== "revoked") row.append(el("span", "muted", "What runs here is tracked in points, not charged."));
     if (n.kind === "own" && n.state !== "revoked") {
       const actions = el("div", "settings-actions");
       const revoke = el("button", "quiet", "Revoke");
       revoke.type = "button";
       revoke.onclick = async () => {
-        if (!confirm(`Revoke ${n.name}? It is cut off at once, and runs none of your computers again${n.computers.length ? ", the one there included" : ""}.`)) return;
+        if (!confirm(`Revoke ${nodeName(nodes, n.id)}? It is cut off at once, and runs none of your computers again${n.computers.length ? ", the one there included" : ""}.`)) return;
         revoke.disabled = true;
         try {
           await api("DELETE", `/api/nodes/${seg(n.id)}`);
@@ -1092,7 +1111,7 @@ function nodesSection(nodes) {
     s.append(
       say("Bring a machine of yours: start sandcastle on it, then run this there and approve the code it shows here:"),
       el("pre", "command", `sandcastle-node pair ${location.origin} --config /etc/sandcastle-node/node.json \\\n  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \\\n  --egress /run/sandcastle-node/egress.sock`),
-      say("Behind a private CA, add `--ca-file` with its PEM. It runs only the computers you choose for it, here."),
+      say("It takes the machine's name, which none of yours may share: `--name` gives it another. Behind a private CA, add `--ca-file` with its PEM. It runs only the computers you choose for it, here, and what runs there is tracked in points, not charged."),
     );
   } else {
     s.append(el("p", "muted", "This platform's machines are its operator's: it pairs none of yours."));

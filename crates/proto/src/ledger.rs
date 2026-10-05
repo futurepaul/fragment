@@ -92,6 +92,13 @@ pub struct LedgerStatus {
     pub price_book: u32,
     /// This month's spend by fragment, the largest first (a bounded list).
     pub fragments: Vec<FragmentSpend>,
+    /// This month's use of the person's own hardware (computers on nodes
+    /// they paired: docs/self-host.md, seam 10), in points (a point is
+    /// $0.001 of list price, rounded up: `fragment_core::price::points`).
+    /// Tracked, never charged: it is in no balance above. Read as 0 from a
+    /// platform from before it.
+    #[serde(default)]
+    pub own_hardware_points: i64,
 }
 
 /// Credit granted: bought (Stripe's hook), or given by an operator. Once
@@ -188,5 +195,21 @@ mod tests {
         assert!(serde_json::from_value::<GrantCredit>(json!({ "id": "g1", "micro": 5, "by": "stripe", "why": "" })).is_err());
         let cap: SetFragmentCap = serde_json::from_value(json!({ "id": "c1", "fragment": "todo.ann", "micros": null })).unwrap();
         assert_eq!(cap.micros, None);
+    }
+
+    /// A status carries own hardware's points as `ownHardwarePoints`; one
+    /// from a platform from before them reads as none.
+    #[test]
+    fn a_status_names_own_hardwares_points() {
+        let mut v = json!({
+            "plan": "seat", "seat": "active", "month": "2026-10", "balanceMicros": 0, "includedMicros": 0,
+            "includedGrantedMicros": 0, "purchasedMicros": 0, "reservedMicros": 0, "availableMicros": 0,
+            "overdraftMicros": 0, "standing": { "standing": "ok" }, "priceBook": 1, "fragments": [],
+        });
+        assert_eq!(serde_json::from_value::<LedgerStatus>(v.clone()).unwrap().own_hardware_points, 0);
+        v["ownHardwarePoints"] = json!(65);
+        let s: LedgerStatus = serde_json::from_value(v).unwrap();
+        assert_eq!(s.own_hardware_points, 65);
+        assert_eq!(serde_json::to_value(&s).unwrap()["ownHardwarePoints"], 65);
     }
 }

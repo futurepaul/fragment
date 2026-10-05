@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
-use fragment_core::placement;
+use fragment_core::{pairing, placement};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
@@ -546,7 +546,10 @@ impl ComputerCell {
     /// deployment's rule (`rank_for`), and the best that still has room as
     /// its object counts takes it. How it was chosen is kept (`placed` in
     /// its view). Placed already, or on the runtime's containers, nothing.
-    async fn place(&self, id: &str, image: &str) -> CellResult<()> {
+    /// `own_only`: only the owner's own node, as they chose it, may take it
+    /// (`own_hardware`); when it cannot, it stays unplaced, and that is no
+    /// failure.
+    async fn place(&self, id: &str, image: &str, own_only: bool) -> CellResult<()> {
         let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
         if self.meta(MetaKey::Node)?.is_some() {
             return Ok(());
@@ -557,6 +560,9 @@ impl ComputerCell {
             Some(r) => Some(placement::own_node(&r.id, placement::Arch::parse(&r.arch).ok_or_else(|| CellError::host(format!("a node of {:?}", r.arch)))?)),
             None => None,
         };
+        if own_only && own.is_none() {
+            return Ok(());
+        }
         let choice = match (&chose.prefer, &own, &chose.gone) {
             (None, _, _) => placement::Choice::Automatic,
             (Some(_), Some(n), _) => placement::Choice::Own(n),
@@ -567,9 +573,14 @@ impl ComputerCell {
         let own_js = js::to_js(&json!(own.iter().map(|n| json!({ "id": n.id, "arch": n.arch.name() })).collect::<Vec<_>>()));
         let probes = js::from_js(&self.call("probe", &[own_js]).await?).map_err(CellError::host)?;
         let probes: Vec<placement::Probe> = serde_json::from_value(probes).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
-        let ranked = placement::rank_for(nodes, choice, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
+        let ranked = match placement::rank_for(nodes, choice, image, &probes) {
+            Ok(ranked) => ranked,
+            Err(_) if own_only => return Ok(()),
+            Err(e) => return Err(CellError::new(ErrorCode::NoNode, e.to_string())),
+        };
         assert!(!ranked.order.is_empty() && ranked.order.len() <= placement::NODES_MAX + 1, "a ranking names a node or says why none");
-        for node in &ranked.order {
+        // their own node is first when it can take it (`rank_for`), and only it here when `own_only`
+        for node in ranked.order.iter().filter(|n| !own_only || pairing::is_paired_id(n)) {
             let capacity = nodes.get(node).map_or(placement::OWN_CAPACITY, |n| n.capacity);
             // the node's object counts what it holds: a place another computer
             // took since the probe is not given twice
@@ -586,6 +597,9 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "placed": node, "how": how, "probes": probes }));
                 return Ok(());
             }
+        }
+        if own_only {
+            return Ok(());
         }
         Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.order.join(", "))))
     }
@@ -695,18 +709,26 @@ impl ComputerCell {
 
     /// A wake, unless the owner's ledger refuses it (decision 27: at zero
     /// credit, no wakes). A computer already up is not asked about. A
-    /// ledger that does not answer lets it wake (docs/ledger.md).
+    /// ledger that does not answer lets it wake (docs/ledger.md). On its
+    /// owner's own hardware it wakes past the want of credit: its awake
+    /// time there is tracked in points, never charged (docs/self-host.md,
+    /// seam 10); a guest's or a canceled seat's refusal stands there too.
     async fn wake(&self, why: Wake) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
             let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
             if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
-                if e.refused.is_some() {
-                    self.set_meta(MetaKey::Note, &e.message)?;
-                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "refused": e.message }));
-                    return Err(CellError::new(e.code, e.message));
+                match e.refused {
+                    Some(r) if r.want_of_credit() && self.own_hardware().await? => {
+                        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "own_hardware": self.meta(MetaKey::Node)?, "past": e.message }));
+                    }
+                    Some(_) => {
+                        self.set_meta(MetaKey::Note, &e.message)?;
+                        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "refused": e.message }));
+                        return Err(CellError::new(e.code, e.message));
+                    }
+                    None => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "ledger": e.message })),
                 }
-                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "ledger": e.message }));
             }
             self.flush_awake().await;
         }
@@ -723,9 +745,32 @@ impl ComputerCell {
         Ok(())
     }
 
+    /// The node this computer runs on, when it is one its owner paired
+    /// (own hardware: docs/self-host.md, seams 2 and 10). Its node is its
+    /// own for life, so every interval it was awake ran there.
+    fn own_node(&self) -> CellResult<Option<String>> {
+        Ok(self.meta(MetaKey::Node)?.filter(|n| pairing::is_paired_id(n)))
+    }
+
+    /// Whether this computer runs on its owner's own hardware: placed there
+    /// (revoked since or not: its start says so, typed), or, not placed
+    /// yet, placed there now, when the node its owner chose is theirs and
+    /// can take it. Never placed anywhere else here: a wake its ledger
+    /// refused pins nothing to the deployment's nodes.
+    async fn own_hardware(&self) -> CellResult<bool> {
+        if self.meta(MetaKey::Node)?.is_none() && self.cfg.nodes.is_some() {
+            let (id, image) = (self.must(MetaKey::Id)?, self.must(MetaKey::Image)?);
+            if let Err(e) = self.place(&id, &image, true).await {
+                console_error!("{}", json!({ "computer": id, "own_hardware": "unplaced", "error": e.message }));
+            }
+        }
+        Ok(self.own_node()?.is_some())
+    }
+
     /// Sends the awake intervals the ledger has not taken to the owner's
     /// ledger (each once, by its reference), and forgets those it took. A
-    /// failure is logged; they go with the next flush.
+    /// failure is logged; they go with the next flush. On the owner's own
+    /// node, each names it: tracked in points there, never charged.
     async fn flush_awake(&self) {
         if let Err(e) = self.try_flush_awake().await {
             console_error!("{}", json!({ "computer": "awake-flush", "error": e.message }));
@@ -738,6 +783,7 @@ impl ComputerCell {
         let intervals: Vec<(i64, i64)> = rows.iter().filter_map(|r| Some((r["from_ms"].as_i64()?, r["to_ms"].as_i64()?))).collect();
         let Some((first, _)) = intervals.first().copied() else { return Ok(()) };
         let last = intervals.last().map_or(first, |(from, _)| *from);
+        let own_node = self.own_node()?;
         let meter_rows = intervals
             .iter()
             .filter(|(from, to)| to > from)
@@ -748,6 +794,7 @@ impl ComputerCell {
                 agent: None,
                 computer: Some(id.clone()),
                 at_ms: *to,
+                own_node: own_node.clone(),
             })
             .collect::<Vec<_>>();
         if !meter_rows.is_empty() {
@@ -853,7 +900,7 @@ impl ComputerCell {
         let image = self.must(MetaKey::Image)?;
         // on sandcastle nodes it is placed first (docs/self-host.md, seam
         // 2): its image's reference is its node's
-        self.place(&self.must(MetaKey::Id)?, &image).await?;
+        self.place(&self.must(MetaKey::Id)?, &image, false).await?;
         let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
         let (plan, save) = self.update_saves(|s| {
@@ -2288,7 +2335,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
                 let mut micros = 0;
                 if operator {
                     let reference = format!("key:{computer}:{}", js::random_hex::<12>());
-                    let row = MeterRow { reference: reference.clone(), usage: Usage::Key { key: provider.clone(), units: 1 }, fragment: None, agent: Some(identity.clone()), computer: Some(computer.clone()), at_ms: at };
+                    let row = MeterRow { reference: reference.clone(), usage: Usage::Key { key: provider.clone(), units: 1 }, fragment: None, agent: Some(identity.clone()), computer: Some(computer.clone()), at_ms: at, own_node: None };
                     match crate::ledger::ask(&env, &owner, &Meter { batch: reference, rows: vec![row] }).await {
                         Ok(m) => micros = m.charged,
                         Err(e) => console_error!("{}", json!({ "egress": "swap", "meter": e.message })),

@@ -155,7 +155,7 @@ pub(crate) async fn page(mut req: Request, env: &Env, cfg: &Config, url: &Url) -
             };
             let shown = match ask_registry(env, &calls::PairShow { token, code: code.clone() }).await {
                 Ok(shown) => shown,
-                Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::InvalidRequest | ErrorCode::RateLimited | ErrorCode::Forbidden) => {
+                Err(e) if matches!(e.code, ErrorCode::NotFound | ErrorCode::InvalidRequest | ErrorCode::RateLimited | ErrorCode::Forbidden | ErrorCode::AlreadyExists) => {
                     return auth::page(e.code.status(), "This node can't be added", &format!("<p>{}</p>", esc(&e.message)));
                 }
                 Err(e) => return Err(e),

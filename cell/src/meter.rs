@@ -121,7 +121,7 @@ impl FragmentCell {
 
     /// Keeps a row in the outbox, once by its reference.
     pub(crate) fn outbox(&self, reference: &str, usage: Usage, at_ms: i64) -> CellResult<()> {
-        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent: None, computer: None, at_ms };
+        let row = MeterRow { reference: reference.to_string(), usage, fragment: Some(self.name()?), agent: None, computer: None, at_ms, own_node: None };
         assert!(fragment_core::price::printable(reference, fragment_core::ledger::ID_MAX_BYTES), "a meter's reference is one the ledger takes: {reference}");
         let text = serde_json::to_string(&row).expect("a meter row serializes");
         self.exec("INSERT OR IGNORE INTO meter_rows (ref, row, batch) VALUES (?, ?, NULL)", vec![reference.into(), text.into()])
