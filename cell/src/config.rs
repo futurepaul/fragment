@@ -53,6 +53,12 @@ pub struct Config {
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
     pub computer_snapshots: bool,
+    /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
+    /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
+    /// keeps failing stays awake before it sleeps unsaved (I5 of
+    /// docs/explorations/pi-durable.md). Thirty minutes by default, a
+    /// default for Paul to confirm (`fragment_core::computer`).
+    pub computer_unsaved_max_ms: i64,
     /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -232,6 +238,9 @@ impl Config {
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
+            computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
+                .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))
+                .unwrap_or(fragment_core::computer::UNSAVED_MAX_MS_DEFAULT),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,

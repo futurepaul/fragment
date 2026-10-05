@@ -87,7 +87,8 @@ Bodies are JSON. `api.rs` has one method for each.
 | `FRAGMENT_API` | required | the fragment API |
 | `RESTORE_PENDING` | | `1`: wait for `BRIDGE_RESTORED` first |
 | `BRIDGE_RESTORED` | `/run/computer/restored` | |
-| `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's mark before a sleep's save; looked at before each claim's every try) |
+| `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's hold before every save; looked at before each claim's every try) |
+| `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
@@ -131,9 +132,13 @@ earlier save, or lost, costs reads and runs nothing twice
   and said so. Queued turns stay queued and are claimed like any other.
 - **A claim waits for the runtime and the hold**: a turn is claimed only
   while the runtime says it can take one (`Connected`), and not while
-  `BRIDGE_HOLD` exists (a sleep's mark before its save; the file is looked
-  at before every try of every claim). Until then it waits, unclaimed,
-  and any later life may run it.
+  `BRIDGE_HOLD` exists (the platform's hold before a save; the file is
+  looked at before every try of every claim). Until then it waits,
+  unclaimed, and any later life may run it. The bridge answers the hold
+  (`BRIDGE_HELD`) only once no try is in flight (from its look at the
+  hold to its answer), so a save never misses a claim that lands after
+  it; a turn already claimed runs on, and its keepalive is what cancels an
+  idle sleep's hold (docs/computers.md).
 - **Every turn has both records**: a refusal, and a Stop of a turn that
   waited, post its `turn.start` and then its `turn.end`.
 - **An answer in words goes only to its turn's life.** A turn that asks

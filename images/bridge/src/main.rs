@@ -116,6 +116,7 @@ async fn main() {
                 restore_pending: env("RESTORE_PENDING").is_some_and(|v| v == "1"),
                 restored: PathBuf::from(env_or("BRIDGE_RESTORED", "/run/computer/restored")),
                 hold: PathBuf::from(env_or("BRIDGE_HOLD", "/run/computer/hold")),
+                held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
                 agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
             };

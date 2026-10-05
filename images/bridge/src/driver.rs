@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,8 +51,13 @@ pub struct Config {
     pub restore_pending: bool,
     pub restored: PathBuf,
     /// `BRIDGE_HOLD`: while this file exists the platform holds the
-    /// computer (a sleep, before its save), and the bridge claims nothing.
+    /// computer (a save, a sleep's included), and the bridge claims nothing.
     pub hold: PathBuf,
+    /// `BRIDGE_HELD`: the bridge's answer to a hold, which it writes once the
+    /// hold exists and no claim of its is in flight, and removes otherwise
+    /// (docs/computers.md, "The hold"). An image with more to quiet than the
+    /// bridge names another file, and answers the platform itself.
+    pub held: PathBuf,
     pub settings: Settings,
     /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
     /// none, every agent the platform lists.
@@ -217,6 +223,9 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     }
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
+    // its answer to the platform's holds, for its whole life (none claims yet)
+    let claims_in_flight = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), claims_in_flight.clone(), stop.clone()));
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
@@ -262,7 +271,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     computer.agents = gated(computer.agents, &ready);
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone(), inbox_tx.clone(), cfg.hold.clone());
+    let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), last: Mutex::new(HashMap::new()) };
@@ -752,12 +761,33 @@ struct Lane {
     ready: Notify,
 }
 
-/// What a lane needs beside its jobs: where claims' answers go, and the
-/// hold that stops them.
+/// What a lane needs beside its jobs: where claims' answers go, the hold
+/// that stops them, and the count of claims in flight (a try between its
+/// look at the hold and its answer), which the bridge's answer to a hold
+/// waits on.
 #[derive(Clone)]
 struct Claims {
     inbox: mpsc::Sender<Msg>,
     hold: PathBuf,
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// One claim's try in flight, counted while it lives.
+struct Flight<'a>(&'a AtomicUsize);
+
+impl<'a> Flight<'a> {
+    fn new(count: &'a AtomicUsize) -> Flight<'a> {
+        let before = count.fetch_add(1, Ordering::SeqCst);
+        assert!(before < limits::TURNS_OPEN_MAX, "a claim in flight is one of an open turn");
+        Flight(count)
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        let before = self.0.fetch_sub(1, Ordering::SeqCst);
+        assert!(before > 0, "a claim in flight is counted once");
+    }
 }
 
 #[derive(Clone)]
@@ -769,8 +799,8 @@ struct Lanes {
 }
 
 impl Lanes {
-    fn new(api: Api, stop: watch::Receiver<bool>, inbox: mpsc::Sender<Msg>, hold: PathBuf) -> Lanes {
-        Lanes { api, stop, claims: Claims { inbox, hold }, lanes: Arc::new(Mutex::new(HashMap::new())) }
+    fn new(api: Api, stop: watch::Receiver<bool>, claims: Claims) -> Lanes {
+        Lanes { api, stop, claims, lanes: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     fn push(&self, fragment: &str, job: Job) {
@@ -857,7 +887,7 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
                 }
             }
             Job::Claim { agent, turn, id, body } => {
-                let answer = claim(&api, &fragment, &agent, &id, &body, &claims.hold, stop.clone()).await;
+                let answer = claim(&api, &fragment, &agent, &id, &body, &claims, stop.clone()).await;
                 // A closed inbox is an engine that has stopped.
                 let _ = claims.inbox.send(Msg::Input(Input::Claimed { turn, answer })).await;
             }
@@ -867,16 +897,21 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut s
 
 /// A turn's claim, posted unless the computer is held (looked at before
 /// each try, so a hold made while a try waits stops the next): the
-/// platform's answer, or none.
+/// platform's answer, or none. Each try is in flight from its look at the
+/// hold to its answer, so the bridge never says `held` with one out.
 #[allow(clippy::too_many_arguments)]
-async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, hold: &Path, stop: watch::Receiver<bool>) -> ClaimAnswer {
+async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, claims: &Claims, stop: watch::Receiver<bool>) -> ClaimAnswer {
     let mut backoff = Backoff::default();
     for attempt in 1..=limits::POST_TRIES_MAX {
-        if hold.exists() {
-            crate::ev!("claim.held", { "fragment": fragment, "id": id, "hold": hold.display().to_string() });
-            return ClaimAnswer::Unanswered;
-        }
-        match api.post(agent, fragment, records::WORK, id, body).await {
+        let answered = {
+            let _flight = Flight::new(&claims.in_flight);
+            if claims.hold.exists() {
+                crate::ev!("claim.held", { "fragment": fragment, "id": id, "hold": claims.hold.display().to_string() });
+                return ClaimAnswer::Unanswered;
+            }
+            api.post(agent, fragment, records::WORK, id, body).await
+        };
+        match answered {
             Ok(replayed) => {
                 crate::ev!("claimed", { "fragment": fragment, "id": id, "replayed": replayed, "attempt": attempt });
                 return ClaimAnswer::Ours;
@@ -1037,6 +1072,36 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
         out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
     }
     out
+}
+
+// ---- the hold ----
+
+/// The bridge's answer to the platform's hold (docs/computers.md, "The
+/// hold"): `held` exists while `hold` does and no claim is in flight (a
+/// claim looks at the hold before each try, so none starts once it holds),
+/// and not otherwise. The platform clears `held` before each hold, so an
+/// answer is always to the hold it finds. Looked at every `HOLD_POLL_MS`,
+/// for the bridge's life.
+async fn answer_holds(hold: PathBuf, held: PathBuf, in_flight: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+    assert!(hold != held, "a hold and its answer are two files");
+    // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
+    loop {
+        let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0;
+        match (quiet, held.exists()) {
+            (true, false) => match std::fs::write(&held, b"") {
+                Ok(()) => crate::ev!("held", { "held": held.display().to_string() }),
+                Err(e) => crate::ev!("held.failed", { "held": held.display().to_string(), "error": e.to_string() }),
+            },
+            (false, true) => {
+                let _ = std::fs::remove_file(&held);
+            }
+            _ => {}
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(limits::HOLD_POLL_MS)) => {}
+            _ = crate::net::stopped(&mut stop) => return,
+        }
+    }
 }
 
 // ---- keepalive ----

@@ -205,10 +205,35 @@ pub struct ComputerView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<ComputerRestore>,
     /// Its starts that went back in time: each woke with a `/data` older
-    /// than the end of the life before it (a crash, or a sleep whose save
-    /// failed).
+    /// than the end of the life before it (a crash, or a sleep that slept
+    /// unsaved).
     #[serde(default)]
     pub rollbacks: u64,
+    /// The saves of its `/data` it keeps, newest first (docs/computers.md,
+    /// "Saves and what a wake restores"): a wake restores the newest one
+    /// that restores.
+    #[serde(default)]
+    pub saves: Vec<ComputerSave>,
+}
+
+/// One save of a computer's `/data`, as its view shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSave {
+    /// 1 for its first save, one more for each after it.
+    pub number: u64,
+    /// Its id (its first record's), as a wake's `restored.save` names it.
+    pub id: String,
+    /// When it was taken (ms).
+    pub at: i64,
+    /// The start it is of.
+    pub generation: u64,
+    /// Whether its guest answered the hold before it was taken.
+    pub held: bool,
+    /// Its restore failed as a whole save, or the image's check of it did:
+    /// no wake restores it again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unusable: bool,
 }
 
 /// Where a start's `/data` came from.

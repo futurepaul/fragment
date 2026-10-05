@@ -242,11 +242,19 @@ speaking Cloudflare's APIs) returns once this product works.
 
     *Status (2026-10-05, #136 and #137).* The hold, the snapshot as a
     cache of the save, and a wake that says what it restored are built.
-    `/data` is still saved only at sleep, not every few minutes, and
-    Litestream's replicas are never read: both are open in
-    docs/explorations/pi-durable.md (P2, P4) and in the debt ledger. A
-    rolled-back or lost `/data` no longer runs a turn again: a turn runs
+    A rolled-back or lost `/data` no longer runs a turn again: a turn runs
     only in the life that claimed it on `work` (lesson 2's journal).
+
+    *Status (2026-10-05, step 1 of docs/durable-computers.md, which is the
+    newer word here).* "Every few minutes while written" became: `/data`
+    is saved when a computer's work ends (its last keepalive closes, 30 s
+    settle), every 15 minutes while it stays busy, and at every sleep, an
+    action of the pure lifecycle. The hold is a handshake (the guest
+    answers `held`), three saves are kept, a wake falls back to the save
+    before one that will not restore, and a sleep whose save fails keeps
+    its container for at most `computers.unsaved_max_ms` (30 minutes by
+    default, Paul's to confirm). Litestream is still in the image, and its
+    replicas are never read (P4: the debt ledger).
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The
