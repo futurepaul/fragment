@@ -58,7 +58,8 @@ impl Code {
         match error {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
-            ErrorCode::Forbidden | ErrorCode::NotConnected => Code::Forbidden,
+            // a computer on a node its owner revoked runs nowhere until they act: no retry helps
+            ErrorCode::Forbidden | ErrorCode::NotConnected | ErrorCode::NodeRevoked => Code::Forbidden,
             // the CLI calls the platform's host, which never moves
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode | ErrorCode::Moved => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,

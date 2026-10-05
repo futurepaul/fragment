@@ -225,6 +225,7 @@ fn dev(args: &[String]) -> Result<()> {
         model_upstream,
         nodes,
         containers: docker,
+        byoc: byoc()?,
         browser_url: None,
     };
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
@@ -288,7 +289,7 @@ fn dev(args: &[String]) -> Result<()> {
         Err(_) => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
     }
     match (std::env::var(devstack::sandcastle::NODES_FILE_VAR), docker) {
-        (Ok(f), _) => println!("  computers:    the sandcastle nodes {f} lists"),
+        (Ok(f), _) => println!("  computers:    the sandcastle nodes {f} lists{}", if byoc()? { ", and people's own (FRAGMENT_BYOC=on: sandcastle-node pair <platform>)" } else { "" }),
         (Err(_), true) => println!("  computers:    local Docker (the stub image)"),
         (Err(_), false) => println!("  computers:    none (no {}, and {})", devstack::sandcastle::NODES_FILE_VAR, if celld { "celld runs no containers" } else { "Docker is not reachable" }),
     }
@@ -504,6 +505,15 @@ fn self_host(read: ReadFile) -> Result<(Option<devstack::ModelUpstreamVars>, Opt
         None => None,
     };
     Ok((model, nodes))
+}
+
+/// `FRAGMENT_BYOC` (on or off; off unless said): whether the stack's
+/// people may pair sandcastle nodes of their own (docs/self-host.md, seam 2,
+/// Bring your own computer). On needs `FRAGMENT_NODES_FILE`, whose images
+/// such a node runs.
+fn byoc() -> Result<bool> {
+    let v = std::env::var("FRAGMENT_BYOC").ok();
+    Ok(fragment_core::placement::Byoc::parse(v.as_deref()).map_err(anyhow::Error::msg)? == fragment_core::placement::Byoc::On)
 }
 
 /// The templates `try` scaffolds.

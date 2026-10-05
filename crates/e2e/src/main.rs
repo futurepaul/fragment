@@ -256,6 +256,13 @@ pub struct Suite {
     /// images they hold, by name (`FRAGMENT_NODES`' `images`).
     nodes: Vec<devstack::sandcastle::SandcastleNode>,
     node_images: Value,
+    /// The binaries a node is made of, for a section's own (a person's
+    /// node it pairs: lanes/pairing.rs).
+    sandcastle: Option<devstack::sandcastle::Tools>,
+    /// Whether the run's people may pair nodes of their own
+    /// (`FRAGMENT_BYOC`): on wherever the run has nodes, but while a
+    /// section turns it off.
+    byoc: bool,
     /// The image tags built for the nodes, removed as the run ends.
     image_tags: Vec<String>,
     port: u16,
@@ -382,6 +389,31 @@ impl Suite {
     /// Node `id`'s process starts again.
     pub fn node_up(&mut self, id: &str) -> Result<()> {
         self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.up()
+    }
+
+    /// A node of a person's own, for them to pair (lanes/pairing.rs): its
+    /// engine double started, its label `label` until it is paired.
+    pub fn node_to_pair(&self, label: &str) -> Result<devstack::sandcastle::SandcastleNode> {
+        let tools = self.sandcastle.as_ref().context("a run with nodes locates sandcastle's binaries")?;
+        let spec = devstack::sandcastle::NodeSpec {
+            id: label.into(),
+            reach: devstack::sandcastle::Reach::Uplink,
+            dir: self.scratch.join("n").join(label),
+            platform: self.platform(),
+            capacity: 1,
+            log_dir: self.scratch.clone(),
+        };
+        devstack::sandcastle::SandcastleNode::start_to_pair(tools, &spec)
+    }
+
+    /// The local node's platform origin.
+    pub fn platform(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Whether the next node start lets people pair their own nodes.
+    pub fn set_byoc(&mut self, on: bool) {
+        self.byoc = on;
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -511,6 +543,7 @@ impl Suite {
         }
         self.ai.clear_script();
         self.shape = Shape::Plain;
+        self.byoc = true;
         // a node a lane left down is up again
         for n in self.nodes.iter_mut().filter(|n| !n.is_up()) {
             n.up()?;
@@ -646,6 +679,7 @@ impl Suite {
             },
             // on nodes, the runtime's own containers go unused
             containers: self.nodes.is_empty(),
+            byoc: self.byoc && !self.nodes.is_empty(),
             browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state
@@ -1192,6 +1226,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         renderer,
         nodes: vec![],
         node_images: Value::Null,
+        sandcastle: sandcastle.clone(),
+        byoc: true,
         image_tags: vec![],
         port,
         run,

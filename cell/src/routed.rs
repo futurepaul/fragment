@@ -228,6 +228,11 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::meter::METER_HEADER, "1")))
     } else if path.starts_with("test/") {
         Ok(None)
+    } else if path == "__node/status" || path == "__node/revoke" {
+        // a sandcastle node's object (entry.mjs's `Node`): no route the
+        // internet reaches, so no marker (the uplink's dial is its only
+        // outside door, and names its own path)
+        Ok(None)
     } else {
         Err(CellError::host(format!("{path} is not an internal route")))
     }

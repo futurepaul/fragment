@@ -11,7 +11,7 @@
 // mirror sandcastle's `uplink::frame`, which is the reference (its tests
 // cover them).
 
-import { authHeader, nodeObject, nodesOf, signedAt } from "./node.mjs";
+import { authHeader, isPaired, nodeObject, nodesOf, pairedNode, signedAt } from "./node.mjs";
 
 const HELLO = 1;
 const PING = 2;
@@ -174,12 +174,15 @@ function dialer(env, id) {
   return node && node.uplink ? node : null;
 }
 
-// The router's half of `/api/nodes/uplink`: a listed node's dial, to its
-// object, which checks the rest.
+// The router's half of `/api/nodes/uplink`: a listed node's dial, or a
+// person's own node's where BYOC is on, to its object, which checks the
+// rest (a person's node's record is the registry's: node.mjs `pairedNode`).
 export function routeNodeUplink(request, env) {
-  if (!nodesOf(env)) return Response.json({ error: "this platform takes no uplink" }, { status: 404 });
+  const nodes = nodesOf(env);
+  if (!nodes) return Response.json({ error: "this platform takes no uplink" }, { status: 404 });
   const id = request.headers.get(NODE_HEADER);
-  if (!dialer(env, id)) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
+  if (!dialer(env, id) && !isPaired(id)) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
+  if (!dialer(env, id) && !nodes.byoc) return Response.json({ error: "this platform pairs no personal nodes: its operator provides them (FRAGMENT_BYOC is off)" }, { status: 403 });
   if ((request.headers.get("upgrade") || "").toLowerCase() !== "websocket") return Response.json({ error: "the uplink is a WebSocket" }, { status: 426 });
   return nodeObject(env, id).fetch(new Request(`https://${id}.node.internal/__uplink/dial`, request));
 }
@@ -536,6 +539,25 @@ export class Uplink {
     return this.#call(request);
   }
 
+  // Whether the node's uplink is open now.
+  connected() {
+    return this.#socket() !== null;
+  }
+
+  // Its owner revoked the node (a person's own): every call in flight
+  // fails, saying so, none waits for a dial, and every uplink closes (the
+  // node is refused when it dials again: its object remembers, entry.mjs).
+  revoke(why) {
+    for (const x of [...this.#streams.values()]) x.end(Object.assign(new Error(why), { revoked: true }));
+    for (const w of this.#waiters.splice(0)) w();
+    for (const ws of this.#ctx.getWebSockets(TAG)) {
+      try {
+        ws.close(4003, "revoked by its owner");
+      } catch {}
+    }
+    console.log(JSON.stringify({ uplink: "revoked" }));
+  }
+
   // The newest open uplink, if any.
   #socket() {
     let best = null;
@@ -550,10 +572,13 @@ export class Uplink {
   async #dial(request) {
     const h = request.headers;
     const id = h.get(NODE_HEADER);
-    const node = dialer(this.#env, id);
-    const nonce = h.get(NONCE_HEADER) || "";
     // this object is that node's alone
-    if (!node || this.#ctx.id.toString() !== this.#env.NODE.idFromName(id).toString()) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
+    if (!id || this.#ctx.id.toString() !== this.#env.NODE.idFromName(id).toString()) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
+    const own = dialer(this.#env, id) ? null : await pairedNode(this.#env, id);
+    if (own?.revoked) return Response.json({ error: "node_revoked", message: `the node ${id} was revoked by its owner: pair the machine again` }, { status: 403 });
+    const node = dialer(this.#env, id) || own;
+    const nonce = h.get(NONCE_HEADER) || "";
+    if (!node) return Response.json({ error: "not one of this platform's nodes that dial in" }, { status: 403 });
     if (!/^[0-9a-f]{32}$/.test(nonce)) return Response.json({ error: "a dial's nonce is 32 lowercase hex digits" }, { status: 400 });
     const t = await signedAt(node, h.get(AUTH), (t) => dialString(id, nonce, t));
     if (t === null) return Response.json({ error: "a bad signature" }, { status: 401 });
@@ -619,7 +644,11 @@ export class Uplink {
     else x.flush([opening, encode(END, id)]);
     // a call that fails here is the node's 502, as a direct call's network
     // failure is NodeContainer's error
-    return x.head.catch((e) => Response.json({ error: String((e && e.message) || e) }, { status: 502 }));
+    return x.head.catch((e) =>
+      e?.revoked
+        ? Response.json({ error: "node_revoked", message: String(e.message) }, { status: 410 })
+        : Response.json({ error: String((e && e.message) || e) }, { status: 502 }),
+    );
   }
 
   // Asks `x` again on the node's next uplink (it dropped before the node

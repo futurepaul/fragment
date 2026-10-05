@@ -191,6 +191,9 @@ enum MetaKey {
     /// Why its last start found no node to run on: its own down, or none
     /// with room. A start that comes up clears it.
     NodeNote,
+    /// How its node was chosen: as its owner chose, by the deployment's
+    /// rule, or by the rule because their choice could not take it.
+    Placed,
 }
 
 impl MetaKey {
@@ -207,6 +210,7 @@ impl MetaKey {
             MetaKey::FailSaves => "fail_saves",
             MetaKey::Node => "node",
             MetaKey::NodeNote => "node_note",
+            MetaKey::Placed => "placed",
         }
     }
 }
@@ -445,10 +449,10 @@ fn sha_hex(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
-/// Whether a start failed for its node (down, or none to place it on), not
-/// for itself (docs/self-host.md, seam 2).
+/// Whether a start failed for its node (down, revoked by its owner, or none
+/// to place it on), not for itself (docs/self-host.md, seam 2).
 fn node_failed(e: &CellError) -> bool {
-    matches!(e.code, ErrorCode::NodeDown | ErrorCode::NoNode)
+    matches!(e.code, ErrorCode::NodeDown | ErrorCode::NoNode | ErrorCode::NodeRevoked)
 }
 
 impl ComputerCell {
@@ -532,29 +536,52 @@ impl ComputerCell {
 
     /// Places a computer that runs on sandcastle nodes at its first start
     /// (`fragment_core::placement`: the rule, and why a computer then
-    /// stays): every node probed, ranked, and the best that still has room
-    /// as its object counts takes it. Placed already, or on the runtime's
-    /// containers, nothing.
+    /// stays): every node probed, ranked by its owner's choice and the
+    /// deployment's rule (`rank_for`), and the best that still has room as
+    /// its object counts takes it. How it was chosen is kept (`placed` in
+    /// its view). Placed already, or on the runtime's containers, nothing.
     async fn place(&self, id: &str, image: &str) -> CellResult<()> {
         let Some(nodes) = &self.cfg.nodes else { return Ok(()) };
         if self.meta(MetaKey::Node)?.is_some() {
             return Ok(());
         }
-        let probes = js::from_js(&self.call("probe", &[]).await?).map_err(CellError::host)?;
+        let owner = self.must(MetaKey::Owner)?;
+        let chose = crate::ask_registry(&self.env, &crate::registry::calls::ChoiceOf { owner }).await?;
+        let own = match chose.own.as_ref().filter(|r| !r.revoked && r.secret.is_some()) {
+            Some(r) => Some(placement::own_node(&r.id, placement::Arch::parse(&r.arch).ok_or_else(|| CellError::host(format!("a node of {:?}", r.arch)))?)),
+            None => None,
+        };
+        let choice = match (&chose.prefer, &own, &chose.gone) {
+            (None, _, _) => placement::Choice::Automatic,
+            (Some(_), Some(n), _) => placement::Choice::Own(n),
+            (Some(p), None, Some(why)) => placement::Choice::Gone { id: p, why },
+            (Some(p), None, None) => placement::Choice::Listed(p),
+        };
+        // their own node is probed beside the deployment's (its key the registry's: node.mjs `pairedNode`)
+        let own_js = js::to_js(&json!(own.iter().map(|n| json!({ "id": n.id, "arch": n.arch.name() })).collect::<Vec<_>>()));
+        let probes = js::from_js(&self.call("probe", &[own_js]).await?).map_err(CellError::host)?;
         let probes: Vec<placement::Probe> = serde_json::from_value(probes).map_err(|e| CellError::host(format!("the nodes' probes: {e}")))?;
-        let ranked = placement::rank(nodes, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
-        assert!(!ranked.is_empty() && ranked.len() <= placement::NODES_MAX, "a ranking names a node or says why none");
-        for node in &ranked {
+        let ranked = placement::rank_for(nodes, choice, image, &probes).map_err(|e| CellError::new(ErrorCode::NoNode, e.to_string()))?;
+        assert!(!ranked.order.is_empty() && ranked.order.len() <= placement::NODES_MAX + 1, "a ranking names a node or says why none");
+        for node in &ranked.order {
+            let capacity = nodes.get(node).map_or(placement::OWN_CAPACITY, |n| n.capacity);
             // the node's object counts what it holds: a place another computer
             // took since the probe is not given twice
-            if self.call("take", &[node.as_str().into(), id.into()]).await?.as_bool() == Some(true) {
+            if self.call("take", &[node.as_str().into(), id.into(), JsValue::from_f64(f64::from(capacity))]).await?.as_bool() == Some(true) {
+                let how = match (&chose.prefer, &ranked.passed_over) {
+                    (None, _) => "by the deployment's rule".to_string(),
+                    (Some(p), None) if p == node => "as its owner chose".to_string(),
+                    (Some(p), Some((_, why))) => format!("by the deployment's rule: {p}, its owner's choice, is {why}"),
+                    (Some(p), None) => format!("by the deployment's rule: {p}, its owner's choice, filled as it was placed"),
+                };
                 self.set_meta(MetaKey::Node, node)?;
+                self.set_meta(MetaKey::Placed, &how)?;
                 self.call("pin", &[node.as_str().into()]).await?;
-                console_log!("{}", json!({ "computer": id, "placed": node, "probes": probes }));
+                console_log!("{}", json!({ "computer": id, "placed": node, "how": how, "probes": probes }));
                 return Ok(());
             }
         }
-        Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.join(", "))))
+        Err(CellError::new(ErrorCode::NoNode, format!("no node can take it: {} filled as it was placed", ranked.order.join(", "))))
     }
 
     /// Applies `first` and every event its actions report back, each
@@ -1288,6 +1315,7 @@ impl ComputerCell {
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
             node: self.meta(MetaKey::Node)?,
+            placed: self.meta(MetaKey::Placed)?,
             phase,
             why,
             agents: self.agents()?,
@@ -2010,6 +2038,29 @@ impl NodesConfig {
         match &Config::from_env(&env).nodes {
             Some(nodes) => js::to_js(&nodes.for_js()),
             None => JsValue::NULL,
+        }
+    }
+}
+
+/// A person's own node by id (BYOC: docs/self-host.md, seam 2), as
+/// node.mjs and uplink.mjs need it: its owner, architecture, and its secret
+/// while it is live, from the registry, which keeps it sealed; `null` for
+/// none (or a deployment that pairs none). The uplink's dial checks a
+/// node's signature with it, and a computer's calls to the node sign with it.
+#[wasm_bindgen(wasm_bindgen = worker::wasm_bindgen)]
+pub struct PairedNodes;
+
+#[wasm_bindgen]
+impl PairedNodes {
+    pub async fn get(env: Env, id: String) -> std::result::Result<JsValue, JsValue> {
+        let byoc = Config::from_env(&env).nodes.as_ref().is_some_and(|n| n.byoc() == placement::Byoc::On);
+        if !byoc || !fragment_core::pairing::is_paired_id(&id) {
+            return Ok(JsValue::NULL);
+        }
+        match crate::ask_registry(&env, &crate::registry::calls::PairedNode { id }).await {
+            Ok(Some(r)) => Ok(js::to_js(&json!({ "id": r.id, "owner": r.owner, "name": r.name, "arch": r.arch, "revoked": r.revoked, "secret": r.secret }))),
+            Ok(None) => Ok(JsValue::NULL),
+            Err(e) => Err(JsValue::from_str(&e.message)),
         }
     }
 }
