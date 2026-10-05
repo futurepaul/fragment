@@ -653,8 +653,12 @@ pub fn load_images(engine_dir: &Path, tags: &[String], scratch: &Path) -> Result
         if status != 200 {
             bail!("the real engine's load of {reference}: {status} {}", String::from_utf8_lossy(&body));
         }
-        let built = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["buildMs"].as_u64()).unwrap_or(0);
-        println!("      (the engine holds {reference}: {} MB saved in {saved:.1?}, loaded in {:.1?}; its disk built in {built} ms, once per image)", bytes >> 20, t0.elapsed() - saved);
+        // the disk's build time, as the engine kept it when it first built
+        // the image: a load that took less found it built
+        let built = Duration::from_millis(serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["buildMs"].as_u64()).unwrap_or(0));
+        let loaded = t0.elapsed() - saved;
+        let disk = if loaded < built { "its disk built before".to_string() } else { format!("its disk built in {built:.1?}") };
+        println!("      (the engine holds {reference}: {} MB saved in {saved:.1?}, loaded in {loaded:.1?}; {disk})", bytes >> 20);
     }
     Ok(())
 }

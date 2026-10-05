@@ -551,10 +551,10 @@ impl Loop {
                     f.parts.insert(id.clone(), part);
                     self.emit(Event::Reply { turn, part, text }).await;
                 } else {
-                    let lines = wire::new_lines(&content, 0);
-                    f.progress.insert(id.clone(), lines.len());
-                    for l in lines {
-                        self.step(&turn, &l).await;
+                    let steps = wire::new_steps(&content, 0);
+                    f.progress.insert(id.clone(), steps.len());
+                    for (tool, args) in steps {
+                        self.step(&turn, tool, args).await;
                     }
                 }
                 json!({ "success": true, "message_id": id })
@@ -566,10 +566,10 @@ impl Loop {
                     let (text, _) = wire::uncursored(&content);
                     self.emit(Event::Reply { turn, part, text: text.to_string() }).await;
                 } else if let Some(seen) = f.progress.get(&message_id).copied() {
-                    let lines = wire::new_lines(&content, seen);
-                    f.progress.insert(message_id, seen + lines.len());
-                    for l in lines {
-                        self.step(&turn, &l).await;
+                    let steps = wire::new_steps(&content, seen);
+                    f.progress.insert(message_id, seen + steps.len());
+                    for (tool, args) in steps {
+                        self.step(&turn, tool, args).await;
                     }
                 } else {
                     return json!({ "success": false, "error": "no message of this turn by that id" });
@@ -651,8 +651,7 @@ impl Loop {
         }
     }
 
-    async fn step(&self, turn: &str, line: &str) {
-        let (tool, args) = wire::step_of(line);
+    async fn step(&self, turn: &str, tool: String, args: String) {
         self.emit(Event::Step { turn: turn.to_string(), step: Step { tool, args, ok: true, excerpt: String::new(), text: String::new() } }).await;
     }
 
