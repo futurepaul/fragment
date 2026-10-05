@@ -19,7 +19,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use fragment_core::placement::{self, Nodes};
+use fragment_core::placement::{self, Byoc, Nodes};
 use serde_json::{json, Value};
 
 pub const SANDCASTLE_DIR_VAR: &str = "SANDCASTLE_DIR";
@@ -66,13 +66,15 @@ impl NodesFile {
             }
         }
         let nodes = v.to_string();
-        // checked as the cell checks it, so a bad list stops here
-        Nodes::parse(&nodes).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        // checked as the cell checks it, so a bad list stops here (an empty
+        // one too, unless the cell is told FRAGMENT_BYOC=on: it says so)
+        Nodes::parse(&nodes, Byoc::On).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
         Ok(NodesVars { nodes, secrets })
     }
 }
 
 /// The binaries a node is made of.
+#[derive(Clone)]
 pub struct Tools {
     pub node: PathBuf,
     pub engine: PathBuf,
@@ -203,6 +205,96 @@ impl SandcastleNode {
         Ok(n)
     }
 
+    /// The engine double alone, for a node that becomes a person's own
+    /// (docs/self-host.md, seam 2, Bring your own computer): its id, config
+    /// and secret come from `sandcastle-node pair` (`pair`, then `paired`).
+    pub fn start_to_pair(tools: &Tools, spec: &NodeSpec) -> Result<SandcastleNode> {
+        let engine_dir = spec.dir.join("e");
+        fs::create_dir_all(&engine_dir).with_context(|| format!("create {}", engine_dir.display()))?;
+        fs::create_dir_all(&spec.log_dir)?;
+        let log_of = |what: &str| spec.log_dir.join(format!("sandcastle-{}-{what}.log", spec.id));
+        let engine_log = log_of("engine");
+        let out = fs::OpenOptions::new().create(true).append(true).open(&engine_log)?;
+        let engine = Command::new(&tools.engine)
+            .arg("--dir")
+            .arg(&engine_dir)
+            .arg("--relay")
+            .arg(&tools.relay)
+            .stdin(Stdio::null())
+            .stdout(out.try_clone()?)
+            .stderr(out)
+            .spawn()
+            .with_context(|| format!("start {}", tools.engine.display()))?;
+        // its id until it is paired: the label its logs carry
+        let mut n = SandcastleNode {
+            id: spec.id.clone(),
+            reach: Reach::Uplink,
+            capacity: placement::OWN_CAPACITY,
+            secret: String::new(),
+            node_bin: tools.node.clone(),
+            config: spec.dir.join("node.json"),
+            log: log_of("node"),
+            engine: Some(engine),
+            node: None,
+        };
+        let sock = engine_dir.join("engine.sock");
+        n.wait_for("the engine's socket", &engine_log, || std::os::unix::net::UnixStream::connect(&sock).is_ok())?;
+        Ok(n)
+    }
+
+    /// `sandcastle-node pair <platform> --name <name>`, writing this node's
+    /// config and secret: started, its output read as it comes. A person
+    /// approves the code it shows (`Pairing::code`), then it ends.
+    pub fn pair(&self, platform: &str, name: &str) -> Result<Pairing> {
+        let dir = self.config.parent().context("a node's config has a directory")?;
+        let engine = dir.join("e");
+        let err = fs::OpenOptions::new().create(true).append(true).open(&self.log)?;
+        let mut child = Command::new(&self.node_bin)
+            .arg("pair")
+            .arg(platform)
+            .arg("--config")
+            .arg(&self.config)
+            .args(["--name", name])
+            .arg("--engine")
+            .arg(engine.join("engine.sock"))
+            .arg("--ports")
+            .arg(engine.join("ports.sock"))
+            .arg("--egress")
+            .arg(dir.join("egress.sock"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(err)
+            .spawn()
+            .with_context(|| format!("start {} pair", self.node_bin.display()))?;
+        let out = child.stdout.take().context("pair's output")?;
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(out).lines().map_while(std::result::Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Pairing { child: Some(child), lines, said: vec![], log: self.log.clone() })
+    }
+
+    /// After its pairing ended well: the id the platform named it by, read
+    /// from the config the pairing wrote, and the node started on it.
+    pub fn paired(&mut self) -> Result<String> {
+        let config: Value = serde_json::from_slice(&fs::read(&self.config).with_context(|| format!("read {}", self.config.display()))?)?;
+        let id = config["uplink"]["id"].as_str().context("a paired node's config names its uplink's id")?.to_string();
+        anyhow::ensure!(fragment_core::pairing::is_paired_id(&id), "the pairing named the node {id:?}, which is no person's node's id");
+        self.id = id.clone();
+        self.up()?;
+        Ok(id)
+    }
+
+    /// The node's own log (`sandcastle-node`'s, a pairing's included).
+    pub fn log_text(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
     /// The node's API, when it listens.
     pub fn url(&self) -> Option<String> {
         match self.reach {
@@ -288,6 +380,68 @@ impl SandcastleNode {
     }
 }
 
+/// A `sandcastle-node pair` under way (`SandcastleNode::pair`).
+pub struct Pairing {
+    child: Option<Child>,
+    lines: std::sync::mpsc::Receiver<String>,
+    /// What it printed so far.
+    pub said: Vec<String>,
+    log: PathBuf,
+}
+
+impl Pairing {
+    /// The code it shows and the link it says to approve it at, within `wait`.
+    pub fn code(&mut self, wait: Duration) -> Result<(String, String)> {
+        let t0 = Instant::now();
+        // Bounded by `wait`.
+        while t0.elapsed() < wait {
+            if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(100)) {
+                self.said.push(line);
+            }
+            let link = self.said.iter().find_map(|l| l.trim().strip_prefix("open ")).map(str::to_string);
+            if let Some(link) = link {
+                let code = link.split("code=").nth(1).context("the link names its code")?.to_string();
+                return Ok((code, link));
+            }
+            if let Some(status) = self.child.as_mut().map(Child::try_wait).transpose()?.flatten() {
+                bail!("sandcastle-node pair exited ({status}) before it showed a code:\n{}\n{}", self.said.join("\n"), fs::read_to_string(&self.log).unwrap_or_default());
+            }
+        }
+        bail!("sandcastle-node pair showed no code within {wait:?}: {}", self.said.join("\n"))
+    }
+
+    /// Its exit within `wait`: success, or what it said.
+    pub fn finish(mut self, wait: Duration) -> Result<()> {
+        let mut child = self.child.take().expect("a pairing's process, once");
+        let t0 = Instant::now();
+        // Bounded by `wait`.
+        let status = loop {
+            if let Some(s) = child.try_wait()? {
+                break s;
+            }
+            if t0.elapsed() > wait {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("sandcastle-node pair did not finish within {wait:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_millis(100)) {
+            self.said.push(line);
+        }
+        anyhow::ensure!(status.success(), "sandcastle-node pair failed ({status}):\n{}\n{}", self.said.join("\n"), fs::read_to_string(&self.log).unwrap_or_default());
+        Ok(())
+    }
+}
+
+impl Drop for Pairing {
+    fn drop(&mut self) {
+        if let Some(c) = self.child.take() {
+            let _ = stop(c, "sandcastle-node pair");
+        }
+    }
+}
+
 /// SIGTERM to a child this process started, and its exit awaited; killed
 /// past NODE_STOP_TIMEOUT.
 fn stop(mut child: Child, what: &str) -> Result<()> {
@@ -358,7 +512,7 @@ pub fn build_cell_images(run: &str) -> Result<Vec<(String, String)>> {
 pub fn vars(nodes: &[&SandcastleNode], images: &Value) -> Result<NodesVars> {
     let list = json!({ "nodes": nodes.iter().map(|n| n.listing()).collect::<Vec<_>>(), "images": images });
     let text = list.to_string();
-    Nodes::parse(&text).map_err(|e| anyhow::anyhow!("the nodes started here: {e}"))?;
+    Nodes::parse(&text, Byoc::Off).map_err(|e| anyhow::anyhow!("the nodes started here: {e}"))?;
     Ok(NodesVars { nodes: text, secrets: nodes.iter().map(|n| (placement::secret_name(&n.id), n.secret.clone())).collect() })
 }
 
@@ -408,7 +562,7 @@ mod tests {
         let vars = NodesFile::read(&file).unwrap();
         assert_eq!(vars.secrets, vec![("FRAGMENT_NODE_SECRET_BOX".to_string(), "s".repeat(40))]);
         assert!(!vars.nodes.contains("secret"), "{}", vars.nodes);
-        Nodes::parse(&vars.nodes).unwrap();
+        Nodes::parse(&vars.nodes, Byoc::Off).unwrap();
         fs::write(&file, list(&short, "x86_64").to_string()).unwrap();
         assert!(NodesFile::read(&file).unwrap_err().to_string().contains("at least 32 bytes"));
         fs::write(&file, list(&secret, "sparc").to_string()).unwrap();

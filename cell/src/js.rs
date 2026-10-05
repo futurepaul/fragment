@@ -59,7 +59,8 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// thenable): for the objects entry.mjs hands the cell (a computer's
 /// `ContainerHost`). A throw or a rejection is the host's failure, its
 /// message kept; but a sandcastle node that does not answer (node.mjs's
-/// `NodeDown`) is `ErrorCode::NodeDown`.
+/// `NodeDown`) is `ErrorCode::NodeDown`, and a person's node they revoked
+/// (`NodeRevoked`) is `ErrorCode::NodeRevoked`.
 pub(crate) async fn invoke(obj: &JsValue, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
     let out = call(obj, method, args).map_err(|e| host_error(method, &e))?;
     settle(out).await.map_err(|e| host_error(method, &e))
@@ -70,6 +71,7 @@ fn host_error(method: &str, e: &JsValue) -> CellError {
     let name = e.is_object().then(|| Reflect::get(e, &JsValue::from_str("name")).ok()).flatten().and_then(|n| n.as_string());
     match name.as_deref() {
         Some("NodeDown") => CellError::new(ErrorCode::NodeDown, message),
+        Some("NodeRevoked") => CellError::new(ErrorCode::NodeRevoked, message),
         _ => CellError::host(format!("{method}: {message}")),
     }
 }

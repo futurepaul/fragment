@@ -93,7 +93,7 @@ prebuilt bundle is in the debt ledger).
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  placement, hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  placement, pairing, hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker (or on two sandcastle nodes the run starts, with
   `FRAGMENT_E2E_NODES=two` and `SANDCASTLE_DIR`, which `placement`

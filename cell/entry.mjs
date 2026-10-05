@@ -10,7 +10,7 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { DirectoryBackup } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
-import { NodeContainer, Placements, goneNode, nodeEgress, nodesOf, probe, routeNodeEgress, take } from "./node.mjs";
+import { NodeContainer, Placements, health, isPaired, nodeEgress, nodeFor, nodeStatus, nodesOf, probe, routeNodeEgress, take } from "./node.mjs";
 import { Uplink, routeNodeUplink } from "./uplink.mjs";
 
 // The last `arm` of a computer on a node, its isolate's to repeat.
@@ -174,9 +174,11 @@ class ContainerHost {
   #generation = 0;
   #backups = null;
   // the deployment's nodes (null: the runtime's containers), and this
-  // computer's container on the one it is placed on (null: not yet placed)
+  // computer's container on the one it is placed on (null: not yet placed),
+  // and that node (the deployment's, or a person's own: node.mjs `nodeFor`)
   #nodes;
   #node = null;
+  #def = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -203,11 +205,24 @@ class ContainerHost {
   // A new isolate's first look, before any request: the node computer.rs
   // placed the computer on (its meta row; the schema is applied before
   // this runs), and what that node says of its container.
-  refresh() {
-    if (!this.#nodes) return Promise.resolve();
+  // A person's own node is the registry's to name (node.mjs `pairedNode`):
+  // when it does not answer, the computer is pinned at its next call instead.
+  async refresh() {
+    if (!this.#nodes) return;
+    try {
+      await this.#repin();
+    } catch (e) {
+      console.log(JSON.stringify({ computer: this.#ctx.id.toString(), pin: String((e && e.message) || e) }));
+    }
+    if (this.#node) await this.#node.refresh();
+  }
+
+  // Pins this isolate to the node computer.rs placed the computer on, if
+  // it has not yet.
+  async #repin() {
+    if (!this.#nodes || this.#node) return;
     const row = [...this.#ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", NODE_META)][0];
-    if (row) this.pin(row.value);
-    return this.#node ? this.#node.refresh() : Promise.resolve();
+    if (row) await this.pin(row.value);
   }
 
   // Whether computers run on sandcastle nodes here.
@@ -215,24 +230,29 @@ class ContainerHost {
     return this.#nodes !== null;
   }
 
-  // Each node as placing a computer needs it (node.mjs `probe`).
-  probe() {
-    return probe(this.#env, this.#nodes);
+  // Each node as placing a computer needs it (node.mjs `probe`): the
+  // deployment's, and `own`, the person's own node they chose ([{id}]).
+  probe(own) {
+    return probe(this.#env, this.#nodes, own || []);
   }
 
-  // Whether node `id` takes `computer` (its object counts what it holds).
-  take(id, computer) {
-    return take(this.#env, this.#nodes.byId.get(id), computer);
+  // Whether node `id` takes `computer`, with room for `capacity` (its
+  // object counts what it holds).
+  take(id, computer, capacity) {
+    return take(this.#env, id, computer, capacity);
   }
 
   // This computer runs on node `id`, which computer.rs recorded, from now
-  // on: a node FRAGMENT_NODES no longer lists answers every call NodeDown.
-  pin(id) {
+  // on: a node FRAGMENT_NODES no longer lists answers every call NodeDown,
+  // and a person's own node they revoked, NodeRevoked.
+  async pin(id) {
     if (this.#node) {
       if (this.#node.node !== id) throw new Error(`placed on ${this.#node.node}, never ${id}`);
       return;
     }
-    const node = this.#nodes.byId.get(id) || goneNode(id);
+    const node = await nodeFor(this.#env, this.#nodes, id);
+    if (this.#node) return;
+    this.#def = node;
     this.#node = new NodeContainer(node, this.#ctx.id.toString());
     this.#backups = this.#backupsOf(this.#node);
   }
@@ -240,20 +260,26 @@ class ContainerHost {
   // An intercepted request from the node (node.mjs). An isolate that
   // started after its container has no bindings: it sets them again from
   // the last `arm`, kept for this.
-  nodeEgress(request) {
+  // A person's own node they revoked hands nothing on: its object says so.
+  async nodeEgress(request) {
     const rearm = async () => {
       const a = await this.#ctx.storage.get(NODE_ARM);
       const adopted = !!a && (await this.adopt(a.generation));
       if (adopted) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
       console.log(JSON.stringify({ nodeEgress: "rearm", generation: a?.generation ?? null, adopted }));
     };
-    const node = this.#node && this.#nodes.byId.get(this.#node.node);
+    const node = this.#node ? this.#def : null;
+    if (node?.own && (await nodeStatus(this.#env, node.id)).revoked) {
+      console.log(JSON.stringify({ nodeEgress: "refused", node: node.id, status: 403, error: "its node was revoked" }));
+      return Response.json({ error: "node_revoked", message: `the node ${node.id} was revoked by its owner` }, { status: 403 });
+    }
     return nodeEgress(request, node, this.#node, rearm);
   }
 
   // Whether its container runs: a node's that could not say as this
   // isolate began (it was dialing again) is asked again first.
   async running() {
+    await this.#repin();
     if (this.#node) await this.#node.known();
     return this.#c.running;
   }
@@ -290,6 +316,8 @@ class ContainerHost {
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
     if (this.#nodes && !this.#node) throw new Error("a computer on nodes is placed before it starts (computer.rs `place`)");
+    // a node it can no longer reach says why, not that it lacks the image
+    if (this.#def?.error) throw this.#def.error();
     this.#generation = generation;
     const opts = { env, enableInternet: true };
     if (instance) opts.instance = instance;
@@ -456,16 +484,55 @@ export class Computer extends DurableObject {
 
 // A sandcastle node's object (node.mjs, uplink.mjs): one per node id. It
 // counts the computers placed on the node, and, when the node dials in,
-// holds its uplink, through which `NodeContainer` calls it.
+// holds its uplink, through which `NodeContainer` calls it. It says whether
+// the node is up (`/__node/status`, for its owner's settings), and, a
+// person's own node, that its owner revoked it (`/__node/revoke`): its
+// uplink is cut, and every dial and call after is refused, typed.
+const REVOKED = "revoked";
 export class Node extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.uplink = new Uplink(ctx, env);
     this.placements = new Placements(ctx);
+    this.revoked = false;
+    ctx.blockConcurrencyWhile(async () => {
+      this.revoked = (await ctx.storage.get(REVOKED)) === true;
+    });
   }
-  fetch(request) {
-    if (new URL(request.url).pathname.startsWith("/__node/")) return this.placements.fetch(request);
+  async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === "/__node/status" || path === "/__node/revoke") {
+      const { id } = await request.json().catch(() => ({}));
+      // this object is that node's alone
+      if (!id || this.ctx.id.toString() !== this.env.NODE.idFromName(id).toString()) return Response.json({ error: "invalid_request", message: "name this node's id" }, { status: 400 });
+      if (path === "/__node/revoke") {
+        if (!isPaired(id)) return Response.json({ error: "forbidden", message: "only a person's own node is revoked" }, { status: 403 });
+        this.revoked = true;
+        await this.ctx.storage.put(REVOKED, true);
+        this.uplink.revoke(`the node ${id} was revoked by its owner`);
+        return Response.json({ revoked: true });
+      }
+      return Response.json(await this.#status(id));
+    }
+    if (path.startsWith("/__node/")) return this.placements.fetch(request);
+    if (this.revoked) {
+      const message = `the node was revoked by its owner: pair the machine again`;
+      return Response.json({ error: "node_revoked", message }, { status: path === "/__uplink/dial" ? 403 : 410 });
+    }
     return this.uplink.fetch(request);
+  }
+  // Up or down now: one that dials in is up while its uplink is open; one
+  // the platform calls, while its health answers (as placing probes it).
+  async #status(id) {
+    if (this.revoked) return { revoked: true, up: false };
+    const nodes = nodesOf(this.env);
+    const listed = nodes?.byId.get(id);
+    if (listed && !listed.uplink) {
+      const h = await health(listed);
+      return { revoked: false, up: !h.down, why: h.down || null };
+    }
+    const up = this.uplink.connected();
+    return { revoked: false, up, why: up ? null : "its uplink is not open" };
   }
   webSocketMessage(ws, message) { return this.uplink.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.uplink.webSocketClose(ws, code, reason, clean); }
