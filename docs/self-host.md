@@ -1095,6 +1095,52 @@ use is still tracked, so a company can see who used what:
   environment (`HTTPS_PROXY`, a portable `NO_PROXY`, pip and npm
   mirrors).
 
+### 12. Secrets: one interface, the store's bindings
+
+Master keeps the deployment's own secrets (the host secret, the
+code.storage org key, WorkOS's client id and API key, the operator keys)
+in Cloudflare's Secrets Store (#134; docs/secrets.md), and so does this
+branch, with two of its own beside them: the sign-in client's secret
+(`OIDC_CLIENT_SECRET`, seam 4) and a model upstream's key (`MODEL_KEY`,
+seam 3). The interface is the binding: the cell reads each as
+`await env.<BINDING>.get()` (cell/src/keys.rs and agent/src/keys.rs,
+through workers-rs's `SecretStore`), cached a minute per isolate.
+
+- **Cloudflare:** the account's Secrets Store; `secrets_store_secrets`
+  binds each by name (`cargo xtask deploy`), and `wrangler dev` binds the
+  same names in its local store, which devstack seeds
+  (`devstack::Secrets::Store`).
+- **celld:** has no Secrets Store, upstream (v0.6.1) or on the fork: its
+  deploy refuses `secrets_store_secrets` as an unknown key (celld's
+  `SUPPORTED_KEYS`), and `celld dev` hands a Worker variables alone
+  (`.dev.vars`, as plain text). So the cell gives itself stand-ins of the
+  store's bindings: `cell/secrets.mjs`, a shim like node.mjs's for
+  `ctx.container`. Every class in entry.mjs takes its env through
+  `withSecrets`, which, when `FRAGMENT_SECRETS` names the deployment's
+  secrets (`{"backend": "vars", "secrets": [{"binding", "secret_name"}, …]}`,
+  the pairs a deploy writes into `secrets_store_secrets`), puts an object
+  with an async `get()` in each binding's place; the agents' Worker runs
+  from agent/celld.mjs there, which does the same. Its class is named
+  `Fetcher`, as Cloudflare's binding's is, since workers-rs takes a binding
+  for a `SecretStore` by that name. The backend for now, `vars`, answers
+  the Worker variable of the binding's own name, which devstack writes into
+  `.dev.vars` (`devstack::Secrets::Shim`), where the spike kept them
+  before #134. Without `FRAGMENT_SECRETS`, as on Cloudflare, the env is
+  handed on as it came. The Rust is the same on both runtimes, and never
+  knows which it read.
+- **Next: OpenBao (Vault's KV v2 API) behind the shim.** It is one more
+  entry in `BACKENDS` in cell/secrets.mjs (a `secret_name` its key), with
+  its address and token in `FRAGMENT_SECRETS`, and nothing else changes:
+  not the cell's Rust, not the bindings' names, not the cache. That is
+  where it slots in.
+- **Not yet behind it:** the sandcastle nodes' secrets
+  (`FRAGMENT_NODE_SECRET_<ID>`, seam 2) are still Worker variables, which
+  node.mjs reads as each isolate starts. A person's paired nodes' secrets
+  are sealed in the registry, as before.
+- **Evidence (2026-10-05):** auth, signin, keys and secrets, 135 passed and
+  0 failed on celld through the shim, and 135 and 0 on `wrangler dev`
+  through its local store.
+
 ## What corporate networks bring (research, 2026-10)
 
 The constraints that shape this design, in order:
@@ -1160,6 +1206,15 @@ that also makes Cloudflare simpler or safer:
    master (#126).
 10. **The CLI trusted the public roots alone**, so it could not reach a
     platform behind a company's CA. Fixed on master (#130).
+11. **The secrets are read through workers-rs's typed binding**
+    (`Env::secret_store`), which takes an object for a Secrets Store
+    binding only when its class is named `Fetcher`: workerd's own class.
+    Every other binding the cell reads through js.rs, by what it does. The
+    shim names its stand-in `Fetcher` so the cell's Rust needs no change
+    (seam 12), but reading the binding by its `get()` would let any
+    runtime's stand in. celld's service bindings fail the same check
+    (their class reads as `Object`), so workers-rs's `Env::service` refuses
+    them there: worth an upstream celld issue for Paul to post.
 
 **Decided (Paul, 2026-10-05):** `FRAGMENT_MODEL_URL` (seam 3) and
 `FRAGMENT_BROWSER_URL` (seam 7) go to master, but not yet: they land when

@@ -228,6 +228,8 @@ fn dev(args: &[String]) -> Result<()> {
         containers: docker,
         byoc: byoc()?,
         browser_url: None,
+        // celld has no Secrets Store: the cell's shim stands in (seam 12)
+        secrets: if celld { devstack::Secrets::Shim } else { devstack::Secrets::Store },
     };
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
     // on celld, which has no `browser` binding, the renderer shoots them
@@ -241,7 +243,7 @@ fn dev(args: &[String]) -> Result<()> {
     // the agents' Worker runs beside it, as a deployment runs it, bound to
     // the same host secret
     devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{port}"), agent_url: format!("http://127.0.0.1:{port}"), test_hooks: false }
-        .configure(&devstack::agent_dir(), &fleet.bound())?;
+        .configure(&devstack::agent_dir(), &fleet)?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         port,
