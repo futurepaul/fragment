@@ -12,6 +12,7 @@ import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
 import { NodeContainer, Placements, health, isPaired, nodeEgress, nodeFor, nodeStatus, nodesOf, probe, routeNodeEgress, take } from "./node.mjs";
 import { Uplink, routeNodeUplink } from "./uplink.mjs";
+import { withSecrets } from "./secrets.mjs";
 
 // The last `arm` of a computer on a node, its isolate's to repeat.
 const NODE_ARM = "node/arm";
@@ -19,6 +20,12 @@ const NODE_ARM = "node/arm";
 const NODE_META = "node";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
+
+// Every class here takes its env through `withSecrets` (secrets.mjs) before
+// anything reads it: where the runtime has no Secrets Store (celld), the
+// deployment's secrets are stand-ins of the store's bindings there, and the
+// Rust reads them as it reads the store's (docs/self-host.md, seam 12).
+// Where it has one, the env is as it came.
 
 // A computer on nodes that has not been placed: nothing runs.
 const UNPLACED = Object.freeze({ running: false, images: {} });
@@ -38,14 +45,23 @@ function routed(request, env, rust) {
 const Rust = rs.default;
 export default typeof Rust === "function"
   ? class extends Rust {
+      constructor(ctx, env) {
+        super(ctx, withSecrets(env));
+      }
       fetch(request) {
         return routed(request, this.env, () => super.fetch(request));
       }
     }
-  : { ...Rust, fetch: (request, env, ctx) => routed(request, env, () => Rust.fetch(request, env, ctx)) };
+  : Object.fromEntries(
+      Object.entries({ ...Rust, fetch: (request, env, ctx) => routed(request, env, () => Rust.fetch(request, env, ctx)) }).map(([name, handler]) => [
+        name,
+        typeof handler === "function" ? (event, env, ctx) => handler.call(Rust, event, withSecrets(env), ctx) : handler,
+      ]),
+    );
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.FragmentCell(ctx, env);
   }
@@ -58,6 +74,7 @@ export class Fragment extends DurableObject {
 
 export class Principal extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.PrincipalCell(ctx, env);
   }
@@ -66,6 +83,7 @@ export class Principal extends DurableObject {
 
 export class Ledger extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.LedgerCell(ctx, env);
   }
@@ -75,6 +93,7 @@ export class Ledger extends DurableObject {
 
 export class Registry extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.RegistryCell(ctx, env);
   }
@@ -88,6 +107,10 @@ export class Registry extends DurableObject {
 // `rs.InternalRoute.request` (routed.rs), which marks the request as that route
 // expects: the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
     return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(`cap/files/${op}`, JSON.stringify(body)));
@@ -119,6 +142,10 @@ export class Files extends WorkerEntrypoint {
 // when its retries run out, the next advance carries its error, and the job
 // sees it and may catch it.
 export class Job extends WorkflowEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   async run(event, step) {
     const { fragment, incarnation, run, attempt } = event.payload;
     const delay = Math.max(1, Number(this.env.FRAGMENT_JOB_RETRY_DELAY_S) || 10);
@@ -526,6 +553,7 @@ class ContainerHost {
 
 export class Computer extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     // What befell its container (its exit, a tab's socket) comes back in as
     // a request of its own, through the object's namespace: never as a
@@ -559,6 +587,7 @@ export class Computer extends DurableObject {
 const REVOKED = "revoked";
 export class Node extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.uplink = new Uplink(ctx, env);
     this.placements = new Placements(ctx);
@@ -612,6 +641,10 @@ export class Node extends DurableObject {
 // computer, both set by the Computer DO, never by the guest. Storage is
 // answered here; the rest is Rust's (`ComputerEgress.handle`).
 export class ComputerEgress extends WorkerEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   fetch(request) {
     const { computer, route } = this.ctx.props;
     if (route === "storage") {

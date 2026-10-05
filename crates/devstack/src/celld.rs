@@ -21,14 +21,27 @@ use crate::{boot_log, read_config, READY_TIMEOUT};
 /// places on a sandcastle node instead (seam 2).
 pub const CELLD_REFUSED: [&str; 5] = ["ai", "browser", "build", "routes", "containers"];
 
+/// A project's own entry on celld, when it has one: the agents' Worker,
+/// whose main elsewhere is its build, gives its env the secrets shim's
+/// stand-ins there (agent/celld.mjs; docs/self-host.md, seam 12). It is
+/// bundled, as every main on celld is.
+pub const CELLD_ENTRY: &str = "celld.mjs";
+
 /// The project's config as celld runs it: `wrangler.celld.jsonc`, beside
 /// its own (so its paths and `.dev.vars` resolve the same), less what
-/// celld refuses.
+/// celld refuses, and from its own entry when it has one (`CELLD_ENTRY`).
+/// Its secrets are the shim's (`crate::Secrets::Shim`): celld has no
+/// Secrets Store, so it binds none.
 pub fn celld_config(project: &Path) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for k in CELLD_REFUSED {
         obj.remove(k);
+    }
+    anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: on celld, the shim stands in for the fleet's", project.join("wrangler.jsonc").display());
+    if project.join(CELLD_ENTRY).is_file() {
+        obj.insert("main".into(), CELLD_ENTRY.into());
+        obj.remove("no_bundle");
     }
     let path = project.join("wrangler.celld.jsonc");
     fs::write(&path, serde_json::to_string_pretty(&config)?)?;
@@ -115,7 +128,7 @@ impl CelldNode {
         let mut cmd = Command::new(&tools.celld);
         cmd.arg("dev").arg(&config).args(["--host", "127.0.0.1", "--port", &opts.port.to_string(), "--logs", "--no-watch"]);
         for w in &opts.with {
-            cmd.arg("--with").arg(w);
+            cmd.arg("--with").arg(celld_config(w)?);
         }
         // the fork's hardening (docs/hardening.md): a facet's database
         // capped past the cell's own 16 MiB, and loaded code locked down
@@ -221,6 +234,25 @@ mod tests {
         for k in ["name", "main", "r2_buckets", "worker_loaders"] {
             assert!(v.get(k).is_some(), "{k} kept");
         }
+        assert_eq!(v["main"], "entry.mjs", "a project without an entry of its own on celld keeps its main");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Goal: a project with an entry of its own on celld (the agents'
+    // Worker: its build, through the secrets shim) runs from it, bundled;
+    // a config that binds secrets of its own is refused, since on celld the
+    // shim stands in for the fleet's (seam 12). Method: both, rendered.
+    #[test]
+    fn a_project_runs_from_its_celld_entry() {
+        let dir = std::env::temp_dir().join(format!("celld-entry-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("wrangler.jsonc"), r#"{ "name": "fragment-agent", "main": "build/index.js", "no_bundle": true }"#).unwrap();
+        fs::write(dir.join(CELLD_ENTRY), "export default {};\n").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(celld_config(&dir).unwrap()).unwrap()).unwrap();
+        assert_eq!(v["main"], CELLD_ENTRY);
+        assert!(v.get("no_bundle").is_none(), "its entry imports the shim: it is bundled");
+        fs::write(dir.join("wrangler.jsonc"), r#"{ "name": "x", "main": "a.mjs", "secrets_store_secrets": [] }"#).unwrap();
+        assert!(celld_config(&dir).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

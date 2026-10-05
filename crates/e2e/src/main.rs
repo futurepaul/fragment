@@ -714,6 +714,8 @@ impl Suite {
             containers: self.nodes.is_empty(),
             byoc: self.byoc && !self.nodes.is_empty(),
             browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
+            // celld has no Secrets Store: the cell's shim stands in (seam 12)
+            secrets: if self.celld.is_some() { devstack::Secrets::Shim } else { devstack::Secrets::Store },
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -722,7 +724,7 @@ impl Suite {
         // router hands it /api/agents and /api/a/*, its inboxes included;
         // it is bound to the platform's host secret
         devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{}", self.port), agent_url: format!("http://127.0.0.1:{}", self.port), test_hooks: true }
-            .configure(&self.agents_project, &fleet.bound())?;
+            .configure(&self.agents_project, &fleet)?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,

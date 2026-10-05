@@ -255,12 +255,13 @@ pub fn clear_state(project: &Path) -> Result<()> {
 
 /// A copy of the built agent project at `dir`.
 pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
-    stage(&agent_dir(), dir, &[])
+    // celld.mjs: its entry on celld (docs/self-host.md, seam 12)
+    stage(&agent_dir(), dir, &["celld.mjs"])
 }
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs", "uplink.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs", "uplink.mjs", "secrets.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.
@@ -330,14 +331,28 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// Where a local node's secrets are, for the bindings the cell reads them
+/// through (cell/src/keys.rs: `await env.<BINDING>.get()`, either way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secrets {
+    /// wrangler's local Secrets Store in the node's state directory, bound
+    /// by name as a deploy binds the account's (`wrangler dev`).
+    Store,
+    /// The cell's stand-ins for the store's bindings (cell/secrets.mjs;
+    /// docs/self-host.md, seam 12), backed by Worker variables of the
+    /// bindings' names in `.dev.vars`: a runtime with no Secrets Store
+    /// (celld).
+    Shim,
+}
+
 /// What a local deployment is configured with. The cell reads its
-/// settings as Worker variables, from `.dev.vars` (mode 600) under
-/// `wrangler dev`, and its keys from Secrets Store bindings
-/// (cell/src/keys.rs), which a local node reads from wrangler's local
-/// store in its state directory: `configure` seeds it with these values,
-/// under the names `store::Bound::conventional` gives them, and binds
-/// them as a deploy does. A dev or test deployment points code.storage at
-/// the fake in `crates/fakes`.
+/// settings as Worker variables, from `.dev.vars` (mode 600), and its keys
+/// from Secrets Store bindings (cell/src/keys.rs): under `wrangler dev`
+/// from wrangler's local store in its state directory, which `configure`
+/// seeds with these values, under the names `store::Bound::conventional`
+/// gives them, and binds as a deploy does; on celld from the cell's
+/// stand-ins for them (`Secrets::Shim`). A dev or test deployment points
+/// code.storage at the fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -416,6 +431,8 @@ pub struct Fleet {
     /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering.rs;
     /// docs/self-host.md, seam 7).
     pub browser_url: Option<String>,
+    /// Where its secrets are (`Secrets`): the runtime's.
+    pub secrets: Secrets,
 }
 
 /// An OpenAI-compatible model server as the cell reads it.
@@ -503,13 +520,8 @@ impl Fleet {
         bound
     }
 
-    /// Renders the deployment for a node on `project`: its settings into
-    /// the project's `.dev.vars`, its secrets into wrangler's local store
-    /// in the project's state directory (`store::seed_local`, which skips
-    /// values it holds already), and their bindings into its local config
-    /// (`local_config`). Clear the state first (`clear_state`), not after.
-    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
-        let bound = self.bound();
+    /// Each store secret's name, and its value.
+    fn values<'a>(&'a self, bound: &'a store::Bound) -> Vec<(&'a str, &'a str)> {
         let mut values: Vec<(&str, &str)> = vec![(bound.host_secret.as_str(), self.host_secret.as_str()), (bound.codestorage_key.as_str(), self.codestorage_key_pem.as_str())];
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
@@ -525,8 +537,39 @@ impl Fleet {
             values.push((name.as_str(), secret.as_str()));
         }
         assert_eq!(values.len(), bound.cell().len(), "every binding has its value");
-        store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell(), self.containers)?;
+        values
+    }
+
+    /// The shim's variables (`Secrets::Shim`) for `bindings` (each a
+    /// binding and its secret's name): `FRAGMENT_SECRETS`, naming them and
+    /// their backend, and each value as the variable of its binding's name.
+    fn shim_vars<'a>(&'a self, bound: &'a store::Bound, bindings: &[(String, &'a str)]) -> Vec<(String, String)> {
+        assert_eq!(self.secrets, Secrets::Shim, "only the shim's secrets are variables");
+        let values = self.values(bound);
+        let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()).expect("every bound secret has its value");
+        let secrets: Vec<serde_json::Value> = bindings.iter().map(|(binding, name)| serde_json::json!({ "binding": binding, "secret_name": name })).collect();
+        let mut vars = vec![("FRAGMENT_SECRETS".to_string(), serde_json::json!({ "backend": "vars", "secrets": secrets }).to_string())];
+        vars.extend(bindings.iter().map(|(binding, name)| (binding.clone(), value(name))));
+        vars
+    }
+
+    /// Renders the deployment for a node on `project`: its settings into
+    /// the project's `.dev.vars`, and its secrets where `secrets` says:
+    /// into wrangler's local store in the project's state directory
+    /// (`store::seed_local`, which skips values it holds already), their
+    /// bindings into its local config (`local_config`); or, for the shim,
+    /// into `.dev.vars` too. Clear the state first (`clear_state`), not
+    /// after.
+    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
+        let bound = self.bound();
+        let shim = match self.secrets {
+            Secrets::Store => {
+                store::seed_local(tools, &state_dir(project), &self.values(&bound)).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+                write_local_config(project, &bound.cell(), self.containers)?;
+                vec![]
+            }
+            Secrets::Shim => self.shim_vars(&bound, &bound.cell()),
+        };
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
@@ -614,6 +657,7 @@ impl Fleet {
         if let Some(u) = &self.browser_url {
             vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));
         }
+        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
@@ -634,13 +678,22 @@ pub struct AgentFleet {
 
 impl AgentFleet {
     /// Renders the fleet into the project's `.dev.vars`, and its bindings
-    /// (`bound.agent()`, the platform fleet's names) into its local config.
-    pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
-        write_local_config(project, &bound.agent(), true)?;
+    /// (`bound.agent()`, the platform fleet's names: `fleet`'s) as `fleet`
+    /// keeps its own: into its local config, or the shim's variables.
+    pub fn configure(&self, project: &Path, fleet: &Fleet) -> Result<()> {
+        let bound = fleet.bound();
+        let shim = match fleet.secrets {
+            Secrets::Store => {
+                write_local_config(project, &bound.agent(), true)?;
+                vec![]
+            }
+            Secrets::Shim => fleet.shim_vars(&bound, &bound.agent()),
+        };
         let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
         if self.test_hooks {
             vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
+        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
