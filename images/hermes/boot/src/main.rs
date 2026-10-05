@@ -160,7 +160,7 @@ fn check_restore() -> ! {
             std::process::exit(1);
         }
     };
-    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING)]).unwrap_or_else(|e| {
+    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK)]).unwrap_or_else(|e| {
         println!("{e}");
         std::process::exit(1)
     });
@@ -312,7 +312,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
 /// databases left hot (named by no pattern the platform takes).
 async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<String>), String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
-    let found = held::databases(data, &[staging]).map_err(|e| e.to_string())?;
+    let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
     held::make_staging(staging, ids).map_err(|e| e.to_string())?;
     let run = tokio::process::Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "copy"]).arg(staging).args(&dbs).kill_on_drop(true).output();
@@ -592,6 +592,37 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
     write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
 }
 
+/// An agent's work directory (`/data/work/<profile>`, the hermes user's:
+/// its terminal's cwd) and its desktop browser's profile in it, linked from
+/// where Hermes keeps one in the profile, so what its tools write is the
+/// work the computer saves on its own (step 2 of docs/durable-computers.md).
+/// A browser profile that is a directory already stays where it is:
+/// nothing is moved.
+fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
+    let work = hermes::work_dir(&a.fragment);
+    let browser = work.join("browser-profile");
+    if let Err(e) = std::fs::create_dir_all(&browser) {
+        ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
+        return;
+    }
+    chown(&work, ids);
+    chown(&browser, ids);
+    let link = profile.join(hermes::BROWSER_PROFILE);
+    if let Some(parent) = link.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        chown(parent, ids);
+    }
+    match std::fs::symlink_metadata(&link) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::os::unix::fs::symlink(&browser, &link) {
+            Ok(()) => chown(&link, ids),
+            Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+        },
+        Ok(m) if m.file_type().is_symlink() => {}
+        Ok(_) => ev!("profile.browser_kept", { "agent": a.fragment, "why": "its browser profile is a directory of the profile's already" }),
+        Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+    }
+}
+
 /// One agent's profile: its directories, its config, its repo pulled. At a
 /// boot for each agent, and while awake for each one assigned since
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
@@ -608,6 +639,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         chown(&dir.join(sub), ids);
     }
     chown(&dir, ids);
+    work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();

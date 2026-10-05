@@ -254,7 +254,9 @@ speaking Cloudflare's APIs) returns once this product works.
     before one that will not restore, and a sleep whose save fails keeps
     its container for at most `computers.unsaved_max_ms` (30 minutes by
     default, Paul's to confirm). Litestream is still in the image, and its
-    replicas are never read (P4: the debt ledger).
+    replicas are never read (P4: the debt ledger). Step 2, the seam:
+    `/data/work` (the tools') is saved as a record of its own beside the
+    rest of `/data` (the guest's own state), restored together.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

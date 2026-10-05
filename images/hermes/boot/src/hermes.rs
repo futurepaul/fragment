@@ -132,8 +132,28 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", passed.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
     y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
+    // Its commands run in the agent's work directory, which the computer
+    // saves on its own (the seam: step 2 of docs/durable-computers.md), never
+    // in Hermes' home (left unset, the gateway's own home, /data/hermes)
+    y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
 }
+
+/// What the computer keeps as its guest's tools' work, saved as a record
+/// of its own (docs/computers.md, "Data and the restore gate").
+pub const WORK: &str = "/data/work";
+
+/// An agent's work directory: its terminal's cwd, and its browser's
+/// profile (`BROWSER_PROFILE`).
+pub fn work_dir(agent_fragment: &str) -> PathBuf {
+    Path::new(WORK).join(wire::profile(agent_fragment))
+}
+
+/// Where Hermes keeps a profile's desktop browser's profile (its
+/// `tools/bot_desktop/browser.py`: `<profile>/bot-desktop/browser-profile`),
+/// relative to the profile: a link into the agent's work directory, so the
+/// cookies and history its tools make are its work, saved with it.
+pub const BROWSER_PROFILE: &str = "bot-desktop/browser-profile";
 
 /// What a profile's terminal knows of the agent it runs (cli/GUIDE.md, "As
 /// an agent"): the agent fragment its computer signs as, and the person it
@@ -338,6 +358,8 @@ mod tests {
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
+        assert!(p.contains("\n  cwd: \"/data/work/juniper-paul\"\n"), "its terminal works in its work directory: {p}");
+        assert_eq!(work_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul"));
         assert!(
             p.contains("  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\", \"/data/hermes/profiles/juniper-paul/credentials.sh\"]\n"),
             "its shell starts as Hermes' does, then reads its credentials: {p}"

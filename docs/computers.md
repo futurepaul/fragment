@@ -153,6 +153,18 @@ that names a PID from before a sleep can name a live process after it.
   swapping a restored directory into place, which overlayfs refuses for
   a directory from an image layer (EXDEV); on a first start the image
   makes it itself.
+- **The seam** (step 2 of docs/durable-computers.md): `/data/work` is
+  what the guest's tools write (a terminal's working directory, projects,
+  a browser's profile, scratch files), and the rest of `/data` is the
+  guest's own state (for ours, Hermes' home: its databases, sessions,
+  profiles, config; and the bridge's state). Each save is two
+  `DirectoryBackup` records, `/data` (its work left out, and what a held
+  guest names) and `/data/work` (nothing left out: its SQLite files are
+  copied as they are), restored together, `/data` first. The DO makes
+  `/data/work` with its hold, so it always exists to save. Nothing in the
+  work is copied under the hold: that it lives apart is what lets it move
+  to a sandbox of its own later (step 4, E). A save taken before the seam
+  is one record of `/data`, which restores whole as before.
 - With `RESTORE_PENDING=1`, the image waits for `/run/computer/restored`
   before it reads `/data`. Without it, `/data` is ready at start (a
   snapshot wake, or a first start with an empty `/data`).
@@ -519,12 +531,19 @@ settings and state):
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
   default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
 
+  Its work (the seam, above): each agent's is `/data/work/<profile>`.
+  Its profile's config makes it the terminal's working directory
+  (`terminal.cwd`; left unset, Hermes' multiplexed gateway ran every
+  agent's commands in the gateway's own home, `/data/hermes`), and its
+  desktop browser's profile (`<profile>/bot-desktop/browser-profile`, where
+  Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
+
   Its saves (`images/hermes/boot/src/held.rs`; "The hold", above): its
   bridge answers to `/var/lib/fragment-run/bridge-held`, and `hermes-boot`
   answers the platform. Held, it starts no new round of its repo sync, its
   skills install or its agents' reads, and waits (at most 8 s) for those
   under way. Once its bridge has answered it copies every `*.db` under
-  `/data` (Hermes' `state.db` of each profile, and whatever else Hermes or
+  `/data` but its work (Hermes' `state.db` of each profile, and whatever else Hermes or
   a plugin keeps) with SQLite's online backup, one step each (one read
   transaction: a copy of one moment whatever writes beside it, never
   restarted), as the hermes user, into `/data/held-copies/<n>.sqlite`,
@@ -541,7 +560,7 @@ settings and state):
   copies go. At a start, before the gateway opens a database, the copies
   go back over their live paths (each one's `-wal`, `-shm` and `-journal`
   removed, its owner and mode as they were): after a restore its
-  `computer-check` does it, then `quick_check`s every database as the
+  `computer-check` does it, then `quick_check`s every database but its work's as the
   hermes user and exits 3 on one that fails; after a snapshot, `pre-init`
   does it, so both wakes leave the same `/data`.
 
