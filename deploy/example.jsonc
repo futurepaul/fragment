@@ -1,7 +1,11 @@
 // A deployment's configuration for `cargo xtask deploy --config <file>`
 // (xtask/src/deploy.rs). Keep yours outside the repo: it names your
-// account and where your secrets are. Every secret is a file read by path,
-// never a value here.
+// account. Every secret the Workers read lives in the account's Cloudflare
+// Secrets Store and is named here by its store name, never a value
+// (docs/secrets.md): `cargo xtask secret set <name> --config <file>` sets
+// one, `secret gen <name>` makes a host secret, `secret list` shows them.
+// A deploy checks the store holds every one named here before it changes
+// anything.
 {
   // Your Cloudflare account (`wrangler whoami`), and the zone the
   // deployment's routes are on. The zone needs one proxied wildcard DNS
@@ -10,26 +14,30 @@
   "zone": "example.dev",
   // A Cloudflare API token with Zone · DNS · Edit on the zone(s) (and
   // Account · AI Gateway · Edit, to make the gateway below): with it, a
-  // deploy makes that record when it is missing. Without it, make it by hand.
+  // deploy makes that record when it is missing. Without it, make it by
+  // hand. A file: it is the deploying machine's own, which no Worker reads.
   // "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
   // A deployment of its own names its hosts (production: "fragment.club"
   // and "fragment.boats", each a zone on the account). Without them,
   // `--branch <b>` deploys a branch at <b>.<zone>.
   // "platform_host": "fragment.club",
   // "fragment_suffix": "fragment.boats",
-  // 32 random bytes or more, as text: seals every value at rest. Rotating:
-  // the new one here, the old one stays a while as FRAGMENT_HOST_SECRET_PREVIOUS.
-  "host_secret_file": "~/.config/fragment/secrets/host-secret",
+  // 32 random bytes or more, as text (`cargo xtask secret gen`): seals
+  // every value at rest. Never set again in place: rotate it by name, the
+  // new one here and the one before as host_secret_previous, until every
+  // value is resealed (docs/secrets.md, Rotating the host secret).
+  "host_secret": "fragment-host-secret",
+  // "host_secret_previous": "fragment-host-secret-2026-09",
   // Every fragment's git. The org's signing key, in PEM.
   "codestorage": {
     "org": "your-org",
-    "private_key_file": "~/.config/fragment/secrets/codestorage-private-key.pem"
+    "private_key": "fragment-codestorage-private-key"
   },
   // Sign-in: a WorkOS environment with AuthKit on, its redirect URI
   // https://<platform>/auth/callback.
   "workos": {
-    "client_id_file": "~/.config/fragment/secrets/workos-client-id",
-    "api_key_file": "~/.config/fragment/secrets/workos-api-key"
+    "client_id": "fragment-workos-client-id",
+    "api_key": "fragment-workos-api-key"
   },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
@@ -59,10 +67,11 @@
   // environment variables a guest finds its placeholder in, the names the
   // vendor's own SDK reads. A connection is a WorkOS Pipes provider,
   // enabled in the WorkOS environment above. An operator key's value is a
-  // file, as every secret; its price is the price book's list price for
-  // its name (fragment_core::price DEFAULT_KEYS) unless it names
-  // `"price": {"micros", "per"}` (micro-dollars per calls, at list; the
-  // margin is added). An `own` row takes the person's own key instead.
+  // store secret, named as its `key`, as every secret; its price is the
+  // price book's list price for its name (fragment_core::price
+  // DEFAULT_KEYS) unless it names `"price": {"micros", "per"}`
+  // (micro-dollars per calls, at list; the margin is added). An `own` row
+  // takes the person's own key instead.
   "providers": [
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
@@ -70,20 +79,21 @@
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["PERPLEXITY_API_KEY"], "key_file": "~/.config/fragment/secrets/perplexity-api-key" },
+      "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
     { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"],
       "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }],
-      "env": ["GOOGLE_PLACES_API_KEY"], "key_file": "~/.config/fragment/secrets/google-places-api-key" },
+      "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key" },
     { "name": "xai", "kind": "operator", "hosts": ["api.x.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["XAI_API_KEY"], "key_file": "~/.config/fragment/secrets/xai-api-key" },
+      "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key_file": "~/.config/fragment/secrets/elevenlabs-api-key" }
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" }
   ],
   // A branch deployment's test levers, for the hosted e2e (`cargo xtask
   // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A
-  // --branch deploy only: a deployment of its own is refused.
+  // --branch deploy only: a deployment of its own is refused. A file, not
+  // a store secret: the hosted e2e sends its value, and a store gives none back.
   // "test_secret_file": "~/.config/fragment/secrets/preview-test-secret",
   // Raise with every change to a key's price, or ledgers keep their book.
   "price_book_version": 1

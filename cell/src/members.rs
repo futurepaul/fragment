@@ -696,8 +696,9 @@ impl FragmentCell {
         if value.len() > limits::SECRET_MAX_BYTES {
             return Err(CellError::too_large("a secret", value.len(), limits::SECRET_MAX_BYTES));
         }
-        // sealed first: the checks and the write below share one turn
-        let sealed = crate::keys::seal(&self.env, &self.scope(), &value)?;
+        // sealed first (reading the host secret may yield): the checks and
+        // the write below share one turn
+        let sealed = crate::keys::seal(&self.env, &self.scope(), &value).await?;
         self.require(caller, false, Role::Editor)?;
         let exists = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![key.into()])?.is_empty();
         if !exists && self.count("SELECT COUNT(*) AS n FROM secrets")? >= limits::SECRETS_MAX as u64 {

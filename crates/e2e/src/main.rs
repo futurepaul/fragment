@@ -98,14 +98,14 @@ pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
 
-/// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its key files
-/// dropped (the deploy's), and the own key's provider.
+/// The fleet's provider catalog: `deploy/e2e.jsonc`'s, its keys' store
+/// names dropped (the deploy's), and the own key's provider.
 pub fn swap_providers() -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
     let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
     for r in &mut rows {
-        r.as_object_mut().context("a provider is an object")?.remove("key_file");
+        r.as_object_mut().context("a provider is an object")?.remove("key");
     }
     rows.push(json!({ "name": SWAP_OWN, "kind": "own", "hosts": [SWAP_OWN_HOST], "placements": [{ "basic": "password" }], "env": [SWAP_OWN_ENV] }));
     fragment_core::catalog::Catalog::parse(&Value::Array(rows.clone()).to_string()).map_err(|e| anyhow!("the e2e's catalog: {e}"))?;
@@ -449,7 +449,11 @@ impl Suite {
         anyhow::ensure!(self.preview.is_none(), "a hosted run starts no node: a section that does declares Need::Node");
         assert!(self.node.is_none(), "one node at a time");
         let tools = self.tools.as_ref().context("a local run locates its tools")?;
-        devstack::Fleet {
+        if clean {
+            // before the fleet seeds the local store in it again
+            devstack::clear_state(&self.project)?;
+        }
+        let fleet = devstack::Fleet {
             host_secret: self.host_secret.clone(),
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
@@ -486,21 +490,18 @@ impl Suite {
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
-        }
-        .configure(&self.project)?;
+        };
+        // its secrets go to wrangler's local store in the node's own state
+        // (seeded once a state, bound by name as a deploy binds them)
+        fleet.configure(tools, &self.project)?;
         // the agents' Worker runs beside it, as a deployment runs it: the
-        // router hands it /api/agents and /api/a/*, its inboxes included
-        devstack::AgentFleet {
-            host_secret: self.host_secret.clone(),
-            fragment_api: format!("http://127.0.0.1:{}", self.port),
-            agent_url: format!("http://127.0.0.1:{}", self.port),
-            test_hooks: true,
-        }
-        .configure(&self.agents_project)?;
+        // router hands it /api/agents and /api/a/*, its inboxes included;
+        // it is bound to the platform's host secret
+        devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{}", self.port), agent_url: format!("http://127.0.0.1:{}", self.port), test_hooks: true }
+            .configure(&self.agents_project, &fleet.bound())?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,
-            clean,
             with: vec![self.agents_project.clone()],
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included

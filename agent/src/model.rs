@@ -250,7 +250,7 @@ impl Call {
             Ok(body) => body,
             Err(e) => return Attempt::Failed(ProviderError::RequestFailed(format!("request: {e}"))),
         };
-        let (url, auth) = match self.fleet.signed("POST", &self.path, body.as_bytes()) {
+        let (url, auth) = match self.fleet.signed("POST", &self.path, body.as_bytes()).await {
             Ok(signed) => signed,
             Err(e) => return Attempt::Failed(ProviderError::RequestFailed(format!("signing the call: {e}"))),
         };

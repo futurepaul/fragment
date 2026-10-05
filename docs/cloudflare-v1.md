@@ -74,7 +74,9 @@ speaking Cloudflare's APIs) returns once this product works.
 4. **Self-deploy without forking.** Configuration lives in a file
    outside the repo: domains, the WorkOS environment, AI Gateway,
    pricing, the code.storage organization, and the default computer
-   image. Secrets live in files named by path. `cargo xtask deploy
+   image. Secrets live in the account's Cloudflare Secrets Store, named
+   in the file and set with `cargo xtask secret` (Paul, 2026-10-05;
+   docs/secrets.md; until then, files named by path). `cargo xtask deploy
    --config <file>` builds and deploys every Worker, the shell and the
    computer image. `SETUP.md` is written for the deployer's agent and
    lists the steps a person must do: make the Cloudflare account and
@@ -400,7 +402,7 @@ speaking Cloudflare's APIs) returns once this product works.
     list price (`fragment_core::price::DEFAULT_KEYS`, with sources: $0.005,
     $0.035, $0.12 and $0.15 before the margin; the last two estimate a
     typical call, as the swap counts calls, not posts or minutes), each
-    key a file Paul supplies (docs/secrets.md). Each agent's placeholder
+    key a store secret Paul sets (docs/secrets.md). Each agent's placeholder
     (`fck_perplexity_<tag>`) is in the variable the vendor's SDK reads
     (`PERPLEXITY_API_KEY`, `GOOGLE_PLACES_API_KEY`, `XAI_API_KEY`,
     `ELEVENLABS_API_KEY`), swapped in a header, a query parameter or basic

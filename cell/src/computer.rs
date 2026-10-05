@@ -704,7 +704,7 @@ impl ComputerCell {
         if catalog.is_empty() || view.agents.is_empty() {
             return Ok(view);
         }
-        let keys = crate::keys::tag_keys(&self.env)?;
+        let keys = crate::keys::tag_keys(&self.env).await?;
         let states = self.connection_states(&view.owner).await;
         let own = self.own_key_names()?;
         for agent in &mut view.agents {
@@ -714,7 +714,7 @@ impl ComputerCell {
                 }
                 let available = match p.kind {
                     Kind::Connection => states.get(&p.name) == Some(&ProviderState::Connected),
-                    Kind::Operator => crate::keys::operator_key(&self.env, &p.name).is_some(),
+                    Kind::Operator => crate::keys::holds_operator_key(&self.env, &p.name),
                     Kind::Own => own.contains(&p.name),
                 };
                 if !available {
@@ -769,13 +769,15 @@ impl ComputerCell {
     }
 
     /// The owner's own key for `provider`, opened.
-    fn own_key(&self, provider: &str) -> CellResult<Option<String>> {
+    async fn own_key(&self, provider: &str) -> CellResult<Option<String>> {
         let rows = self.rows("SELECT sealed FROM own_keys WHERE provider = ?", vec![provider.into()])?;
-        let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()) else { return Ok(None) };
+        let Some(sealed) = rows.first().and_then(|r| r["sealed"].as_str()).map(str::to_string) else { return Ok(None) };
         let scope = crate::keys::scope(SEAL_CLASS, &self.state);
-        let opened = crate::keys::open(&self.env, &scope, sealed)?;
+        let opened = crate::keys::open(&self.env, &scope, &sealed).await?;
         if let Some(resealed) = opened.resealed {
-            self.exec("UPDATE own_keys SET sealed = ? WHERE provider = ?", vec![resealed.into(), provider.into()])?;
+            // only over the value opened: the owner may have set another
+            // while the store was read
+            self.exec("UPDATE own_keys SET sealed = ? WHERE provider = ? AND sealed = ?", vec![resealed.into(), provider.into(), sealed.into()])?;
         }
         let key = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("an own key that is not text"))?;
         Ok(Some(key))
@@ -968,7 +970,7 @@ impl ComputerCell {
                         if !crate::connections::own_key_ok(&key) {
                             return Err(CellError::invalid("a key is a printable token"));
                         }
-                        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), key.as_bytes())?;
+                        let sealed = crate::keys::seal(&self.env, &crate::keys::scope(SEAL_CLASS, &self.state), key.as_bytes()).await?;
                         self.exec(
                             "INSERT INTO own_keys (provider, sealed, set_at) VALUES (?, ?, ?) ON CONFLICT (provider) DO UPDATE SET sealed = excluded.sealed, set_at = excluded.set_at",
                             vec![b.provider.as_str().into(), sealed.into(), js::now_ms().into()],
@@ -1056,7 +1058,7 @@ impl ComputerCell {
         let id = self.must(MetaKey::Id)?;
         let rows = self.rows("SELECT fragment, owner, identity, connections FROM agents ORDER BY added_at", vec![])?;
         let fragments: Vec<String> = rows.iter().filter_map(|r| r["fragment"].as_str().map(str::to_string)).collect();
-        let keys = crate::keys::tag_keys(&self.env)?;
+        let keys = crate::keys::tag_keys(&self.env).await?;
         let mut agent: Option<&str> = None;
         for p in &b.placeholders {
             let provider = self.cfg.providers.get(&p.provider).ok_or_else(|| CellError::invalid(format!("no provider {:?} on this deployment", p.provider)))?;
@@ -1104,9 +1106,9 @@ impl ComputerCell {
                         }
                         console_error!("{}", json!({ "computer": "key", "ledger": e.message }));
                     }
-                    crate::keys::operator_key(&self.env, &provider.name).ok_or_else(|| CellError::host(format!("{} is not set", catalog::key_secret_name(&provider.name))))?
+                    crate::keys::operator_key(&self.env, &provider.name).await?
                 }
-                Kind::Own => self.own_key(&provider.name)?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
+                Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
                 return Err(CellError::new(ErrorCode::UpstreamFailed, format!("{}'s credential is not a printable token", provider.name)));
@@ -1146,13 +1148,13 @@ impl ComputerCell {
                 return Ok(token.clone());
             }
         }
-        let workos = self.cfg.workos()?;
+        let workos = crate::keys::workos(&self.env, self.cfg).await?;
         let call = crate::registry::calls::SubjectOf { identity: owner.into(), issuer: workos.issuer() };
         let user = crate::ask_registry(&self.env, &call)
             .await?
             .subject
             .ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, &workos.api, provider, &user).await?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, workos.api, provider, &user).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));

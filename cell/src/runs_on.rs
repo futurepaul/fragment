@@ -148,9 +148,13 @@ impl FragmentCell {
                 let b: Sign = serde_json::from_value(body.clone()).map_err(|e| CellError::invalid(format!("body: {e}")))?;
                 self.assigned_to(&b.computer)?;
                 let sealed = self.must(MetaKey::FragmentSecret)?;
-                let opened = crate::keys::open(&self.env, &self.scope(), &sealed)?;
+                let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
                 if let Some(fresh) = opened.resealed {
-                    self.set_meta(MetaKey::FragmentSecret, &fresh)?;
+                    // only over the value opened (the store's read may yield)
+                    self.exec(
+                        "UPDATE meta SET value = ? WHERE key = ? AND value = ?",
+                        vec![fresh.into(), MetaKey::FragmentSecret.key().into(), sealed.as_str().into()],
+                    )?;
                 }
                 let secret = std::str::from_utf8(&opened.plaintext).map_err(|_| CellError::host("the fragment's key is not text"))?;
                 let keys = fragment_nip98::Keys::from_secret_hex(secret).ok_or_else(|| CellError::host("the fragment's sealed key is not a nostr key"))?;

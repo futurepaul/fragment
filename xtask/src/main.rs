@@ -31,14 +31,23 @@
 //!   check            every first-party JavaScript file parses (node --check;
 //!                    xtask/src/js_syntax.rs), then host tests and clippy,
 //!                    warnings denied
+//!   secret set <name> --config <file> [--from-file <path>]
+//!   secret gen <name> --config <file>
+//!   secret list --config <file>
+//!                    the deployment's secrets in its account's Cloudflare
+//!                    Secrets Store: set one (wrangler's hidden prompt, standard
+//!                    input, or a file once), make a host secret, or list names
+//!                    and times; --local <state dir> for wrangler's local store
+//!                    instead (xtask/src/secret.rs)
 //!   deploy --config <file> [--branch <name>]
 //!                    build and deploy to Cloudflare from a deployment's config
-//!                    (deploy/example.jsonc): a branch gets a complete copy of
-//!                    its own at <branch>.<zone> (xtask/src/deploy.rs)
+//!                    (deploy/example.jsonc), once its secrets are all in the
+//!                    store: a branch gets a complete copy of its own at
+//!                    <branch>.<zone> (xtask/src/deploy.rs)
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
 //!
-//! dev, e2e, deploy and teardown run wrangler and npm on the pinned Node,
+//! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
 //! use, never a `node` from PATH (crates/devstack/src/node.rs;
 //! FRAGMENT_NODE names another).
@@ -58,6 +67,7 @@ mod build;
 mod deploy;
 mod dns;
 mod js_syntax;
+mod secret;
 mod summary;
 
 const DEV_PORT: u16 = 8790;
@@ -101,6 +111,8 @@ fn dev(args: &[String]) -> Result<()> {
     let state = devstack::repo_root().join("target/devstack/codestorage.json");
     if clean {
         let _ = std::fs::remove_file(&state);
+        // the node's state too, before the fleet seeds its local store again
+        devstack::clear_state(&devstack::cell_dir())?;
     }
     let key = devstack::dev_secret("codestorage-org-key.pem", fragment_fakes::codestorage::generate_org_key_pem)?;
     let fake = fragment_fakes::codestorage::CodeStorage::start(fragment_fakes::codestorage::Options {
@@ -130,7 +142,7 @@ fn dev(args: &[String]) -> Result<()> {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
     };
-    devstack::Fleet {
+    let fleet = devstack::Fleet {
         host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
@@ -160,20 +172,16 @@ fn dev(args: &[String]) -> Result<()> {
         providers: None,
         operator_key_values: vec![],
         swap_upstream: None,
-    }
-    .configure(&devstack::cell_dir())?;
-    // the agents' Worker runs beside it, as a deployment runs it
-    devstack::AgentFleet {
-        host_secret: devstack::dev_secret("host-secret", || devstack::random_hex(32))?,
-        fragment_api: format!("http://127.0.0.1:{DEV_PORT}"),
-        agent_url: format!("http://127.0.0.1:{DEV_PORT}"),
-        test_hooks: false,
-    }
-    .configure(&devstack::agent_dir())?;
+    };
+    // its secrets go to wrangler's local store under cell/.wrangler/state
+    fleet.configure(&tools, &devstack::cell_dir())?;
+    // the agents' Worker runs beside it, as a deployment runs it, bound to
+    // the same host secret
+    devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{DEV_PORT}"), agent_url: format!("http://127.0.0.1:{DEV_PORT}"), test_hooks: false }
+        .configure(&devstack::agent_dir(), &fleet.bound())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         port: DEV_PORT,
-        clean,
         with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
         // wrangler's own debug logs, when asked for
@@ -407,9 +415,10 @@ fn main() -> Result<()> {
         Some("e2e") => e2e(&args[1..]),
         Some("e2e-summary") => summary::e2e_summary(&args[1..]),
         Some("check") => check(),
+        Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 

@@ -159,7 +159,10 @@ prebuilt bundle is in the debt ledger).
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Each boot's log is
+  `WORKOS_API_KEY_FILE` name its files. Its secrets are seeded into
+  wrangler's local Secrets Store in `cell/.wrangler/state` and bound by
+  name as a deploy binds them (`--clean` clears them with the state;
+  docs/secrets.md). Each boot's log is
   `target/devstack/node-8790-<boot>.log` (printed at start;
   `FRAGMENT_NODE_LOGS=1` adds wrangler's debug logs). Point the CLI at it with
   `FRAGMENT_HOST=http://127.0.0.1:8790` and run `fragment login` once. Dev fleets let jobs
@@ -174,9 +177,23 @@ prebuilt bundle is in the debt ledger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank` and `calories`, which has a goose agent of its own); the
   shell's catalog offers `todo`, `inbox` and `blank`.
+- `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
+  `secret gen <name> --config <file>`, `secret list --config <file>`: the
+  deployment's secrets in its account's Cloudflare Secrets Store
+  (xtask/src/secret.rs, through wrangler on the pinned Node). `set` takes
+  the value from wrangler's hidden prompt, standard input, or a file once,
+  and updates a secret already there (never the config's host secret,
+  which rotates by name); `gen` makes a new one of 32 random bytes as hex;
+  `list` shows names and times and what the config names that the store
+  lacks. `set` and `gen` make the account's one store when there is none.
+  No `rm`. `--local <state dir>` acts on wrangler's local store instead.
+  Setting a remote secret is Paul's (or the coordinating session's).
 - `cargo xtask deploy --config <file> [--branch <name>]`: builds and
   deploys to Cloudflare from a deployment's config, kept outside the repo
-  (`deploy/example.jsonc`; xtask/src/deploy.rs). A branch is a complete
+  (`deploy/example.jsonc`; xtask/src/deploy.rs). It lists the store first
+  and refuses, before anything is built, when a secret the config names
+  is missing (naming the `secret set` for each); it binds them by name
+  and uploads no secret but a branch's test secret. A branch is a complete
   copy at `<branch>.<zone>`, its fragments at
   `<label>--<username>--<branch>.<zone>`. `cargo xtask teardown --config
   <file> --branch <name>` removes one (irreversible: ask Paul).
@@ -211,9 +228,13 @@ prebuilt bundle is in the debt ledger).
 
 ## Rules
 
-- Secrets are files read by path (`docs/finite-next-lessons.md`,
-  Resources); never print them, pass them on a command line, or commit
-  them.
+- The deployment's secrets live in its account's Cloudflare Secrets
+  Store: set with `cargo xtask secret`, named in its config, bound to the
+  Workers by name, and read only by `cell/src/keys.rs` and
+  `agent/src/keys.rs` (docs/secrets.md). Only the DNS token and a
+  preview's test secret are files read by path. Never print them, pass
+  them on a command line (no `--value`), or commit them; deleting one is
+  Paul's.
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.

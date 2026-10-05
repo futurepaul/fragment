@@ -35,7 +35,7 @@ pub enum SealError {
 impl std::fmt::Display for SealError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SealError::NoHostSecret => write!(f, "no host secret is configured (FRAGMENT_HOST_SECRET)"),
+            SealError::NoHostSecret => write!(f, "no host secret is bound (HOST_SECRET, a Secrets Store binding)"),
             SealError::WeakHostSecret => write!(f, "the host secret must be at least {HOST_SECRET_MIN_BYTES} bytes"),
             SealError::TooLarge(n) => write!(f, "a sealed value is at most {PLAINTEXT_MAX_BYTES} bytes, not {n}"),
             SealError::Malformed => write!(f, "a sealed value is not in the w2 format"),

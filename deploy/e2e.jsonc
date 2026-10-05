@@ -3,23 +3,27 @@
 // preview at e2e.finite.place, docs/cloudflare-v1.md phase 7), with every
 // provider the platform offers, so the hosted lane can swap each operator
 // key against its real vendor. Copy it outside the repo and set your
-// account. Every secret is a file read by path: the four operator keys are
-// Paul's to supply, at the files named below (docs/secrets.md); none is in
-// the repo, and a deploy that cannot read one stops before anything changes.
+// account. Every secret the Workers read is a secret in the account's
+// Cloudflare Secrets Store, named here (docs/secrets.md): the four operator
+// keys are Paul's to set (`cargo xtask secret set <name> --config <file>`);
+// none is in the repo, and a deploy that finds one missing from the store
+// stops before anything changes, naming the command that sets it. The DNS
+// token and the test secret stay files: the deploying machine and the
+// hosted e2e runner use their values themselves.
 {
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "finite.place",
   "dns_token_file": "~/.config/fragment/secrets/cloudflare-dns-token",
-  "host_secret_file": "~/.config/fragment/secrets/host-secret",
+  "host_secret": "fragment-host-secret",
   "codestorage": {
     "org": "your-org",
-    "private_key_file": "~/.config/fragment/secrets/codestorage-private-key.pem"
+    "private_key": "fragment-codestorage-private-key"
   },
   // WorkOS staging, with Pipes' google provider on Finite's OAuth client
   // (spike S5)
   "workos": {
-    "client_id_file": "~/.config/fragment/secrets/workos-client-id",
-    "api_key_file": "~/.config/fragment/secrets/workos-api-key"
+    "client_id": "fragment-workos-client-id",
+    "api_key": "fragment-workos-api-key"
   },
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",
@@ -40,16 +44,16 @@
       "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["PERPLEXITY_API_KEY"], "key_file": "~/.config/fragment/secrets/perplexity-api-key" },
+      "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key" },
     { "name": "google-places", "kind": "operator", "hosts": ["places.googleapis.com"],
       "placements": [{ "header": "x-goog-api-key" }, { "query": "key" }],
-      "env": ["GOOGLE_PLACES_API_KEY"], "key_file": "~/.config/fragment/secrets/google-places-api-key" },
+      "env": ["GOOGLE_PLACES_API_KEY"], "key": "fragment-google-places-api-key" },
     { "name": "xai", "kind": "operator", "hosts": ["api.x.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      "env": ["XAI_API_KEY"], "key_file": "~/.config/fragment/secrets/xai-api-key" },
+      "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key_file": "~/.config/fragment/secrets/elevenlabs-api-key" }
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" }
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",

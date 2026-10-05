@@ -862,8 +862,8 @@ impl FragmentCell {
             // fragment seals another cannot open
             let body: Value = body_json(&mut req).await?;
             let answer = match (body["op"].as_str(), body["plaintext"].as_str(), body["sealed"].as_str()) {
-                (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, &self.scope(), text.as_bytes())? }),
-                (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, &self.scope(), sealed)?.plaintext) }),
+                (Some("seal"), Some(text), _) => json!({ "sealed": crate::keys::seal(&self.env, &self.scope(), text.as_bytes()).await? }),
+                (Some("open"), _, Some(sealed)) => json!({ "plaintext": String::from_utf8_lossy(&crate::keys::open(&self.env, &self.scope(), sealed).await?.plaintext) }),
                 _ => return Err(CellError::invalid("op is seal {plaintext} or open {sealed}")),
             };
             return json_response(&answer);
@@ -1122,7 +1122,7 @@ impl FragmentCell {
             let flat = fragment_proto::flat_name(&body.name).ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>"))?;
             let repo_name = format!("{}{flat}", cs_cfg.repo_prefix);
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope())?;
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
         let (repo, fragment_pub, sealed) = match made.await {

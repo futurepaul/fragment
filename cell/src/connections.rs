@@ -40,8 +40,8 @@ pub fn own_key_ok(key: &str) -> bool {
 
 /// The WorkOS user the person signed in as, which their connections are.
 pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Option<String>> {
-    let workos = cfg.workos()?;
-    Ok(crate::ask_registry(env, &SubjectOf { identity: who.into(), issuer: workos.issuer() }).await?.subject)
+    let issuer = crate::keys::workos(env, cfg).await?.issuer();
+    Ok(crate::ask_registry(env, &SubjectOf { identity: who.into(), issuer }).await?.subject)
 }
 
 /// Each connection's state for `who` (as Pipes says, with no token).

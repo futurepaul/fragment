@@ -2,8 +2,8 @@
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
 //! (ROADMAP decision 13): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
-//! code.storage key, and the WorkOS API key are Worker secrets, read only
-//! by keys.rs.
+//! code.storage key, and WorkOS's client id and API key are Secrets Store
+//! bindings, read only by keys.rs.
 
 use std::sync::OnceLock;
 
@@ -23,21 +23,12 @@ pub struct CodeStorageConfig {
     pub repo_prefix: String,
 }
 
-/// WorkOS AuthKit (phase 4 slice B): fragment's own environment.
+/// WorkOS AuthKit (phase 4 slice B): fragment's own environment, configured
+/// when its client id is bound (`secrets_store::WORKOS_CLIENT`; keys.rs
+/// reads it, and its API key, as `keys::workos`).
 pub struct WorkOsConfig {
-    /// `WORKOS_CLIENT_ID`: names the environment (its API key is the node's).
-    pub client_id: String,
     /// `WORKOS_API_URL` (default https://api.workos.com; dev and the e2e: the fake).
     pub api: String,
-}
-
-impl WorkOsConfig {
-    /// Who vouches for a person's subject: this environment. A person is
-    /// keyed by `(issuer, subject)`, so finite.computer's login (another
-    /// environment) is another issuer (docs/finite-integration.md).
-    pub fn issuer(&self) -> String {
-        format!("workos:{}", self.client_id)
-    }
 }
 
 pub struct Config {
@@ -124,8 +115,8 @@ pub struct Config {
     pub deploy_id: String,
     /// `FRAGMENT_PROVIDERS`: the provider catalog (`fragment_core::catalog`),
     /// every credential a computer's guest may use: the WorkOS Pipes
-    /// connections, the operator's keys (each the secret
-    /// `catalog::key_secret_name` names, and each priced, which is the
+    /// connections, the operator's keys (each bound as
+    /// `secrets_store::operator_key` names it, and each priced, which is the
     /// price book's `keys`) and people's own keys, each with its hosts, its
     /// placements and its environment variables. None by default.
     /// `FRAGMENT_PRICE_BOOK_VERSION` (default the defaults' 1) grows with
@@ -247,8 +238,7 @@ impl Config {
             push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
             delivery_retry_s,
             delivery_retry_max_s: var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s),
-            workos: var(env, "WORKOS_CLIENT_ID").map(|client_id| WorkOsConfig {
-                client_id,
+            workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
             platform_url,
@@ -296,7 +286,7 @@ impl Config {
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {
         self.workos
             .as_ref()
-            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, "sign-in is not configured on this fleet (WORKOS_CLIENT_ID)"))
+            .ok_or_else(|| CellError::new(ErrorCode::HostFailed, format!("sign-in is not configured on this fleet (no {} binding)", fragment_core::secrets_store::WORKOS_CLIENT)))
     }
 
     /// The platform's origin, given the URL a request arrived on.

@@ -35,25 +35,34 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
-| `WORKOS_CLIENT_ID` | sign-in: fragment's WorkOS environment; unset, sign-in answers 500 |
-| `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake) |
+| `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
 
-Worker secrets (`cargo xtask deploy` uploads them from the files the
-deployment's config names; `.dev.vars` in dev), read only by
-`cell/src/keys.rs`. An app's isolate gets an env the platform builds, so
-no author code can name one:
+Secrets Store bindings (docs/secrets.md): each a secret in the account's
+Cloudflare Secrets Store, named by the deployment's config and bound by
+`cargo xtask deploy` (wrangler's local store, seeded by devstack, in dev
+and the e2e), read only by `cell/src/keys.rs` (the agents' Worker: the
+host secrets, by `agent/src/keys.rs`), each value used for a minute at
+most before it is read again. The names are
+`fragment_core::secrets_store`'s. An app's isolate gets an env the
+platform builds, so no author code can name one:
+
+| Binding | Meaning |
+|---|---|
+| `HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes); the key computers' placeholders are tagged with is derived from it. Bound to the agents' Worker too |
+| `HOST_SECRET_PREVIOUS` | the host secret before a rotation, bound while it runs; values sealed under it open and come back resealed |
+| `CODESTORAGE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
+| `WORKOS_CLIENT` | sign-in: fragment's WorkOS environment's client id; unbound, sign-in answers 500 |
+| `WORKOS_KEY` | WorkOS's API key, for its code exchange and Pipes |
+| `OPERATOR_KEY_<NAME>` | an operator key of the catalog (`perplexity` is `OPERATOR_KEY_PERPLEXITY`, `google-places` `OPERATOR_KEY_GOOGLE_PLACES`), the store secret its row's `key` names |
+
+One Worker secret is left, the platform Worker's:
 
 | Secret | Meaning |
 |---|---|
-| `FRAGMENT_HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes); the key computers' placeholders are tagged with is derived from it (docs/secrets.md) |
-| `FRAGMENT_KEY_<NAME>` | an operator key of the catalog (`perplexity` is `FRAGMENT_KEY_PERPLEXITY`, `google-places` `FRAGMENT_KEY_GOOGLE_PLACES`), uploaded from its row's `key_file` |
-| `FRAGMENT_HOST_SECRET_PREVIOUS` | the secret before a rotation; values sealed under it open and come back resealed |
-| `CODESTORAGE_PRIVATE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
-| `WORKOS_API_KEY` | WorkOS's API key, for its code exchange |
-| `FRAGMENT_TEST_SECRET` | the test levers' secret (Test levers, below): honoured on a branch deployment (`FRAGMENT_HOST_LABEL_SUFFIX`) or a local fleet (`FRAGMENT_EGRESS_LOCAL`) alone, 32 to 256 bytes of printable ASCII; one set on a deployment of its own, or one too short, is logged (`levers.refused`) and honoured nowhere. `cargo xtask deploy` uploads it from the config's `test_secret_file`, for a `--branch` deploy only |
+| `FRAGMENT_TEST_SECRET` | the test levers' secret (Test levers, below): honoured on a branch deployment (`FRAGMENT_HOST_LABEL_SUFFIX`) or a local fleet (`FRAGMENT_EGRESS_LOCAL`) alone, 32 to 256 bytes of printable ASCII; one set on a deployment of its own, or one too short, is logged (`levers.refused`) and honoured nowhere. `cargo xtask deploy` uploads it from the config's `test_secret_file`, for a `--branch` deploy only (`.dev.vars` in the local e2e) |
 
 ## Test levers
 
