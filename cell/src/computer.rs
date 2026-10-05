@@ -807,9 +807,11 @@ impl ComputerCell {
             let _ = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await;
         }
         let gone = self.call("destroy", &[g.clone(), "asleep".into()]).await.is_ok_and(|r| r.as_bool() == Some(true));
-        if !gone && self.call("running", &[]).await.is_ok_and(|r| r.as_bool() == Some(true)) {
+        // still this sleep's: no exit of it has been heard, nor a start after it
+        let ours = matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { generation: s, .. }) if s == generation);
+        if !gone && ours && self.call("running", &[]).await.is_ok_and(|r| r.as_bool() == Some(true)) {
             // a container that outlives its sleep would claim no turn again:
-            // the hold is the sleep's alone (`exec` refuses another start's)
+            // the hold is the sleep's alone
             if let Err(e) = self.mark(&g, HOLD_UNMARK).await {
                 console_error!("{}", json!({ "computer": id, "unhold": "failed", "generation": generation, "error": e.message }));
             }
