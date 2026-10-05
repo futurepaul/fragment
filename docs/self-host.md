@@ -1424,14 +1424,14 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
 - **Bring your own computer: built, experimental** (2026-10-05; branch
   `selfhost-pair`, and sandcastle's `node-pair`). The design is seam 2's
   part of that name.
-  - Host tests (11 here, 7 in sandcastle): `fragment_core::pairing` (7:
+  - Host tests (11 here, 8 in sandcastle): `fragment_core::pairing` (7:
     a pairing valid, a wrong code, an expired one, a replayed approval,
     the bounds, revoking, and BYOC off), `placement`'s choices (3: a
     choice first, each fallback with its reason, BYOC's switch), proto's
     poll answers (1), and sandcastle's `pair` (5 in the crate: its
-    arguments, the uplink, the config it writes; 2 in process against a
-    stand-in platform: a pairing to its files, and five refusals that
-    write nothing). `cargo xtask check` passes.
+    arguments, the uplink, the config it writes; 3 in process against a
+    stand-in platform: a pairing to its files, five refusals that write
+    nothing, and a lost poll asked again). `cargo xtask check` passes.
   - The e2e's `pairing` section (`FRAGMENT_E2E_NODES=two`, which turns
     BYOC on): the device flow over HTTP; three impostors refused; a real
     `sandcastle-node pair` in front of the Docker engine double, approved,
@@ -1442,12 +1442,16 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     starts past their bound. With Chrome, settings' Computers
     (experimental) shows the node up, the computer on it, the choice, and
     Revoke. **On celld: pairing 37 of 37; with computers, shell-ui,
-    placement and restart in one run, 227 passed, 0 failed, 0 skipped.**
+    placement and restart in one run, 227 passed, 0 failed, 0 skipped.
+    On wrangler dev (workerd): pairing and placement, 50 of 50.**
   - Found on the way: a computer whose node is gone (delisted, or a
     person's revoked) answered its wake "no image for its architecture"
     (the gone node has no images) instead of why; its start now throws
     the node's own error, so a delisted node is `node_down` and a revoked
-    one `node_revoked`.
+    one `node_revoked`. On wrangler dev, `pair` met two things celld let
+    pass: an absolute URI on the request line (refused: it now sends
+    origin form), and a poll its proxy lost (a 502 that never reached the
+    cell: a lost poll is now asked again, up to three in a row).
   - Not built: moving a computer; several computers per person; a node
     renamed; a paired node's capacity from its engine (it is
     `OWN_CAPACITY`); billing a computer on its owner's own machine
