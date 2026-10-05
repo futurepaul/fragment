@@ -58,6 +58,10 @@ pub struct Config {
     /// (docs/computers.md, "The hold"). An image with more to quiet than the
     /// bridge names another file, and answers the platform itself.
     pub held: PathBuf,
+    /// `BRIDGE_HELD_LEAVE_OUT`: what the save may leave out, written into
+    /// the answer one per line (gitignore patterns relative to `/data`):
+    /// files the image keeps another way. None by default.
+    pub left_out: Vec<String>,
     pub settings: Settings,
     /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
     /// none, every agent the platform lists.
@@ -152,6 +156,24 @@ pub fn save(dir: &Path, state: &State) -> Result<(), BridgeError> {
     Ok(())
 }
 
+/// Whether `pattern` is one a hold's answer may name (docs/computers.md,
+/// "The hold"): a gitignore pattern of letters, digits and `._-/*?[]`, at
+/// most `HELD_PATTERN_MAX_BYTES`. The platform refuses an answer with any
+/// other, and saves the guest whole.
+pub fn left_out_ok(pattern: &str) -> bool {
+    (1..=limits::HELD_PATTERN_MAX_BYTES).contains(&pattern.len()) && pattern.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-/*?[]".contains(&b))
+}
+
+/// Writes `bytes` to `path` whole: a temporary file beside it, renamed over
+/// it, so a reader never sees half.
+fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// Waits for the platform's restore of `/data` (docs/computers.md, the
 /// restore gate). False when told to stop first.
 pub async fn restore_gate(cfg: &Config, mut stop: watch::Receiver<bool>) -> bool {
@@ -225,7 +247,8 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
     // its answer to the platform's holds, for its whole life (none claims yet)
     let claims_in_flight = Arc::new(AtomicUsize::new(0));
-    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), claims_in_flight.clone(), stop.clone()));
+    let answer: String = cfg.left_out.iter().map(|p| format!("{p}\n")).collect();
+    tokio::spawn(answer_holds(cfg.hold.clone(), cfg.held.clone(), answer, claims_in_flight.clone(), stop.clone()));
     let state = load(&cfg.state_dir)?;
     let life = new_life()?;
     let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
@@ -1080,15 +1103,18 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
 /// hold"): `held` exists while `hold` does and no claim is in flight (a
 /// claim looks at the hold before each try, so none starts once it holds),
 /// and not otherwise. The platform clears `held` before each hold, so an
-/// answer is always to the hold it finds. Looked at every `HOLD_POLL_MS`,
-/// for the bridge's life.
-async fn answer_holds(hold: PathBuf, held: PathBuf, in_flight: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
+/// answer is always to the hold it finds. The answer is `answer`: what the
+/// save may leave out, one per line (none, empty). Looked at every
+/// `HOLD_POLL_MS`, for the bridge's life.
+async fn answer_holds(hold: PathBuf, held: PathBuf, answer: String, in_flight: Arc<AtomicUsize>, mut stop: watch::Receiver<bool>) {
     assert!(hold != held, "a hold and its answer are two files");
+    assert!(answer.len() <= limits::HELD_ANSWER_MAX_BYTES, "an answer the platform reads whole");
     // bounded by the bridge's life: one look per `HOLD_POLL_MS`, ended by `stop`
     loop {
         let quiet = hold.exists() && in_flight.load(Ordering::SeqCst) == 0;
         match (quiet, held.exists()) {
-            (true, false) => match std::fs::write(&held, b"") {
+            // written whole, then renamed: the platform never reads half
+            (true, false) => match write_whole(&held, answer.as_bytes()) {
                 Ok(()) => crate::ev!("held", { "held": held.display().to_string() }),
                 Err(e) => crate::ev!("held.failed", { "held": held.display().to_string(), "error": e.to_string() }),
             },

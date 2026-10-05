@@ -32,7 +32,11 @@ COPY stub/screen /opt/fragment/screen
 # rollback lane reads it through the computer's port)
 ARG STUB_VERSION=1
 RUN echo "$STUB_VERSION" > /opt/fragment/screen/version.txt
+# Its answer to a save's hold names `*.scratch` as what the save leaves out
+# (docs/computers.md, "The hold"): nothing it keeps another way, only so the
+# platform's lanes can see a save leave out what a guest names.
 ENV BRIDGE_RUNTIME=script \
+    BRIDGE_HELD_LEAVE_OUT=*.scratch \
     BRIDGE_STATE_DIR=/data/bridge \
     BRIDGE_MEDIA_DIR=/tmp/bridge-media \
     BRIDGE_SCRIPT_SCRATCH=/tmp/bridge-script \

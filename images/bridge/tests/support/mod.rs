@@ -54,7 +54,7 @@ pub fn script() -> Box<dyn Runtime> {
 
 /// The scripted agent with drafts `pace` apart (`slow` is twenty of them).
 pub fn script_paced(pace: Duration) -> Box<dyn Runtime> {
-    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script") } })
+    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } })
 }
 
 /// A bridge running in this process: on the test's own runtime (`start`),
@@ -66,7 +66,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), settings, agents_file: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run

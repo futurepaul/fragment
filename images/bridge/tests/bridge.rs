@@ -395,7 +395,7 @@ async fn agents_the_image_makes_ready() {
     let mut cfg = support::config(&fake.url(), &dir, support::settings());
     cfg.agents_file = Some(file.clone());
     // a pace that makes `slow` take five seconds: a turn that runs through the change
-    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script") } });
+    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } });
     let bridge = support::start(cfg, script);
     following(&fake, 2).await;
     let slow = fake.say(&talk, &person("paul"), json!({ "text": "slow, while maple arrives" }));

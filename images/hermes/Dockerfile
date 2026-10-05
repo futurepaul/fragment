@@ -74,6 +74,11 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
 COPY --from=build /out/ /opt/fragment/bin/
+# The check the platform runs after it restores /data, before the gate
+# (docs/computers.md): the last hold's copies of Hermes' databases put back,
+# then each one's quick_check (hermes-boot's held.rs).
+RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate (docs/computers.md).\nexec /opt/fragment/bin/hermes-boot check-restore\n' > /usr/local/bin/computer-check \
+ && chmod 755 /usr/local/bin/computer-check
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/screen /opt/fragment/screen

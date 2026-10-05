@@ -26,6 +26,9 @@
 //! - `credentials`: what the agent's guest is given now (`GET
 //!   /api/computer`): each credential's provider, its environment variables
 //!   and its placeholder, `; ` between;
+//! - `write <path> <text>`: the text in the file `<path>` under the data
+//!   root (`/data`), and `read <path>`: that file's text, or `none` (what a
+//!   save kept, and left out);
 //! - `think <text>`: one model call through the computer's model intercept
 //!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
 //!   model's answer;
@@ -50,6 +53,43 @@ pub struct ScriptConfig {
     pub pace: Duration,
     /// Where files it writes go (scratch).
     pub scratch: PathBuf,
+    /// What `write` and `read` name paths under (`/data`: what a computer
+    /// keeps).
+    pub data: PathBuf,
+}
+
+/// A path `write` and `read` take: relative, at most eight parts of
+/// letters, digits and `._-`, none of them `.` or `..`.
+fn data_path(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let part_ok = |p: &&str| !p.is_empty() && *p != "." && *p != ".." && p.len() <= 64 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    (parts.len() <= 8 && parts.iter().all(part_ok)).then(|| root.join(rel))
+}
+
+/// `write <path> <text>`: the text in a file under the data root.
+async fn write_data(root: &std::path::Path, rest: &str) -> String {
+    let (rel, text) = rest.split_once(' ').unwrap_or((rest, ""));
+    let Some(path) = data_path(root, rel) else { return format!("write refused: {rel:?} is no path under the data") };
+    let wrote = async {
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        tokio::fs::write(&path, text.as_bytes()).await
+    };
+    match wrote.await {
+        Ok(()) => format!("wrote {rel}"),
+        Err(e) => format!("write failed: {e}"),
+    }
+}
+
+/// `read <path>`: a file's text under the data root, or `none`.
+async fn read_data(root: &std::path::Path, rel: &str) -> String {
+    let Some(path) = data_path(root, rel) else { return format!("read refused: {rel:?} is no path under the data") };
+    match tokio::fs::read_to_string(&path).await {
+        Ok(text) => format!("read {rel}: {}", text.chars().take(300).collect::<String>()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => format!("read {rel}: none"),
+        Err(e) => format!("read failed: {e}"),
+    }
 }
 
 pub struct Script {
@@ -256,6 +296,12 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             Err(e) => format!("credentials failed: {e}"),
         };
     }
+    if let Some(rest) = ts.text.strip_prefix("write ") {
+        reply = write_data(&cfg.data, rest.trim()).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("read ") {
+        reply = read_data(&cfg.data, rest.trim()).await;
+    }
     if text.starts_with("fetch ") {
         reply = match fetch(&ts.agent.fragment, &ts.text).await {
             Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
@@ -342,5 +388,22 @@ mod tests {
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
         }
+    }
+
+    /// `write` and `read` stay under the data root: a relative path of
+    /// plain parts, or nothing; then a file written is read back, and one
+    /// never written reads as none.
+    #[tokio::test]
+    async fn write_and_read_stay_under_the_data() {
+        let root = std::env::temp_dir().join(format!("script-data-{}", std::process::id()));
+        assert_eq!(data_path(&root, "notes/keep.txt"), Some(root.join("notes/keep.txt")));
+        for bad in ["", "/etc/passwd", "../up", "a/../b", "a//b", "./a", "a b", "x/y/z/a/b/c/d/e/f"] {
+            assert_eq!(data_path(&root, bad), None, "{bad:?}");
+        }
+        assert_eq!(write_data(&root, "notes/keep.txt kept, hello").await, "wrote notes/keep.txt");
+        assert_eq!(read_data(&root, "notes/keep.txt").await, "read notes/keep.txt: kept, hello");
+        assert_eq!(read_data(&root, "notes/gone.txt").await, "read notes/gone.txt: none");
+        assert!(write_data(&root, "../escape x").await.starts_with("write refused"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
