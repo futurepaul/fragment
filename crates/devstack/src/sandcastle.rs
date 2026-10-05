@@ -11,6 +11,12 @@
 //! sandcastle-docker-engine`, and `cargo build --release -p
 //! sandcastle-docker-relay --target <arch>-unknown-linux-musl` (the relay
 //! runs inside each container, so it is static).
+//!
+//! Or a node fronts the machine's real engine (`Engine::Real`: root, its
+//! microVMs jailed, already running under its service), and only
+//! `sandcastle-node` is needed. The run's images are loaded into it
+//! (`load_images`), and the containers the run started there are destroyed
+//! when the node stops: the engine itself stays up.
 
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
@@ -81,8 +87,9 @@ pub struct Tools {
 }
 
 impl Tools {
-    /// From `SANDCASTLE_DIR`'s builds; each must be a file.
-    pub fn locate() -> Result<Tools> {
+    /// From `SANDCASTLE_DIR`'s builds; each must be a file (only the node,
+    /// in front of a real engine).
+    pub fn locate(real: bool) -> Result<Tools> {
         let dir = std::env::var_os(SANDCASTLE_DIR_VAR)
             .map(PathBuf::from)
             .with_context(|| format!("set {SANDCASTLE_DIR_VAR} to a sandcastle checkout (its branch node-placement), with sandcastle-node, sandcastle-docker-engine and the static sandcastle-docker-relay built"))?;
@@ -97,7 +104,7 @@ impl Tools {
             (&tools.engine, "cargo build --release -p sandcastle-docker-engine".to_string()),
             (&tools.relay, format!("cargo build --release -p sandcastle-docker-relay --target {musl}")),
         ] {
-            if !bin.is_file() {
+            if !bin.is_file() && (!real || *bin == tools.node) {
                 bail!("no {} ({SANDCASTLE_DIR_VAR}: {build} there)", bin.display());
             }
         }
@@ -114,9 +121,30 @@ pub enum Reach {
     Uplink,
 }
 
+/// What a node fronts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Engine {
+    /// sandcastle's Docker engine double, started here under the node's
+    /// directory, its containers in local Docker.
+    Double,
+    /// The machine's real engine, already running, its sockets in this
+    /// directory (its `state_dir`, e.g. /var/lib/sandcastle).
+    Real(PathBuf),
+}
+
+impl Engine {
+    fn dir(&self, node_dir: &Path) -> PathBuf {
+        match self {
+            Engine::Double => node_dir.join("e"),
+            Engine::Real(dir) => dir.clone(),
+        }
+    }
+}
+
 pub struct NodeSpec {
     pub id: String,
     pub reach: Reach,
+    pub engine: Engine,
     /// Its state: the engine's sockets, its config and secret.
     pub dir: PathBuf,
     /// The platform's origin: its uplink and `/api/nodes/egress`.
@@ -129,7 +157,7 @@ pub struct NodeSpec {
 
 /// The node's config (sandcastle's crates/node/src/config.rs).
 fn node_config(spec: &NodeSpec) -> Value {
-    let engine = spec.dir.join("e");
+    let engine = spec.engine.dir(&spec.dir);
     let mut config = json!({
         "engine": engine.join("engine.sock"),
         "ports": engine.join("ports.sock"),
@@ -154,7 +182,11 @@ pub struct SandcastleNode {
     node_bin: PathBuf,
     config: PathBuf,
     log: PathBuf,
+    /// The engine double this node started; none in front of a real one.
     engine: Option<Child>,
+    /// A real engine's API socket, and when this node started: the
+    /// containers started there since are the run's, destroyed at `stop`.
+    real: Option<(PathBuf, u64)>,
     node: Option<Child>,
 }
 
@@ -165,8 +197,8 @@ impl SandcastleNode {
     /// until the platform answers.
     pub fn start(tools: &Tools, spec: &NodeSpec) -> Result<SandcastleNode> {
         assert!(placement::valid_node_id(&spec.id), "a node's id is the platform's form");
-        let engine_dir = spec.dir.join("e");
-        fs::create_dir_all(&engine_dir).with_context(|| format!("create {}", engine_dir.display()))?;
+        let engine_dir = spec.engine.dir(&spec.dir);
+        fs::create_dir_all(&spec.dir).with_context(|| format!("create {}", spec.dir.display()))?;
         fs::create_dir_all(&spec.log_dir)?;
         let secret = crate::random_hex(SECRET_HEX_BYTES);
         let mut f = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(spec.dir.join("node.secret"))?;
@@ -175,17 +207,31 @@ impl SandcastleNode {
         fs::write(&config, serde_json::to_string_pretty(&node_config(spec))?)?;
         let log_of = |what: &str| spec.log_dir.join(format!("sandcastle-{}-{what}.log", spec.id));
         let engine_log = log_of("engine");
-        let out = fs::OpenOptions::new().create(true).append(true).open(&engine_log)?;
-        let engine = Command::new(&tools.engine)
-            .arg("--dir")
-            .arg(&engine_dir)
-            .arg("--relay")
-            .arg(&tools.relay)
-            .stdin(Stdio::null())
-            .stdout(out.try_clone()?)
-            .stderr(out)
-            .spawn()
-            .with_context(|| format!("start {}", tools.engine.display()))?;
+        let sock = engine_dir.join("engine.sock");
+        let (engine, real) = match &spec.engine {
+            Engine::Double => {
+                fs::create_dir_all(&engine_dir).with_context(|| format!("create {}", engine_dir.display()))?;
+                let out = fs::OpenOptions::new().create(true).append(true).open(&engine_log)?;
+                let child = Command::new(&tools.engine)
+                    .arg("--dir")
+                    .arg(&engine_dir)
+                    .arg("--relay")
+                    .arg(&tools.relay)
+                    .stdin(Stdio::null())
+                    .stdout(out.try_clone()?)
+                    .stderr(out)
+                    .spawn()
+                    .with_context(|| format!("start {}", tools.engine.display()))?;
+                (Some(child), None)
+            }
+            Engine::Real(_) => {
+                let (status, body) = engine_call(&sock, "GET", "/v1/health", None).with_context(|| format!("the real engine at {} (is its service running, and may this user reach its socket?)", sock.display()))?;
+                if status != 200 {
+                    bail!("the real engine's health at {}: {status} {}", sock.display(), String::from_utf8_lossy(&body));
+                }
+                (None, Some((sock.clone(), now_ms())))
+            }
+        };
         let mut n = SandcastleNode {
             id: spec.id.clone(),
             reach: spec.reach,
@@ -194,10 +240,10 @@ impl SandcastleNode {
             node_bin: tools.node.clone(),
             config,
             log: log_of("node"),
-            engine: Some(engine),
+            engine,
+            real,
             node: None,
         };
-        let sock = engine_dir.join("engine.sock");
         n.wait_for("the engine's socket", &engine_log, || std::os::unix::net::UnixStream::connect(&sock).is_ok())?;
         n.up()?;
         Ok(n)
@@ -260,8 +306,10 @@ impl SandcastleNode {
     pub fn stop(mut self) -> Result<()> {
         let node = self.node.take().map(|c| stop(c, "sandcastle-node"));
         let engine = self.engine.take().map(|c| stop(c, "the engine double"));
+        let real = self.real.take().map(|(sock, since)| destroy_since(&sock, since));
         node.transpose()?;
         engine.transpose()?;
+        real.transpose()?;
         Ok(())
     }
 
@@ -307,14 +355,132 @@ fn stop(mut child: Child, what: &str) -> Result<()> {
 
 impl Drop for SandcastleNode {
     /// An early error must not leave its processes running: the engine is
-    /// told to stop (it removes its containers), never killed outright.
+    /// told to stop (it removes its containers), never killed outright; a
+    /// real engine's containers the run started are destroyed.
     fn drop(&mut self) {
         for (child, what) in [(self.node.take(), "sandcastle-node"), (self.engine.take(), "the engine double")] {
             if let Some(c) = child {
                 let _ = stop(c, what);
             }
         }
+        if let Some((sock, since)) = self.real.take() {
+            let _ = destroy_since(&sock, since);
+        }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// The most one answer from an engine's API may be.
+const ENGINE_ANSWER_BYTES_MAX: u64 = 16 << 20;
+/// An engine call's limit: an image's load builds its disk in a VM.
+const ENGINE_CALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// One HTTP/1.1 call to an engine's API on its unix socket: its status and
+/// body. A body is a file, streamed (an image's tar), or bytes.
+fn engine_call(sock: &Path, method: &str, path: &str, body: Option<EngineBody>) -> Result<(u16, Vec<u8>)> {
+    use std::io::{Read, Write};
+    let mut c = std::os::unix::net::UnixStream::connect(sock).with_context(|| format!("connect {}", sock.display()))?;
+    c.set_read_timeout(Some(ENGINE_CALL_TIMEOUT))?;
+    c.set_write_timeout(Some(ENGINE_CALL_TIMEOUT))?;
+    let len = match &body {
+        None => 0,
+        Some(EngineBody::Bytes(b)) => b.len() as u64,
+        Some(EngineBody::File(p)) => fs::metadata(p)?.len(),
+    };
+    write!(c, "{method} {path} HTTP/1.1\r\nhost: engine\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {len}\r\n\r\n")?;
+    match body {
+        None => {}
+        Some(EngineBody::Bytes(b)) => c.write_all(&b)?,
+        Some(EngineBody::File(p)) => {
+            std::io::copy(&mut fs::File::open(&p)?, &mut c)?;
+        }
+    }
+    let mut answer = vec![];
+    c.take(ENGINE_ANSWER_BYTES_MAX).read_to_end(&mut answer)?;
+    let head_end = answer.windows(4).position(|w| w == b"\r\n\r\n").context("an engine's answer has a head")?;
+    let head = String::from_utf8_lossy(&answer[..head_end]).into_owned();
+    let status = head.split(' ').nth(1).and_then(|s| s.parse().ok()).context("an engine's answer has a status")?;
+    let mut rest = answer[head_end + 4..].to_vec();
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        rest = unchunk(&rest)?;
+    }
+    Ok((status, rest))
+}
+
+enum EngineBody {
+    Bytes(Vec<u8>),
+    File(PathBuf),
+}
+
+/// A chunked body, joined.
+fn unchunk(mut b: &[u8]) -> Result<Vec<u8>> {
+    let mut out = vec![];
+    // Bounded by the body: each pass consumes one chunk.
+    loop {
+        let line_end = b.windows(2).position(|w| w == b"\r\n").context("a chunk's size line")?;
+        let size = usize::from_str_radix(String::from_utf8_lossy(&b[..line_end]).split(';').next().unwrap_or("").trim(), 16).context("a chunk's size")?;
+        b = &b[line_end + 2..];
+        if size == 0 {
+            return Ok(out);
+        }
+        anyhow::ensure!(b.len() >= size + 2, "a chunk shorter than its size");
+        out.extend_from_slice(&b[..size]);
+        b = &b[size + 2..];
+    }
+}
+
+/// The run's images, built into local Docker (`build_cell_images`), loaded
+/// into a real engine as `docker.io/library/<tag>`: each saved from Docker
+/// to a file under `scratch`, then handed to the engine, which builds its
+/// disk.
+pub fn load_images(engine_dir: &Path, tags: &[String], scratch: &Path) -> Result<()> {
+    let sock = engine_dir.join("engine.sock");
+    fs::create_dir_all(scratch)?;
+    // bounded: the run's images
+    for tag in tags {
+        let tar = scratch.join(format!("{}.tar", tag.replace([':', '/'], "-")));
+        let out = Command::new("docker").args(["save", "-o"]).arg(&tar).arg(tag).stdin(Stdio::null()).output().context("run docker save")?;
+        if !out.status.success() {
+            bail!("docker save {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        let reference = format!("docker.io/library/{tag}");
+        let path = format!("/v1/images/load?reference={}", reference.replace('/', "%2F").replace(':', "%3A"));
+        let (status, body) = engine_call(&sock, "POST", &path, Some(EngineBody::File(tar.clone())))?;
+        let _ = fs::remove_file(&tar);
+        if status != 200 {
+            bail!("the real engine's load of {reference}: {status} {}", String::from_utf8_lossy(&body));
+        }
+    }
+    Ok(())
+}
+
+/// The VMs a real engine runs at most (its health's `vms_max`): a node's
+/// capacity in front of it.
+pub fn real_engine_vms(engine_dir: &Path) -> Result<u32> {
+    let (status, body) = engine_call(&engine_dir.join("engine.sock"), "GET", "/v1/health", None)?;
+    anyhow::ensure!(status == 200, "the real engine's health: {status}");
+    let v: Value = serde_json::from_slice(&body)?;
+    v["vms_max"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("the real engine's health names its vms_max")
+}
+
+/// Every container on a real engine started at or after `since_ms` (the
+/// run's), destroyed.
+fn destroy_since(sock: &Path, since_ms: u64) -> Result<()> {
+    let (status, body) = engine_call(sock, "GET", "/v1/containers", None)?;
+    anyhow::ensure!(status == 200, "the real engine's containers: {status}");
+    let list: Value = serde_json::from_slice(&body)?;
+    let all = list.as_array().cloned().or_else(|| list["containers"].as_array().cloned()).unwrap_or_default();
+    // bounded: the engine's containers (at most its VMs)
+    for c in all {
+        let (Some(name), Some(started)) = (c["name"].as_str(), c["startedAtMs"].as_u64()) else { continue };
+        if started >= since_ms {
+            let _ = engine_call(sock, "POST", &format!("/v1/containers/{name}/destroy"), Some(EngineBody::Bytes(b"{}".to_vec())));
+        }
+    }
+    Ok(())
 }
 
 /// The cell's computer images (`cell/wrangler.jsonc`'s `containers`
@@ -367,7 +533,7 @@ mod tests {
     use super::*;
 
     fn spec(reach: Reach) -> NodeSpec {
-        NodeSpec { id: "uplink".into(), reach, dir: PathBuf::from("/tmp/n"), platform: "http://127.0.0.1:9000".into(), capacity: 8, log_dir: PathBuf::from("/tmp") }
+        NodeSpec { id: "uplink".into(), reach, engine: Engine::Double, dir: PathBuf::from("/tmp/n"), platform: "http://127.0.0.1:9000".into(), capacity: 8, log_dir: PathBuf::from("/tmp") }
     }
 
     /// Goal: a node that listens is given its port, one that dials the
@@ -384,6 +550,19 @@ mod tests {
         assert!(dial.get("listen").is_none());
         assert_eq!(dial["uplink"], json!({ "url": "ws://127.0.0.1:9000/api/nodes/uplink", "id": "uplink" }));
         assert_eq!(dial["platform"], "http://127.0.0.1:9000");
+        // in front of a real engine, its own sockets
+        let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) });
+        assert_eq!(real["engine"], "/var/lib/sandcastle/engine.sock");
+        assert_eq!(real["ports"], "/var/lib/sandcastle/ports.sock");
+        assert_eq!(real["secret_file"], "/tmp/n/node.secret");
+    }
+
+    /// Goal: a chunked answer is joined; one cut short is refused.
+    #[test]
+    fn chunked_answers() {
+        assert_eq!(unchunk(b"4\r\nWiki\r\n5;x=y\r\npedia\r\n0\r\n\r\n").unwrap(), b"Wikipedia");
+        assert!(unchunk(b"9\r\nWiki\r\n").is_err());
+        assert!(unchunk(b"zz\r\n").is_err());
     }
 
     /// Goal: a node list from a file keeps the secrets out of the variable,

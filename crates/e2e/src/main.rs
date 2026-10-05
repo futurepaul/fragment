@@ -30,7 +30,11 @@
 //! one that listens and one that dials in (its uplink), each in front of
 //! sandcastle's Docker engine double, the stub image built for them. The
 //! computers sections run on them, on either runtime, and the placement
-//! section stops and starts them.
+//! section stops and starts them. `FRAGMENT_E2E_NODES=real` runs them on
+//! the machine's real engine instead (`SANDCASTLE_ENGINE_DIR`, default
+//! /var/lib/sandcastle): one node in front of it, the images loaded into it,
+//! every computer a jailed microVM (the placement section, which needs two
+//! nodes, is a skip).
 
 mod api;
 mod browser;
@@ -1143,9 +1147,13 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // where computers run: the runtime's containers, or sandcastle nodes (docs/self-host.md, seam 2)
     let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
         Err(_) => None,
-        Ok("two") if rehearse.is_none() => Some(devstack::sandcastle::Tools::locate()?),
-        Ok("two") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
-        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in), not {other}"),
+        Ok("two") if rehearse.is_none() => Some((devstack::sandcastle::Tools::locate(false)?, None)),
+        Ok("real") if rehearse.is_none() => {
+            let dir = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/sandcastle"));
+            Some((devstack::sandcastle::Tools::locate(true)?, Some(dir)))
+        }
+        Ok("two" | "real") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
+        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in) or real (one node in front of the machine's engine), not {other}"),
     };
     let nodes = sandcastle.is_some();
     let (rung, shared) = match rehearse {
@@ -1209,8 +1217,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(shard) = s.shard {
         println!("shard {shard}: {}", lanes::SHARDS[shard.k as usize - 1].join(", "));
     }
-    if let Some(tools) = &sandcastle {
-        start_nodes(&mut s, tools)?;
+    if let Some((tools, real)) = &sandcastle {
+        start_nodes(&mut s, tools, real.as_deref())?;
     }
     let t0 = Instant::now();
     s.start(true, true)?;
@@ -1246,8 +1254,10 @@ fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering>
 /// The run's two sandcastle nodes (`FRAGMENT_E2E_NODES=two`), in the
 /// order `FRAGMENT_NODES` lists them: `direct`, which listens, and
 /// `uplink`, which dials the platform; each holds the cell's images, built
-/// here for the run and tagged with its name.
-fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools) -> Result<()> {
+/// here for the run and tagged with its name. With a real engine
+/// (`FRAGMENT_E2E_NODES=real`), one node, `box`, which listens in front of
+/// it, the images loaded into it.
+fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<&Path>) -> Result<()> {
     let t0 = Instant::now();
     let mut images = serde_json::Map::new();
     for (name, tag) in devstack::sandcastle::build_cell_images(&s.run)? {
@@ -1256,10 +1266,26 @@ fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools) -> Result<()>
     }
     s.node_images = Value::Object(images);
     let platform = format!("http://127.0.0.1:{}", s.port);
+    if let Some(dir) = real {
+        devstack::sandcastle::load_images(dir, &s.image_tags, &s.scratch.join("images"))?;
+        let spec = devstack::sandcastle::NodeSpec {
+            id: "box".into(),
+            reach: devstack::sandcastle::Reach::Listen(devstack::free_port()?),
+            engine: devstack::sandcastle::Engine::Real(dir.to_path_buf()),
+            dir: s.scratch.join("n").join("box"),
+            platform: platform.clone(),
+            capacity: devstack::sandcastle::real_engine_vms(dir)?,
+            log_dir: s.scratch.clone(),
+        };
+        s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
+        println!("nodes: box at {}, in front of the real engine in {}, its images {} loaded (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), dir.display(), s.node_images, t0.elapsed());
+        return Ok(());
+    }
     for (id, reach) in [("direct", devstack::sandcastle::Reach::Listen(devstack::free_port()?)), ("uplink", devstack::sandcastle::Reach::Uplink)] {
         let spec = devstack::sandcastle::NodeSpec {
             id: id.into(),
             reach,
+            engine: devstack::sandcastle::Engine::Double,
             // short: the engine's sockets live under it (a unix socket's path is at most 108 bytes)
             dir: s.scratch.join("n").join(id),
             platform: platform.clone(),

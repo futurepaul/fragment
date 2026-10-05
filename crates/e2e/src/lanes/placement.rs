@@ -58,6 +58,10 @@ pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("placement", &[crate::Need::Nodes, crate::Need::Computers, crate::Need::Node]) {
         return Ok(());
     }
+    if s.node_ids().len() < 2 {
+        s.skip("computers spread across nodes, each pinned to its own", "it needs two nodes (FRAGMENT_E2E_NODES=two); this run's one is the real engine's");
+        return Ok(());
+    }
     let ids = s.node_ids();
     anyhow::ensure!(ids.len() == 2, "the run's nodes: {ids:?}");
     let (a, b) = (api.person()?, api.person()?);
