@@ -38,6 +38,21 @@ pub const NODE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A node's secret, made here: 32 random bytes, as hex.
 const SECRET_HEX_BYTES: usize = 32;
+/// A unix socket's path, at most this many bytes: Linux's `sun_path` holds
+/// 108, the last a NUL. A node handed a longer one cannot bind it, and says
+/// so only in its own log.
+pub const SOCKET_PATH_MAX: usize = 107;
+
+/// `dir/name`, the path of a socket a node binds or dials, refused when it
+/// is too long to be one (a deep checkout's scratch).
+pub fn socket_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    let path = dir.join(name);
+    let len = path.as_os_str().len();
+    if len > SOCKET_PATH_MAX {
+        bail!("{} is {len} bytes, past a unix socket's {SOCKET_PATH_MAX}: name its directory shorter", path.display());
+    }
+    Ok(path)
+}
 
 /// The deployment's nodes as the cell reads them: `FRAGMENT_NODES`, and
 /// each node's secret under the name the cell looks for
@@ -158,12 +173,12 @@ pub struct NodeSpec {
 }
 
 /// The node's config (sandcastle's crates/node/src/config.rs).
-fn node_config(spec: &NodeSpec) -> Value {
+fn node_config(spec: &NodeSpec) -> Result<Value> {
     let engine = spec.engine.dir(&spec.dir);
     let mut config = json!({
-        "engine": engine.join("engine.sock"),
-        "ports": engine.join("ports.sock"),
-        "egress": spec.dir.join("egress.sock"),
+        "engine": socket_path(&engine, "engine.sock")?,
+        "ports": socket_path(&engine, "ports.sock")?,
+        "egress": socket_path(&spec.dir, "egress.sock")?,
         "secret_file": spec.dir.join("node.secret"),
         "platform": spec.platform,
     });
@@ -171,7 +186,7 @@ fn node_config(spec: &NodeSpec) -> Value {
         Reach::Listen(port) => config["listen"] = json!(format!("127.0.0.1:{port}")),
         Reach::Uplink => config["uplink"] = json!({ "url": format!("{}/api/nodes/uplink", spec.platform.replacen("http", "ws", 1)), "id": spec.id }),
     }
-    config
+    Ok(config)
 }
 
 /// One node: the engine double and the node in front of it.
@@ -206,7 +221,7 @@ impl SandcastleNode {
         let mut f = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(spec.dir.join("node.secret"))?;
         std::io::Write::write_all(&mut f, secret.as_bytes())?;
         let config = spec.dir.join("node.json");
-        fs::write(&config, serde_json::to_string_pretty(&node_config(spec))?)?;
+        fs::write(&config, serde_json::to_string_pretty(&node_config(spec)?)?)?;
         let log_of = |what: &str| spec.log_dir.join(format!("sandcastle-{}-{what}.log", spec.id));
         let engine_log = log_of("engine");
         let sock = engine_dir.join("engine.sock");
@@ -303,11 +318,11 @@ impl SandcastleNode {
             .arg(&self.config)
             .args(["--name", name])
             .arg("--engine")
-            .arg(engine.join("engine.sock"))
+            .arg(socket_path(&engine, "engine.sock")?)
             .arg("--ports")
-            .arg(engine.join("ports.sock"))
+            .arg(socket_path(&engine, "ports.sock")?)
             .arg("--egress")
-            .arg(dir.join("egress.sock"))
+            .arg(socket_path(dir, "egress.sock")?)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(err)
@@ -701,20 +716,34 @@ mod tests {
     /// sockets, their secret's file and the platform.
     #[test]
     fn a_node_is_configured_to_listen_or_dial() {
-        let listen = node_config(&spec(Reach::Listen(9401)));
+        let listen = node_config(&spec(Reach::Listen(9401))).unwrap();
         assert_eq!(listen["listen"], "127.0.0.1:9401");
         assert!(listen.get("uplink").is_none());
         assert_eq!(listen["engine"], "/tmp/n/e/engine.sock");
         assert_eq!(listen["secret_file"], "/tmp/n/node.secret");
-        let dial = node_config(&spec(Reach::Uplink));
+        let dial = node_config(&spec(Reach::Uplink)).unwrap();
         assert!(dial.get("listen").is_none());
         assert_eq!(dial["uplink"], json!({ "url": "ws://127.0.0.1:9000/api/nodes/uplink", "id": "uplink" }));
         assert_eq!(dial["platform"], "http://127.0.0.1:9000");
         // in front of a real engine, its own sockets
-        let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) });
+        let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) }).unwrap();
         assert_eq!(real["engine"], "/var/lib/sandcastle/engine.sock");
         assert_eq!(real["ports"], "/var/lib/sandcastle/ports.sock");
         assert_eq!(real["secret_file"], "/tmp/n/node.secret");
+    }
+
+    /// Goal: a socket's path that fits is given back; one past `sun_path`
+    /// (a deep checkout's scratch, as the e2e's impostor's was) is refused,
+    /// saying which and why, before a node is handed it.
+    #[test]
+    fn a_socket_path_fits_sun_path_or_is_refused() {
+        let fits = PathBuf::from(format!("/{}", "d".repeat(SOCKET_PATH_MAX - "/egress.sock".len() - 1)));
+        assert_eq!(socket_path(&fits, "egress.sock").unwrap().as_os_str().len(), SOCKET_PATH_MAX);
+        let long = PathBuf::from(format!("/{}", "d".repeat(SOCKET_PATH_MAX - "/egress.sock".len())));
+        let e = socket_path(&long, "egress.sock").unwrap_err().to_string();
+        assert!(e.contains("108 bytes") && e.contains("egress.sock"), "{e}");
+        let deep = NodeSpec { dir: long, ..spec(Reach::Uplink) };
+        assert!(node_config(&deep).is_err());
     }
 
     /// Goal: a chunked answer is joined; one cut short is refused.

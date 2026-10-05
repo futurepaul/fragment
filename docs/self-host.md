@@ -1227,6 +1227,16 @@ These are listed as found. Each names where it bites and what to do.
       object adopts or starts;
     - a start refused 409 replaces the container it could not see
       (lesson 6: never reused half-known).
+20. **The pairing section's impostor could not bind its socket in a
+    deep checkout.** It made its directory `n/impostor-<id>`, and a
+    person's node's id is 23 characters: under `fragment-selfhost/` its
+    `egress.sock` was 110 bytes, past `sun_path`'s 107, so the node
+    exited before it dialed ("path must be shorter than SUN_LEN"), and
+    the check read "no refusal within 20 s". Under `fragment-pair/`, 4
+    bytes shorter, it fit: the fold broke nothing, and it was no race.
+    Its directory is now `n/x-<label>`, and every socket path the harness
+    hands a node is checked first (`sandcastle::socket_path`), refused
+    with its length.
 
 ## The spike, on this box
 
