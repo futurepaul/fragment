@@ -149,6 +149,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let seq = records(api, &owner, &chat_name, "chat").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
     page.send(&json!({ "type": "subscribe", "channel": "chat", "after": seq }))?;
     page.until("subscribed", 20)?;
+    // the model fake keeps every section's calls: this check reads its own
+    let calls_at_start = s.ai.calls().len();
     let t1 = std::time::Instant::now();
     let r = say(1, "hello hermes")?;
     let first = turn_for(&r);
@@ -182,7 +184,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         indexed.as_deref().is_some_and(|t| t.contains("- fragment: You are an agent on a Fragment computer") && t.contains("- garden-notes: ") && !t.contains("- apps-finite: ")),
         json!(indexed.as_deref().and_then(|t| t.find("<available_skills>").map(|at| t[at..].chars().take(1200).collect::<String>()))),
     );
-    let calls = s.ai.calls();
+    let calls = s.ai.calls().split_off(calls_at_start);
     s.ok(
         "every model call went through the platform's route, on the agent's tier, as the agent",
         !calls.is_empty() && calls.iter().all(|c| c.model.contains("flash") && c.metadata["agent_id"].is_string()),
@@ -196,7 +198,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
-    s.ok("Hermes' terminal call is a step on work", steps.iter().any(|r| r["body"]["tool"] == "terminal"), json!(steps));
+    // Hermes shows the command as a fenced block under its header: the
+    // block is the step's arguments, never a step of its own
+    s.ok(
+        "Hermes' terminal call is one step on work, its command the step's arguments",
+        steps.len() == 1 && steps[0]["body"]["tool"] == "terminal" && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo tool-ran")),
+        json!(steps),
+    );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
 
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers

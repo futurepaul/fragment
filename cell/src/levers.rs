@@ -8,6 +8,7 @@
 //!   POST /api/test/ledger   {identity, op, …}: a lever on that person's ledger
 //!   POST /api/test/keys     {fragment, op, …}: seal or open as that fragment
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
+//!   POST /api/test/computer {computer, op}: a lever on that computer (kill, saves)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!
 //! An e2e person signs in by an `@e2e.test` email under the e2e issuer, so
@@ -17,13 +18,14 @@
 //! on real models spends only the budget it lends out.
 //!
 //! On a branch deployment (a preview, `Config::levers_scoped`) the levers
-//! reach the e2e's own things alone: fragments labelled `e2e-…`, and e2e
-//! people's ledgers; the registry's (the whole deployment's) are no
+//! reach the e2e's own things alone: fragments labelled `e2e-…`, e2e
+//! people's ledgers and computers; the registry's (the whole deployment's) are no
 //! route; and a day makes at most `levers::E2E_PEOPLE_DAILY_MAX` e2e
 //! people and lends them at most `levers::E2E_PAID_CALLS_DAILY_MAX` paid
 //! calls. A secret that leaked spends that much, and touches no one real.
 
 use fragment_core::{levers, npub};
+use fragment_proto::computer::valid_computer_id;
 use fragment_proto::ledger::{Plan, SetPlan};
 use fragment_proto::{limits, ErrorCode};
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,27 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             let body = String::from_utf8(body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
             let inner = routed::internal_request(&format!("test/{hook}"), &body)?;
             Ok(env.durable_object("FRAGMENT")?.get_by_name(&target.fragment)?.fetch_with_request(inner).await?)
+        }
+        (Method::Post, ["computer"]) => {
+            /// `{computer, op}`: a lever on that computer (computer.rs, `lever`).
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestComputer {
+                computer: String,
+                op: String,
+            }
+            let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !valid_computer_id(&t.computer) {
+                return Err(CellError::invalid("a computer's id is computer:<24 hex>"));
+            }
+            if cfg.levers_scoped {
+                let view = crate::computer::ask(env, &t.computer, "computer/view", &serde_json::json!({})).await?;
+                let owner = view["owner"].as_str().ok_or_else(|| CellError::host("the computer named no owner"))?;
+                if !is_e2e(env, owner).await? {
+                    return Err(CellError::new(ErrorCode::Forbidden, "on a preview, the computer levers reach e2e people's computers alone"));
+                }
+            }
+            json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &serde_json::json!({ "op": t.op })).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
         (Method::Post, ["registry"]) if cfg.levers_scoped => Err(no_route("/api/test/registry")),

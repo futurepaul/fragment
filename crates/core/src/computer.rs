@@ -16,15 +16,20 @@
 //!   port tab is open; with nothing open, until the latest hold runs out
 //!   (twenty minutes after a record or the last socket closed, a minute
 //!   after a pre-wake). An always-on computer never sleeps.
-//! - **Sleeping.** The DO's own sequence (save, snapshot, signal, wait,
-//!   destroy), reported back by `Asleep`.
+//! - **Sleeping.** The DO's own sequence (hold, save, snapshot, signal,
+//!   wait, destroy), reported back by `Asleep`.
 //! - **Failing.** A start that fails, or never reports ready, is tried
 //!   again with a growing pause; after `STARTS_FAILED_MAX` in a row the
 //!   computer "won't wake" until its owner asks (lesson 4): no more
 //!   container starts are paid for.
 //! - **Metering.** Awake time, in intervals that never overlap, every
 //!   `METER_EVERY_MS` while awake and at sleep.
+//!
+//! And, beside it, what the DO knows of its saves (`Saves`): which save of
+//! `/data` is current, the snapshot that caches it, what each start that
+//! came up restored, and whether that went back in time (a rollback).
 
+use fragment_proto::computer::{ComputerRestore, LifeEnd, RestoreSource};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -49,8 +54,8 @@ pub const STARTS_FAILED_MAX: u32 = 3;
 /// first pull at a location takes 24–40 s (spike S3b), a Hermes boot on a
 /// fresh disk up to 82 s.
 pub const START_DEADLINE_MS: i64 = 3 * 60_000;
-/// The DO's sleep sequence (save, snapshot, signal, five seconds of exit,
-/// destroy) finishes within this, or it is asked again.
+/// The DO's sleep sequence (hold, save, snapshot, signal, five seconds of
+/// exit, destroy) finishes within this, or it is asked again.
 pub const SLEEP_DEADLINE_MS: i64 = 60_000;
 /// Awake time is metered at least this often.
 pub const METER_EVERY_MS: i64 = 5 * 60_000;
@@ -118,6 +123,12 @@ pub enum Event {
     /// data restored.
     Ready { generation: u64 },
     StartFailed { generation: u64, why: String },
+    /// The start `generation` was from a snapshot, and failed (or its
+    /// container stopped before it came up). The DO has forgotten the
+    /// snapshot, so the next start is from the image and the save: it is
+    /// started again at once, and the first in a wake is no strike against
+    /// the computer (the snapshot was at fault, not the computer).
+    SnapshotFailed { generation: u64, why: String },
     Opened { socket: Socket },
     Closed { socket: Socket },
     /// The sleep `generation` finished: the container is gone.
@@ -152,6 +163,16 @@ pub struct Step {
     pub alarm_ms: Option<i64>,
     /// Why a wake started nothing (it won't wake).
     pub refused: Option<String>,
+    /// A life (a start that came up) ended with this event: the DO tells
+    /// its `Saves` before it performs the actions (the next start reads it).
+    pub ended: Option<Ended>,
+}
+
+/// How one life ended: the start it was, and by what.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ended {
+    pub generation: u64,
+    pub by: LifeEnd,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +192,15 @@ pub struct Lifecycle {
     always_on: bool,
     /// Awake time is metered up to here (while awake).
     metered_to_ms: i64,
+    /// The running start came up (it was ready): its end is a life's end.
+    /// A lifecycle stored before this field reads `false`, so a computer
+    /// awake across that deploy reports no end for that one life.
+    #[serde(default)]
+    ready: bool,
+    /// This wake already fell back from a snapshot that would not start:
+    /// a second fallback before a start comes up is a failure like any.
+    #[serde(default)]
+    fell_back: bool,
 }
 
 impl Default for Lifecycle {
@@ -192,11 +222,22 @@ impl Lifecycle {
             retry_at_ms: None,
             always_on: false,
             metered_to_ms: 0,
+            ready: false,
+            fell_back: false,
         }
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The running start, when one is running (starting, awake, or going
+    /// to sleep): the start a container that runs now belongs to.
+    pub fn running(&self) -> Option<u64> {
+        match self.phase {
+            Phase::Starting { generation, .. } | Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => Some(generation),
+            Phase::Asleep | Phase::Failed { .. } => None,
+        }
     }
 
     /// Whether something open keeps it awake.
@@ -220,8 +261,18 @@ impl Lifecycle {
     fn start(&mut self, now_ms: i64, step: &mut Step) {
         self.generation += 1;
         self.retry_at_ms = None;
+        self.ready = false;
         self.phase = Phase::Starting { generation: self.generation, since_ms: now_ms };
         step.actions.push(Action::Start { generation: self.generation });
+    }
+
+    /// The running start's container is gone: if it came up, that was a
+    /// life, and it ended `by` this.
+    fn end_life(&mut self, by: LifeEnd, step: &mut Step) {
+        if std::mem::take(&mut self.ready) {
+            assert!(step.ended.is_none(), "one event ends one life");
+            step.ended = Some(Ended { generation: self.generation, by });
+        }
     }
 
     fn sleep(&mut self, generation: u64, now_ms: i64, step: &mut Step) {
@@ -302,21 +353,45 @@ impl Lifecycle {
             }
             (Phase::Starting { generation, .. }, Event::Ready { generation: g }) if g == generation => {
                 self.failures = 0;
+                self.fell_back = false;
+                self.ready = true;
                 self.metered_to_ms = now_ms;
                 self.phase = Phase::Awake { generation, since_ms: now_ms };
             }
             (Phase::Starting { generation, .. }, Event::StartFailed { generation: g, why }) if g == generation => self.failed(why, now_ms),
+            (Phase::Starting { generation, .. }, Event::SnapshotFailed { generation: g, why }) if g == generation => {
+                if std::mem::replace(&mut self.fell_back, true) {
+                    // its snapshot went at the first: this one is the image's
+                    self.failed(why, now_ms);
+                } else {
+                    // never awake: nothing since it last was is metered, and
+                    // it starts again (from the image and the save) while wanted
+                    self.metered_to_ms = now_ms;
+                    self.gone(now_ms, &mut step);
+                }
+            }
             // a completion of an earlier start, or a report of one that is
             // not running: nothing it says is true of this one
-            (_, Event::Ready { .. } | Event::StartFailed { .. } | Event::Asleep { .. } | Event::Exited { .. })
+            (_, Event::Ready { .. } | Event::StartFailed { .. } | Event::SnapshotFailed { .. } | Event::Asleep { .. } | Event::Exited { .. })
                 if !matches!(&self.phase, Phase::Sleeping { .. } | Phase::Awake { .. } | Phase::Starting { .. }) => {}
-            (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => self.gone(now_ms, &mut step),
+            (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => {
+                self.end_life(LifeEnd::Sleep, &mut step);
+                self.gone(now_ms, &mut step);
+            }
             (Phase::Awake { generation, .. } | Phase::Starting { generation, .. }, Event::Exited { generation: g }) if g == generation => {
                 // one that died before it was ready was never awake: nothing
                 // since it last was is metered (its sleep, its start)
                 if matches!(self.phase, Phase::Starting { .. }) {
                     self.metered_to_ms = now_ms;
                 }
+                // a guest that died busy had turns open: its next life ends
+                // them, so it is held as a record holds it, and starts again
+                // however long the turn ran (F11 of
+                // docs/explorations/pi-durable.md)
+                if self.keepalives > 0 {
+                    self.hold(now_ms + IDLE_MS);
+                }
+                self.end_life(LifeEnd::Exit, &mut step);
                 // a container that died under us counts against its starts
                 self.failures += 1;
                 if self.failures >= STARTS_FAILED_MAX {
@@ -326,8 +401,13 @@ impl Lifecycle {
                     self.gone(now_ms, &mut step);
                 }
             }
-            (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation => self.gone(now_ms, &mut step),
-            (_, Event::Ready { .. } | Event::StartFailed { .. } | Event::Asleep { .. } | Event::Exited { .. }) => {}
+            (Phase::Sleeping { generation, .. }, Event::Exited { generation: g }) if g == generation => {
+                // its sleep ended it (signalled after the save, or dead
+                // during it: whether that sleep saved is `Saves`' to know)
+                self.end_life(LifeEnd::Sleep, &mut step);
+                self.gone(now_ms, &mut step);
+            }
+            (_, Event::Ready { .. } | Event::StartFailed { .. } | Event::SnapshotFailed { .. } | Event::Asleep { .. } | Event::Exited { .. }) => {}
             (_, Event::Opened { socket }) => {
                 match socket {
                     Socket::Keepalive => self.keepalives += 1,
@@ -407,12 +487,225 @@ impl Lifecycle {
             Phase::Failed { .. } => assert!(self.retry_at_ms.is_none(), "a computer that won't wake has no retry due"),
         }
         assert!(self.failures <= STARTS_FAILED_MAX, "failures stop counting at the limit");
+        if self.ready {
+            assert!(matches!(self.phase, Phase::Awake { .. } | Phase::Sleeping { .. }), "only a start that came up, and is not gone, is ready");
+        }
+    }
+}
+
+/// A save of `/data`: the backup one sleep took. Its `DirectoryBackup`
+/// record is the DO's (the authority on what a wake restores, handed back to
+/// restore and to delete it); this is what the platform knows of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Save {
+    /// The record's id (a UUID), which a snapshot names as its save.
+    pub id: String,
+    /// The start whose sleep took it.
+    pub generation: u64,
+    pub at_ms: i64,
+}
+
+/// A container snapshot: a cache of one save, for one image (P3 of
+/// docs/explorations/pi-durable.md). A wake uses it only while `save` is
+/// the current save and `image` the pinned image's reference, so it only
+/// ever makes a wake faster, never different.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    pub id: String,
+    /// The image's reference it was taken of (a name can stand for another
+    /// image after a redeploy).
+    pub image: String,
+    /// The id of the save it was taken with, in the same sleep.
+    pub save: String,
+}
+
+/// What a start restores, chosen as it begins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Plan {
+    /// The snapshot `id`, of the current save.
+    Snapshot { id: String },
+    /// The image, then the current save.
+    Backup,
+    /// The image, with an empty `/data`: there is no save.
+    Nothing,
+}
+
+impl Plan {
+    pub fn source(&self) -> RestoreSource {
+        match self {
+            Plan::Snapshot { .. } => RestoreSource::Snapshot,
+            Plan::Backup => RestoreSource::Backup,
+            Plan::Nothing => RestoreSource::Nothing,
+        }
+    }
+}
+
+/// The start under way, and what it restores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Starting {
+    pub generation: u64,
+    pub from: RestoreSource,
+}
+
+/// What the Computer DO knows of its saves, kept whole beside its
+/// `Lifecycle`. Each method is one fact the DO learned, applied as it
+/// happened; nothing here reaches the container.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Saves {
+    /// The current save (`None` until a sleep saves, or for a record kept
+    /// before the platform knew its time).
+    backup: Option<Save>,
+    /// The snapshot of the current save, when its sleep took one.
+    snapshot: Option<Snapshot>,
+    /// The start under way: an exit before it comes up is its own failure.
+    starting: Option<Starting>,
+    /// How the last life ended, until the next start that comes up reads it.
+    ended: Option<Ended>,
+    /// What the last start that came up restored.
+    restored: Option<ComputerRestore>,
+    /// The image the last start that came up runs: what a snapshot its
+    /// sleep takes is of (a pin while it runs changes the next start's).
+    running: Option<Running>,
+    /// Starts that went back in time.
+    rollbacks: u64,
+}
+
+/// A start that came up, and the image's reference it runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Running {
+    pub generation: u64,
+    pub image: String,
+}
+
+impl Saves {
+    /// What a start restores: the snapshot only when it caches the current
+    /// save (`backup`, the id of the record the DO holds) for the pinned
+    /// image (`image`, its reference: `None` with snapshots off); otherwise
+    /// the image and the save, or nothing when there is no save.
+    pub fn plan(&self, backup: Option<&str>, image: Option<&str>) -> Plan {
+        let Some(save) = backup else { return Plan::Nothing };
+        match (&self.snapshot, image) {
+            (Some(s), Some(image)) if s.save == save && s.image == image => Plan::Snapshot { id: s.id.clone() },
+            _ => Plan::Backup,
+        }
+    }
+
+    /// The start `generation` begins, restoring `from`. A start older than
+    /// the one recorded was superseded before it began: it records nothing.
+    pub fn starting(&mut self, generation: u64, from: RestoreSource) {
+        if self.starting.is_none_or(|s| s.generation <= generation) {
+            self.starting = Some(Starting { generation, from });
+        }
+    }
+
+    /// What the start `generation` under way restores, if it is the one.
+    pub fn start_from(&self, generation: u64) -> Option<RestoreSource> {
+        self.starting.filter(|s| s.generation == generation).map(|s| s.from)
+    }
+
+    /// A start from the snapshot failed: the snapshot is forgotten (it is
+    /// only a cache), so the next start is from the image and the save
+    /// (F7). Answers the snapshot forgotten.
+    pub fn snapshot_failed(&mut self) -> Option<Snapshot> {
+        self.snapshot.take()
+    }
+
+    /// A life ended (the lifecycle's `Step::ended`).
+    pub fn ended(&mut self, ended: Ended) {
+        assert!(self.ended.is_none_or(|e| e.generation < ended.generation), "a life ends once, after the lives before it");
+        self.ended = Some(ended);
+    }
+
+    /// The start `generation` came up on `image` (its reference), having
+    /// restored `from` (`backup`: the id of the record the DO holds): what
+    /// it restored, and whether that went back in time, which is counted.
+    /// `None` when another start began meanwhile (this one was superseded:
+    /// nothing is recorded).
+    pub fn came_up(&mut self, generation: u64, from: RestoreSource, backup: Option<&str>, image: Option<&str>, now_ms: i64) -> Option<ComputerRestore> {
+        if self.starting != Some(Starting { generation, from }) {
+            return None;
+        }
+        self.starting = None;
+        self.running = image.map(|image| Running { generation, image: image.to_string() });
+        assert_eq!(from == RestoreSource::Nothing, backup.is_none(), "a start restores the save there is");
+        let save = backup.and_then(|id| self.backup.as_ref().filter(|b| b.id == id));
+        let ended = self.ended.take();
+        // a life's work since its own start is in no save unless its sleep
+        // saved it: a crash loses it, and so does a sleep whose save failed
+        let rollback = match ended {
+            None => false,
+            Some(Ended { by: LifeEnd::Exit, .. }) => true,
+            Some(Ended { by: LifeEnd::Sleep, generation: life }) => save.is_none_or(|s| s.generation != life),
+        };
+        let restored = ComputerRestore {
+            generation,
+            from,
+            save: backup.map(str::to_string),
+            saved_at: save.map(|s| s.at_ms),
+            age_ms: save.map(|s| now_ms.saturating_sub(s.at_ms).max(0)),
+            after: ended.map(|e| e.by),
+            rollback,
+            at: now_ms,
+        };
+        self.rollbacks += u64::from(rollback);
+        self.restored = Some(restored.clone());
+        Some(restored)
+    }
+
+    /// A sleep of the start `generation` saved `/data` as the backup `id`
+    /// at `at_ms`: it is the current save, and a snapshot of any other save
+    /// caches nothing a wake would use.
+    pub fn saved(&mut self, generation: u64, id: &str, at_ms: i64) {
+        assert!(!id.is_empty(), "a save has an id");
+        if self.snapshot.as_ref().is_some_and(|s| s.save != id) {
+            self.snapshot = None;
+        }
+        self.backup = Some(Save { id: id.to_string(), generation, at_ms });
+        assert!(self.snapshot.as_ref().is_none_or(|s| s.save == id), "a snapshot kept is of the current save");
+    }
+
+    /// A sleep of `generation` could not save: whether that is news (no
+    /// save of this start is kept). A slow sleep is asked for again
+    /// (`SLEEP_DEADLINE_MS`), and the second ask's save fails once the
+    /// first's destroy took the container: the first one saved.
+    pub fn save_failed(&self, generation: u64) -> bool {
+        !self.backup.as_ref().is_some_and(|b| b.generation == generation)
+    }
+
+    /// A sleep took snapshot `id` of `image` after its save `save`: kept
+    /// when `save` is still the current save (a second ask's save may have
+    /// replaced it meanwhile). A sleep whose own save failed takes none,
+    /// and a snapshot that fails forgets nothing: the one kept is still a
+    /// cache of its own save (F11).
+    pub fn snapshotted(&mut self, save: &str, id: &str, image: &str) -> bool {
+        let current = self.backup.as_ref().is_some_and(|b| b.id == save);
+        if current {
+            self.snapshot = Some(Snapshot { id: id.to_string(), image: image.to_string(), save: save.to_string() });
+        }
+        current
+    }
+
+    /// The image's reference the start `generation` came up on, if it did.
+    pub fn image_of(&self, generation: u64) -> Option<&str> {
+        self.running.as_ref().filter(|r| r.generation == generation).map(|r| r.image.as_str())
+    }
+
+    pub fn restored(&self) -> Option<&ComputerRestore> {
+        self.restored.as_ref()
+    }
+
+    pub fn rollbacks(&self) -> u64 {
+        self.rollbacks
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     const T: i64 = 1_800_000_000_000;
 
@@ -648,12 +941,325 @@ mod tests {
         let mut back: Lifecycle = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(back, l);
         assert_eq!(back.apply(Event::Alarm, T + 2 * IDLE_MS), l.clone().apply(Event::Alarm, T + 2 * IDLE_MS));
+        // a lifecycle stored before it knew which start came up reads as
+        // one whose start did not: its end is no life's
+        let mut old: Value = serde_json::to_value(&l).unwrap();
+        old.as_object_mut().unwrap().retain(|k, _| k != "ready" && k != "fell_back");
+        let mut old: Lifecycle = serde_json::from_value(old).unwrap();
+        let s = old.apply(Event::Exited { generation: old.generation() }, T + 6_000);
+        assert_eq!(s.ended, None, "{s:?}");
+    }
+
+    /// Goal (F11 of docs/explorations/pi-durable.md): a guest that dies
+    /// while it holds its keepalive (a turn open, however long it has run)
+    /// is started again, so its next life ends that turn. Method: a turn
+    /// that runs past every hold, then a crash; on master `gone()` zeroed
+    /// the keepalive before asking `wanted()`, and it stayed asleep.
+    #[test]
+    fn a_crash_while_busy_starts_it_again() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        // a long turn: the record's hold ran out long ago
+        let late = T + 3 * IDLE_MS;
+        assert!(l.apply(Event::Alarm, late - 1).actions.iter().all(|a| matches!(a, Action::Meter { .. })), "busy, it stays awake");
+        let s = l.apply(Event::Exited { generation: g }, late);
+        assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "busy when it died, it starts again: {s:?}");
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Exit }));
+        // the next life comes up and, its turns ended, is idle: it sleeps
+        // once the crash's hold runs out, as after a record
+        l.apply(Event::Ready { generation: g + 1 }, late + 3_000);
+        let s = l.apply(Event::Alarm, late + IDLE_MS);
+        assert!(s.actions.contains(&Action::Sleep { generation: g + 1 }), "{s:?}");
+        // the keepalive's close reaching it first (the socket dies with its
+        // container) holds it the same: the order of the two never matters
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Opened { socket: Socket::Keepalive }, T + 4_000);
+        l.apply(Event::Closed { socket: Socket::Keepalive }, late);
+        let s = l.apply(Event::Exited { generation: g }, late);
+        assert!(s.actions.contains(&Action::Start { generation: g + 1 }), "{s:?}");
+        // idle when it died, and nothing holding it: it stays asleep
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        let s = l.apply(Event::Exited { generation: g }, late);
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "{s:?}");
+    }
+
+    /// Goal (P3, F7): a start from a snapshot that fails starts again at
+    /// once, from the image (the DO forgot the snapshot), with no strike
+    /// against the computer and nothing metered; a second in one wake is a
+    /// failure like any. Method: three snapshot failures in a row would be
+    /// "won't wake" if each were a strike.
+    #[test]
+    fn a_failed_snapshot_start_falls_back_in_the_same_wake() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 10_000);
+        l.apply(Event::Asleep { generation: g }, T + 12_000);
+        let s = l.apply(Event::Wake { why: Wake::Record }, T + 60_000);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 1 }]);
+        let s = l.apply(Event::SnapshotFailed { generation: g + 1, why: "no such snapshot".into() }, T + 61_000);
+        assert_eq!(s.actions, vec![Action::Start { generation: g + 2 }], "the same wake, from the image, metering nothing");
+        assert_eq!(l.failures, 0, "no strike");
+        // a replay of it, or one from the start it superseded, changes nothing
+        let before = l.clone();
+        assert!(l.apply(Event::SnapshotFailed { generation: g + 1, why: "late".into() }, T + 62_000).actions.is_empty());
+        assert_eq!(l, before);
+        // the image's start fails too: that is a strike, with its pause
+        let s = l.apply(Event::SnapshotFailed { generation: g + 2, why: "again".into() }, T + 63_000);
+        assert_eq!((l.phase.clone(), l.failures, s.alarm_ms), (Phase::Asleep, 1, Some(T + 63_000 + RETRY_PAUSE_MS)));
+        // and a start that comes up clears it, for the next wake's
+        let s = l.apply(Event::Alarm, T + 63_000 + RETRY_PAUSE_MS);
+        let Some(Action::Start { generation: g3 }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        l.apply(Event::Ready { generation: g3 }, T + 70_000);
+        assert!(!l.fell_back && l.failures == 0);
+        // with nothing wanting it any more, a fallback leaves it asleep
+        let mut l = Lifecycle::new();
+        let s = l.apply(Event::Wake { why: Wake::Presence }, T);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let s = l.apply(Event::SnapshotFailed { generation, why: "slow".into() }, T + PREWAKE_MS + 1);
+        assert!(s.actions.is_empty() && l.phase == Phase::Asleep, "{s:?}");
+    }
+
+    /// Goal: a life is a start that came up, and it ends once: by its sleep
+    /// (the exit it is signalled into included) or on its own. A start that
+    /// never came up ends no life. Method: each way out, read from the step.
+    #[test]
+    fn a_life_ends_once_and_says_how() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 10_000);
+        let s = l.apply(Event::Exited { generation: g }, T + 11_000);
+        assert_eq!(s.ended, Some(Ended { generation: g, by: LifeEnd::Sleep }), "signalled by its sleep");
+        assert!(l.apply(Event::Asleep { generation: g }, T + 12_000).ended.is_none(), "it ended once");
+        // one that never came up
+        let s = l.apply(Event::Wake { why: Wake::Owner }, T + 20_000);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        assert!(l.apply(Event::StartFailed { generation, why: "pull".into() }, T + 21_000).ended.is_none());
+        // slept as it started, it never came up either
+        let s = l.apply(Event::Wake { why: Wake::Owner }, T + 30_000);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        l.apply(Event::Sleep, T + 31_000);
+        assert!(l.apply(Event::Asleep { generation }, T + 32_000).ended.is_none());
+        // a crash that was its third strike still ends its life
+        let mut l = Lifecycle { failures: STARTS_FAILED_MAX - 1, ..Lifecycle::new() };
+        let s = l.apply(Event::Wake { why: Wake::Record }, T);
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        l.apply(Event::Ready { generation }, T + 1_000);
+        l.failures = STARTS_FAILED_MAX - 1;
+        let s = l.apply(Event::Exited { generation }, T + 2_000);
+        assert!(matches!(l.phase, Phase::Failed { .. }) && s.ended == Some(Ended { generation, by: LifeEnd::Exit }), "{s:?} {:?}", l.phase);
+    }
+
+    const IMAGE: &str = "registry/stub@sha256:1";
+
+    /// Goal (P3): a wake uses the snapshot only while it caches the current
+    /// save for the pinned image; any other is the image and the save, and
+    /// a computer never saved starts empty. Method: each way the two can
+    /// disagree: another image (a pin, a redeploy), snapshots off, a newer
+    /// save, a snapshot of a save that has gone.
+    #[test]
+    fn a_snapshot_is_used_only_for_its_save_and_image() {
+        let mut s = Saves::default();
+        assert_eq!(s.plan(None, Some(IMAGE)), Plan::Nothing);
+        s.saved(1, "b1", T);
+        assert!(s.snapshotted("b1", "s1", IMAGE));
+        assert_eq!(s.plan(Some("b1"), Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        assert_eq!(s.plan(Some("b1"), Some("registry/stub@sha256:2")), Plan::Backup, "another image's");
+        assert_eq!(s.plan(Some("b1"), None), Plan::Backup, "snapshots off");
+        assert_eq!(s.plan(Some("b0"), Some(IMAGE)), Plan::Backup, "the record held names another save");
+        // the next sleep saves and takes no snapshot: the old one is dropped
+        s.saved(2, "b2", T + 1);
+        assert_eq!(s.plan(Some("b2"), Some(IMAGE)), Plan::Backup);
+        assert_eq!(s.snapshot, None);
+        // a snapshot taken with a save that is no longer current is not kept
+        assert!(!s.snapshotted("b1", "s1-late", IMAGE));
+        assert_eq!(s.plan(Some("b2"), Some(IMAGE)), Plan::Backup);
+    }
+
+    /// Goal (P3, decision 19): a snapshot is of the image its start ran, so
+    /// an image pinned while it runs is taken at the next wake, from the
+    /// save, never answered with a snapshot of the old image. On master the
+    /// sleep named its snapshot's image by the pin at the time of the sleep.
+    /// Method: a start on one image, a pin, its sleep, the next plan.
+    #[test]
+    fn a_pin_while_it_runs_wakes_on_the_new_image() {
+        const NEXT: &str = "registry/stub@sha256:2";
+        let mut s = Saves::default();
+        s.starting(1, RestoreSource::Nothing);
+        assert!(s.came_up(1, RestoreSource::Nothing, None, Some(IMAGE), T).is_some());
+        // its owner pins NEXT while it runs; its sleep saves, then snapshots
+        s.saved(1, "b1", T + 10);
+        let of = s.image_of(1).expect("the image it runs").to_string();
+        assert_eq!(of, IMAGE);
+        assert!(s.snapshotted("b1", "s1", &of));
+        assert_eq!(s.plan(Some("b1"), Some(NEXT)), Plan::Backup, "the new image, and the save");
+        assert_eq!(s.plan(Some("b1"), Some(IMAGE)), Plan::Snapshot { id: "s1".into() }, "pinned back, the snapshot serves again");
+        assert_eq!(s.image_of(2), None, "a start that has not come up runs nothing yet");
+    }
+
+    /// Goal (F11 of docs/explorations/pi-durable.md): the second ask of a
+    /// slow sleep (`SLEEP_DEADLINE_MS`) never forgets the snapshot the first
+    /// stored, nor notes a failed save the first one made. On master a
+    /// snapshot that failed forgot the stored one (cell/src/computer.rs,
+    /// `sleep`). Method: both asks of one start, in each order their saves
+    /// can land.
+    #[test]
+    fn the_second_ask_of_a_slow_sleep_keeps_the_first_ones_snapshot() {
+        let mut s = Saves::default();
+        s.saved(3, "b-old", T);
+        // the first ask saves and snapshots
+        s.saved(4, "b1", T + 70_000);
+        assert!(s.snapshotted("b1", "s1", IMAGE));
+        // the second: its save fails once the first's destroy took the
+        // container, so it takes no snapshot, and that is not news
+        assert!(!s.save_failed(4), "the first ask saved this start");
+        assert!(s.save_failed(5), "a start whose sleep saved nothing is news");
+        assert_eq!(s.plan(Some("b1"), Some(IMAGE)), Plan::Snapshot { id: "s1".into() });
+        // the other order: the second's save lands while the first snapshots
+        let mut s = Saves::default();
+        s.saved(4, "b1", T);
+        s.saved(4, "b2", T + 1_000);
+        assert!(!s.snapshotted("b1", "s1", IMAGE), "the first's snapshot caches a save that is no longer current");
+        assert_eq!(s.plan(Some("b2"), Some(IMAGE)), Plan::Backup);
+        assert!(s.snapshotted("b2", "s2", IMAGE));
+        assert_eq!(s.plan(Some("b2"), Some(IMAGE)), Plan::Snapshot { id: "s2".into() });
+    }
+
+    /// The lifecycle and its saves, as the Computer DO drives them: each
+    /// step's end told to the saves, each start planned and recorded.
+    struct Computer {
+        life: Lifecycle,
+        saves: Saves,
+        /// The record the DO holds (its id).
+        backup: Option<String>,
+        now: i64,
+    }
+
+    impl Computer {
+        fn new() -> Computer {
+            Computer { life: Lifecycle::new(), saves: Saves::default(), backup: None, now: T }
+        }
+
+        fn apply(&mut self, e: Event) -> Step {
+            self.now += 1_000;
+            let s = self.life.apply(e, self.now);
+            if let Some(ended) = s.ended {
+                self.saves.ended(ended);
+            }
+            s
+        }
+
+        /// A wake that comes up: what it restored.
+        fn wake(&mut self) -> ComputerRestore {
+            let s = self.apply(Event::Wake { why: Wake::Owner });
+            let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
+            self.come_up(generation)
+        }
+
+        fn come_up(&mut self, generation: u64) -> ComputerRestore {
+            let plan = self.saves.plan(self.backup.as_deref(), Some(IMAGE));
+            self.saves.starting(generation, plan.source());
+            let r = self.saves.came_up(generation, plan.source(), self.backup.as_deref(), Some(IMAGE), self.now).expect("the start under way");
+            self.apply(Event::Ready { generation });
+            r
+        }
+
+        /// The owner's sleep, saving `/data` as `save` (or failing to).
+        fn sleep(&mut self, save: Option<&str>) {
+            let g = self.life.generation();
+            self.apply(Event::Sleep);
+            match save {
+                Some(id) => {
+                    self.saves.saved(g, id, self.now);
+                    self.backup = Some(id.to_string());
+                }
+                None => assert!(self.saves.save_failed(g)),
+            }
+            self.apply(Event::Asleep { generation: g });
+        }
+    }
+
+    /// Goal (P7): each start that comes up says what it restored, how old
+    /// that was, and how the life before it ended; a start that went back
+    /// in time (after a crash, or a sleep whose save failed) is counted, and
+    /// one after a sleep that saved is not. Method: one computer's history,
+    /// read after each start.
+    #[test]
+    fn a_wake_says_what_it_restored() {
+        let mut c = Computer::new();
+        let r = c.wake();
+        assert_eq!((r.from, r.save.clone(), r.after, r.rollback), (RestoreSource::Nothing, None, None, false), "its first start");
+        c.sleep(Some("b1"));
+        let saved_at = c.saves.backup.as_ref().map(|b| b.at_ms).expect("a save");
+        let r = c.wake();
+        assert_eq!((r.from, r.save.as_deref(), r.after, r.rollback), (RestoreSource::Backup, Some("b1"), Some(LifeEnd::Sleep), false), "{r:?}");
+        assert_eq!((r.saved_at, r.age_ms), (Some(saved_at), Some(r.at - saved_at)));
+        assert!(r.age_ms.is_some_and(|a| a > 0));
+        // a crash: it comes back from the save before it, a rollback
+        let g = c.life.generation();
+        let s = c.apply(Event::Exited { generation: g });
+        let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { panic!("{s:?}") };
+        let r = c.come_up(generation);
+        assert_eq!((r.from, r.after, r.rollback, c.saves.rollbacks()), (RestoreSource::Backup, Some(LifeEnd::Exit), true, 1), "{r:?}");
+        // a sleep whose save failed: the next wake is a rollback too (F6)
+        c.sleep(None);
+        let r = c.wake();
+        assert_eq!((r.save.as_deref(), r.after, r.rollback, c.saves.rollbacks()), (Some("b1"), Some(LifeEnd::Sleep), true, 2), "{r:?}");
+        // a crash, then a start that fails, then one that comes up: counted once
+        let g = c.life.generation();
+        c.apply(Event::Exited { generation: g });
+        c.apply(Event::StartFailed { generation: g + 1, why: "pull".into() });
+        let s = c.apply(Event::Wake { why: Wake::Owner });
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let r = c.come_up(generation);
+        assert_eq!((r.rollback, c.saves.rollbacks()), (true, 3));
+        // a sleep that saves: none
+        c.sleep(Some("b2"));
+        let r = c.wake();
+        assert_eq!((r.save.as_deref(), r.rollback, c.saves.rollbacks()), (Some("b2"), false, 3));
+        assert_eq!(c.saves.restored(), Some(&r));
+        // a start superseded before it came up records nothing
+        assert_eq!(c.saves.came_up(r.generation, r.from, Some("b2"), Some(IMAGE), c.now), None, "it came up once");
+        // what it knows survives a restart of its Durable Object
+        let back: Saves = serde_json::from_str(&serde_json::to_string(&c.saves).unwrap()).unwrap();
+        assert_eq!(back, c.saves);
+    }
+
+    /// Goal (P3, F7): a start from a snapshot that fails forgets it, and
+    /// the start the lifecycle makes at once restores the image and the
+    /// save: one wake, no strike, the rollback rule unchanged. Method: the
+    /// DO's two paths, its own failure and its container's exit before it
+    /// came up, each reported once.
+    #[test]
+    fn a_broken_snapshot_wakes_from_the_save() {
+        let mut c = Computer::new();
+        c.wake();
+        c.sleep(Some("b1"));
+        assert!(c.saves.snapshotted("b1", "s1", IMAGE));
+        let s = c.apply(Event::Wake { why: Wake::Record });
+        let Some(Action::Start { generation }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        let plan = c.saves.plan(c.backup.as_deref(), Some(IMAGE));
+        assert_eq!(plan, Plan::Snapshot { id: "s1".into() });
+        c.saves.starting(generation, plan.source());
+        assert_eq!(c.saves.start_from(generation), Some(RestoreSource::Snapshot), "its exit now is the start's own failure");
+        assert_eq!(c.saves.snapshot_failed().map(|s| s.id), Some("s1".into()));
+        let s = c.apply(Event::SnapshotFailed { generation, why: "expired".into() });
+        let Some(Action::Start { generation: next }) = s.actions.first().cloned() else { panic!("{s:?}") };
+        assert_eq!(c.saves.plan(c.backup.as_deref(), Some(IMAGE)), Plan::Backup);
+        let r = c.come_up(next);
+        assert_eq!((r.from, r.save.as_deref(), r.rollback, c.life.failures), (RestoreSource::Backup, Some("b1"), false, 0), "{r:?}");
+        assert_eq!(c.saves.came_up(generation, RestoreSource::Snapshot, Some("b1"), Some(IMAGE), c.now), None, "the broken start never comes up after");
     }
 
     /// Goal: under any interleaving of events (duplicates, late reports,
-    /// reordering), the generation only grows, at most one container is
-    /// ever running, metered intervals never overlap or run backwards, and
-    /// a computer is never left asleep while it is wanted and not failed.
+    /// reordering, crashes, snapshots that will not start), the generation
+    /// only grows, at most one container is ever running, metered intervals
+    /// never overlap or run backwards, a computer is never left asleep while
+    /// it is wanted and not failed, one that dies busy starts again unless
+    /// it gave up, and each life (a start that came up) ends once. Its saves
+    /// ride along as the DO keeps them, so their own assertions run too.
     #[test]
     fn simulated_interleavings_keep_the_invariants() {
         // a small xorshift: the sequence is a pure function of the seed
@@ -666,13 +1272,17 @@ mod tests {
         for seed0 in 1..=8u64 {
             let mut seed = seed0.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let mut l = Lifecycle::new();
+            let mut saves = Saves::default();
+            let mut backup: Option<String> = None;
             let mut now = T;
             let mut metered: Vec<(i64, i64)> = vec![];
             let mut generation = 0;
-            for _ in 0..4_000 {
+            let mut came_up = std::collections::BTreeSet::new();
+            let mut ended = std::collections::BTreeSet::new();
+            for step in 0..4_000u32 {
                 now += (rng(&mut seed) % 120_000) as i64;
                 let g = l.generation().saturating_sub(rng(&mut seed) % 2);
-                let event = match rng(&mut seed) % 11 {
+                let event = match rng(&mut seed) % 12 {
                     0 => Event::Wake { why: [Wake::Record, Wake::Presence, Wake::Tab, Wake::Owner, Wake::Joined][(rng(&mut seed) % 5) as usize] },
                     1 => Event::Ready { generation: g },
                     2 => Event::StartFailed { generation: g, why: "sim".into() },
@@ -682,9 +1292,28 @@ mod tests {
                     6 => Event::Exited { generation: g },
                     7 => Event::AlwaysOn { on: rng(&mut seed).is_multiple_of(4) },
                     8 if rng(&mut seed).is_multiple_of(3) => Event::Sleep,
+                    9 => Event::SnapshotFailed { generation: g, why: "sim".into() },
                     _ => Event::Alarm,
                 };
+                // a crash of the running start while its guest holds a keepalive
+                let busy_crash = matches!(&event, Event::Exited { generation: e } if matches!(l.phase, Phase::Awake { generation, .. } | Phase::Starting { generation, .. } if generation == *e)) && l.keepalives > 0;
+                let coming_up = matches!(&event, Event::Ready { generation: e } if matches!(l.phase, Phase::Starting { generation, .. } if generation == *e));
                 let s = l.apply(event, now);
+                if let Some(e) = s.ended {
+                    assert!(came_up.contains(&e.generation), "only a start that came up ends a life (seed {seed0})");
+                    assert!(ended.insert(e.generation), "a life ends once (seed {seed0})");
+                    saves.ended(e);
+                }
+                if coming_up {
+                    assert!(matches!(l.phase, Phase::Awake { .. }));
+                    came_up.insert(l.generation());
+                    let from = saves.plan(backup.as_deref(), Some(IMAGE)).source();
+                    saves.starting(l.generation(), from);
+                    assert!(saves.came_up(l.generation(), from, backup.as_deref(), Some(IMAGE), now).is_some(), "the start that came up records what it restored");
+                }
+                if busy_crash && !matches!(l.phase, Phase::Failed { .. }) {
+                    assert!(s.actions.iter().any(|a| matches!(a, Action::Start { .. })), "busy when it died, it starts again (seed {seed0}): {l:?}");
+                }
                 for a in &s.actions {
                     match a {
                         Action::Start { generation: g } => {
@@ -696,9 +1325,18 @@ mod tests {
                             assert!(metered.last().is_none_or(|(_, last)| from_ms >= last), "intervals never overlap");
                             metered.push((*from_ms, *to_ms));
                         }
-                        Action::Sleep { generation: g } => assert_eq!(*g, l.generation(), "only the current start sleeps"),
+                        Action::Sleep { generation: g } => {
+                            assert_eq!(*g, l.generation(), "only the current start sleeps");
+                            // most sleeps save; some fail, and some are asked twice
+                            if !rng(&mut seed).is_multiple_of(4) {
+                                let id = format!("b{seed0}-{step}");
+                                saves.saved(*g, &id, now);
+                                backup = Some(id);
+                            }
+                        }
                     }
                 }
+                assert!(saves.rollbacks() <= ended.len() as u64, "each rollback is one life's loss");
                 if matches!(l.phase, Phase::Asleep) && l.wanted(now) && l.retry_at_ms.is_none() {
                     panic!("asleep while wanted, with no retry due (seed {seed0}): {l:?}");
                 }
@@ -707,6 +1345,7 @@ mod tests {
                     assert!(s.alarm_ms.is_some(), "a running computer has its alarm: {l:?}");
                 }
             }
+            assert!(!came_up.is_empty() && !ended.is_empty() && saves.rollbacks() > 0, "the simulation reached lives, their ends, and rollbacks (seed {seed0})");
         }
     }
 }

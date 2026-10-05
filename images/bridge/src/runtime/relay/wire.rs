@@ -358,6 +358,23 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
     json!({ "type": "inbound", "bufferId": buffer_id, "event": event })
 }
 
+/// What a Stop answers a question asked in words with, so the clarify
+/// waiting on it lets go and the interrupted turn ends.
+pub const STOP_WORDS: &str = "Stop.";
+
+/// Hermes asking its person something to answer in words, as Relay carries
+/// it: an open `clarify` (the base adapter's `❓ <question>`, its choices
+/// numbered when it has some) or, after "Other" on a clarify's card,
+/// `✏️ Type your answer:`. The words to show for it; `None` for any other
+/// message. Hermes takes the person's next message as the answer (its
+/// gateway's clarify intercept), even while the turn runs.
+pub fn question(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    let asked = t.strip_prefix('❓').or_else(|| t.strip_prefix("✏️").filter(|rest| rest.trim_start().starts_with("Type your answer")))?;
+    let asked = asked.trim();
+    (!asked.is_empty()).then(|| asked.to_string())
+}
+
 /// A message's text without the edit stream's cursor, and whether it still
 /// streams.
 pub fn uncursored(content: &str) -> (&str, bool) {
@@ -367,11 +384,49 @@ pub fn uncursored(content: &str) -> (&str, bool) {
     }
 }
 
-/// Hermes' tool progress is one message whose lines grow: the lines past
-/// the first `seen`.
-pub fn new_lines(content: &str, seen: usize) -> Vec<String> {
+/// Hermes' tool progress is one message whose lines grow, a step each
+/// (`step_of`): its steps past the first `seen`, as (tool, arguments).
+/// A terminal command comes as a fenced block (Hermes v0.21.5's
+/// `_progress_terminal_blocks`, on a platform with code blocks, as Relay
+/// is): `💻 terminal`, then the command between fences, which is that
+/// step's arguments, never a step of its own. Back to back, a command's
+/// header is dropped, and its block is a step of the tool before it. A
+/// header whose block has not closed yet (an edit cut inside it) is no
+/// step until it has.
+pub fn new_steps(content: &str, seen: usize) -> Vec<(String, String)> {
     let (text, _) = uncursored(content);
-    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("```")).skip(seen).map(str::to_string).collect()
+    let mut steps: Vec<(String, String)> = Vec::new();
+    // whether the last step is a header waiting for its block
+    let mut header = false;
+    let mut block: Option<Vec<&str>> = None;
+    // bounded by the message's lines
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("```") {
+            let Some(cmd) = block.take() else {
+                block = Some(Vec::new());
+                continue;
+            };
+            let cmd = cmd.join("\n");
+            match steps.last_mut() {
+                Some(last) if header => last.1 = cmd,
+                last => {
+                    let tool = last.map_or_else(|| "terminal".to_string(), |s| s.0.clone());
+                    steps.push((tool, cmd));
+                }
+            }
+            header = false;
+        } else if let Some(cmd) = block.as_mut() {
+            cmd.push(line);
+        } else if !line.is_empty() {
+            let (tool, args) = step_of(line);
+            header = args.is_empty();
+            steps.push((tool, args));
+        }
+    }
+    if block.is_some() && header {
+        steps.pop();
+    }
+    steps.into_iter().skip(seen).collect()
 }
 
 /// A progress line as a step: its tool (the first word after the emoji)
@@ -390,6 +445,20 @@ pub fn step_of(line: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A question in words is an open clarify (`❓`, as Hermes' base
+    /// adapter sends it, with or without numbered choices) or the prompt to
+    /// type after "Other"; anything else, an empty question or a `✏️` that
+    /// asks nothing included, is not one.
+    #[test]
+    fn a_question_in_words() {
+        assert_eq!(question("❓ What do you plant in your garden?").as_deref(), Some("What do you plant in your garden?"));
+        assert_eq!(question("  ❓ Which?\n\n  1. a\n  2. b\n\nReply with the number").as_deref(), Some("Which?\n\n  1. a\n  2. b\n\nReply with the number"));
+        assert_eq!(question("✏️ Type your answer:").as_deref(), Some("Type your answer:"));
+        for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️ edited notes.md", "💻 terminal ❓"] {
+            assert_eq!(question(not), None, "{not}");
+        }
+    }
 
     /// The gateway's own test vector (docs/hermes-relay.md): its token is
     /// ours, and ours is checked as the gateway mints it.
@@ -483,10 +552,22 @@ mod tests {
     fn progress_grows_into_steps() {
         assert_eq!(uncursored("Hello wo ▉"), ("Hello wo", true));
         assert_eq!(uncursored("Hello world"), ("Hello world", false));
-        let progress = "💻 terminal: `ls`\n```\nls\n```\n🔍 web_search: \"rust\" ▉";
-        assert_eq!(new_lines(progress, 0), vec!["💻 terminal: `ls`", "ls", "🔍 web_search: \"rust\""]);
-        assert_eq!(new_lines(progress, 2), vec!["🔍 web_search: \"rust\""]);
-        assert!(new_lines(progress, 3).is_empty());
+        let step = |t: &str, a: &str| (t.to_string(), a.to_string());
+        // a terminal command's block is its header's arguments, never a step
+        let progress = "💻 terminal\n```\nuname -a && nproc\n```\n🔍 web_search: \"rust\" ▉";
+        assert_eq!(new_steps(progress, 0), vec![step("terminal", "uname -a && nproc"), step("web_search", "\"rust\"")]);
+        assert_eq!(new_steps(progress, 1), vec![step("web_search", "\"rust\"")]);
+        assert!(new_steps(progress, 2).is_empty());
+        // back to back, the header is dropped: the block is the tool before it's
+        let twice = "💻 terminal\n```\nls\n```\n```\ncat notes.md\n```";
+        assert_eq!(new_steps(twice, 0), vec![step("terminal", "ls"), step("terminal", "cat notes.md")]);
+        // a header whose block has not closed is no step until it has
+        assert!(new_steps("💻 terminal\n```\nls", 0).is_empty());
+        assert_eq!(new_steps("💻 terminal\n```\nls\n```", 0), vec![step("terminal", "ls")]);
+        // the inline form, a friendly verb, a header with no block, a repeat's count
+        assert_eq!(new_steps("💻 terminal: `ls`\n✍️ Writing /data/hermes/notes.md\n⚙️ thinking...", 0), vec![step("terminal", "`ls`"), step("Writing", "/data/hermes/notes.md"), step("thinking...", "")]);
+        assert_eq!(new_steps("💻 terminal\n```\nls\n``` (×2)", 0), vec![step("terminal", "ls")]);
+        assert!(new_steps("", 0).is_empty());
         assert_eq!(step_of("💻 terminal: `ls -la`"), ("terminal".into(), "`ls -la`".into()));
         assert_eq!(step_of("🔍 web_search(\"q\")"), ("web_search".into(), "(\"q\")".into()));
         assert_eq!(step_of("⚙️ thinking..."), ("thinking...".into(), String::new()));
