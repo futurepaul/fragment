@@ -13,6 +13,11 @@ ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
+# A target cache is every build's on this Docker, another checkout's
+# included, and cargo takes a path crate as built when its sources are older
+# than its last build: the sources copied in are touched first, so a build
+# of other sources since never stands for these (the step runs only when
+# they changed).
 FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY images/Cargo.toml images/Cargo.lock ./
@@ -20,12 +25,14 @@ COPY images/bridge bridge
 COPY images/hermes/boot hermes/boot
 RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=images-target,target=/src/target \
-    cargo build --release --locked -p fragment-bridge -p hermes-boot \
+    find bridge hermes/boot -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-bridge -p hermes-boot \
  && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
 
 # The fragment CLI (cli/), static, for the agents' terminals: it acts as the
 # agent its profile names, through the computer's API egress, with no key
-# (cli/GUIDE.md, "As an agent"; docs/computers.md).
+# (cli/GUIDE.md, "As an agent"; docs/computers.md). Its sources are touched
+# as the build stage's are.
 FROM rust:1.99-alpine AS cli
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -35,7 +42,8 @@ COPY templates templates
 COPY xtask xtask
 RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
-    cargo build --release --locked -p fragment-cli \
+    find cli crates templates -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
 # noVNC, the screen page's RFB client (pinned by hash).
@@ -80,8 +88,10 @@ RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchec
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
 
 # What the boot reads instead of finding it each time: the lean plugin list,
-# Hermes' revision, the browser's path; and the files the gateway loads,
-# read ahead on the second CPU while /data is restored (S3b, cut h).
+# Hermes' revision, the browser's path; the platform skill every profile
+# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
+# and the files the gateway loads, read ahead on the second CPU while /data
+# is restored (S3b, cut h).
 RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /tmp/rh \
  && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
