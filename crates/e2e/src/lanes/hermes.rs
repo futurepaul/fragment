@@ -7,7 +7,10 @@
 //! with nothing but the image changed.
 //!
 //! It builds the Hermes image (3.8 GB), so it runs only by name
-//! (`cargo xtask e2e --only hermes`).
+//! (`cargo xtask e2e --only hermes`). With sandcastle nodes
+//! (`FRAGMENT_E2E_NODES`: docs/self-host.md, S3) the same flows run there:
+//! the images built into local Docker for the engine double (`two`), or
+//! loaded into the machine's engine (`real`), every computer a microVM.
 
 use std::path::Path;
 use std::time::Duration;
@@ -68,7 +71,9 @@ fn said_count(text: &str) -> Option<u32> {
 
 /// The Hermes images beside the stubs in the node's staged cell config:
 /// `hermes`, and `hermes-next`, the same image another build (for the
-/// upgrade and the rollback).
+/// upgrade and the rollback). wrangler builds them for its containers; a
+/// run with sandcastle nodes builds them from the same config for the
+/// nodes (`start_nodes`).
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
@@ -250,8 +255,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let aig = super::ledger::entries(api, &owner_id, "aig:");
     s.ok("and each is settled on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::end_of(e) == "settled"), json!(aig));
 
-    // a tool step, then the answer that names it
-    let r = say(2, "run: echo tool-ran")?;
+    // a tool step, then the answer that names it. Hermes' gateway looks for
+    // tool progress every 0.3 s while its turn runs, so a turn over sooner
+    // shows no step (on a node, against the scripted model, a turn can take
+    // 0.1 s): the command takes a second, as a real one does
+    let r = say(2, "run: sleep 1 && echo tool-ran")?;
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();

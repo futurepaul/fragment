@@ -595,24 +595,31 @@ fn unchunk(mut b: &[u8]) -> Result<Vec<u8>> {
 /// The run's images, built into local Docker (`build_cell_images`), loaded
 /// into a real engine as `docker.io/library/<tag>`: each saved from Docker
 /// to a file under `scratch`, then handed to the engine, which builds its
-/// disk.
+/// disk (once per image: a reference to one it holds is named at once).
+/// Each load is printed with its size and what it took.
 pub fn load_images(engine_dir: &Path, tags: &[String], scratch: &Path) -> Result<()> {
     let sock = engine_dir.join("engine.sock");
     fs::create_dir_all(scratch)?;
     // bounded: the run's images
     for tag in tags {
+        let t0 = Instant::now();
         let tar = scratch.join(format!("{}.tar", tag.replace([':', '/'], "-")));
         let out = Command::new("docker").args(["save", "-o"]).arg(&tar).arg(tag).stdin(Stdio::null()).output().context("run docker save")?;
         if !out.status.success() {
             bail!("docker save {tag}: {}", String::from_utf8_lossy(&out.stderr));
         }
+        let saved = t0.elapsed();
+        let bytes = fs::metadata(&tar)?.len();
         let reference = format!("docker.io/library/{tag}");
         let path = format!("/v1/images/load?reference={}", reference.replace('/', "%2F").replace(':', "%3A"));
-        let (status, body) = engine_call(&sock, "POST", &path, Some(EngineBody::File(tar.clone())))?;
+        let answer = engine_call(&sock, "POST", &path, Some(EngineBody::File(tar.clone())));
         let _ = fs::remove_file(&tar);
+        let (status, body) = answer?;
         if status != 200 {
             bail!("the real engine's load of {reference}: {status} {}", String::from_utf8_lossy(&body));
         }
+        let built = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["buildMs"].as_u64()).unwrap_or(0);
+        println!("      (the engine holds {reference}: {} MB saved in {saved:.1?}, loaded in {:.1?}; its disk built in {built} ms, once per image)", bytes >> 20, t0.elapsed() - saved);
     }
     Ok(())
 }
@@ -643,15 +650,15 @@ fn destroy_since(sock: &Path, since_ms: u64) -> Result<()> {
     Ok(())
 }
 
-/// The cell's computer images (`cell/wrangler.jsonc`'s `containers`
-/// images, which wrangler builds for the runtime's own containers), built
-/// for this machine's architecture into local Docker for its nodes to run,
-/// each tagged `fragment-<name>:e2e-<run>`: (name, tag). Every layer a
-/// build before made is a cache hit.
-pub fn build_cell_images(run: &str) -> Result<Vec<(String, String)>> {
-    let cell = crate::cell_dir();
-    let mut config = crate::read_config(&cell)?;
-    crate::absolute_images(&mut config, &cell)?;
+/// The computer images of the cell project at `project` (its
+/// `wrangler.jsonc`'s `containers` images, which wrangler builds for the
+/// runtime's own containers: the e2e's staged copy, with the Hermes images
+/// when its lane runs), built for this machine's architecture into local
+/// Docker for its nodes to run, each tagged `fragment-<name>:e2e-<run>`:
+/// (name, tag). Every layer a build before made is a cache hit.
+pub fn build_cell_images(project: &Path, run: &str) -> Result<Vec<(String, String)>> {
+    let mut config = crate::read_config(project)?;
+    crate::absolute_images(&mut config, project)?;
     let platform = match std::env::consts::ARCH {
         "x86_64" => "linux/amd64",
         "aarch64" => "linux/arm64",

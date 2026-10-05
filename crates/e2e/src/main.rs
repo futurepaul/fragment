@@ -1296,18 +1296,20 @@ fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering>
 
 /// The run's two sandcastle nodes (`FRAGMENT_E2E_NODES=two`), in the
 /// order `FRAGMENT_NODES` lists them: `direct`, which listens, and
-/// `uplink`, which dials the platform; each holds the cell's images, built
-/// here for the run and tagged with its name. With a real engine
+/// `uplink`, which dials the platform; each holds the staged cell's images
+/// (the Hermes images among them when its lane runs: `stage_images`),
+/// built here for the run and tagged with its name. With a real engine
 /// (`FRAGMENT_E2E_NODES=real`), one node, `box`, which listens in front of
 /// it, the images loaded into it.
 fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<&Path>) -> Result<()> {
     let t0 = Instant::now();
     let mut images = serde_json::Map::new();
-    for (name, tag) in devstack::sandcastle::build_cell_images(&s.run)? {
+    for (name, tag) in devstack::sandcastle::build_cell_images(&s.project, &s.run)? {
         s.image_tags.push(tag.clone());
         images.insert(name, json!(format!("docker.io/library/{tag}")));
     }
     s.node_images = Value::Object(images);
+    println!("      (the nodes' images built in {:.1?})", t0.elapsed());
     let platform = format!("http://127.0.0.1:{}", s.port);
     if let Some(dir) = real {
         devstack::sandcastle::load_images(dir, &s.image_tags, &s.scratch.join("images"))?;
