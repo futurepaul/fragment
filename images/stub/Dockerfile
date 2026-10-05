@@ -6,7 +6,10 @@
 #
 # Build from images/: docker build --platform linux/amd64 -f stub/Dockerfile .
 
-# The bridge, static (Alpine's Rust targets musl), built where it runs.
+# The bridge, static (Alpine's Rust targets musl), built where it runs. Its
+# sources are touched first: the target cache is every build's on this
+# Docker, and cargo takes a path crate as built when its sources are older
+# than its last build (images/hermes/Dockerfile).
 FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -14,7 +17,8 @@ COPY bridge bridge
 COPY hermes/boot hermes/boot
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p fragment-bridge \
+    find bridge -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-bridge \
  && cp target/release/fragment-bridge /fragment-bridge
 
 # busybox for the few commands the Computer DO runs in a container (`true`

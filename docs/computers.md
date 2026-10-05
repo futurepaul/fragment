@@ -541,18 +541,39 @@ and how a runtime finds them, is the image's.
   `/data/hermes/managed-skills`, `skills/<category>/<name>/…` as
   `<category>/<name>/…`, and removes what the listing no longer has; no
   skills fragment means no managed skills. It does so off the boot's path,
-  at each start and every ten minutes while awake (`skills.installed`,
-  `skills.failed`); `/data` keeps the last install, so a wake fetches only
-  what a release changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all
-  (`skills.rs`); a file past one, or at a path that is no safe relative
-  path, is refused and the rest installs.
-- **Every profile** names that directory in `skills.external_dirs`, after
-  its own `skills/` (its agent fragment's, synced both ways: an agent's
-  own skills are versioned in its fragment). Hermes takes the first skill
-  of a name, so an agent's own wins over a managed one. Hermes' bundled
-  skills are the default profile's only; an agent's profile has its own
-  and the managed set, which is what the shell's Skills section lists. A
-  managed skill a session has not yet seen appears at its next session.
+  at each start and every ten minutes while awake, or every minute while
+  the owner has no skills fragment (`skills.installed`, `skills.failed`);
+  `/data` keeps the last install, so a wake fetches only what a release
+  changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all (`skills.rs`);
+  a file past one, or at a path that is no safe relative path, is refused
+  and the rest installs. A person whose agents predate their skills
+  fragment (setup makes it since 2026-10-03) gets one as the shell loads,
+  once, from the blessed template, as setup makes it (shell.js,
+  `backfillSkills`); their awake computers install it within the minute.
+- **The platform skill**, `fragment`, is every profile's, whatever the
+  skills fragment holds: what an agent knows of the platform it is on. It
+  is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
+  what a fragment is, the commands for the agent's fragments) after a page
+  of what the computer adds (`images/hermes/boot/src/computer.md`: that it
+  is an agent on a Fragment computer acting for its owner with no login,
+  the apps and brain skills to load, its connections as placeholders in
+  its environment, `GOOGLE_OAUTH_ACCESS_TOKEN` and the Google Workspace
+  skill, and its desktop, which its owner watches and can take over from
+  "Its computer's screen"), with a description for Hermes' skills index.
+  `hermes-boot build-info` writes it at the image's build
+  (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
+  agents), so it is always the binary's in the image, and costs a boot
+  nothing; the build fails if `fragment skill` is no skill named
+  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
+- **Every profile** names the managed directory, then the platform skill's,
+  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
+  synced both ways: an agent's own skills are versioned in its fragment).
+  Hermes takes the first skill of a name, so an agent's own wins over a
+  managed one, and either over the platform skill. Hermes' bundled skills
+  are the default profile's only; an agent's profile has its own, the
+  managed set, which is what the shell's Skills section lists, and the
+  platform skill. A managed skill a session has not yet seen appears at its
+  next session.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner
