@@ -254,7 +254,11 @@ pair it with their fragment account and it becomes avail as a resource";
   2. The person opens the link where they are signed in (`/nodes/pair`),
      checks the code against the node's terminal, and approves. The form
      posts from the platform's own origin, with the session, as `/cli`'s
-     does. The page warns: approve only a machine you started.
+     does. The page warns: approve only a machine you started. A box on
+     the form, "Run my new computers on it", makes the node their choice
+     in the same step (below): a person's first computer starts as they
+     pick a username, before settings can be reached, so without it a new
+     person's first computer could never land on their own node.
   3. The platform names the node (`paired-<16 hex>`, never the node's
      choice) and mints its secret (32 random bytes), sealed in the registry
      for that id (`keys::seal`, scope `PairedNode:<id>`).
@@ -285,7 +289,8 @@ pair it with their fragment account and it becomes avail as a resource";
   deployment's rule over the deployment's nodes), or one node the person
   may use: one of the deployment's, or one of theirs. A person's own node
   is never in the deployment's rule: a node someone was tricked into
-  approving runs nothing until they pick it.
+  approving runs nothing until they pick it (in settings, or with the
+  approval's box ticked).
 - **Placement honors it at a computer's first start** (`rank_for`): the
   chosen node first if it can take the computer, then the deployment's
   rule. When it cannot (down, another architecture than it is listed or
@@ -1327,15 +1332,12 @@ These are listed as found. Each names where it bites and what to do.
       vLLM and llama.cpp support it. A deployment whose server does not
       could have the route drop `response_format` by configuration, or
       the image turn titles off. Not done.
-    - **A clarify card's "Other (type your answer)" cannot carry the
-      answer.** Hermes asks with choices and a free-text "other". The
-      chat's `prompt_response` has no text, so the bridge answers
-      "other". Hermes then asks "Type your answer:", which the bridge
-      records as a step. The person's next message queues as a new turn.
-      The asking turn ends after the bridge's watchdog ("the agent stopped
-      answering"), and the next turn's ✅ names the old message, so it
-      never ends. Needs a `prompt_response` with text for "other", and a
-      text box on the chat's card.
+    - **A clarify card's "Other (type your answer)" could not carry the
+      answer** (fixed 2026-10-05, found 27). Hermes asks with choices and
+      a free-text "other". The chat's `prompt_response` has no text, so
+      the bridge answers "other". Hermes then asks "Type your answer:",
+      which the bridge recorded as a step, and the person's next message
+      queued as a new turn behind the asking one.
     - **Writes outside `/data/hermes` are refused** (the image sets
       `HERMES_WRITE_SAFE_ROOT`), and `/data` is root's. Asked to write
       `/data/notes/…`, Hermes said so and offered `/data/hermes/notes/…`
@@ -1351,6 +1353,26 @@ These are listed as found. Each names where it bites and what to do.
       a dropped stream and asked again. The cause was not found: asked
       directly through the intercept, the route's stream ends with its
       finish reason, the usage and `[DONE]`.
+27. **An agent asking in words deadlocked its chat** (the guide's
+    rehearsal, 2026-10-05; on master too). Hermes' `clarify` with no
+    choices (and "Other" on one with choices) sends `❓ <question>` (or
+    `✏️ Type your answer:`) and blocks until the person's next message,
+    which its gateway intercepts as the answer even mid-turn. The bridge
+    recorded the question as a step and queued the next message as a turn
+    behind the asking one, so both waited for Hermes' clarify timeout (an
+    hour); Stop's interrupt never reached the blocked wait. A new agent did
+    this on its first message, its job. Now the question is the agent's
+    reply part (`Event::Asked` after it), the asker's next message to that
+    agent in that chat goes to the running turn (`Command::Tell`, an
+    inbound in the same chat), and a Stop while it asks is followed by
+    "Stop." so the wait lets go. Tests: the engine's
+    `a_question_is_answered_by_the_next_message` and
+    `a_question_waits_as_long_as_a_prompt`, the wire's
+    `a_question_in_words`, and in process `a_question_answered_in_words`
+    (the script runtime's `ask-me`); live on Bonsai, an open question, a
+    Stop while asking, and "Other" then typed (docs/self-host-lan.md,
+    Evidence, 2026-10-05).
+
 ## The spike, on this box
 
 This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
@@ -1486,6 +1508,12 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     shown in sandcastle's in-process test.
   - Still to do: S2's checks on a real engine, which needs root, and
     the same against a Cloudflare preview. Both are Paul's.
+- **The LAN guide, rehearsed end to end** (2026-10-05; docs/self-host-lan.md,
+  Evidence): every step short of sudo, the router and the devices, with
+  computers on the real engine, Hermes on Bonsai, BYOC pairing to a stand-in
+  Mac, and cards. It found found 27, the renderer's LAN defaults, a
+  person's first computer placed before they could choose their node (the
+  pairing page now offers it), and the CLI's login waiting on its browser.
 - **S6: built, tested on high ports** (branch `selfhost-lan`;
   docs/self-host-lan.md, Paul's guide). `cargo xtask dev --lan` serves the
   stack on celld as an intranet would: DNS for `fragment.home.arpa` on the
