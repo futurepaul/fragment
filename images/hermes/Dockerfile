@@ -24,6 +24,19 @@ RUN cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim --
  && mkdir -p /usr/local/bin && cp target/release/sandbox-shim /usr/local/bin/sandbox-shim
 FROM shim-${TARGETARCH} AS shim
 
+# cua-driver's and gws's releases for the platform, pinned by hash (each
+# arm64 one as its release's own checksums list it).
+FROM scratch AS cua-driver-amd64
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
+FROM scratch AS cua-driver-arm64
+ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
+FROM cua-driver-${TARGETARCH} AS cua-driver
+FROM scratch AS gws-amd64
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
+FROM scratch AS gws-arm64
+ADD --checksum=sha256:e700fe63524932b10ec2130b47ece90aa850e66005fe52ccfc4cf8767bf9919a https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz /gws.tgz
+FROM gws-${TARGETARCH} AS gws
+
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
 # A target cache is every build's on this Docker, another checkout's
@@ -70,14 +83,14 @@ COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's), named to Hermes by
 # HERMES_CUA_DRIVER_CMD below, so Hermes never runs its upstream installer.
-ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+COPY --from=cua-driver /cua-driver.tgz /tmp/cua-driver.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
  && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
 # gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
 # wrapper hands it the agent's Google connection: the placeholder in
 # GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
 # which the computer's egress swaps for the real token on Google's hosts.
-ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+COPY --from=gws /gws.tgz /tmp/gws.tgz
 RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
  && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
       '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
