@@ -1445,7 +1445,7 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     starts past their bound. With Chrome, settings' Computers
     (experimental) shows the node up, the computer on it, the choice, and
     Revoke. **On celld: pairing 37 of 37; with computers, shell-ui,
-    placement and restart, 226 passed, 0 failed, 0 skipped.**
+    placement and restart in one run, 227 passed, 0 failed, 0 skipped.**
   - Found on the way: a computer whose node is gone (delisted, or a
     person's revoked) answered its wake "no image for its architecture"
     (the gone node has no images) instead of why; its start now throws
