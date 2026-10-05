@@ -412,6 +412,17 @@ impl Suite {
         self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.up()
     }
 
+    /// The containers running on node `id`'s engine that started at or
+    /// after `since_ms` (devstack's `sandcastle::now_ms`), by name.
+    pub fn node_running_since(&self, id: &str, since_ms: u64) -> Result<Vec<String>> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.running_since(since_ms)
+    }
+
+    /// Container `name` on node `id` killed, behind the platform's back.
+    pub fn node_kill(&self, id: &str, name: &str) -> Result<()> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.kill(name)
+    }
+
     /// A node of a person's own, for them to pair (lanes/pairing.rs): its
     /// engine double started, its label `label` until it is paired.
     pub fn node_to_pair(&self, label: &str) -> Result<devstack::sandcastle::SandcastleNode> {

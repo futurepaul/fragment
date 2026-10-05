@@ -4,7 +4,9 @@
 //! before; two placed one after the other go to two nodes (the rule: the
 //! fewest computers for a node's capacity, every placement so far balanced
 //! on two nodes of one capacity); each runs its image on its node, its
-//! screen through its port; asleep and woken, it wakes where it was. Each
+//! screen through its port; asleep and woken, it wakes where it was; its
+//! container killed under it while awake, it is started again there by
+//! itself and comes up (on either node: one listens, one dials in). Each
 //! node in turn goes down: a wake of a computer on it answers 503
 //! `node_down`, typed and within seconds, its view says why, and a new
 //! computer goes to the node that is up; the node back, the computer wakes
@@ -88,8 +90,34 @@ pub fn placement(s: &mut Suite, api: &Api) -> Result<()> {
     // boots, within a second: a sleep sooner saves nothing to restore)
     std::thread::sleep(BOOTED);
     sleep(api, &a, &ca)?;
+    sleep(api, &b, &cb)?;
+    let woken_at = fragment_devstack::sandcastle::now_ms();
     let r = wake(api, &a, &ca)?;
     s.ok("asleep and woken, a computer wakes on the node it was placed on", r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == na.as_str(), &r);
+    let r = wake(api, &b, &cb)?;
+    anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake", "waking the second computer again: {r}");
+
+    // its container killed under it while it is awake, the computer starts
+    // it again on its node by itself (the start its exit's report makes,
+    // with a backup to restore: an exec first), and it comes up
+    for (id, owner, pinned, origin) in [(na.clone(), &a, ca.clone(), oa.clone()), (nb.clone(), &b, cb.clone(), ob.clone())] {
+        let reach = s.node_reach(&id);
+        let running = s.node_running_since(&id, woken_at)?;
+        anyhow::ensure!(running.len() == 1, "the node {id} runs one container started by the wake: {running:?}");
+        std::thread::sleep(BOOTED);
+        let killed_at = fragment_devstack::sandcastle::now_ms();
+        s.node_kill(&id, &running[0])?;
+        let t0 = Instant::now();
+        let back = s.eventually(WAKE, || {
+            s.node_running_since(&id, killed_at).is_ok_and(|c| c.len() == 1) && view(api, owner, &pinned)["phase"] == "awake" && version(api, owner, &origin) == "1"
+        });
+        let v = view(api, owner, &pinned);
+        s.ok(
+            &format!("its container killed under it, awake (on the node that {reach}), the computer starts it again there by itself, and it comes up"),
+            back && v["node"] == id.as_str() && v["why"].is_null(),
+            format!("{} in {:.1?}", v, t0.elapsed()),
+        );
+    }
     sleep(api, &a, &ca)?;
     sleep(api, &b, &cb)?;
 
