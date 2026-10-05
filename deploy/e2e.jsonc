@@ -28,7 +28,7 @@
     // the OAuth application's client id (no secret: every authorize URL
     // carries it), and its secret's name in the store
     "oauth_client_id": "client_your_oauth_application",
-    "oauth_client_secret": "fragment-workos-oauth-client-secret"
+    "oauth_client_secret": "fragment-oidc-client-secret"
   },
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",

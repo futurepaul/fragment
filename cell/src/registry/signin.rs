@@ -444,7 +444,7 @@ impl RegistryCell {
         let keyed_as = match &cfg.keyed_as {
             KeyedAs::Named(k) => k.clone(),
             // the bound WorkOS environment's name, its client id a store secret
-            KeyedAs::WorkOs => crate::keys::workos(&self.env, &self.cfg).await?.issuer(),
+            KeyedAs::WorkOs => crate::keys::workos(&self.env, self.cfg).await?.issuer(),
         };
         let (id, _) = self.person_for(&keyed_as, &person.subject, &attributes, login.link_to.as_deref())?;
         let hint = crate::keys::seal(&self.env, &self.scope(), id_token.as_bytes()).await?;

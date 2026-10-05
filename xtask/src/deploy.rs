@@ -793,7 +793,7 @@ mod tests {
                 api_key: "fragment-workos-api-key".into(),
                 authkit_domain: "example.authkit.app".into(),
                 oauth_client_id: "client_app".into(),
-                oauth_client_secret: "fragment-workos-oauth-client-secret".into(),
+                oauth_client_secret: "fragment-oidc-client-secret".into(),
             },
             operators: vec![],
             ai_gateway: None,
@@ -932,7 +932,9 @@ mod tests {
             assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
             assert_eq!(keys.len(), 4, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
-            let conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);
+            let mut conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);
+            // sign-in's client, AuthKit's application (devstack's `Fleet::bound`)
+            conventional.oidc_client_secret = Some("fragment-oidc-client-secret".into());
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
     }
@@ -1008,10 +1010,10 @@ mod tests {
         let b = bound(&checked(d).unwrap()).unwrap();
         let named = named_secrets(&b);
         let listed = |names: &[&str]| names.iter().map(|n| devstack::store::Listed { name: n.to_string(), id: "0".into(), created: String::new(), modified: String::new() }).collect::<Vec<_>>();
-        let all = ["fragment-host-secret", "fragment-host-secret-old", "fragment-codestorage-private-key", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-xai-api-key", "another-projects-secret"];
+        let all = ["fragment-host-secret", "fragment-host-secret-old", "fragment-codestorage-private-key", "fragment-workos-client-id", "fragment-oidc-client-secret", "fragment-workos-api-key", "fragment-xai-api-key", "another-projects-secret"];
         assert!(devstack::store::missing(&named, &listed(&all)).is_empty(), "every one there: the deploy goes on");
 
-        let missing = devstack::store::missing(&named, &listed(&all[..4]));
+        let missing = devstack::store::missing(&named, &listed(&all[..5]));
         let config = Path::new("/home/p/.config/finite-next/e2e.jsonc");
         let store = devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() };
         let said = refusal(config, Some(&store), &missing);
@@ -1057,6 +1059,7 @@ mod tests {
                 ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
                 ("OPERATOR_KEY_XAI", "fragment-xai-api-key"),
                 ("OPERATOR_KEY_ELEVENLABS", "fragment-elevenlabs-api-key"),
+                ("OIDC_CLIENT_SECRET", "fragment-oidc-client-secret"),
             ]
         );
         assert!(cell["secrets_store_secrets"].as_array().unwrap().iter().all(|b| b["store_id"] == "0f0e0d0c"));
@@ -1086,10 +1089,10 @@ mod tests {
         assert_eq!(vars["FRAGMENT_OIDC_CLIENT_ID"], "client_app");
         assert_eq!(vars["FRAGMENT_OIDC_AUTH"], "client_secret_post", "the client in the body, as WorkOS's reference has it");
         assert_eq!(vars["FRAGMENT_OIDC_KEYED_AS"], "workos", "the people WorkOS signed in before keep their key: the bound environment's");
-        assert!(!vars.contains_key("FRAGMENT_OIDC_CLIENT_SECRET") && !vars.values().any(|v| v.contains("fragment-workos-oauth-client-secret")), "the secret is a store secret, never a variable");
+        assert!(!vars.contains_key("FRAGMENT_OIDC_CLIENT_SECRET") && !vars.values().any(|v| v.contains("fragment-oidc-client-secret")), "the secret is a store secret, never a variable");
         // its secret is bound by name, beside WorkOS's own
         let bound = bound(&d).unwrap();
-        assert!(bound.cell().iter().any(|(b, n)| b == fragment_core::secrets_store::OIDC_CLIENT_SECRET && *n == "fragment-workos-oauth-client-secret"));
+        assert!(bound.cell().iter().any(|(b, n)| b == fragment_core::secrets_store::OIDC_CLIENT_SECRET && *n == "fragment-oidc-client-secret"));
     }
 
     /// OpenRouter went (a hard cut): a config that still names its key is
