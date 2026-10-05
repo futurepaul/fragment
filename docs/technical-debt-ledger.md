@@ -807,26 +807,6 @@ fragment.club until cutover (decisions 34–35).
   computers lane kills a container and finds its last turn's save (the
   exploration's P2, and its rung 4).
 
-## A `/data` that goes back in time runs turns again
-
-- **Observed:** 2026-10-05 (docs/explorations/pi-durable.md, F2, with a
-  test that fails on master). The bridge's cursors and open turns are in
-  `/data/bridge/state.json` (images/bridge), and nothing asks the chat's
-  `work` channel whether a turn already started. After `/data` is
-  restored from an earlier save, or lost, the bridge reads the records
-  since again and hands each turn to its runtime again.
-- **Risk:** every crash is such a restore (the entry above). Each turn
-  since the save is run again: its model calls are paid again and its
-  tools run again, and no record shows it, since the second run's posts
-  are replays of the first's or 409s the bridge drops.
-- **First proof:** a second `turn.handed` in a guest's log for one turn
-  id; model meter rows for a turn whose `turn.end` is older than its
-  computer's start.
-- **Delete when:** a turn runs only in the life of the bridge that wrote
-  its `turn.start` (the exploration's P1), proven by the bridge's
-  rollback and lost-state tests, which count runs, and by the computers
-  lane's crash check.
-
 ## Litestream's replicas are written and never read
 
 - **Observed:** 2026-10-05 (docs/explorations/pi-durable.md, F8).
