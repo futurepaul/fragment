@@ -50,6 +50,7 @@ macro_rules! username_join {
 }
 
 pub(crate) mod calls;
+mod nodes;
 mod signin;
 use calls::{
     Hold, SubjectOf,
@@ -104,6 +105,7 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
+        state.storage().sql().exec(nodes::SCHEMA, None).expect("the nodes' schema applies");
         signin::migrate(&state.storage().sql());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
@@ -706,6 +708,15 @@ impl RegistryCell {
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            calls::PairBegin::PATH => reply::<calls::PairBegin>(self.pair_begin(body(&bytes)?)),
+            calls::PairShow::PATH => reply::<calls::PairShow>(self.pair_show(body(&bytes)?)),
+            calls::PairApprove::PATH => reply::<calls::PairApprove>(self.pair_approve(body(&bytes)?)),
+            calls::PairPoll::PATH => reply::<calls::PairPoll>(self.pair_poll(body(&bytes)?)),
+            calls::OwnNodes::PATH => reply::<calls::OwnNodes>(self.own_nodes_of(body(&bytes)?)),
+            calls::PairedNode::PATH => reply::<calls::PairedNode>(self.paired_node(body(&bytes)?)),
+            calls::RevokeNode::PATH => reply::<calls::RevokeNode>(self.revoke_node(body(&bytes)?)),
+            calls::PreferNode::PATH => reply::<calls::PreferNode>(self.prefer_node(body(&bytes)?)),
+            calls::ChoiceOf::PATH => reply::<calls::ChoiceOf>(self.choice_of(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

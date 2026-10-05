@@ -26,6 +26,18 @@
 //! holding the fewest computers for its capacity; a tie goes to the node
 //! listed first (the deployment's preference). A node's count never falls:
 //! computers are not deleted, and moving one to another node is not built.
+//!
+//! **Bring your own computer (experimental; `Byoc`).** A deployment that
+//! lets its people pair nodes of their own (`FRAGMENT_BYOC=on`;
+//! `fragment_core::pairing`) runs a person's computers on such a node only
+//! when that person chose it (`Choice`): their own nodes are never in the
+//! deployment's rule, so a node someone was tricked into approving takes
+//! nothing until they pick it. A person's choice (a deployment node or one
+//! of theirs) is tried first; when it cannot take the computer (down, the
+//! wrong architecture, no image for it, full, or no longer theirs), the
+//! deployment's rule places it, and the computer says why its choice was
+//! passed over (`rank_for`). The ids of people's nodes are
+//! `pairing::PAIRED_PREFIX` and hex, which no deployment node may take.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -48,6 +60,30 @@ pub const IMAGE_NAME_BYTES_MAX: usize = 64;
 pub const REFERENCE_BYTES_MAX: usize = 512;
 /// A node's secret, at least (sandcastle's `auth::Secret`).
 pub const SECRET_BYTES_MIN: usize = 32;
+/// The computers a person's own node holds (`own_node`): a person has few,
+/// and a node of theirs is never in the deployment's rule.
+pub const OWN_CAPACITY: u32 = 8;
+
+/// Whether the deployment lets its people pair nodes of their own
+/// (`FRAGMENT_BYOC`: `on` or `off`, off unless it says so). Off is a
+/// company's intranet, whose IT provides every node; on, a home or
+/// personal deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Byoc {
+    Off,
+    On,
+}
+
+impl Byoc {
+    /// `FRAGMENT_BYOC`'s value: unset is off.
+    pub fn parse(value: Option<&str>) -> Result<Byoc, String> {
+        match value.map(str::trim) {
+            None | Some("") | Some("off") => Ok(Byoc::Off),
+            Some("on") => Ok(Byoc::On),
+            Some(other) => Err(format!("FRAGMENT_BYOC is on or off, not {other:?}")),
+        }
+    }
+}
 
 /// A node's architecture, as Rust (`std::env::consts::ARCH`) and the node's
 /// health name it.
@@ -99,6 +135,7 @@ pub struct Nodes {
     nodes: Vec<Node>,
     /// Each image's reference by architecture.
     images: BTreeMap<String, BTreeMap<Arch, String>>,
+    byoc: Byoc,
 }
 
 /// Why `FRAGMENT_NODES` is refused (a node with a bad one refuses its first
@@ -107,10 +144,12 @@ pub struct Nodes {
 pub enum NodesError {
     /// Not `{nodes, images}` as above.
     Shape(String),
-    /// No nodes, or more than `NODES_MAX`.
+    /// No nodes (where people pair none of their own), or more than `NODES_MAX`.
     Count(usize),
     /// A node's id is not 1 to 64 of a-z, 0-9 and `-`.
     Id(String),
+    /// A node's id is in the form people's own nodes are named by.
+    Reserved(String),
     /// Two nodes have one id.
     Duplicate(String),
     /// A node has both a URL and an uplink, or neither, or a URL that is no
@@ -128,6 +167,7 @@ impl fmt::Display for NodesError {
             NodesError::Shape(e) => write!(f, "FRAGMENT_NODES is {{\"nodes\": [{{id, url | uplink, arch, capacity}}], \"images\": {{name: reference | {{arch: reference}}}}}}: {e}"),
             NodesError::Count(n) => write!(f, "1 to {NODES_MAX} nodes, not {n}"),
             NodesError::Id(id) => write!(f, "{id:?} is not a node's id (1 to {NODE_ID_BYTES_MAX} of a-z, 0-9 and -)"),
+            NodesError::Reserved(id) => write!(f, "{id:?} begins {:?}, which names people's own nodes: a deployment's node is named otherwise", crate::pairing::PAIRED_PREFIX),
             NodesError::Duplicate(id) => write!(f, "the node {id} is listed twice"),
             NodesError::Reach { node, why } => write!(f, "the node {node}: {why}"),
             NodesError::Capacity { node, capacity } => write!(f, "the node {node}'s capacity is 1 to {CAPACITY_MAX} computers, not {capacity}"),
@@ -200,15 +240,21 @@ fn origin(url: &str) -> Result<String, String> {
 }
 
 impl Nodes {
-    pub fn parse(json: &str) -> Result<Nodes, NodesError> {
+    /// `FRAGMENT_NODES`, checked. With `Byoc::On` it may list no node of
+    /// its own (its people's own nodes run their computers), but it names
+    /// the images all the same.
+    pub fn parse(json: &str, byoc: Byoc) -> Result<Nodes, NodesError> {
         let wire: Wire = serde_json::from_str(json).map_err(|e| NodesError::Shape(e.to_string()))?;
-        if wire.nodes.is_empty() || wire.nodes.len() > NODES_MAX {
+        if (wire.nodes.is_empty() && byoc == Byoc::Off) || wire.nodes.len() > NODES_MAX {
             return Err(NodesError::Count(wire.nodes.len()));
         }
         let mut nodes: Vec<Node> = Vec::with_capacity(wire.nodes.len());
         for n in wire.nodes {
             if !valid_node_id(&n.id) {
                 return Err(NodesError::Id(n.id));
+            }
+            if n.id.starts_with(crate::pairing::PAIRED_PREFIX) {
+                return Err(NodesError::Reserved(n.id));
             }
             if nodes.iter().any(|m| m.id == n.id) {
                 return Err(NodesError::Duplicate(n.id));
@@ -245,7 +291,12 @@ impl Nodes {
             }
             images.insert(name, by_arch);
         }
-        Ok(Nodes { nodes, images })
+        Ok(Nodes { nodes, images, byoc })
+    }
+
+    /// Whether people may pair nodes of their own here.
+    pub fn byoc(&self) -> Byoc {
+        self.byoc
     }
 
     /// The nodes, in the deployment's order.
@@ -291,8 +342,23 @@ impl Nodes {
                 })
             })
             .collect();
-        serde_json::json!({ "nodes": nodes, "images": self.image_names().collect::<Vec<_>>() })
+        // a person's own node runs what its architecture has (`own_node`)
+        let by_arch: BTreeMap<&str, BTreeMap<&str, &str>> = Arch::ALL.into_iter().map(|a| (a.name(), self.images_for(a))).collect();
+        serde_json::json!({
+            "nodes": nodes,
+            "images": self.image_names().collect::<Vec<_>>(),
+            "byArch": by_arch,
+            "byoc": self.byoc == Byoc::On,
+            "ownCapacity": OWN_CAPACITY,
+        })
     }
+}
+
+/// A person's own node (`fragment_core::pairing`), as placing their
+/// computer sees it: it dials in, and holds `OWN_CAPACITY` computers.
+pub fn own_node(id: &str, arch: Arch) -> Node {
+    assert!(crate::pairing::is_paired_id(id), "a person's own node has a paired id");
+    Node { id: id.to_string(), reach: Reach::Uplink, arch, capacity: OWN_CAPACITY }
 }
 
 /// What the platform found of one node as it placed a computer: its
@@ -317,6 +383,9 @@ pub struct Probe {
 pub enum Unfit {
     /// It was not probed (a node added since the probe began).
     Unprobed,
+    /// The person chose it, and may no longer use it: why (it left the
+    /// deployment's list, they revoked it, or the deployment pairs none).
+    Gone(String),
     Down(String),
     /// It reports another architecture than its listing says.
     Arch { listed: Arch, reported: String },
@@ -329,6 +398,7 @@ impl fmt::Display for Unfit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unfit::Unprobed => write!(f, "not probed"),
+            Unfit::Gone(why) => write!(f, "{why}"),
             Unfit::Down(why) => write!(f, "down ({why})"),
             Unfit::Arch { listed, reported } => write!(f, "listed as {} but reports {reported}", listed.name()),
             Unfit::NoImage { image, arch } => write!(f, "no {image} image for {}", arch.name()),
@@ -344,6 +414,9 @@ pub struct Unplaced(pub Vec<(String, Unfit)>);
 
 impl fmt::Display for Unplaced {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return write!(f, "no node can take it: this platform lists no node of its own; choose one of yours in settings");
+        }
         write!(f, "no node can take it: ")?;
         for (i, (id, why)) in self.0.iter().enumerate() {
             write!(f, "{}{id} is {why}", if i == 0 { "" } else { "; " })?;
@@ -392,6 +465,62 @@ pub fn rank(nodes: &Nodes, image: &str, probes: &[Probe]) -> Result<Vec<String>,
     Ok(fit.into_iter().map(|(_, n, _)| n.id.clone()).collect())
 }
 
+/// Where a person wants their new computers to run (their setting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice<'a> {
+    /// The deployment's rule (`rank`).
+    Automatic,
+    /// One of the deployment's nodes, by id.
+    Listed(&'a str),
+    /// One of their own (BYOC), still theirs.
+    Own(&'a Node),
+    /// A node they chose and may no longer use, and why.
+    Gone { id: &'a str, why: &'a str },
+}
+
+/// Where a new computer goes: the nodes to try, best first, and the node
+/// the person chose with why it cannot take it, when it cannot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ranked {
+    pub order: Vec<String>,
+    pub passed_over: Option<(String, Unfit)>,
+}
+
+/// The rule with the person's choice (`Choice`): the node they chose
+/// first, when it can take the computer, then the deployment's rule
+/// (`rank`) for the rest; when it cannot, the deployment's rule, and why
+/// it was passed over. Their own nodes are never in the deployment's rule.
+/// No node at all: why, node by node, their choice first.
+pub fn rank_for(nodes: &Nodes, choice: Choice<'_>, image: &str, probes: &[Probe]) -> Result<Ranked, Unplaced> {
+    let auto = rank(nodes, image, probes);
+    let (id, why) = match choice {
+        Choice::Automatic => return auto.map(|order| Ranked { order, passed_over: None }),
+        Choice::Listed(id) => match nodes.get(id) {
+            Some(n) => (id, unfit(nodes, n, image, probes.iter().find(|p| p.id == id))),
+            None => (id, Some(Unfit::Gone("no longer one of the deployment's nodes".into()))),
+        },
+        Choice::Own(n) => {
+            assert!(crate::pairing::is_paired_id(&n.id) && nodes.get(&n.id).is_none(), "a person's own node is none of the deployment's");
+            (n.id.as_str(), unfit(nodes, n, image, probes.iter().find(|p| p.id == n.id)))
+        }
+        Choice::Gone { id, why } => (id, Some(Unfit::Gone(why.to_string()))),
+    };
+    match (why, auto) {
+        (None, auto) => {
+            let mut order = vec![id.to_string()];
+            order.extend(auto.unwrap_or_default().into_iter().filter(|n| n != id));
+            Ok(Ranked { order, passed_over: None })
+        }
+        (Some(why), Ok(order)) => Ok(Ranked { order, passed_over: Some((id.to_string(), why)) }),
+        (Some(why), Err(Unplaced(mut each))) => {
+            // a deployment node they chose says why once, first
+            each.retain(|(n, _)| n != id);
+            each.insert(0, (id.to_string(), why));
+            Err(Unplaced(each))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,7 +538,7 @@ mod tests {
     }"#;
 
     fn two() -> Nodes {
-        Nodes::parse(TWO).unwrap()
+        Nodes::parse(TWO, Byoc::Off).unwrap()
     }
 
     fn up(id: &str, placed: u32) -> Probe {
@@ -436,6 +565,28 @@ mod tests {
         assert_eq!(js["nodes"][1]["uplink"], true);
         assert_eq!(js["nodes"][1]["images"]["stub"], "docker.io/library/fragment-stub:3-arm64");
         assert!(js["nodes"][1]["images"].get("hermes").is_none());
+        assert_eq!(js["byArch"]["aarch64"]["stub"], "docker.io/library/fragment-stub:3-arm64");
+        assert_eq!(js["byoc"], false);
+        assert_eq!(n.byoc(), Byoc::Off);
+    }
+
+    // Goal: BYOC is off unless the deployment says on; on, its list may
+    // name no node of its own (its people's run its computers), and still
+    // names the images; off, an empty list is refused.
+    #[test]
+    fn byoc_is_off_unless_said() {
+        assert_eq!(Byoc::parse(None), Ok(Byoc::Off));
+        assert_eq!(Byoc::parse(Some("")), Ok(Byoc::Off));
+        assert_eq!(Byoc::parse(Some("off")), Ok(Byoc::Off));
+        assert_eq!(Byoc::parse(Some(" on ")), Ok(Byoc::On));
+        assert!(Byoc::parse(Some("yes")).unwrap_err().contains("on or off"));
+        let none = r#"{ "nodes": [], "images": { "stub": "s:1" } }"#;
+        assert_eq!(Nodes::parse(none, Byoc::Off), Err(NodesError::Count(0)));
+        let n = Nodes::parse(none, Byoc::On).unwrap();
+        assert!(n.nodes().is_empty() && n.byoc() == Byoc::On && n.for_js()["byoc"] == true);
+        assert!(Nodes::parse(r#"{ "nodes": [], "images": {} }"#, Byoc::On).is_err(), "the images all the same");
+        // the deployment's rule over no node: why says where to look
+        assert_eq!(rank(&n, "stub", &[]).unwrap_err().to_string(), "no node can take it: this platform lists no node of its own; choose one of yours in settings");
     }
 
     // Goal: every malformed configuration is refused, saying what is wrong.
@@ -447,6 +598,8 @@ mod tests {
             (r#"{ "nodes": [], "images": { "stub": "s:1" } }"#.into(), "1 to 64 nodes"),
             (node(r#"{ "id": "Box", "url": "http://a", "arch": "x86_64", "capacity": 1 }"#), "not a node's id"),
             (node(r#"{ "id": "a_b", "url": "http://a", "arch": "x86_64", "capacity": 1 }"#), "not a node's id"),
+            (node(r#"{ "id": "paired-0123456789abcdef", "uplink": true, "arch": "x86_64", "capacity": 1 }"#), "names people's own nodes"),
+            (node(r#"{ "id": "paired-box", "url": "http://a", "arch": "x86_64", "capacity": 1 }"#), "names people's own nodes"),
             (node(r#"{ "id": "a", "url": "http://a", "arch": "x86_64", "capacity": 1 }, { "id": "a", "uplink": true, "arch": "x86_64", "capacity": 1 }"#), "listed twice"),
             (node(r#"{ "id": "a", "url": "http://a", "uplink": true, "arch": "x86_64", "capacity": 1 }"#), "not both"),
             (node(r#"{ "id": "a", "arch": "x86_64", "capacity": 1 }"#), "a url, or"),
@@ -464,11 +617,11 @@ mod tests {
             (r#"{ "nodes": [{ "id": "a", "url": "http://a", "arch": "x86_64", "capacity": 1 }], "images": { "stub": { "sparc": "s:1" } } }"#.into(), "FRAGMENT_NODES is"),
         ];
         for (json, says) in cases {
-            let e = Nodes::parse(&json).expect_err(&json);
+            let e = Nodes::parse(&json, Byoc::Off).expect_err(&json);
             assert!(e.to_string().contains(says), "{json}: {e} (wanted {says:?})");
         }
         let many: Vec<String> = (0..=NODES_MAX).map(|i| format!(r#"{{ "id": "n{i}", "uplink": true, "arch": "x86_64", "capacity": 1 }}"#)).collect();
-        assert_eq!(Nodes::parse(&node(&many.join(","))), Err(NodesError::Count(NODES_MAX + 1)));
+        assert_eq!(Nodes::parse(&node(&many.join(",")), Byoc::On), Err(NodesError::Count(NODES_MAX + 1)));
     }
 
     #[test]
@@ -533,5 +686,65 @@ mod tests {
         let first = rank(&n, "stub", &probes).unwrap();
         assert_eq!(first, ["box"]);
         assert_eq!(rank(&n, "stub", &probes).unwrap(), first);
+    }
+
+    const MINE: &str = "paired-00000000000000aa";
+
+    // Goal: a person's choice is tried first when it can take the computer,
+    // a deployment node or one of their own; the deployment's rule follows
+    // for the rest; automatic is the rule alone, and never their own nodes.
+    #[test]
+    fn a_choice_that_can_take_it_goes_first() {
+        let n = two();
+        let probes = [up("box", 0), up("mac", 3), Probe { arch: Some("x86_64".into()), ..up(MINE, 0) }];
+        assert_eq!(rank_for(&n, Choice::Automatic, "stub", &probes).unwrap(), Ranked { order: vec!["box".into()], passed_over: None }, "mac is full; their own node is never the rule's");
+        let r = rank_for(&n, Choice::Listed("mac"), "stub", &[up("box", 0), up("mac", 1)]).unwrap();
+        assert_eq!(r, Ranked { order: vec!["mac".into(), "box".into()], passed_over: None });
+        let mine = own_node(MINE, Arch::X86_64);
+        assert_eq!(mine.reach, Reach::Uplink);
+        assert_eq!(mine.capacity, OWN_CAPACITY);
+        let r = rank_for(&n, Choice::Own(&mine), "stub", &probes).unwrap();
+        assert_eq!(r, Ranked { order: vec![MINE.into(), "box".into()], passed_over: None });
+        // the image its architecture has: hermes on an x86_64 node of theirs
+        assert_eq!(rank_for(&n, Choice::Own(&mine), "hermes", &probes).unwrap().order, [MINE, "box"]);
+        // the same probes, ranked again: the same answer
+        assert_eq!(rank_for(&n, Choice::Own(&mine), "stub", &probes), rank_for(&n, Choice::Own(&mine), "stub", &probes));
+    }
+
+    // Goal: a choice that cannot take the computer falls back to the
+    // deployment's rule, saying why: down, the wrong architecture, no image
+    // for its own, full, or gone (revoked, delisted, BYOC off). With nothing
+    // to fall back to, every reason, the choice's first and once.
+    #[test]
+    fn a_choice_that_cannot_falls_back_saying_why() {
+        let n = two();
+        let mac = own_node(MINE, Arch::Aarch64);
+        let down = Probe { down: Some("no uplink open".into()), ..up(MINE, 0) };
+        let r = rank_for(&n, Choice::Own(&mac), "stub", &[up("box", 0), up("mac", 0), down.clone()]).unwrap();
+        assert_eq!(r.order, ["box", "mac"]);
+        assert_eq!(r.passed_over, Some((MINE.to_string(), Unfit::Down("no uplink open".into()))));
+        let wrong = Probe { arch: Some("x86_64".into()), ..up(MINE, 0) };
+        let r = rank_for(&n, Choice::Own(&mac), "stub", &[up("box", 0), up("mac", 0), wrong]).unwrap();
+        assert_eq!(r.passed_over.unwrap().1, Unfit::Arch { listed: Arch::Aarch64, reported: "x86_64".into() });
+        let r = rank_for(&n, Choice::Own(&mac), "hermes", &[up("box", 0), up("mac", 0), up(MINE, 0)]).unwrap();
+        assert_eq!((r.order, r.passed_over.unwrap().1), (vec!["box".to_string()], Unfit::NoImage { image: "hermes".into(), arch: Arch::Aarch64 }));
+        let r = rank_for(&n, Choice::Own(&mac), "stub", &[up("box", 0), up("mac", 0), up(MINE, OWN_CAPACITY)]).unwrap();
+        assert_eq!(r.passed_over.unwrap().1, Unfit::Full { placed: OWN_CAPACITY, capacity: OWN_CAPACITY });
+        let r = rank_for(&n, Choice::Listed("mac"), "stub", &[up("box", 0), Probe { down: Some("refused".into()), ..up("mac", 0) }]).unwrap();
+        assert_eq!((r.order, r.passed_over.map(|(id, _)| id)), (vec!["box".to_string()], Some("mac".to_string())));
+        let r = rank_for(&n, Choice::Listed("gone"), "stub", &[up("box", 0), up("mac", 0)]).unwrap();
+        assert_eq!(r.passed_over.unwrap().1.to_string(), "no longer one of the deployment's nodes");
+        let r = rank_for(&n, Choice::Gone { id: MINE, why: "revoked by you" }, "stub", &[up("box", 0), up("mac", 0)]).unwrap();
+        assert_eq!(r.passed_over, Some((MINE.to_string(), Unfit::Gone("revoked by you".into()))));
+        // nothing to fall back to: their choice's reason first, once
+        let e = rank_for(&n, Choice::Own(&mac), "stub", &[Probe { down: Some("refused".into()), ..up("box", 0) }, up("mac", 2), down.clone()]).unwrap_err();
+        assert_eq!(e.to_string(), format!("no node can take it: {MINE} is down (no uplink open); box is down (refused); mac is full (2 of 2 computers)"));
+        let e = rank_for(&n, Choice::Listed("mac"), "stub", &[up("box", 4), up("mac", 2)]).unwrap_err();
+        assert_eq!(e.0.iter().filter(|(id, _)| id == "mac").count(), 1);
+        assert_eq!(e.0[0].0, "mac");
+        let empty = Nodes::parse(r#"{ "nodes": [], "images": { "stub": "s:1" } }"#, Byoc::On).unwrap();
+        let mine = own_node(MINE, Arch::X86_64);
+        assert_eq!(rank_for(&empty, Choice::Own(&mine), "stub", &[up(MINE, 0)]).unwrap().order, [MINE]);
+        assert_eq!(rank_for(&empty, Choice::Own(&mine), "stub", &[down]).unwrap_err().to_string(), format!("no node can take it: {MINE} is down (no uplink open)"));
     }
 }

@@ -907,10 +907,11 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked, uses] = await Promise.all([
+  const [ledger, linked, uses, nodes] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+    api("GET", "/api/nodes").catch(() => null),
   ]);
   // an OpenID Connect sign-in may give no email: its username, else its subject
   const emails = (state.me.subjects ?? []).map((x) => x.email || x.handle).filter(Boolean);
@@ -970,7 +971,7 @@ async function openSettings(push = true) {
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.node ? [line("Runs on", c.node)] : []), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []), ...(c.placed ? [line("Placed", c.placed)] : []), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   if (c) {
@@ -998,7 +999,88 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, ...nodesSection(nodes), agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- computers (experimental; docs/self-host.md, seam 2): the nodes the
+// person's computers may run on, the platform's and their own (bring your
+// own computer: a sandcastle node they paired), each up or down with their
+// computers on it, and where a new computer runs. A computer stays on the
+// node it first started on; the choice is for the next. A person has one
+// computer today: several, one per machine, is the experimental part.
+const NODE_STATE = { up: "Up", down: "Down", revoked: "Revoked" };
+const nodeName = (nodes, id) => {
+  const n = nodes?.nodes?.find((x) => x.id === id);
+  return n ? (n.kind === "own" ? `${n.name} (yours)` : n.name) : id;
+};
+function nodesSection(nodes) {
+  if (!nodes || (!nodes.nodes.length && !nodes.byoc)) return [];
+  const s = section("Computers (experimental)");
+  s.id = "settings-nodes";
+  s.append(el("p", "muted", "Where your computers run. Experimental: a computer stays on the machine it first started on; what you choose here is for your next one."));
+  // where new computers run: the platform's rule, or a node they may use
+  const usable = nodes.nodes.filter((n) => n.state !== "revoked");
+  const where = el("label", "settings-line");
+  const pick = el("select");
+  pick.id = "settings-nodes-prefer";
+  const auto = el("option", null, "Automatic (the platform's machines)");
+  auto.value = "";
+  pick.append(auto, ...usable.map((n) => {
+    const o = el("option", null, `${nodeName(nodes, n.id)}, ${n.arch}${n.state === "up" ? "" : ", down now"}`);
+    o.value = n.id;
+    return o;
+  }));
+  pick.value = nodes.prefer && usable.some((n) => n.id === nodes.prefer) ? nodes.prefer : "";
+  pick.onchange = async () => {
+    pick.disabled = true;
+    try {
+      await api("PUT", "/api/nodes/prefer", { node: pick.value || null });
+    } catch (e) {
+      notice("That was not changed", e.message);
+    }
+    await openSettings(false);
+  };
+  where.append(el("span", "settings-key", "New computers run on"), pick);
+  s.append(where, el("p", "muted", "If that machine is down, or cannot run the computer, the platform's rule places it, and the computer says why."));
+  for (const n of nodes.nodes) {
+    const row = el("div", "provider node");
+    row.dataset.node = n.id;
+    row.dataset.state = n.state;
+    const head = el("div", "provider-head");
+    head.append(el("span", "provider-name", n.name), el("span", "provider-kind", `${n.kind === "own" ? "Yours" : "The platform's"} · ${n.arch}`));
+    head.append(el("span", `provider-state ${n.state === "up" ? "connected" : "needs_reauthorization"}`, NODE_STATE[n.state] ?? n.state));
+    row.append(head);
+    if (n.why && n.state === "down") row.append(el("span", "muted", n.why));
+    if (n.computers.length) row.append(el("span", "muted", n.computers.length === 1 ? "Your computer runs here." : `${n.computers.length} of your computers run here.`));
+    if (n.kind === "own" && n.state !== "revoked") {
+      const actions = el("div", "settings-actions");
+      const revoke = el("button", "quiet", "Revoke");
+      revoke.type = "button";
+      revoke.onclick = async () => {
+        if (!confirm(`Revoke ${n.name}? It is cut off at once, and runs none of your computers again${n.computers.length ? ", the one there included" : ""}.`)) return;
+        revoke.disabled = true;
+        try {
+          await api("DELETE", `/api/nodes/${seg(n.id)}`);
+        } catch (e) {
+          notice("It was not revoked", e.message);
+        }
+        await openSettings(false);
+      };
+      actions.append(revoke);
+      row.append(actions);
+    }
+    s.append(row);
+  }
+  if (nodes.byoc) {
+    s.append(
+      say("Bring a machine of yours: start sandcastle on it, then run this there and approve the code it shows here:"),
+      el("pre", "command", `sandcastle-node pair ${location.origin} --config /etc/sandcastle-node/node.json \\\n  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \\\n  --egress /run/sandcastle-node/egress.sock`),
+      say("Behind a private CA, add `--ca-file` with its PEM. It runs only the computers you choose for it, here."),
+    );
+  } else {
+    s.append(el("p", "muted", "This platform's machines are its operator's: it pairs none of yours."));
+  }
+  return [s];
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform

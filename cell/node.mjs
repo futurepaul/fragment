@@ -14,6 +14,13 @@
 // which checks it and says the rule a computer is placed by; computer.rs
 // places it). A node that does not answer is `NodeDown`, which the cell
 // answers as `node_down`, typed, within a bound: a call never hangs on it.
+//
+// A person's own node (bring your own computer, experimental:
+// fragment_core::pairing) is no row of FRAGMENT_NODES: its record is the
+// registry's (`pairedNode`, its secret kept sealed there), it always dials
+// in, it runs the images of its architecture, and only its owner's
+// computers, chosen for it. Revoked, its object answers every call
+// `node_revoked` (`NodeRevoked`), typed.
 
 import * as rs from "./build/index.js";
 
@@ -69,22 +76,34 @@ const callString = (method, path, t, body) => `sandcastle-node-v1\n${method}\n${
 const egressString = (e, t, body) =>
   `sandcastle-egress-v1\n${e.method}\n${e.container}\n${e.intercept}\n${e.scheme}\n${e.host}\n${e.path}\n${t}\n${body}`;
 
-// This isolate's reading of FRAGMENT_NODES, by its text.
+// A person's own node that its owner revoked: it runs nothing again (the
+// cell's `node_revoked`, js.rs reads the name).
+export class NodeRevoked extends Error {
+  constructor(node) {
+    super(`its node ${node} was revoked by its owner: it runs nothing again (pair the machine again, and choose it, for a new computer)`);
+    this.name = "NodeRevoked";
+    this.node = node;
+  }
+}
+
+// This isolate's reading of FRAGMENT_NODES (and FRAGMENT_BYOC), by its text.
 let read = { text: undefined, nodes: null };
 
 // The deployment's nodes, or null where computers run in the runtime's own
 // containers: `byId`, each node with its secret's key (the Worker secret
-// `secret` names) and its transport, and `images`, every image name a
-// computer may be pinned to. Rust checks the variable (`rs.NodesConfig`).
+// `secret` names) and its transport; `images`, every image name a computer
+// may be pinned to; whether its people pair nodes of their own (`byoc`),
+// with the images an architecture runs (`byArch`) and what one of theirs
+// holds (`ownCapacity`). Rust checks the variables (`rs.NodesConfig`).
 export function nodesOf(env) {
-  const text = env.FRAGMENT_NODES || "";
+  const text = `${env.FRAGMENT_NODES || ""}\n${env.FRAGMENT_BYOC || ""}`;
   if (read.text === text) return read.nodes;
   const config = rs.NodesConfig.read(env);
   let nodes = null;
   if (config) {
     const byId = new Map();
-    for (const n of config.nodes) byId.set(n.id, nodeOf(env, n));
-    nodes = { byId, images: config.images };
+    for (const n of config.nodes) byId.set(n.id, nodeOf(env, n, env[n.secret], n.secret));
+    nodes = { byId, images: config.images, byoc: config.byoc === true, byArch: config.byArch, ownCapacity: config.ownCapacity };
   }
   read = { text, nodes };
   return nodes;
@@ -93,21 +112,66 @@ export function nodesOf(env) {
 // One node: its id, reach, architecture, capacity and images (name to its
 // reference for that architecture), its secret's key, and `fetch(path,
 // init)`, its transport: its URL, or the object that holds its uplink.
-function nodeOf(env, n) {
-  const secret = (env[n.secret] || "").trim();
-  if (enc.encode(secret).length < SECRET_BYTES_MIN) throw new Error(`${n.secret}, the node ${n.id}'s secret, is at least ${SECRET_BYTES_MIN} bytes`);
+// `own`: a person's own node (its owner's id).
+function nodeOf(env, n, secretValue, named) {
+  const secret = (secretValue || "").trim();
+  if (enc.encode(secret).length < SECRET_BYTES_MIN) throw new Error(`${named}, the node ${n.id}'s secret, is at least ${SECRET_BYTES_MIN} bytes`);
   const key = crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
   const fetcher = n.uplink
     ? (path, init) => nodeObject(env, n.id).fetch(new Request(`https://${n.id}.node.internal${path}`, init))
     : (path, init) => fetch(n.url + path, init);
-  return { id: n.id, url: n.url, uplink: n.uplink, arch: n.arch, capacity: n.capacity, images: n.images, key, fetch: fetcher };
+  return { id: n.id, url: n.url, uplink: n.uplink, arch: n.arch, capacity: n.capacity, images: n.images, key, fetch: fetcher, own: n.own || null };
 }
 
-// A node that FRAGMENT_NODES no longer lists, for a computer placed on it:
-// every call is NodeDown.
-export function goneNode(id) {
-  const gone = () => Promise.reject(new NodeDown(id, "it is no longer in FRAGMENT_NODES"));
-  return { id, url: null, uplink: false, arch: null, capacity: 0, images: {}, key: null, fetch: gone };
+// A node a computer was placed on that it can no longer reach, for that
+// computer: every call is NodeDown (gone from FRAGMENT_NODES, or a person's
+// node where BYOC is now off), or NodeRevoked (a person's node they revoked).
+export function goneNode(id, why = "it is no longer in FRAGMENT_NODES", revoked = false) {
+  const error = () => (revoked ? new NodeRevoked(id) : new NodeDown(id, why));
+  return { id, url: null, uplink: false, arch: null, capacity: 0, images: {}, key: null, fetch: () => Promise.reject(error()), own: null, error };
+}
+
+const PAIRED = /^paired-[0-9a-f]{16}$/;
+
+// Whether `id` names a person's own node (fragment_core::pairing).
+export const isPaired = (id) => PAIRED.test(id || "");
+
+// This isolate's people's nodes, by id: its record never changes but to
+// be revoked, which its object says (`/__node/status`, and every call).
+const pairedRead = new Map();
+
+// A person's own node as a node (`nodeOf`), from the registry
+// (`rs.PairedNodes.get`); `{ id, revoked: true }` when its owner revoked
+// it; null for none, or where BYOC is off.
+export function pairedNode(env, id) {
+  const nodes = nodesOf(env);
+  if (!nodes || !nodes.byoc || !isPaired(id)) return Promise.resolve(null);
+  let found = pairedRead.get(id);
+  if (!found) {
+    found = rs.PairedNodes.get(env, id).then((r) => {
+      if (!r) return null;
+      if (r.revoked || !r.secret) return { id, revoked: true };
+      const n = { id, url: null, uplink: true, arch: r.arch, capacity: nodes.ownCapacity, images: (nodes.byArch || {})[r.arch] || {}, own: r.owner };
+      return nodeOf(env, n, r.secret, `the node ${id}'s secret`);
+    });
+    // a registry that did not answer is asked again next time
+    found.catch(() => pairedRead.delete(id));
+    pairedRead.set(id, found);
+  }
+  return found;
+}
+
+// The node `id` a computer runs on: the deployment's, a person's own, or a
+// gone one that says why at every call.
+export async function nodeFor(env, nodes, id) {
+  const listed = nodes.byId.get(id);
+  if (listed) return listed;
+  if (!isPaired(id)) return goneNode(id);
+  if (!nodes.byoc) return goneNode(id, "this platform no longer runs people's own nodes (FRAGMENT_BYOC is off)");
+  const own = await pairedNode(env, id);
+  if (!own) return goneNode(id, "no such node");
+  if (own.revoked) return goneNode(id, null, true);
+  return own;
 }
 
 // Node `id`'s object (uplink.mjs): it holds the node's uplink, when it
@@ -119,33 +183,50 @@ export function nodeObject(env, id) {
 // What placing a computer needs of each node (computer.rs `place`): whether
 // it answers its health within HEALTH_MS, the architecture it reports, and
 // the computers its object counts. One object each, as
-// `fragment_core::placement::Probe` reads it.
-export function probe(env, nodes) {
+// `fragment_core::placement::Probe` reads it. `own`: the person's own node
+// they chose, beside the deployment's ([{id}]).
+export async function probe(env, nodes, own = []) {
+  const theirs = await Promise.all(own.map((o) => nodeFor(env, nodes, o.id)));
   return Promise.all(
-    [...nodes.byId.values()].map(async (node) => {
+    [...nodes.byId.values(), ...theirs].map(async (node) => {
       const placed = (await (await nodeObject(env, node.id).fetch(`https://${node.id}.node.internal/__node/placed`)).json()).placed;
-      try {
-        const health = await within(node.id, HEALTH_MS, signedFetch(node, "GET", "/v1/health"));
-        if (!health.ok) {
-          const e = await health.json().catch(() => ({}));
-          return { id: node.id, down: `its health answered ${health.status} ${e.error || ""}`.trim(), placed };
-        }
-        const h = await health.json().catch(() => ({}));
-        return { id: node.id, arch: h?.node?.arch ?? null, placed };
-      } catch (e) {
-        return { id: node.id, down: String((e && e.message) || e), placed };
-      }
+      return { id: node.id, ...(await health(node)), placed };
     }),
   );
 }
 
-// Node `id` takes `computer` if its object has room (or holds it already).
-export async function take(env, node, computer) {
-  const r = await nodeObject(env, node.id).fetch(`https://${node.id}.node.internal/__node/take`, {
+// Whether `node` answers its health within HEALTH_MS (`down`: why not),
+// and the architecture it reports.
+export async function health(node) {
+  try {
+    const r = await within(node.id, HEALTH_MS, signedFetch(node, "GET", "/v1/health"));
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      return { down: `its health answered ${r.status} ${e.error || ""}`.trim() };
+    }
+    const h = await r.json().catch(() => ({}));
+    return { arch: h?.node?.arch ?? null };
+  } catch (e) {
+    return { down: String((e && e.message) || e) };
+  }
+}
+
+// What node `id`'s object says of it now (entry.mjs's `Node`): `up`, why
+// not, and whether its owner revoked it.
+export async function nodeStatus(env, id) {
+  const r = await nodeObject(env, id).fetch(`https://${id}.node.internal/__node/status`, { method: "POST", body: JSON.stringify({ id }) });
+  if (!r.ok) throw new Error(`the node ${id}'s object: ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
+// Node `id` takes `computer` if its object has room for `capacity` (or
+// holds it already).
+export async function take(env, id, computer, capacity) {
+  const r = await nodeObject(env, id).fetch(`https://${id}.node.internal/__node/take`, {
     method: "POST",
-    body: JSON.stringify({ computer, capacity: node.capacity }),
+    body: JSON.stringify({ computer, capacity }),
   });
-  if (!r.ok) throw new Error(`the node ${node.id}'s object: ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(`the node ${id}'s object: ${r.status} ${await r.text()}`);
   return (await r.json()).taken === true;
 }
 
@@ -185,7 +266,7 @@ async function signedFetch(node, method, path) {
   try {
     return await node.fetch(path, { method, headers });
   } catch (e) {
-    throw e instanceof NodeDown ? e : new NodeDown(node.id, String((e && e.message) || e));
+    throw e instanceof NodeDown || e instanceof NodeRevoked ? e : new NodeDown(node.id, String((e && e.message) || e));
   }
 }
 
@@ -421,11 +502,12 @@ export class NodeContainer {
     const headers = { [AUTH]: await signed(this.#node, method, path, await sha256Hex(bytes)) };
     if (body !== undefined) headers["content-type"] = "application/json";
     const sent = this.#node.fetch(path, { method, headers, body: body === undefined ? undefined : bytes }).catch((e) => {
-      throw e instanceof NodeDown ? e : new NodeDown(node, String((e && e.message) || e));
+      throw e instanceof NodeDown || e instanceof NodeRevoked ? e : new NodeDown(node, String((e && e.message) || e));
     });
     const resp = await (ms ? within(node, ms, sent) : sent);
     if (!resp.ok && !allowed.includes(resp.status)) {
       const e = await resp.json().catch(() => ({}));
+      if (resp.status === 410 && e.error === "node_revoked") throw new NodeRevoked(node);
       if ([502, 503, 504].includes(resp.status)) throw new NodeDown(node, `${method} ${path}: ${resp.status} ${e.error || ""}`.trim());
       throw Object.assign(new Error(`the node ${node}: ${method} ${path}: ${resp.status} ${e.error || ""}`.trim()), { status: resp.status });
     }
@@ -533,7 +615,7 @@ export class NodeContainer {
     const headers = { [AUTH]: await signed(this.#node, "GET", path, await sha256Hex(new Uint8Array())), upgrade: "websocket" };
     const node = this.#node.id;
     const sent = this.#node.fetch(path, { headers }).catch((e) => {
-      throw e instanceof NodeDown ? e : new NodeDown(node, String((e && e.message) || e));
+      throw e instanceof NodeDown || e instanceof NodeRevoked ? e : new NodeDown(node, String((e && e.message) || e));
     });
     const resp = await within(node, CALL_MS, sent);
     const ws = resp.webSocket;
