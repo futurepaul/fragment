@@ -412,7 +412,18 @@ settings and state):
   bridge stops running it; its profile is retired at the next start, when
   no Hermes could be winding down a turn in it. The screen is the first
   agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
-  that moves with the first agent, started by `hermes-boot screen-start`;
+  that moves with the first agent, started by `hermes-boot screen-start`
+  for the screen's first viewer (about a second on the lower rung, and
+  about 300 MiB more while it runs), or by Hermes at an agent's first
+  `computer_use` or browser call (`bot_desktop.auto_start`), never at
+  boot. On that desktop an agent operates: Hermes' `computer_use` (its
+  backend, cua-driver 0.28.3, is in the image, pinned, and named by
+  `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
+  bridge and the agent calls it through `tool_call`), and its built-in
+  browser tools, headed there (`browser: {headed: true, backend: off}` in
+  each profile's own config, the only place Hermes reads `browser` from;
+  with no backend named, Hermes would fetch the Browser Use CLI into
+  `/data` at the first call);
   Litestream starts again when the set of databases it streams changes
   (a new profile's appears at its first turn). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
@@ -477,6 +488,14 @@ and how a runtime finds them, is the image's.
   operator key's placeholder does not change). So a skill's helper, a
   stock `curl` or a vendor's SDK in the terminal finds its variable, with
   no header of ours (`profile.credentials` in the events).
+- **`gws`**, Google's Workspace CLI (github.com/googleworkspace/cli,
+  v0.22.5, pinned by its checksum), is in the image for the `google`
+  connection: `/usr/local/bin/gws` hands it `GOOGLE_OAUTH_ACCESS_TOKEN`
+  as its pre-obtained access token (`GOOGLE_WORKSPACE_CLI_TOKEN`, which it
+  sends as `Authorization: Bearer`), so the swap fills it on Google's
+  hosts; it trusts the system's CA bundle (rustls with native roots), so
+  the interception CA appended at boot is its too. The image holds no
+  secret of it. The google-workspace skill prefers it.
 
 ## Billing
 

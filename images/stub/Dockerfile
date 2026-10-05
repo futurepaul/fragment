@@ -12,9 +12,14 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY bridge bridge
 COPY hermes/boot hermes/boot
+# The target cache is shared by every build on this Docker, from any
+# checkout: one build at a time (locked), and this context's sources made
+# newer than anything in it (cargo judges a workspace member fresh by
+# mtime, so another checkout's later build would otherwise pass for ours).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p fragment-bridge \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    find bridge hermes -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-bridge \
  && cp target/release/fragment-bridge /fragment-bridge
 
 # busybox for the few commands the Computer DO runs in a container (`true`
