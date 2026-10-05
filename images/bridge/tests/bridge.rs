@@ -61,6 +61,35 @@ async fn a_reply() {
     bridge.stop().await;
 }
 
+/// Goal: a first start makes the bridge's state directory, and so `/data`,
+/// at once, though it has read nothing of the platform yet and run no turn,
+/// so a sleep then has a `/data` to save (the platform's save fails on a
+/// `/data` that is not there, and a sleep that fails to save keeps its
+/// container); behind the restore gate, nothing is made until the restore
+/// is done. Method: a bridge with no agents whose platform does not answer,
+/// and one whose restore is pending until the test opens the gate.
+#[tokio::test]
+async fn a_first_start_makes_its_data() {
+    let fake = Fake::start("127.0.0.1:0", &[]).await;
+    fake.with(|w| w.down = true);
+    let dir = support::dir("first-start-data");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    support::until(WAIT, "its state's directory, made at start", || dir.join("bridge").is_dir()).await;
+    bridge.stop().await;
+    fake.with(|w| w.down = false);
+
+    let dir = support::dir("first-start-data-gated");
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.restore_pending = true;
+    let restored = cfg.restored.clone();
+    let bridge = support::start(cfg, support::script());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!dir.join("bridge").exists(), "nothing is made before the restore is done");
+    std::fs::write(&restored, b"").expect("the restore gate opens");
+    support::until(WAIT, "its state's directory, made past the gate", || dir.join("bridge").is_dir()).await;
+    bridge.stop().await;
+}
+
 /// Goal: a reply streams as drafts, then posts as a record with the same
 /// turn, after which its draft is stopped.
 #[tokio::test]
