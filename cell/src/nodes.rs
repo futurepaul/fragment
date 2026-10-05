@@ -167,7 +167,7 @@ pub(crate) async fn page(mut req: Request, env: &Env, cfg: &Config, url: &Url) -
                     "<p>A sandcastle node named <b>{name}</b> ({arch}) wants to run your computers.</p>
 <p>Its code is <code>{code}</code>. Check that the terminal where you ran <code>sandcastle-node pair</code> shows the same code.</p>
 <p>It runs only computers you choose for it, in settings. Approve only a machine you started yourself: whoever runs it sees what your computers on it do.</p>
-<form method=\"post\" action=\"/nodes/pair\"><input type=\"hidden\" name=\"code\" value=\"{code}\"><button>Add this node</button></form>
+<form method=\"post\" action=\"/nodes/pair\"><input type=\"hidden\" name=\"code\" value=\"{code}\"><p><label><input type=\"checkbox\" name=\"prefer\" value=\"on\"> Run my new computers on it</label></p><button>Add this node</button></form>
 <p>Didn't run <code>sandcastle-node pair</code>? Close this page.</p>",
                     name = esc(&shown.name),
                     arch = esc(&shown.arch),
@@ -179,16 +179,24 @@ pub(crate) async fn page(mut req: Request, env: &Env, cfg: &Config, url: &Url) -
             auth::same_origin(&req, &platform)?;
             // read before anyone is known to be signed in: bounded as it arrives
             let bytes = read_body(&mut req, FORM_MAX_BYTES).await?;
-            let code = url::form_urlencoded::parse(&bytes).find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()).unwrap_or_default();
+            let form: Vec<(String, String)> = url::form_urlencoded::parse(&bytes).into_owned().collect();
+            let field = |k: &str| form.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+            let code = field("code").unwrap_or_default().to_string();
+            let prefer = field("prefer") == Some("on");
             let Some(token) = auth::platform_session_token(&req, url)? else {
                 return Err(CellError::new(ErrorCode::Unauthenticated, "sign in first"));
             };
-            let approved = ask_registry(env, &calls::PairApprove { token, code }).await?;
+            let approved = ask_registry(env, &calls::PairApprove { token, code, prefer }).await?;
+            let next = if prefer {
+                "<p>Your new computers run on it. <a href=\"/\">Open the shell</a>.</p>".to_string()
+            } else {
+                "<p>To run your next computer there, choose it in <a href=\"/settings\">settings</a>, under Computers.</p>".to_string()
+            };
             auth::page(
                 200,
                 "Node added",
                 &format!(
-                    "<p><b>{}</b> is yours now, as <code>{}</code>. The <code>sandcastle-node pair</code> waiting in its terminal finishes on its own.</p><p>To run your next computer there, choose it in <a href=\"/settings\">settings</a>, under Computers.</p>",
+                    "<p><b>{}</b> is yours now, as <code>{}</code>. The <code>sandcastle-node pair</code> waiting in its terminal finishes on its own.</p>{next}",
                     esc(&approved.name),
                     esc(&approved.node)
                 ),

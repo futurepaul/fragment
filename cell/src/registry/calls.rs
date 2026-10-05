@@ -663,11 +663,17 @@ impl Call for PairShow {
 }
 
 /// `POST /nodes/pair/approve`: the person approves the pairing their code
-/// names (the router checked the form came from the platform's own page).
+/// names (the router checked the form came from the platform's own page),
+/// and, when they say so (`prefer`), chooses the node for their new
+/// computers in the same step: a person with no computer yet gets their
+/// first one there (the shell starts it as they pick a username, before
+/// settings could be reached).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct PairApprove {
     pub token: String,
     pub code: String,
+    #[serde(default)]
+    pub prefer: bool,
 }
 
 #[derive(Serialize, Deserialize)]
