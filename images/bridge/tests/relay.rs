@@ -144,8 +144,12 @@ async fn stop_during_an_approval() {
     bridge.stop().await;
 }
 
-/// Goal: a message is kept until Hermes acks it: one handed while Hermes is
-/// away reaches it when it dials again, and is answered once.
+/// Goal (P1): a turn is claimed only while Hermes is on its socket. A
+/// message said while Hermes is away waits, unclaimed, for any life to
+/// claim (the bridge has it: it holds the computer awake for it), and is
+/// claimed and answered once Hermes dials. Within a life, a turn handed is
+/// kept until Hermes acks it: one handed to a Hermes that never took it is
+/// handed again on its next dial, and answered once.
 #[tokio::test]
 async fn kept_until_acked() {
     let (fake, bridge, hermes, _dir) = setup("relay-away", &["juniper"]).await;
@@ -158,19 +162,45 @@ async fn kept_until_acked() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let started = |w: &World, turn: &str| w.bodies(&chat, "work", "turn.start").iter().filter(|s| s["turn"] == turn).count();
+    let say = |text: &str| {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+    };
+
+    // away: its socket closes, and the bridge hears it go
     hermes.with(|s| s.away = true);
     tokio::time::sleep(Duration::from_millis(200)).await;
-    fake.say(&chat, &person("paul"), json!({ "text": "are you there" }));
-    fake.until(WAIT, "the turn handed", |w| !w.bodies(&chat, "work", "turn.start").is_empty()).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert!(replies(w, &chat).is_empty(), "Hermes is away"));
+    let t1 = say("are you there");
+    fake.until(WAIT, "the bridge holding the computer awake for it", |w| w.keepalive_open == 1).await;
+    fake.with(|w| assert_eq!(started(w, &t1), 0, "Hermes is away: not claimed"));
     hermes.with(|s| s.away = false);
     fake.until(WAIT, "the reply once Hermes is back", |w| replies(w, &chat).len() == 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    fake.with(|w| assert_eq!(replies(w, &chat).len(), 1));
+    fake.with(|w| assert_eq!(started(w, &t1), 1, "claimed once Hermes dialed"));
+
+    // handed to a Hermes that drops it unacked, then dials again
+    hermes.with(|s| s.deaf = true);
+    let t2 = say("still there?");
+    fake.until(WAIT, "the second message claimed and handed", |w| started(w, &t2) == 1).await;
+    hermes.with(|s| s.away = true);
+    tokio::time::sleep(Duration::from_millis(200)).await;
     hermes.with(|s| {
-        assert!(s.dials >= 2);
-        assert_eq!(s.heard.iter().filter(|e| e["text"] == "are you there").count(), 1, "handed once to the gateway that acked it");
+        s.deaf = false;
+        s.away = false;
+    });
+    fake.until(WAIT, "its reply once Hermes dials again", |w| replies(w, &chat).len() == 2).await;
+    // one more, so a second answer to either would have come before its own
+    let t3 = say("and now?");
+    fake.until(WAIT, "the third reply", |w| replies(w, &chat).len() == 3).await;
+    fake.with(|w| {
+        let turns: Vec<&str> = replies(w, &chat).iter().map(|r| r["turn"].as_str().unwrap_or("")).map(|t| if t == t1 { "one" } else if t == t2 { "two" } else if t == t3 { "three" } else { "?" }).collect();
+        assert_eq!(turns, vec!["one", "two", "three"], "each answered once");
+    });
+    hermes.with(|s| {
+        assert!(s.dials >= 3);
+        for text in ["are you there", "still there?", "and now?"] {
+            assert_eq!(s.heard.iter().filter(|e| e["text"] == text).count(), 1, "{text}: heard once, by the gateway that acked it");
+        }
     });
     bridge.stop().await;
 }
@@ -231,7 +261,6 @@ async fn media_both_ways() {
 /// end proves the older records were read again first. Hermes' own record
 /// of what it heard is the count of runs.
 #[tokio::test]
-#[ignore = "P1: a rolled-back cursor hands Hermes the second message again (F2)"]
 async fn hermes_hears_each_message_once_across_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -245,7 +274,7 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
         records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
     };
 
-    let bridge = support::start(cfg.clone(), relay(listen, &dir));
+    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
     fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
     let t1 = say("one");
     fake.until(WAIT, "one's end", |w| ended(w, &t1)).await;
@@ -256,7 +285,7 @@ async fn hermes_hears_each_message_once_across_a_rollback() {
     fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
 
     support::restore_state(&dir, &saved);
-    let bridge = support::start(cfg, relay(listen, &dir));
+    let bridge = support::start_killable(cfg, relay(listen, &dir));
     let t3 = say("three");
     fake.until(WAIT, "three's end, Hermes dialing the new life", |w| ended(w, &t3)).await;
     hermes.with(|s| {

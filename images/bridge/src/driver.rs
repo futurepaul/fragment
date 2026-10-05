@@ -2,13 +2,17 @@
 //!
 //! - the restore gate (`RESTORE_PENDING=1`: wait for
 //!   `/run/computer/restored` before reading `/data`);
+//! - the life: 128 random bits of this process's, never written to `/data`;
 //! - the state file (`<state>/state.json`), written whole and renamed into
 //!   place after every step that changed it, before the step's effects;
 //! - followers: for each agent and each fragment it follows (its chats'
 //!   `chat`, its own `tasks`), a wake subscription, a catch-up from the
 //!   cursor over `GET …/channels/{c}?after=`, then `__live`, reconnecting
 //!   with jitter (lesson 5);
-//! - lanes: each fragment's posts and drafts in order, retried by id;
+//! - lanes: each fragment's posts, claims and drafts in order, retried by
+//!   id; a claim is sent only while the computer is not held
+//!   (`/run/computer/hold`, a sleep's mark before its save), and its answer
+//!   goes back to the engine;
 //! - the runtime's commands (a turn's attachments downloaded first) and
 //!   events;
 //! - the keepalive socket, held while the engine says so (decision 39).
@@ -26,7 +30,7 @@ use tokio::sync::{mpsc, watch, Notify};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::{self, Api, ApiError};
-use crate::engine::{self, ChatView, Effect, Engine, Input, Settings, State};
+use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
 use crate::limits;
 use crate::net::Backoff;
 use crate::ready::Ready;
@@ -45,6 +49,9 @@ pub struct Config {
     /// `RESTORE_PENDING=1`: wait for `restored` before reading `/data`.
     pub restore_pending: bool,
     pub restored: PathBuf,
+    /// `BRIDGE_HOLD`: while this file exists the platform holds the
+    /// computer (a sleep, before its save), and the bridge claims nothing.
+    pub hold: PathBuf,
     pub settings: Settings,
     /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
     /// none, every agent the platform lists.
@@ -78,21 +85,44 @@ pub fn state_path(dir: &Path) -> PathBuf {
     dir.join("state.json")
 }
 
-/// The state as last written, or a fresh one.
+/// The state as last written, or a fresh one. A state of another format (an
+/// older bridge's) is set aside for a fresh one: the state is a cache of
+/// the journal (one life per turn), so starting from none reads the chats
+/// again and runs nothing twice. A state that contradicts itself is refused.
 pub fn load(dir: &Path) -> Result<State, BridgeError> {
     let path = state_path(dir);
+    let corrupt = |why: String| BridgeError::Corrupt(format!("{}: {why}", path.display()));
     match std::fs::read(&path) {
         Ok(bytes) => {
             if bytes.len() > limits::STATE_FILE_MAX_BYTES {
-                return Err(BridgeError::Corrupt(format!("{} is {} bytes, past the bound", path.display(), bytes.len())));
+                return Err(corrupt(format!("{} bytes, past the bound", bytes.len())));
             }
-            let state: State = serde_json::from_slice(&bytes).map_err(|e| BridgeError::Corrupt(format!("{}: {e}", path.display())))?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|e| corrupt(e.to_string()))?;
+            let Some(version) = value.get("version").and_then(Value::as_u64) else { return Err(corrupt("no version".into())) };
+            if version != u64::from(engine::STATE_VERSION) {
+                crate::ev!("state.set_aside", { "path": path.display().to_string(), "version": version, "why": "another bridge's format: the journal says which turns ran" });
+                return Ok(State::default());
+            }
+            let state: State = serde_json::from_value(value).map_err(|e| corrupt(e.to_string()))?;
             engine::check(&state).map_err(|c| BridgeError::Corrupt(c.0))?;
             Ok(state)
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
         Err(e) => Err(BridgeError::Disk(format!("{}: {e}", path.display()))),
     }
+}
+
+/// This process's life: 128 bits from the kernel's random source, as 32
+/// lowercase hex. Never written to `/data`, so no save carries it into
+/// another life (docs/chat-records.md, `turn.start`).
+pub fn new_life() -> Result<String, BridgeError> {
+    use std::io::Read;
+    let mut bits = [0u8; 16];
+    let mut random = std::fs::File::open("/dev/urandom").map_err(|e| BridgeError::Runtime(format!("/dev/urandom: {e}")))?;
+    random.read_exact(&mut bits).map_err(|e| BridgeError::Runtime(format!("/dev/urandom: {e}")))?;
+    let life = records::hex(&bits);
+    assert!(records::valid_life(&life), "a life is 32 lowercase hex");
+    Ok(life)
 }
 
 /// Writes the state whole: a temporary file, synced, renamed over the old,
@@ -188,7 +218,8 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
     let state = load(&cfg.state_dir)?;
-    let mut engine = Engine::new(state, cfg.settings).map_err(|c| BridgeError::Corrupt(c.0))?;
+    let life = new_life()?;
+    let mut engine = Engine::new(state, cfg.settings, &life).map_err(|c| BridgeError::Corrupt(c.0))?;
 
     let (inbox_tx, mut inbox) = mpsc::channel::<Msg>(limits::INBOX_MAX);
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
@@ -229,9 +260,9 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let Some(mut computer) = computer else { return Ok(()) };
     let listed = computer.agents.len();
     computer.agents = gated(computer.agents, &ready);
-    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1 });
+    crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
-    let lanes = Lanes::new(api.clone(), stop.clone());
+    let lanes = Lanes::new(api.clone(), stop.clone(), inbox_tx.clone(), cfg.hold.clone());
     let runtime_lane = RuntimeLane::spawn(api.clone(), cmd_tx, cfg.media_dir.clone());
     tokio::spawn(keepalive(api.clone(), keep_rx, stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), last: Mutex::new(HashMap::new()) };
@@ -244,6 +275,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
         for e in step.effects {
             match e {
                 Effect::Post { agent, fragment, channel, id, body, files } => lanes.push(&fragment, Job::Post { agent, channel, id, body, files }),
+                Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
                 Effect::Draft { agent, fragment, turn, text } => lanes.push(&fragment, Job::Draft { agent, turn, text }),
                 Effect::Runtime(c) => runtime_lane.push(c),
                 Effect::Keepalive(on) => {
@@ -701,11 +733,13 @@ async fn ensure_wake(api: &Api, agent: &Agent, fragment: &str, channel: &str) ->
     Ok(())
 }
 
-// ---- lanes: each fragment's posts and drafts, in order ----
+// ---- lanes: each fragment's posts, claims and drafts, in order ----
 
 #[derive(Debug, Clone)]
 enum Job {
     Post { agent: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
+    /// A turn's `turn.start` on `work`, whose answer the engine waits for.
+    Claim { agent: String, turn: String, id: String, body: Value },
     Draft { agent: String, turn: String, text: Option<String> },
 }
 
@@ -714,16 +748,25 @@ struct Lane {
     ready: Notify,
 }
 
+/// What a lane needs beside its jobs: where claims' answers go, and the
+/// hold that stops them.
+#[derive(Clone)]
+struct Claims {
+    inbox: mpsc::Sender<Msg>,
+    hold: PathBuf,
+}
+
 #[derive(Clone)]
 struct Lanes {
     api: Api,
     stop: watch::Receiver<bool>,
+    claims: Claims,
     lanes: Arc<Mutex<HashMap<String, Arc<Lane>>>>,
 }
 
 impl Lanes {
-    fn new(api: Api, stop: watch::Receiver<bool>) -> Lanes {
-        Lanes { api, stop, lanes: Arc::new(Mutex::new(HashMap::new())) }
+    fn new(api: Api, stop: watch::Receiver<bool>, inbox: mpsc::Sender<Msg>, hold: PathBuf) -> Lanes {
+        Lanes { api, stop, claims: Claims { inbox, hold }, lanes: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     fn push(&self, fragment: &str, job: Job) {
@@ -734,7 +777,7 @@ impl Lanes {
                 None => {
                     let l = Arc::new(Lane { queue: Mutex::new(VecDeque::new()), ready: Notify::new() });
                     lanes.insert(fragment.to_string(), l.clone());
-                    tokio::spawn(work(self.api.clone(), fragment.to_string(), l.clone(), self.stop.clone()));
+                    tokio::spawn(work(self.api.clone(), fragment.to_string(), l.clone(), self.claims.clone(), self.stop.clone()));
                     l
                 }
             }
@@ -757,7 +800,7 @@ impl Lanes {
 
 /// A fragment's lane: its jobs in order, each post retried until the
 /// platform takes it (its id makes a retry the same record).
-async fn work(api: Api, fragment: String, lane: Arc<Lane>, mut stop: watch::Receiver<bool>) {
+async fn work(api: Api, fragment: String, lane: Arc<Lane>, claims: Claims, mut stop: watch::Receiver<bool>) {
     let mut drafted: HashMap<String, Instant> = HashMap::new();
     // bounded by the bridge's life: one job per pass
     loop {
@@ -799,8 +842,51 @@ async fn work(api: Api, fragment: String, lane: Arc<Lane>, mut stop: watch::Rece
                 }
             }
             Job::Post { agent, channel, id, body, files } => post(&api, &fragment, &agent, channel, &id, body, &files, stop.clone()).await,
+            Job::Claim { agent, turn, id, body } => {
+                let answer = claim(&api, &fragment, &agent, &id, &body, &claims.hold, stop.clone()).await;
+                // A closed inbox is an engine that has stopped.
+                let _ = claims.inbox.send(Msg::Input(Input::Claimed { turn, answer })).await;
+            }
         }
     }
+}
+
+/// A turn's claim, posted unless the computer is held (looked at before
+/// each try, so a hold made while a try waits stops the next): the
+/// platform's answer, or none.
+#[allow(clippy::too_many_arguments)]
+async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, hold: &Path, stop: watch::Receiver<bool>) -> ClaimAnswer {
+    let mut backoff = Backoff::default();
+    for attempt in 1..=limits::POST_TRIES_MAX {
+        if hold.exists() {
+            crate::ev!("claim.held", { "fragment": fragment, "id": id, "hold": hold.display().to_string() });
+            return ClaimAnswer::Unanswered;
+        }
+        match api.post(agent, fragment, records::WORK, id, body).await {
+            Ok(replayed) => {
+                crate::ev!("claimed", { "fragment": fragment, "id": id, "replayed": replayed, "attempt": attempt });
+                return ClaimAnswer::Ours;
+            }
+            Err(e) if e.status() == Some(409) => {
+                crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id" });
+                return ClaimAnswer::Theirs;
+            }
+            Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
+                crate::ev!("claim.retry", { "fragment": fragment, "id": id, "attempt": attempt, "error": e.to_string() });
+                if !backoff.wait(stop.clone()).await {
+                    return ClaimAnswer::Unanswered;
+                }
+            }
+            Err(e) => {
+                // Out of tries, or refused (the agent gone from the fragment,
+                // which its follower hears too): nothing is known, so it fails
+                // closed. The engine claims it again at its next tick.
+                crate::ev!("claim.unanswered", { "fragment": fragment, "id": id, "error": e.to_string() });
+                return ClaimAnswer::Unanswered;
+            }
+        }
+    }
+    unreachable!("the last try returns")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -828,10 +914,16 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
                     return;
                 }
             }
+            Err(e) if e.status() == Some(409) => {
+                // Another life posted the id with another body: the end of a
+                // turn that life ended, or the records of one it claimed
+                // (one life per turn). Never retried.
+                crate::ev!("post.taken", { "fragment": fragment, "channel": channel, "id": id });
+                return;
+            }
             Err(e) => {
-                // A 409 is an id this bridge posted before with another
-                // body: a bug in the ids, never retried. A 403/404: it is no
-                // longer the agent's to post in.
+                // Out of tries, or a 403/404: it is no longer the agent's to
+                // post in.
                 crate::ev!("post.failed", { "fragment": fragment, "channel": channel, "id": id, "error": e.to_string() });
                 return;
             }

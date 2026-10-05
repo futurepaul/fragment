@@ -578,7 +578,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let runs = support::Runs::default();
 
-    let bridge = support::start(cfg.clone(), support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
     following(&fake, 2).await;
     let t1 = said_and_ended(&fake, &chat, "one").await;
     // the save: /data as it is after turn one (its end was written to the
@@ -594,7 +594,7 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
     } else {
         support::restore_state(&dir, &saved);
     }
-    let bridge = support::start(cfg, support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
     let t3 = said_and_ended(&fake, &chat, "three").await;
     assert_eq!(runs.all(), vec![t1.clone(), t2.clone(), t3.clone()], "each turn ran once");
     fake.with(|w| {
@@ -611,7 +611,6 @@ async fn rollback_case(name: &str, lose_it_all: bool) {
 /// Goal (I3): a turn that ran is never run again after a rollback: the
 /// next life wakes with a save from before it.
 #[tokio::test]
-#[ignore = "P1: a rolled-back cursor reads the record again and hands its turn to the runtime again (F2)"]
 async fn a_rollback_runs_nothing_twice() {
     rollback_case("rollback", false).await;
 }
@@ -619,7 +618,6 @@ async fn a_rollback_runs_nothing_twice() {
 /// Goal (I3): a turn that ran is never run again after `/data` is lost:
 /// the next life reads every chat from the start.
 #[tokio::test]
-#[ignore = "P1: a lost state reads every record again and hands every turn to the runtime again (F2)"]
 async fn a_lost_state_runs_nothing_twice() {
     rollback_case("lost-state", true).await;
 }
@@ -628,7 +626,6 @@ async fn a_lost_state_runs_nothing_twice() {
 /// never run again, whether the next life wakes with the state from before
 /// the turn, the state the crash left (the turn running), or none.
 #[tokio::test]
-#[ignore = "P1: a state from before the turn reads its record again and runs it again"]
 async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
     for wakes in ["before", "during", "none"] {
         let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -639,7 +636,7 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
         // drafts 100 ms apart: `slow` runs two seconds, time to kill it in
         let pace = Duration::from_millis(100);
 
-        let bridge = support::start(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
         following(&fake, 2).await;
         let t1 = said_and_ended(&fake, &chat, "one").await;
         let before = support::save_state(&dir);
@@ -654,7 +651,7 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
             _ => support::lose_state(&dir),
         }
 
-        let bridge = support::start(cfg, support::counting(support::script_paced(pace), &runs));
+        let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
         let t3 = said_and_ended(&fake, &chat, "after").await;
         assert_eq!(runs.all(), vec![t1.clone(), ts.clone(), t3.clone()], "{wakes}: the cut turn ran once, in the life it was cut in");
         fake.with(|w| {
@@ -672,7 +669,6 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
 /// by the next life, even one that wakes with an older save, and the turn
 /// that save does not know is not run again for it.
 #[tokio::test]
-#[ignore = "P1: the older save's cursor runs the turn it does not know again before the new message"]
 async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -680,7 +676,7 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let runs = support::Runs::default();
 
-    let bridge = support::start(cfg.clone(), support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
     following(&fake, 2).await;
     let t1 = said_and_ended(&fake, &chat, "one").await;
     let saved = support::save_state(&dir);
@@ -692,7 +688,7 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let three = fake.say(&chat, &person("paul"), json!({ "text": "three" }));
     let t3 = turn_of("juniper", &chat, seq(&three));
     support::restore_state(&dir, &saved);
-    let bridge = support::start(cfg, support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
     fake.until(WAIT, "three's end", |w| !ends_of(w, &chat, &t3).is_empty()).await;
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
@@ -708,7 +704,6 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
 /// once the fake has refused the claim twice (the lane tried it again),
 /// nothing has run; then the platform answers, and the turn runs once.
 #[tokio::test]
-#[ignore = "P1: the runtime is handed the turn as its turn.start is posted, answered or not"]
 async fn a_claim_the_platform_never_answers_runs_nothing() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -734,7 +729,6 @@ async fn a_claim_the_platform_never_answers_runs_nothing() {
 /// kept, unclaimed, while the computer is held awake for it (its keepalive,
 /// the proof the bridge has it), and is claimed and run once the hold goes.
 #[tokio::test]
-#[ignore = "P1: the bridge knows no hold"]
 async fn held_it_claims_nothing() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -764,7 +758,6 @@ async fn held_it_claims_nothing() {
 /// computer is never claimed by the life the sleep ends: the next life,
 /// woken from the save the sleep took, answers it once.
 #[tokio::test]
-#[ignore = "P1: the bridge knows no hold, so the dying life claims and runs the message"]
 async fn a_message_during_a_hold_waits_for_the_next_life() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
     let chat = fake.chat("talk", &["juniper"]);
@@ -772,7 +765,7 @@ async fn a_message_during_a_hold_waits_for_the_next_life() {
     let cfg = support::config(&fake.url(), &dir, support::settings());
     let runs = support::Runs::default();
 
-    let bridge = support::start(cfg.clone(), support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
     following(&fake, 2).await;
     let t1 = said_and_ended(&fake, &chat, "one").await;
     fake.until(WAIT, "the keepalive let go after one", |w| w.keepalive_open == 0 && w.keepalive_log.last() == Some(&false)).await;
@@ -792,7 +785,7 @@ async fn a_message_during_a_hold_waits_for_the_next_life() {
     support::unhold(&dir);
     support::restore_state(&dir, &saved);
 
-    let bridge = support::start(cfg, support::counting(support::script(), &runs));
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
     fake.until(WAIT, "two's end, in the next life", |w| !ends_of(w, &chat, &t2).is_empty()).await;
     assert_eq!(runs.all(), vec![t1, t2.clone()], "two ran once, in the next life");
     fake.with(|w| {

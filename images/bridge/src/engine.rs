@@ -6,12 +6,32 @@
 //!
 //! What it keeps (lesson 1, authority): a cursor per followed channel and
 //! the turns it admitted that have not ended. The chat channel owns what was
-//! said; the runtime owns the in-flight turn; the bridge only translates.
+//! said; the chat's `work` channel owns which turns have started (the
+//! journal); the runtime owns the in-flight turn; the bridge only
+//! translates. Its state is a cache: lost, or restored from any earlier
+//! save, it costs reads, never a second run (docs/explorations/
+//! pi-durable.md, P1).
 //!
 //! Its rules, in one place:
-//! - A record is admitted once: the cursor of its `(agent, fragment,
-//!   channel)` passes it before anything it causes is done, so a catch-up
-//!   after a restart, a wake, or a reconnect starts nothing twice (lesson 2).
+//! - A record is admitted once in a life: the cursor of its `(agent,
+//!   fragment, channel)` passes it before anything it causes is done, so a
+//!   catch-up after a reconnect starts nothing twice (lesson 2).
+//! - A turn runs only in the life that claimed it. Each bridge process is a
+//!   life, with 128 random bits of its own that are never written to
+//!   `/data`. A turn's claim is its `turn.start` on `work`, naming the
+//!   life; the runtime is given the turn only once the platform answers
+//!   the claim as this life's (appended, or a replay of this life's own
+//!   retry). A 409 is another life's claim: never run here, the turn is
+//!   ended as lost (a 409 itself when that life ended it) and forgotten. No
+//!   answer starts nothing: the turn stays queued and is claimed again. So
+//!   a cursor a rollback sent back reads a record again and runs nothing
+//!   twice (one life per turn, at most once).
+//! - A life's first step ends every turn its state holds that is not
+//!   queued: an earlier life claimed it, and that life is gone.
+//! - A turn is claimed only while the runtime can take it (`Connected`),
+//!   so a turn waits, unclaimed, for a runtime that is still starting.
+//! - Every turn gets both records: a turn refused, or stopped while it
+//!   waited, posts its `turn.start` and then its `turn.end`.
 //! - One turn of an agent runs in a chat at a time; the rest wait in order.
 //! - In a chat with several agents, a message is for the agents it names
 //!   (`to`, else `@mentions` of this computer's agents), else for the lead,
@@ -23,7 +43,7 @@
 //! - The computer is kept awake while a turn waits to run or runs, and not
 //!   while every open turn waits on a person.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,15 +52,20 @@ use crate::limits;
 use crate::records::{self, AttachmentRef, Cause, Closed, Message, Outcome, PromptOption, Record, Said, Task};
 use crate::runtime::{Agent, Command, Event, LocalFile, TurnStart};
 
-/// The state file's format.
-pub const STATE_VERSION: u32 = 1;
+/// The state file's format. 2: one life per turn (no `handed` phase).
+pub const STATE_VERSION: u32 = 2;
 
-/// What the bridge keeps across restarts (`/data/bridge/state.json`).
+/// Why a turn an earlier life claimed is ended.
+pub const LOST: &str = "lost when the computer restarted";
+
+/// What the bridge keeps across restarts (`/data/bridge/state.json`): a
+/// cache of where to read from and what it has in hand, never the
+/// authority on which turns have run (the journal is).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub version: u32,
-    /// How many times this state was loaded: a turn from an earlier boot was
-    /// in the runtime that died with it.
+    /// How many times this state was loaded (a restored one counts from its
+    /// save's number again): for the log.
     pub boot: u64,
     /// The last seq handled, per `agent|fragment|channel`.
     pub cursors: BTreeMap<String, u64>,
@@ -48,7 +73,8 @@ pub struct State {
     pub turns: BTreeMap<String, Turn>,
     /// Admissions so far: a turn's place in its chat's queue.
     pub admitted: u64,
-    /// Messages the runtime said on its own so far (their turns' ids).
+    /// Messages the runtime said on its own so far (their turns' ids, with
+    /// the life).
     pub said: u64,
 }
 
@@ -62,14 +88,27 @@ impl Default for State {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
-    /// Admitted; another turn of its agent runs in its chat.
+    /// Admitted, and not claimed as this life's: another turn of its agent
+    /// runs in its chat, its runtime cannot take it yet, or its claim is
+    /// unanswered (in flight, held, or lost). Any life may claim it.
     Queued,
-    /// Given to the runtime, not yet taken (a restart gives it again).
-    Handed,
-    /// The runtime's (a restart ends it).
+    /// Its claim was answered as this life's, and the runtime has it (a
+    /// restart ends it: one life per turn).
     Running,
     /// Waiting on a prompt's answer: the computer may sleep.
     Waiting,
+}
+
+/// The platform's answer to a claim (`Effect::Claim`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimAnswer {
+    /// Appended, or a replay of this life's own retry: this life runs it.
+    Ours,
+    /// 409: another life's claim holds the id.
+    Theirs,
+    /// No answer after the lane's tries, or never sent (the computer is
+    /// held): nothing is known, so nothing starts.
+    Unanswered,
 }
 
 /// A prompt a turn asked.
@@ -111,8 +150,6 @@ pub struct Turn {
     /// Its admission's number: the order turns of a chat run in.
     pub order: u64,
     pub phase: Phase,
-    /// The boot that admitted or last handed it.
-    pub boot: u64,
     /// When the runtime was last heard about it (or it was handed).
     pub last_ms: u64,
     pub steps: u32,
@@ -126,8 +163,9 @@ pub struct Turn {
 }
 
 impl Turn {
+    /// This life's claim was answered, and the runtime has it.
     fn active(&self) -> bool {
-        matches!(self.phase, Phase::Handed | Phase::Running | Phase::Waiting)
+        matches!(self.phase, Phase::Running | Phase::Waiting)
     }
 }
 
@@ -158,7 +196,9 @@ pub enum Input {
     /// history: its cursor passes it, and it starts nothing.
     Record { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64 },
     Runtime(Event),
-    /// Time passed: expiries and quiet turns.
+    /// The platform's answer to a turn's claim.
+    Claimed { turn: String, answer: ClaimAnswer },
+    /// Time passed: expiries, quiet turns, and claims to try again.
     Tick,
     /// The agent is no longer in the fragment (403 or 404 there).
     Gone { agent: String, fragment: String },
@@ -170,6 +210,10 @@ pub enum Effect {
     /// A record, as `agent`; `files` are uploaded as the fragment's blobs and
     /// listed in the body's `attachments` first.
     Post { agent: String, fragment: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
+    /// A turn's claim: its `turn.start` on `work` as this life, posted in
+    /// its fragment's order unless the computer is held, and answered back
+    /// as `Input::Claimed`. The runtime hears of the turn only after.
+    Claim { agent: String, fragment: String, turn: String, id: String, body: Value },
     /// The chat's draft for a turn (`None` stops it).
     Draft { agent: String, fragment: String, turn: String, text: Option<String> },
     Runtime(Command),
@@ -208,6 +252,14 @@ impl Default for Settings {
 pub struct Engine {
     state: State,
     settings: Settings,
+    /// This bridge process's life: never written to the state, so no save
+    /// carries it into another life.
+    life: String,
+    /// The runtime can take turns now.
+    connected: bool,
+    /// Turns whose claim is posted and not answered yet: queued in the
+    /// state, so a crash leaves them for the next life to claim.
+    claiming: BTreeSet<String>,
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
@@ -226,15 +278,21 @@ fn label(fragment: &str) -> &str {
 }
 
 impl Engine {
-    /// An engine over a loaded state. It checks the state agrees with
-    /// itself; then `recover` must run before any other step.
-    pub fn new(state: State, settings: Settings) -> Result<Engine, Corrupt> {
+    /// An engine over a loaded state, in the life `life` (this process's,
+    /// 32 lowercase hex). It checks the state agrees with itself; then
+    /// `recover` must run before any other step.
+    pub fn new(state: State, settings: Settings, life: &str) -> Result<Engine, Corrupt> {
+        assert!(records::valid_life(life), "a life is 32 lowercase hex: {life}");
         check(&state)?;
-        Ok(Engine { state, settings, agents: Vec::new(), views: HashMap::new(), keepalive: false, out: Vec::new(), dirty: false, now: 0 })
+        Ok(Engine { state, settings, life: life.to_string(), connected: false, claiming: BTreeSet::new(), agents: Vec::new(), views: HashMap::new(), keepalive: false, out: Vec::new(), dirty: false, now: 0 })
     }
 
     pub fn state(&self) -> &State {
         &self.state
+    }
+
+    pub fn life(&self) -> &str {
+        &self.life
     }
 
     pub fn agents(&self) -> &[Agent] {
@@ -249,33 +307,23 @@ impl Engine {
         self.keepalive
     }
 
-    /// The first step of a boot: a new boot number; turns the runtime held
-    /// when the last boot ended are ended (it died with them), turns handed
-    /// but never taken are handed again, and every chat's queue moves.
+    /// The first step of a life: a new boot number, and every turn the state
+    /// holds that is not queued is ended as lost. An earlier life claimed it
+    /// (its claim was answered, or the state would hold it queued), and the
+    /// runtime that had it died with that life: one life per turn, never
+    /// handed again. Queued turns stay queued, for this life to claim once
+    /// its runtime can take them.
     pub fn recover(&mut self, now: u64) -> Step {
         self.begin(now);
+        assert!(self.claiming.is_empty(), "a life recovers before it claims");
         self.state.boot += 1;
         self.dirty = true;
-        let boot = self.state.boot;
-        let ids: Vec<String> = self.state.turns.keys().cloned().collect();
-        for id in &ids {
-            let phase = self.state.turns[id].phase;
-            match phase {
-                Phase::Queued => {}
-                Phase::Handed => {
-                    let t = self.state.turns.get_mut(id).expect("listed");
-                    t.phase = Phase::Queued;
-                }
-                Phase::Running | Phase::Waiting => self.end(id, Outcome::Error("lost when the computer restarted".into()), Closed::Expired),
-            }
+        let earlier: Vec<String> = self.state.turns.values().filter(|t| t.phase != Phase::Queued).map(|t| t.id.clone()).collect();
+        for id in &earlier {
+            self.end(id, Outcome::Error(LOST.into()), Closed::Expired);
         }
-        for t in self.state.turns.values_mut() {
-            t.boot = boot;
-        }
-        let chats: Vec<(String, String)> = self.state.turns.values().map(|t| (t.agent.clone(), t.fragment.clone())).collect();
-        for (agent, fragment) in chats {
-            self.pump(&agent, &fragment);
-        }
+        assert!(self.state.turns.values().all(|t| t.phase == Phase::Queued), "a recovered life holds only queued turns");
+        self.pump_all();
         self.finish()
     }
 
@@ -286,6 +334,7 @@ impl Engine {
             Input::Agents(agents) => self.set_agents(agents),
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
             Input::Runtime(event) => self.runtime(event),
+            Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::Tick => self.tick(),
             Input::Gone { agent, fragment } => self.gone(&agent, &fragment),
         }
@@ -300,12 +349,15 @@ impl Engine {
     }
 
     fn finish(&mut self) -> Step {
-        let busy = self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Handed | Phase::Running));
+        let busy = self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running));
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));
         }
         assert!(self.state.turns.len() <= limits::TURNS_OPEN_MAX, "admission bounds the open turns");
+        for id in &self.claiming {
+            assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
+        }
         debug_assert!(check(&self.state).is_ok(), "a step keeps the state whole");
         Step { effects: std::mem::take(&mut self.out), dirty: self.dirty }
     }
@@ -330,6 +382,7 @@ impl Engine {
         let gone: Vec<String> = self.state.turns.values().filter(|t| self.agent(&t.agent).is_none()).map(|t| t.id.clone()).collect();
         for id in gone {
             let t = self.state.turns.remove(&id).expect("listed");
+            self.claiming.remove(&id);
             self.dirty = true;
             crate::ev!("turn.dropped", { "turn": id, "agent": t.agent, "why": "the agent left this computer" });
             if t.active() {
@@ -436,7 +489,7 @@ impl Engine {
         };
         if let Some(why) = refusal {
             crate::ev!("turn.refused", { "turn": id, "agent": agent.fragment, "fragment": fragment, "why": why });
-            self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &Outcome::Error(why.into())), Vec::new());
+            self.end_unrun(&agent.fragment, fragment, &id, asker, &agent.identity, &cause, Outcome::Error(why.into()));
             return;
         }
         self.state.admitted += 1;
@@ -453,7 +506,6 @@ impl Engine {
             hop,
             order: self.state.admitted,
             phase: Phase::Queued,
-            boot: self.state.boot,
             last_ms: self.now,
             steps: 0,
             replies: 0,
@@ -468,23 +520,85 @@ impl Engine {
         self.pump(&agent.fragment, fragment);
     }
 
-    /// Hands the chat's next turn to the runtime when none of its agent's
-    /// runs there.
+    /// A turn that ends without running here (refused, or stopped while it
+    /// waited): its claim, then its end, so it has both records as every
+    /// turn does. When another life claimed it, the first is a 409, and so
+    /// is the second if that life ended it.
+    #[allow(clippy::too_many_arguments)]
+    fn end_unrun(&mut self, agent: &str, fragment: &str, id: &str, asker: &str, identity: &str, cause: &Cause, outcome: Outcome) {
+        let start = records::turn_start(id, asker, identity, cause, &self.life);
+        self.post(agent, fragment, records::WORK, records::work_id(id, "start"), start, Vec::new());
+        self.post(agent, fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &outcome), Vec::new());
+    }
+
+    /// Claims the chat's next turn when its runtime can take one and none
+    /// of its agent's runs, or is being claimed, there. Nothing is persisted:
+    /// the turn stays queued in the state until its claim is answered, so a
+    /// life that ends meanwhile leaves it for the next to claim (a 409 then,
+    /// if this claim had landed).
     fn pump(&mut self, agent: &str, fragment: &str) {
-        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && t.active());
+        if !self.connected {
+            return;
+        }
+        let busy = self.state.turns.values().any(|t| t.agent == agent && t.fragment == fragment && (t.active() || self.claiming.contains(&t.id)));
         if busy {
             return;
         }
         let next = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment && t.phase == Phase::Queued).min_by_key(|t| t.order).map(|t| t.id.clone());
         let Some(id) = next else { return };
-        let Some(a) = self.agent(agent).cloned() else { return };
+        let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
+        let t = &self.state.turns[&id];
+        let body = records::turn_start(&id, &t.asker, &identity, &t.cause, &self.life);
+        let fragment = t.fragment.clone();
+        self.claiming.insert(id.clone());
+        crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
+        self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body });
+    }
+
+    /// Every chat's queue moves (a claim may be due in any).
+    fn pump_all(&mut self) {
+        let chats: BTreeSet<(String, String)> = self.state.turns.values().map(|t| (t.agent.clone(), t.fragment.clone())).collect();
+        for (agent, fragment) in chats {
+            self.pump(&agent, &fragment);
+        }
+    }
+
+    /// A claim's answer: this life runs the turn; or it is another life's,
+    /// and ends as lost; or nothing is known, and it waits for the next
+    /// tick's claim (never sooner, so a held computer is asked once a tick).
+    fn claimed(&mut self, id: &str, answer: ClaimAnswer) {
+        if !self.claiming.remove(id) {
+            // Stopped, or its agent gone, while its claim was in flight.
+            crate::ev!("claim.stale", { "turn": id, "answer": format!("{answer:?}") });
+            return;
+        }
+        assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
+        match answer {
+            ClaimAnswer::Ours => self.hand(id),
+            ClaimAnswer::Theirs => {
+                let t = self.state.turns.remove(id).expect("checked");
+                self.dirty = true;
+                crate::ev!("turn.lost", { "turn": id, "agent": t.agent, "why": "another life claimed it" });
+                self.post(&t.agent, &t.fragment, records::WORK, records::work_id(id, "end"), records::turn_end(id, &Outcome::Error(LOST.into())), Vec::new());
+                self.pump(&t.agent, &t.fragment);
+            }
+            ClaimAnswer::Unanswered => crate::ev!("claim.unanswered", { "turn": id }),
+        }
+    }
+
+    /// Hands a turn this life claimed to the runtime: from here a restart
+    /// ends it.
+    fn hand(&mut self, id: &str) {
+        let agent = self.state.turns[id].agent.clone();
+        let a = self.agent(&agent).cloned().expect("a held turn's agent is on this computer");
         let now = self.now;
-        let t = self.state.turns.get_mut(&id).expect("found");
-        t.phase = Phase::Handed;
+        let t = self.state.turns.get_mut(id).expect("checked");
+        t.phase = Phase::Running;
         t.last_ms = now;
+        self.dirty = true;
         let start = TurnStart {
-            turn: id.clone(),
-            agent: a.clone(),
+            turn: id.to_string(),
+            agent: a,
             fragment: t.fragment.clone(),
             chat_name: label(&t.fragment).to_string(),
             seq: t.cause.seq,
@@ -495,11 +609,7 @@ impl Engine {
             files: Vec::new(),
             routine: t.routine,
         };
-        let body = records::turn_start(&id, &t.asker, &a.identity, &t.cause);
-        let fragment = t.fragment.clone();
-        self.dirty = true;
-        crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": fragment });
-        self.post(agent, &fragment, records::WORK, records::work_id(&id, "start"), body, Vec::new());
+        crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));
     }
 
@@ -526,12 +636,15 @@ impl Engine {
         }
         match phase {
             Phase::Queued => {
-                self.state.turns.remove(&id);
+                // Never run here (a claim in flight is answered to no one).
+                let t = self.state.turns.remove(&id).expect("found");
+                self.claiming.remove(&id);
                 self.dirty = true;
                 crate::ev!("turn.stopped", { "turn": id, "phase": "queued" });
-                self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &Outcome::Stopped), Vec::new());
+                self.end_unrun(&agent.fragment, fragment, &id, &t.asker, &agent.identity, &t.cause, Outcome::Stopped);
+                self.pump(&agent.fragment, fragment);
             }
-            Phase::Handed | Phase::Running | Phase::Waiting => {
+            Phase::Running | Phase::Waiting => {
                 let t = self.state.turns.get_mut(&id).expect("found");
                 if t.stop_requested {
                     return;
@@ -591,9 +704,9 @@ impl Engine {
     fn runtime(&mut self, event: Event) {
         let turn_of = |e: &Event| -> Option<String> {
             match e {
-                Event::Accepted { turn } | Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
+                Event::Draft { turn, .. } | Event::Reply { turn, .. } | Event::Attachment { turn, .. } | Event::Retract { turn, .. } => Some(turn.clone()),
                 Event::Step { turn, .. } | Event::Prompt { turn, .. } | Event::End { turn, .. } => Some(turn.clone()),
-                Event::Say { .. } => None,
+                Event::Connected(_) | Event::Say { .. } => None,
             }
         };
         if let Some(id) = turn_of(&event) {
@@ -606,12 +719,12 @@ impl Engine {
             }
         }
         match event {
-            Event::Accepted { turn } => {
-                let t = self.state.turns.get_mut(&turn).expect("checked");
-                if t.phase == Phase::Handed {
-                    t.phase = Phase::Running;
-                    self.dirty = true;
+            Event::Connected(connected) => {
+                if connected != self.connected {
+                    crate::ev!("runtime.connected", { "connected": connected });
                 }
+                self.connected = connected;
+                self.pump_all();
             }
             Event::Draft { turn, text } => {
                 let t = &self.state.turns[&turn];
@@ -646,7 +759,7 @@ impl Engine {
                 }
                 self.state.said += 1;
                 self.dirty = true;
-                let turn = records::said_turn_id(&agent, self.state.said);
+                let turn = records::said_turn_id(&agent, &self.life, self.state.said);
                 crate::ev!("said", { "agent": agent, "fragment": fragment, "turn": turn });
                 self.post(&agent, &fragment, records::CHAT, records::reply_id(&turn, 1), records::reply(&text, &turn, &[], 0), Vec::new());
             }
@@ -769,7 +882,7 @@ impl Engine {
             for p in t.prompts.iter().filter(|p| !p.closed && p.expires_at <= now) {
                 expired.push((t.id.clone(), p.id.clone()));
             }
-            let idle = matches!(t.phase, Phase::Handed | Phase::Running) && now.saturating_sub(t.last_ms) > self.settings.turn_idle_ms;
+            let idle = t.phase == Phase::Running && now.saturating_sub(t.last_ms) > self.settings.turn_idle_ms;
             if idle {
                 quiet.push(t.id.clone());
             }
@@ -791,12 +904,16 @@ impl Engine {
             self.out.push(Effect::Runtime(Command::Forget { turn: id.clone() }));
             self.end(&id, Outcome::Error("the agent stopped answering".into()), Closed::Expired);
         }
+        // A claim left unanswered (no answer, or the computer held) is
+        // claimed again.
+        self.pump_all();
     }
 
     fn gone(&mut self, agent: &str, fragment: &str) {
         let ids: Vec<String> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment).map(|t| t.id.clone()).collect();
         for id in ids {
             let t = self.state.turns.remove(&id).expect("listed");
+            self.claiming.remove(&id);
             self.dirty = true;
             crate::ev!("turn.dropped", { "turn": id, "why": "the agent is no longer in this fragment" });
             if t.active() {

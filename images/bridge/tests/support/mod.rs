@@ -5,10 +5,10 @@
 //! The tools of the failure cases (docs/explorations/pi-durable.md,
 //! "Testing the failure cases"):
 //!
-//! - `Running::kill`: an abrupt stop. The bridge runs on a tokio runtime of
-//!   its own, and a kill shuts that runtime down: every task it spawned ends
-//!   at its next await, with no SIGTERM path, and the state file is as the
-//!   last step wrote it, which is what a crash leaves;
+//! - `Running::kill`: an abrupt stop. A bridge from `start_killable` runs on
+//!   a tokio runtime of its own, and a kill shuts that runtime down: every
+//!   task it spawned ends at its next await, with no SIGTERM path, and the
+//!   state file is as the last step wrote it, which is what a crash leaves;
 //! - `save_state`, `restore_state`, `lose_state`: a save of the bridge's
 //!   state directory, put back (a rollback), or removed (a lost `/data`);
 //! - `counting`: a runtime that records each turn it is given
@@ -56,7 +56,8 @@ pub fn script_paced(pace: Duration) -> Box<dyn Runtime> {
     Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script") } })
 }
 
-/// A bridge running in this process, on a tokio runtime of its own.
+/// A bridge running in this process: on the test's own runtime (`start`),
+/// or on a runtime of its own, so a kill can end it (`start_killable`).
 pub struct Running {
     stop: watch::Sender<bool>,
     handle: Option<tokio::task::JoinHandle<Result<(), BridgeError>>>,
@@ -64,10 +65,21 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), settings, agents_file: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), settings, agents_file: None }
 }
 
+/// A bridge on the test's runtime, beside the fakes, as the tests have run
+/// it from the start (its posts and its runtime's frames interleave with
+/// the fakes' work on one thread); stopped with `stop`.
 pub fn start(cfg: Config, runtime: Box<dyn Runtime>) -> Running {
+    fragment_bridge::log::set_quiet(std::env::var("BRIDGE_TEST_LOG").is_err());
+    let (stop, rx) = watch::channel(false);
+    let handle = tokio::spawn(driver::run(cfg, runtime, rx));
+    Running { stop, handle: Some(handle), runtime: None }
+}
+
+/// A bridge on a runtime of its own, which `kill` shuts down whole.
+pub fn start_killable(cfg: Config, runtime: Box<dyn Runtime>) -> Running {
     fragment_bridge::log::set_quiet(std::env::var("BRIDGE_TEST_LOG").is_err());
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("bridge").enable_all().build().expect("a runtime for the bridge");
     let (stop, rx) = watch::channel(false);
@@ -91,8 +103,11 @@ impl Running {
     /// Kills it, as a crash does: every task ends where it is (its sockets
     /// close, its listener's port is free), nothing is flushed, and the
     /// state file is as its last step wrote it (written whole and renamed,
-    /// so a crash leaves the old state or the new).
+    /// so a crash leaves the old state or the new). Only a bridge started
+    /// with `start_killable`: one on the test's runtime leaves its tasks
+    /// running when its own is aborted.
     pub async fn kill(mut self) {
+        assert!(self.runtime.is_some(), "a killed bridge was started with start_killable");
         self.handle.take();
         self.shut_down().await;
     }

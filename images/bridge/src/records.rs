@@ -236,10 +236,20 @@ pub fn turn_id(agent: &str, fragment: &str, channel: &str, seq: u64) -> String {
 }
 
 /// A turn of an agent's own (a message its runtime sent with no turn
-/// running): numbered by the bridge's own counter.
-pub fn said_turn_id(agent: &str, n: u64) -> String {
-    let digest = Sha256::digest(format!("{agent}|said/{n}").as_bytes());
+/// running): numbered by the bridge's own counter within its life. The
+/// counter is kept in `/data`, which a rollback sends back, so the life is
+/// in the id too: a number said again in a later life names a new turn,
+/// never one an earlier life posted with other text (a 409).
+pub fn said_turn_id(agent: &str, life: &str, n: u64) -> String {
+    assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
+    let digest = Sha256::digest(format!("{agent}|said/{life}/{n}").as_bytes());
     hex(&digest)[..24].to_string()
+}
+
+/// Whether `s` is a life: one bridge process's 128 random bits, as 32
+/// lowercase hex (docs/chat-records.md, `turn.start`).
+pub fn valid_life(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -303,9 +313,14 @@ pub struct Cause {
     pub seq: u64,
 }
 
-pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause) -> Value {
+/// A turn's claim: "this life runs this turn" (docs/chat-records.md). The
+/// platform answers the same id and body again as a replay and another
+/// body as 409, so with the life in the body this life's own retry is a
+/// replay and any other life's claim of the turn is a 409.
+pub fn turn_start(turn: &str, asker: &str, agent: &str, cause: &Cause, life: &str) -> Value {
+    assert!(valid_life(life), "a life is 32 lowercase hex: {life}");
     json!({ "kind": "turn.start", "turn": turn, "asker": asker, "agent": agent,
-        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq } })
+        "cause": { "fragment": cause.fragment, "channel": cause.channel, "seq": cause.seq }, "life": life })
 }
 
 /// One step of a turn (a tool call), numbered from 1.
@@ -499,13 +514,20 @@ mod tests {
         for id in [work_id(&t, "start"), work_id(&t, "7"), work_id(&t, "p:ab12cd.0011aabb"), work_id(&t, "end"), reply_id(&t, 1)] {
             assert!(valid_post_id(&id), "{id}");
         }
-        assert_ne!(said_turn_id("a", 1), said_turn_id("a", 2));
+        let (one, two) = ("0".repeat(32), "1".repeat(32));
+        assert_ne!(said_turn_id("a", &one, 1), said_turn_id("a", &one, 2));
+        assert_ne!(said_turn_id("a", &one, 1), said_turn_id("a", &two, 1), "a counter said again in another life is another turn");
+        assert_eq!(said_turn_id("a", &one, 1), said_turn_id("a", &one, 1));
+        for bad in ["", "0", &"A".repeat(32), &"g".repeat(32), &"0".repeat(33)] {
+            assert!(!valid_life(bad), "{bad}");
+        }
     }
 
     #[test]
     fn bodies_are_the_docs() {
         let c = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 4 };
-        assert_eq!(turn_start("t", "id:p", "id:a", &c), json!({ "kind": "turn.start", "turn": "t", "asker": "id:p", "agent": "id:a", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 4 } }));
+        let life = "0123456789abcdef0123456789abcdef";
+        assert_eq!(turn_start("t", "id:p", "id:a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "id:p", "agent": "id:a", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 4 }, "life": life }));
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new() };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "args": "ls", "ok": true, "excerpt": "" }));
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
