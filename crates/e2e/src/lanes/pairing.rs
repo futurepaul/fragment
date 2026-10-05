@@ -158,6 +158,10 @@ pub fn pairing(s: &mut Suite, _: &Api) -> Result<()> {
     if !s.section("pairing", &[crate::Need::Nodes, crate::Need::Computers, crate::Need::Node]) {
         return Ok(());
     }
+    if s.real_engine() {
+        s.skip("a node pairs, is placed on by choice, and is revoked", "its nodes to pair run on the engine double (FRAGMENT_E2E_NODES=two); this run's one node is the real engine's");
+        return Ok(());
+    }
     let api = s.api();
     let platform = s.platform();
     let (ann, ann_session) = person(&api)?;
