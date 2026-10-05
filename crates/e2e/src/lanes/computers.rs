@@ -326,8 +326,11 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         answered && replies.first().is_some_and(|r| if scripted { echoed(r, "hello there") } else { said_something(r) }),
         json!(replies),
     );
+    // its end is posted just after its reply
+    let started_and_ended = |work: &[Value]| ["turn.start", "turn.end"].iter().all(|k| work.iter().any(|r| r["body"]["kind"] == *k && r["principal"] == identity.as_str()));
+    s.eventually(Duration::from_secs(10), || started_and_ended(&records(api, &owner, &chat_name, "work")));
     let work = records(api, &owner, &chat_name, "work");
-    s.ok("its turn starts and ends on work", ["turn.start", "turn.end"].iter().all(|k| work.iter().any(|r| r["body"]["kind"] == *k && r["principal"] == identity.as_str())), json!(work));
+    s.ok("its turn starts and ends on work", started_and_ended(&work), json!(work));
     let mut replies_so_far = 1;
     if !scripted {
         for label in [
