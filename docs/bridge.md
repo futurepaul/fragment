@@ -17,7 +17,10 @@ ended.
   (`BRIDGE_AGENTS_FILE`): a computer's agents may change while it runs.
 - `runtime/`: `relay` (Hermes' Relay connector) and `script` (a
   deterministic agent, the stub image's).
-- `screen.rs`: a screen page and an RFB proxy with Take over / Give back.
+- `screen.rs`: a screen page and an RFB proxy with Take over / Give back:
+  its input gate follows every message noVNC 1.7.0 sends (the extended
+  clipboard's negative length, the extended pointer event), and its
+  control socket answers on an image with no display (the stub's) too.
 
 ## A runtime
 

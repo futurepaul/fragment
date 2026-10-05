@@ -698,6 +698,22 @@ impl Socket {
         }
     }
 
+    /// The next `n` bytes of binary frames (an RFB stream's); `Err` on a
+    /// timeout or a close.
+    pub fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        // bounded by the socket's read timeout
+        while out.len() < n {
+            match self.0.read()? {
+                tungstenite::Message::Binary(b) => out.extend_from_slice(&b),
+                tungstenite::Message::Close(f) => anyhow::bail!("closed {}", f.map(|f| u16::from(f.code)).unwrap_or(0)),
+                _ => {}
+            }
+        }
+        out.truncate(n);
+        Ok(out)
+    }
+
     /// The very next frame, which must be of `kind`: a check that nothing
     /// else came first (`until` would skip it).
     pub fn expect(&mut self, kind: &str) -> Result<Value> {
