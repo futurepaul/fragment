@@ -128,12 +128,6 @@ const EXIT_WAIT_MS: i64 = 5_000;
 const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/restored";
 const HOLD_MARK: &str = "mkdir -p /run/computer && touch /run/computer/hold";
 const HOLD_UNMARK: &str = "rm -f /run/computer/hold";
-/// The guest's ask for a fresh root (docs/computers.md, "Saves and what a
-/// wake restores"): it changed outside `/data` what must not reach its next
-/// life (our Hermes image: anything run as root), so its sleep takes no
-/// snapshot, and the next wake starts from the image and the save. `test`
-/// is `sh`'s own; it answers 0 only when asked.
-const NO_SNAPSHOT_ASKED: &str = "test -e /run/computer/no-snapshot";
 /// A marker's exec answers within this, or it failed: a sleep goes on
 /// without its hold, a start fails.
 const MARK_EXEC_MS: i64 = 30_000;
@@ -777,10 +771,8 @@ impl ComputerCell {
     /// snapshot it, signal, give the guest five seconds, destroy. A save
     /// that fails keeps the save before it and is noted; the sleep goes on
     /// (F6 of docs/explorations/pi-durable.md: P2's to change), and takes no
-    /// snapshot, since a snapshot is only ever a cache of a save; nor does
-    /// one whose guest asked for a fresh root (`NO_SNAPSHOT_ASKED`). A
-    /// snapshot that fails forgets nothing: the one kept is still its own
-    /// save's.
+    /// snapshot, since a snapshot is only ever a cache of a save. A snapshot
+    /// that fails forgets nothing: the one kept is still its own save's.
     async fn sleep(&self, generation: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
@@ -809,16 +801,7 @@ impl ComputerCell {
                 }
             };
             if let (true, Some(save)) = (self.cfg.computer_snapshots, saved) {
-                // asked after the save: a turn the guest claimed before its
-                // hold may still have run as root. An exec that fails asks
-                // nothing, as before there was an ask.
-                if self.mark(&g, NO_SNAPSHOT_ASKED).await.is_ok() {
-                    // the save is current, and a snapshot of the one before
-                    // it went as it was kept (`keep_backup`)
-                    console_log!("{}", json!({ "computer": id, "snapshot": "declined", "generation": generation, "why": "the guest asked for a fresh root" }));
-                } else {
-                    self.snapshot(generation, &save).await;
-                }
+                self.snapshot(generation, &save).await;
             }
             let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
             let _ = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await;

@@ -54,15 +54,12 @@ RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestr
 # install`, a binary into /usr/local/bin, `sudo npm install -g`. The
 # computer is one person's VM and holds no secret (decisions 13, 43, 44),
 # so root inside it opens nothing of anyone else's. The system's
-# directories stay root's, so every change outside /data and /tmp goes
-# through sudo, and sudo logs each command to /run/computer/no-snapshot
-# (hermes-boot makes the directory at each start): a sleep after one takes
-# no snapshot, and the next wake starts from the image and the save
-# (docs/computers.md), so what was installed is gone. apt's lists are
-# kept, fresh as of this build.
+# directories stay root's, as on a CI runner. What it installs lasts until
+# the computer's next start from this image (docs/computers.md, "Root in
+# our Hermes image"). apt's lists are kept, fresh as of this build.
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
- && printf 'Defaults:hermes logfile=/run/computer/no-snapshot\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && printf 'hermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/

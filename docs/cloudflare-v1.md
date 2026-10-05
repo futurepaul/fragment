@@ -205,11 +205,7 @@ speaking Cloudflare's APIs) returns once this product works.
     restores: the container starts with `RESTORE_PENDING=1`, the DO
     restores `/data`, and it touches `/run/computer/restored`, which the
     image waits for before its own init runs. The DO retries a
-    "temporarily unavailable" start (spike S3b). A snapshot is the whole
-    writable root, so a guest that changed it in ways that must not last
-    (our Hermes image: anything its agent ran as root, Paul 2026-10-05)
-    asks for a fresh root with `/run/computer/no-snapshot`, and its sleep
-    takes no snapshot (docs/computers.md).
+    "temporarily unavailable" start (spike S3b).
 
     The platform gives every computer an S3 endpoint scoped to its own
     R2 prefix through an intercept, so the guest holds no credential. The

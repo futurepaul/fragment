@@ -23,9 +23,8 @@ use support::model::Model;
 
 /// An install for the session, offline (as the e2e's hermes lane has it):
 /// a package Hermes builds and installs through apt as root, and a program
-/// it puts in /usr/local/bin as root; then both run, and whether sudo's
-/// log asked for a fresh root, on one line.
-const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo "$(fragment-hello) $(fragment-hi) $(test -e /run/computer/no-snapshot && echo fresh-root-asked)""#;
+/// it puts in /usr/local/bin as root; then both run, on one line.
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo "$(fragment-hello) $(fragment-hi)""#;
 
 fn docker() -> String {
     std::env::var("DOCKER").unwrap_or_else(|_| if std::path::Path::new("/usr/local/bin/docker").exists() { "/usr/local/bin/docker".into() } else { "docker".into() })
@@ -376,19 +375,17 @@ async fn the_hermes_image() {
     });
 
     // Root for the session (docs/computers.md, "Root in our Hermes image"):
-    // nothing asked for a fresh root until something ran as root; then its
-    // terminal installs, offline, a package it builds through apt and a
+    // its terminal installs, offline, a package it builds through apt and a
     // program into /usr/local/bin, both with passwordless sudo, and runs
-    // them; sudo's log is the ask.
-    assert!(!c.exec(&["test", "-e", "/run/computer/no-snapshot"]), "no ask for a fresh root before anything ran as root");
+    // them.
     let install = fake.say(&chat, &person("paul"), json!({ "text": format!("run: {INSTALL}") }));
     let ti = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", install["seq"].as_u64().unwrap());
     fake.until(120_000, "the install's answer", |w| answered(w, &ti).is_some()).await;
     fake.with(|w| {
         let reply = answered(w, &ti).unwrap();
-        assert!(reply["text"].as_str().unwrap_or("").contains("hello-from-apt hello-from-usr-local fresh-root-asked"), "installed as root, and run: {reply}");
+        assert!(reply["text"].as_str().unwrap_or("").contains("hello-from-apt hello-from-usr-local"), "installed as root, and run: {reply}");
     });
-    assert!(c.exec_out(&["cat", "/run/computer/no-snapshot"]).contains("/usr/bin/apt-get"), "sudo's log, the ask, names what ran as root");
+    assert!(c.exec(&["dpkg", "-s", "fragment-hello"]), "installed as a package, through apt");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /usr/local/bin/fragment-hi"]), "the system's directories stay root's: an install goes through sudo");
 
     let (took, code) = c.sigterm();

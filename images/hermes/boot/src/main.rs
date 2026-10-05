@@ -40,9 +40,6 @@ const OPT: &str = "/opt/fragment";
 /// at every start, since a container started from a snapshot carries the
 /// last boot's (S3b).
 const RUN: &str = "/var/lib/fragment-run";
-/// Where the platform leaves its markers, and reads the guest's
-/// (docs/computers.md: `restored`, `hold`, `no-snapshot`).
-const COMPUTER_DIR: &str = "/run/computer";
 /// The relay's port, on loopback only: Hermes dials it, nothing else can.
 const RELAY_LISTEN: &str = "127.0.0.1:8650";
 /// The gateway id both sides name.
@@ -118,11 +115,6 @@ fn pre_init() -> ! {
     ev!("boot.pre_init");
     let _ = std::fs::remove_dir_all(RUN);
     std::fs::create_dir_all(RUN).unwrap_or_else(|e| fail(&format!("{RUN}: {e}")));
-    // The platform's markers' directory, made by the image's build but made
-    // again in case the runtime mounts /run afresh: sudo logs every command
-    // to its `no-snapshot` (the Dockerfile), which asks for a fresh root at
-    // the next wake, and writes nothing where no directory is.
-    std::fs::create_dir_all(COMPUTER_DIR).unwrap_or_else(|e| fail(&format!("{COMPUTER_DIR}: {e}")));
     // The browser's path, found at build: stage2 skips its own search.
     if let Ok(p) = std::fs::read_to_string(format!("{OPT}/browser-path")) {
         if !p.trim().is_empty() && env("AGENT_BROWSER_EXECUTABLE_PATH").is_none() {
