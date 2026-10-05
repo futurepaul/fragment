@@ -466,7 +466,14 @@ class ContainerHost {
 export class Computer extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
-    const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
+    // What befell its container (its exit, a tab's socket) comes back in as
+    // a request of its own, through the object's namespace: never as a
+    // continuation of the call that started the container, long answered by
+    // then. A runtime may tie what such a continuation opens to that call:
+    // celld closes its WebSockets at once, so the start an exit's report
+    // made took no exec (docs/self-host.md, found 21).
+    const self = env.COMPUTER.idFromString(ctx.id.toString());
+    const report = (path, body) => env.COMPUTER.get(self).fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
     const host = new ContainerHost(ctx, env, report);
     Object.defineProperty(ctx, "computerHost", { value: host });
     this.rs = new rs.ComputerCell(ctx, env);
