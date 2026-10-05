@@ -127,6 +127,11 @@ impl Settings {
         fragment_lan::https_origin(&self.zone, self.https_port)
     }
 
+    /// Where the front door takes https from this box: its first address.
+    pub fn door(&self) -> SocketAddr {
+        SocketAddr::new(self.bind[0], self.https_port)
+    }
+
     /// Dex's issuer: `https://dex.<zone>`, likewise.
     pub fn issuer(&self) -> String {
         fragment_lan::https_origin(&format!("dex.{}", self.zone), self.https_port)
@@ -257,6 +262,16 @@ pub fn start(cell_port: u16) -> Result<Lan> {
     })
 }
 
+impl Lan {
+    /// What the card renderer reaches fragments through on the LAN: the
+    /// front door (its first address, on the https port: the door may
+    /// listen on the LAN's address alone, never loopback), and the root
+    /// the door's certificate is under (docs/self-host.md, seam 7).
+    pub fn renderer_defaults(&self) -> (SocketAddr, PathBuf) {
+        (self.settings.door(), self.ca_file.clone())
+    }
+}
+
 /// A log file, truncated at each start, for a child's stdout and stderr.
 fn log_file(path: &Path) -> Result<(std::fs::File, std::fs::File)> {
     let f = std::fs::OpenOptions::new().create(true).truncate(true).write(true).open(path).with_context(|| format!("open {}", path.display()))?;
@@ -354,6 +369,7 @@ mod tests {
         assert_eq!(s.users, ["paul"]);
         assert_eq!(s.platform_url(), "https://fragment.home.arpa");
         assert_eq!(s.issuer(), "https://dex.fragment.home.arpa");
+        assert_eq!(s.door(), "192.168.50.7:443".parse().unwrap(), "the door is on the LAN's address, not loopback");
     }
 
     // Goal: each setting moves what it names; high ports show in the origins.
@@ -376,6 +392,7 @@ mod tests {
         assert_eq!(s.users, ["paul", "ana"]);
         assert_eq!(s.platform_url(), "https://corp.example:8443");
         assert_eq!(s.issuer(), "https://dex.corp.example:8443");
+        assert_eq!(s.door(), "127.0.0.1:8443".parse().unwrap(), "the first address bound");
         assert_eq!(settings(&[("FRAGMENT_LAN_DNS_UPSTREAM", "10.0.0.1")]).unwrap().dns_upstream, "10.0.0.1:53".parse().unwrap());
     }
 
