@@ -36,13 +36,13 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
-use fragment_core::computer::{Action, Event, Lifecycle, Phase, Socket, Step, Wake};
+use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, Saves, Socket, Step, Wake};
 use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse};
+use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
 use fragment_proto::{ErrorCode, IdentityKind};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::wasm_bindgen::{self, prelude::*, JsCast};
@@ -120,6 +120,17 @@ const RUNTIME_IDLE_MS: i64 = fragment_core::computer::IDLE_MS + 10 * 60_000;
 const EXEC_READY_MS: i64 = 120_000;
 /// A signalled guest exits within this (docs/computers.md: five seconds).
 const EXIT_WAIT_MS: i64 = 5_000;
+/// The markers the DO leaves in the container (docs/computers.md, "What
+/// every image carries"): the restore gate's, and the sleep's hold, which
+/// the guest reads as "claim no turn" (P1 of
+/// docs/explorations/pi-durable.md, its simple form). Each needs only `sh`,
+/// `mkdir`, `touch` and `rm`, which every image carries.
+const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/restored";
+const HOLD_MARK: &str = "mkdir -p /run/computer && touch /run/computer/hold";
+const HOLD_UNMARK: &str = "rm -f /run/computer/hold";
+/// A marker's exec answers within this, or it failed: a sleep goes on
+/// without its hold, a start fails.
+const MARK_EXEC_MS: i64 = 30_000;
 /// The largest request body the egress signs and hands on (it is hashed
 /// for NIP-98 first, so it is read whole).
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -142,10 +153,15 @@ enum MetaKey {
     Image,
     CreatedAt,
     Lifecycle,
-    /// The last `/data` backup (DirectoryBackup's record).
+    /// The current save of `/data`: DirectoryBackup's record, the authority
+    /// on what a wake restores (handed back to restore and to delete it).
     Backup,
-    /// The last snapshot and the image it was taken of.
-    Snapshot,
+    /// What the DO knows of its saves (`fragment_core::computer::Saves`):
+    /// the current save's time, the snapshot that caches it, what each
+    /// start restored, and its rollbacks. A snapshot record kept before it
+    /// named its save (the old `snapshot` key) is no longer read: a
+    /// snapshot is a cache, and a wake without it restores the save.
+    Saves,
     /// Why the last wake was refused, or the last sleep failed to save.
     Note,
 }
@@ -159,18 +175,21 @@ impl MetaKey {
             MetaKey::CreatedAt => "created_at",
             MetaKey::Lifecycle => "lifecycle",
             MetaKey::Backup => "backup",
-            MetaKey::Snapshot => "snapshot",
+            MetaKey::Saves => "saves",
             MetaKey::Note => "note",
         }
     }
 }
 
-/// What a snapshot is of: the image's reference (its name can stand for
-/// another image after a redeploy).
-#[derive(Serialize, Deserialize)]
-struct Snapshot {
-    id: String,
+/// What a start restores, as it was chosen at its beginning.
+struct Planned {
+    plan: Restore,
+    /// The pinned image's name, and its reference now (what the start runs).
     image: String,
+    reference: Option<String>,
+    /// The current save's record, and its id.
+    record: Option<Value>,
+    save: Option<String>,
 }
 
 #[durable_object]
@@ -359,6 +378,13 @@ struct Exited {
     generation: u64,
 }
 
+/// `computer/test`'s body (a test fleet's: `POST /api/test/computer`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestLever {
+    op: String,
+}
+
 #[derive(Deserialize)]
 struct Tab {
     open: bool,
@@ -395,15 +421,37 @@ impl ComputerCell {
         self.exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", vec![k.key().into(), v.into()])
     }
 
-    fn del_meta(&self, k: MetaKey) -> CellResult<()> {
-        self.exec("DELETE FROM meta WHERE key = ?", vec![k.key().into()])
-    }
-
     fn lifecycle(&self) -> CellResult<Lifecycle> {
         match self.meta(MetaKey::Lifecycle)? {
             Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored lifecycle: {e}"))),
             None => Ok(Lifecycle::new()),
         }
+    }
+
+    fn saves(&self) -> CellResult<Saves> {
+        match self.meta(MetaKey::Saves)? {
+            Some(text) => serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored saves: {e}"))),
+            None => Ok(Saves::default()),
+        }
+    }
+
+    /// One fact about its saves, applied to them as stored. `f` is not
+    /// async, so nothing runs between the read and the write: a handler
+    /// beside this one applies its own fact before or after, never between.
+    fn update_saves<T>(&self, f: impl FnOnce(&mut Saves) -> T) -> CellResult<T> {
+        let mut saves = self.saves()?;
+        let out = f(&mut saves);
+        let text = serde_json::to_string(&saves).map_err(|e| CellError::host(e.to_string()))?;
+        self.set_meta(MetaKey::Saves, &text)?;
+        Ok(out)
+    }
+
+    /// The current save's record, as stored, and its id.
+    fn backup(&self) -> CellResult<Option<(Value, String)>> {
+        let Some(text) = self.meta(MetaKey::Backup)? else { return Ok(None) };
+        let record: Value = serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored backup: {e}")))?;
+        let id = record["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or_else(|| CellError::host("the stored backup names no id"))?;
+        Ok(Some((record, id)))
     }
 
     fn host(&self) -> CellResult<JsValue> {
@@ -424,11 +472,9 @@ impl ComputerCell {
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
         let mut queue = vec![first];
-        if !self.adopted.replace(true) {
-            if let Some(exited) = self.adopt().await? {
-                // the event that brought this isolate up applies after the exit
-                queue.push(exited);
-            }
+        if let Some(exited) = self.take_over().await? {
+            // the event that brought this isolate up applies after the exit
+            queue.push(exited);
         }
         let mut refused = None;
         while let Some(event) = queue.pop() {
@@ -436,8 +482,17 @@ impl ComputerCell {
             let logged = json!(event);
             let step = life.apply(event, js::now_ms());
             // one line per event (lesson 14): what happened, and what it led to
-            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions }));
+            let mut line = json!({ "computer": self.meta(MetaKey::Id)?, "event": logged, "phase": life.phase, "actions": step.actions });
+            if let Some(ended) = step.ended {
+                line["ended"] = json!(ended);
+            }
+            console_log!("{line}");
             self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+            // in the same write as the lifecycle (nothing awaits between), and
+            // before its actions: the start it may make reads how this life ended
+            if let Some(ended) = step.ended {
+                self.update_saves(|s| s.ended(ended))?;
+            }
             self.alarm_at(step.alarm_ms).await?;
             refused = refused.or(step.refused.clone());
             for next in self.perform(step).await? {
@@ -447,15 +502,21 @@ impl ComputerCell {
         Ok(refused)
     }
 
+    /// This isolate's first look, once (`adopt`): the exit to apply when the
+    /// container it should find is gone.
+    async fn take_over(&self) -> CellResult<Option<Event>> {
+        if self.adopted.replace(true) {
+            return Ok(None);
+        }
+        self.adopt().await
+    }
+
     /// A new isolate's first look (lesson 6): a container its lifecycle says
     /// is running is taken over (watched again, its intercepts and idle
     /// stop armed again, never destroyed: `/data` may be unsaved), or, gone,
     /// reported as exited.
     async fn adopt(&self) -> CellResult<Option<Event>> {
-        let generation = match self.lifecycle()?.phase {
-            Phase::Starting { generation, .. } | Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. } => generation,
-            Phase::Asleep | Phase::Failed { .. } => return Ok(None),
-        };
+        let Some(generation) = self.lifecycle()?.running() else { return Ok(None) };
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
             return Ok(Some(Event::Exited { generation }));
@@ -574,12 +635,40 @@ impl ComputerCell {
         env
     }
 
-    /// One start: from a snapshot of the pinned image when there is one,
-    /// else the image (restoring `/data` from the last backup, behind the
-    /// restore gate). Any failure destroys what started.
+    /// One start: from the snapshot when it caches the current save for the
+    /// pinned image, else the image (restoring the save, behind the restore
+    /// gate; docs/computers.md, "Saves and what a wake restores"). Any
+    /// failure destroys what started. A start from the snapshot that fails
+    /// forgets the snapshot and reports `SnapshotFailed`, which the lifecycle
+    /// answers with a start from the image and the save in the same wake, no
+    /// strike against the computer (F7). A start that comes up records what
+    /// it restored, and logs it (P7).
     async fn start(&self, generation: u64) -> Event {
-        match self.try_start(generation).await {
-            Ok(()) => Event::Ready { generation },
+        let planned = match self.plan(generation).await {
+            Ok(p) => p,
+            Err(e) => return Event::StartFailed { generation, why: e.message },
+        };
+        let from = planned.plan.source();
+        match self.try_start(generation, &planned).await {
+            Ok(()) => {
+                let came_up = |s: &mut Saves| s.came_up(generation, from, planned.save.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
+                match self.update_saves(came_up) {
+                    // one line per start that came up (lesson 14): what it restored
+                    Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks })),
+                    Ok(None) => {}
+                    Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
+                }
+                Event::Ready { generation }
+            }
+            Err(e) if from == RestoreSource::Snapshot => {
+                // forgotten before the destroy: the exit that reports is the
+                // start's own failure (`exit_of`), and any start after it
+                // restores the save
+                let forgot = self.update_saves(|s| s.snapshot_failed());
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "snapshot": "failed", "generation": generation, "why": e.message, "forgot": forgot.ok().flatten() }));
+                let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the snapshot did not start".into()]).await;
+                Event::SnapshotFailed { generation, why: e.message }
+            }
             Err(e) => {
                 let _ = self.call("destroy", &[JsValue::from_f64(generation as f64), "the start failed".into()]).await;
                 Event::StartFailed { generation, why: e.message }
@@ -587,89 +676,183 @@ impl ComputerCell {
         }
     }
 
-    async fn try_start(&self, generation: u64) -> CellResult<()> {
-        let (id, image) = (self.must(MetaKey::Id)?, self.must(MetaKey::Image)?);
+    /// What the start `generation` restores, recorded as the start under
+    /// way. Nothing awaits between reading the saves and recording it.
+    async fn plan(&self, generation: u64) -> CellResult<Planned> {
+        let image = self.must(MetaKey::Image)?;
+        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
+        let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
+        let (record, save) = match self.backup()? {
+            Some((record, id)) => (Some(record), Some(id)),
+            None => (None, None),
+        };
+        let plan = self.update_saves(|s| {
+            let plan = s.plan(save.as_deref(), snapshots);
+            s.starting(generation, plan.source());
+            plan
+        })?;
+        Ok(Planned { plan, image, reference, record, save })
+    }
+
+    async fn try_start(&self, generation: u64, planned: &Planned) -> CellResult<()> {
+        let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
         // lesson 6: a container a new isolate found running is never ours to
-        // reuse half-known; it goes before this one starts
+        // reuse half-known, nor is an earlier start's that is not gone yet:
+        // it goes before this one starts (`0`: whatever runs)
         if js::invoke(&self.host()?, "running", &[]).await?.as_bool() == Some(true) {
             self.call("destroy", &[JsValue::from_f64(0.0), "a new start".into()]).await?;
         }
-        let reference = self.call("imageRef", &[image.as_str().into()]).await?.as_string();
-        let snapshot = match (self.meta(MetaKey::Snapshot)?, &reference) {
-            (Some(text), Some(r)) if self.cfg.computer_snapshots => serde_json::from_str::<Snapshot>(&text).ok().filter(|s| &s.image == r).map(|s| s.id),
-            _ => None,
+        let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
+        let snapshot_js = match &planned.plan {
+            Restore::Snapshot { id } => JsValue::from_str(id),
+            Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
-        let backup = if snapshot.is_none() { self.meta(MetaKey::Backup)? } else { None };
-        let env = js::to_js(&self.guest_env(&id, &image, backup.is_some()));
-        let snapshot_js = snapshot.as_deref().map(JsValue::from_str).unwrap_or(JsValue::NULL);
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
         let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
-        self.call("start", &[g.clone(), image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
+        self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
             return Err(CellError::host(format!("start {generation} was superseded before it was armed")));
         }
-        if let Some(record) = backup {
-            let up = self.call("execReady", &[g.clone(), JsValue::from_f64(EXEC_READY_MS as f64)]).await?;
-            if up.as_bool() != Some(true) {
-                return Err(CellError::host(format!("the container took no exec within {}s", EXEC_READY_MS / 1000)));
+        match &planned.plan {
+            Restore::Backup => {
+                self.exec_ready(&g).await?;
+                let record = planned.record.as_ref().expect("a start from the save has its record");
+                self.call("restore", &[g.clone(), js::to_js(record)]).await?;
+                self.mark(&g, RESTORED_MARK).await.map_err(|e| CellError::host(format!("opening the restore gate: {}", e.message)))?;
             }
-            let record: Value = serde_json::from_str(&record).map_err(|e| CellError::host(format!("the stored backup: {e}")))?;
-            self.call("restore", &[g.clone(), js::to_js(&record)]).await?;
-            let argv = js::to_js(&json!(["sh", "-c", "mkdir -p /run/computer && touch /run/computer/restored"]));
-            let out = js::from_js(&self.call("exec", &[g, argv]).await?).map_err(CellError::host)?;
-            if out["exitCode"] != 0 {
-                return Err(CellError::host(format!("opening the restore gate: {}", out["output"])));
+            Restore::Snapshot { .. } => {
+                // its sleep held the guest before it took the snapshot: a
+                // container started from it must not wake held
+                self.exec_ready(&g).await?;
+                self.mark(&g, HOLD_UNMARK).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
             }
+            Restore::Nothing => {}
         }
         Ok(())
     }
 
-    /// The sleep sequence (docs/computers.md): save `/data`, snapshot,
-    /// signal, give the guest five seconds, destroy. A save that fails
-    /// keeps the backup before it and is noted; the sleep goes on.
+    /// Waits for the container of start `g` to take an exec.
+    async fn exec_ready(&self, g: &JsValue) -> CellResult<()> {
+        let up = self.call("execReady", &[g.clone(), JsValue::from_f64(EXEC_READY_MS as f64)]).await?;
+        if up.as_bool() != Some(true) {
+            return Err(CellError::host(format!("the container took no exec within {}s", EXEC_READY_MS / 1000)));
+        }
+        Ok(())
+    }
+
+    /// Runs one of the DO's markers (`script`, through `sh -c`) in the
+    /// container of start `g`.
+    async fn mark(&self, g: &JsValue, script: &str) -> CellResult<()> {
+        let argv = js::to_js(&json!(["sh", "-c", script]));
+        let out = js::from_js(&self.call("exec", &[g.clone(), argv, JsValue::from_f64(MARK_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+        if out["exitCode"] != 0 {
+            return Err(CellError::host(format!("`{script}` answered {}: {}", out["exitCode"], out["output"])));
+        }
+        Ok(())
+    }
+
+    /// An exit of start `generation`'s container, as the lifecycle should
+    /// hear it: one from the snapshot that stopped before it came up is the
+    /// start's own failure (the snapshot is forgotten), never a strike.
+    fn exit_of(&self, generation: u64) -> CellResult<Event> {
+        let starting = matches!(self.lifecycle()?.phase, Phase::Starting { generation: g, .. } if g == generation);
+        if starting && self.saves()?.start_from(generation) == Some(RestoreSource::Snapshot) {
+            let forgot = self.update_saves(|s| s.snapshot_failed())?;
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "snapshot": "stopped", "generation": generation, "forgot": forgot }));
+            return Ok(Event::SnapshotFailed { generation, why: "its container stopped as it started from the snapshot".into() });
+        }
+        Ok(Event::Exited { generation })
+    }
+
+    /// The sleep sequence (docs/computers.md): hold the guest, save `/data`,
+    /// snapshot it, signal, give the guest five seconds, destroy. A save
+    /// that fails keeps the save before it and is noted; the sleep goes on
+    /// (F6 of docs/explorations/pi-durable.md: P2's to change), and takes no
+    /// snapshot, since a snapshot is only ever a cache of a save. A snapshot
+    /// that fails forgets nothing: the one kept is still its own save's.
     async fn sleep(&self, generation: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
+        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if let Ok(true) = self.call("running", &[]).await.map(|r| r.as_bool() == Some(true)) {
-            match self.call("backup", std::slice::from_ref(&g)).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
-                Ok(record) => {
-                    let previous = self.meta(MetaKey::Backup).ok().flatten();
-                    let _ = self.set_meta(MetaKey::Backup, &record.to_string());
-                    if let Some(old) = previous.and_then(|p| serde_json::from_str::<Value>(&p).ok()) {
-                        let _ = self.call("forget", &[js::to_js(&old)]).await;
-                    }
-                }
-                Err(e) => {
-                    let _ = self.set_meta(MetaKey::Note, &format!("the last sleep could not save /data: {}", e.message));
-                }
+            // the hold: from here the guest claims no turn, so the save has
+            // every turn it claimed (the bridge's half: docs/bridge.md); an
+            // image that ignores it loses nothing it did not lose before
+            if let Err(e) = self.mark(&g, HOLD_MARK).await {
+                console_error!("{}", json!({ "computer": id, "hold": "failed", "generation": generation, "error": e.message }));
             }
-            if self.cfg.computer_snapshots {
-                let name = format!("{}-{generation}", self.meta(MetaKey::Id).ok().flatten().unwrap_or_default().replace(':', "-"));
-                match self.call("snapshot", &[g.clone(), name.into()]).await.map(|s| s.as_string()) {
-                    Ok(Some(id)) => {
-                        let name = self.meta(MetaKey::Image).ok().flatten().unwrap_or_default();
-                        match self.call("imageRef", &[name.as_str().into()]).await.ok().and_then(|r| r.as_string()) {
-                            Some(image) => {
-                                let _ = self.set_meta(MetaKey::Snapshot, &serde_json::to_string(&Snapshot { id, image }).unwrap_or_default());
-                            }
-                            None => {
-                                let _ = self.del_meta(MetaKey::Snapshot);
-                            }
-                        }
+            let saved = match self.call("backup", std::slice::from_ref(&g)).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
+                Ok(record) => match self.keep_backup(generation, record).await {
+                    Ok(save) => Some(save),
+                    Err(e) => {
+                        console_error!("{}", json!({ "computer": id, "backup": "unkept", "generation": generation, "error": e.message }));
+                        None
                     }
-                    // a computer without a snapshot wakes from its image and backup
-                    _ => {
-                        let _ = self.del_meta(MetaKey::Snapshot);
+                },
+                Err(e) => {
+                    // the second ask of a slow sleep fails once the first's
+                    // destroy took the container: the first one saved
+                    if self.saves().map(|s| s.save_failed(generation)).unwrap_or(true) {
+                        let _ = self.set_meta(MetaKey::Note, &format!("the last sleep could not save /data: {}", e.message));
                     }
+                    None
                 }
+            };
+            if let (true, Some(save)) = (self.cfg.computer_snapshots, saved) {
+                self.snapshot(generation, &save).await;
             }
             let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
             let _ = self.call("exited", &[JsValue::from_f64(EXIT_WAIT_MS as f64)]).await;
         }
-        let _ = self.call("destroy", &[g, "asleep".into()]).await;
+        let gone = self.call("destroy", &[g.clone(), "asleep".into()]).await.is_ok_and(|r| r.as_bool() == Some(true));
+        if !gone && self.call("running", &[]).await.is_ok_and(|r| r.as_bool() == Some(true)) {
+            // a container that outlives its sleep would claim no turn again:
+            // the hold is the sleep's alone (`exec` refuses another start's)
+            if let Err(e) = self.mark(&g, HOLD_UNMARK).await {
+                console_error!("{}", json!({ "computer": id, "unhold": "failed", "generation": generation, "error": e.message }));
+            }
+        }
         Event::Asleep { generation }
+    }
+
+    /// A sleep's save worked: its record is the current save, and the one
+    /// it replaces is deleted. Answers the save's id.
+    async fn keep_backup(&self, generation: u64, record: Value) -> CellResult<String> {
+        let save = record["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string).ok_or_else(|| CellError::host("the backup's record names no id"))?;
+        let previous = self.backup().ok().flatten();
+        // the record and what the platform knows of it, in one write
+        self.set_meta(MetaKey::Backup, &record.to_string())?;
+        self.update_saves(|s| s.saved(generation, &save, js::now_ms()))?;
+        assert_eq!(self.backup()?.map(|(_, id)| id).as_deref(), Some(save.as_str()), "the save kept is the one just taken");
+        if let Some((old, old_id)) = previous {
+            if old_id != save {
+                let _ = self.call("forget", &[js::to_js(&old)]).await;
+            }
+        }
+        Ok(save)
+    }
+
+    /// A sleep's snapshot, taken after its save `save`: kept as that save's
+    /// cache, for the image its start ran (not the one pinned now: a pin
+    /// while it ran is the next start's).
+    async fn snapshot(&self, generation: u64, save: &str) {
+        let g = JsValue::from_f64(generation as f64);
+        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+        let name = format!("{}-{generation}", id.replace(':', "-"));
+        let taken = self.call("snapshot", &[g, name.into()]).await.map(|s| s.as_string());
+        let reference = self.saves().ok().and_then(|s| s.image_of(generation).map(str::to_string));
+        match (taken, reference) {
+            (Ok(Some(snapshot)), Some(reference)) => match self.update_saves(|s| s.snapshotted(save, &snapshot, &reference)) {
+                Ok(true) => {}
+                Ok(false) => console_log!("{}", json!({ "computer": id, "snapshot": "unkept", "generation": generation, "why": "its save is no longer the current one" })),
+                Err(e) => console_error!("{}", json!({ "computer": id, "snapshot": "unkept", "generation": generation, "error": e.message })),
+            },
+            (Ok(_), _) => console_error!("{}", json!({ "computer": id, "snapshot": "unkept", "generation": generation, "why": "no snapshot id, or the image its start ran is unknown here" })),
+            // a wake without it restores the save; the one kept is still its own save's
+            (Err(e), _) => console_log!("{}", json!({ "computer": id, "snapshot": "failed", "generation": generation, "error": e.message })),
+        }
     }
 
     fn agents(&self) -> CellResult<Vec<ComputerAgent>> {
@@ -837,6 +1020,7 @@ impl ComputerCell {
             Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
         };
         let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host("a computer's origin needs FRAGMENT_HOST_SUFFIX"))?;
+        let saves = self.saves()?;
         Ok(ComputerView {
             computer: id,
             owner: self.must(MetaKey::Owner)?,
@@ -846,7 +1030,44 @@ impl ComputerCell {
             agents: self.agents()?,
             origin,
             credential_env: vec![],
+            restored: saves.restored().cloned(),
+            rollbacks: saves.rollbacks(),
         })
+    }
+
+    /// A test fleet's lever on this computer (`POST /api/test/computer`,
+    /// docs/api.md): `kill` sends SIGKILL to the guest's PID 1, so its
+    /// container exits as a crash does and its real exit is reported;
+    /// `saves` answers what it keeps of its saves and what its last start
+    /// restored.
+    async fn lever(&self, op: &str) -> CellResult<Value> {
+        assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
+        let id = self.must(MetaKey::Id)?;
+        match op {
+            "kill" => {
+                // the container this isolate signals is the one it watches
+                if let Some(exited) = self.take_over().await? {
+                    self.drive(exited).await?;
+                }
+                let Some(generation) = self.lifecycle()?.running() else {
+                    return Err(CellError::invalid("it is not running: wake it first"));
+                };
+                let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(9.0)]).await?;
+                if sent.as_bool() != Some(true) {
+                    return Err(CellError::host(format!("start {generation}'s container is not running here")));
+                }
+                console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
+                Ok(json!({ "computer": id, "killed": generation }))
+            }
+            "saves" => {
+                let mut v = serde_json::to_value(self.saves()?).map_err(|e| CellError::host(e.to_string()))?;
+                v["record"] = self.backup()?.map(|(record, _)| record).unwrap_or(Value::Null);
+                v["computer"] = json!(id);
+                v["generation"] = json!(self.lifecycle()?.generation());
+                Ok(v)
+            }
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill or saves"))),
+        }
     }
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
@@ -1028,8 +1249,13 @@ impl ComputerCell {
             "computer/guest" => json_response(&self.guest_view().await?),
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
-                self.drive(Event::Exited { generation: b.generation }).await?;
+                let event = self.exit_of(b.generation)?;
+                self.drive(event).await?;
                 json_response(&json!({ "ok": true }))
+            }
+            "computer/test" if self.cfg.test_hooks => {
+                let b: TestLever = body_json(&mut req).await?;
+                json_response(&self.lever(&b.op).await?)
             }
             "computer/tab" => {
                 let b: Tab = body_json(&mut req).await?;
