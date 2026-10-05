@@ -47,6 +47,24 @@ FROM ${HERMES} AS hermes
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
+
+# Root for the session (Paul, 2026-10-05: "hermes needs to be able to
+# install binaries (not persisted)"). Hermes stays its unprivileged user, as
+# upstream runs it, and reaches root by passwordless sudo: `sudo apt-get
+# install`, a binary into /usr/local/bin, `sudo npm install -g`. The
+# computer is one person's VM and holds no secret (decisions 13, 43, 44),
+# so root inside it opens nothing of anyone else's. The system's
+# directories stay root's, so every change outside /data and /tmp goes
+# through sudo, and sudo logs each command to /run/computer/no-snapshot
+# (hermes-boot makes the directory at each start): a sleep after one takes
+# no snapshot, and the next wake starts from the image and the save
+# (docs/computers.md), so what was installed is gone. apt's lists are
+# kept, fresh as of this build.
+RUN apt-get -o Acquire::Retries=3 update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
+ && printf 'Defaults:hermes logfile=/run/computer/no-snapshot\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && chmod 0440 /etc/sudoers.d/hermes \
+ && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
@@ -89,7 +107,17 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /run/computer /var/lib/fragment-run
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
-# restated, without upstream's VOLUME.
+# restated, without upstream's VOLUME. Two differ from upstream's:
+# - Hermes' file tools (write_file, patch) may write /tmp as well as its
+#   home (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
+#   to it), for the scratch an install is made from. /usr/local is not
+#   theirs to write: they run as Hermes' user, and root is the terminal's,
+#   through sudo.
+# - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
+#   optional backends (providers, platforms, speech; tools/lazy_deps.py),
+#   which a computer configures none of (its model is the platform's route,
+#   its chat the relay). Software the agent wants is its terminal's to
+#   install.
 FROM scratch
 COPY --from=hermes / /
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -100,7 +128,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
-    HERMES_WRITE_SAFE_ROOT=/data/hermes \
+    HERMES_WRITE_SAFE_ROOT=/data/hermes:/tmp \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \

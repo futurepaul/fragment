@@ -42,6 +42,15 @@ const PNG: &[u8] = &[
     0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00,
     0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
+/// An install for the session, offline: a package Hermes builds and
+/// installs through apt as root, a program it puts in /usr/local/bin as
+/// root, a file in its home; then both programs run, and whether sudo's
+/// log asked for a fresh root, on one line (the scripted model quotes a
+/// tool's first line).
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo kept-in-its-home > /data/hermes/fragment-kept.txt && echo "$(fragment-hello) $(fragment-hi) $(test -e /run/computer/no-snapshot && echo fresh-root-asked)""#;
+/// After a sleep and a wake: neither program, no package, no ask, and the
+/// file in its home, on one line.
+const INSTALLED_AFTER: &str = r#"echo "$(command -v fragment-hello fragment-hi || echo gone) $(dpkg-query -W -f='${Status}' fragment-hello 2> /dev/null || echo unpackaged) $(test -e /run/computer/no-snapshot || echo unasked) $(cat /data/hermes/fragment-kept.txt)""#;
 /// A fragment someone shares with the agent's owner, whose `notes` its
 /// editors post to.
 const NOTES_JSON: &[u8] = br#"{ "channels": { "notes": { "read": "viewer", "post": "editor" } } }"#;
@@ -432,6 +441,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent its owner holds at viewer edits nothing", status_of(&held).as_deref() == Some("403"), json!(reply_of(&held)));
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": null })))?;
 
+    // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
+    // in our Hermes image"): Hermes' user runs anything as root with sudo,
+    // here offline (a package it builds, through apt; a program into
+    // /usr/local/bin), and sudo's log asks for a fresh root at the next wake
+    let installed = run(s, 90, INSTALL)?;
+    s.ok(
+        "Hermes installs software as root with passwordless sudo, a package through apt and a program into /usr/local/bin, and runs both; sudo asked for a fresh root",
+        said(&installed, "hello-from-apt hello-from-usr-local fresh-root-asked"),
+        json!({ "reply": installed }),
+    );
+
     // a restart mid-turn: a turn waiting on its card when the computer sleeps
     let r = say(10, "run: rm -rf /tmp/fragment-restart && echo tool-ran")?;
     let lost = turn_for(&r);
@@ -458,6 +478,16 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "after a sleep and a wake, Hermes answers with the conversation it had before (its /data restored)",
         reply_of(&remembered).is_some_and(|t| t.contains("do you remember") && said_count(&t).is_some_and(|n| n > 1)),
         json!({ "reply": reply_of(&remembered), "model_saw": model_saw(s, "do you remember", 4) }),
+    );
+    // what it installed went with the life that installed it, and what it
+    // wrote in its home came back with /data (local workerd takes no
+    // snapshots, so this wake is from the image; with snapshots on, it is
+    // the platform declining one)
+    let after = run(s, 91, INSTALLED_AFTER)?;
+    s.ok(
+        "after the sleep and the wake, what it installed as root is gone (no program, no package, no ask) and its home is kept",
+        said(&after, "gone unpackaged unasked kept-in-its-home"),
+        json!({ "reply": after }),
     );
 
     // an upgrade, then a rollback, by pin
