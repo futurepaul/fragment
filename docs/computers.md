@@ -354,7 +354,8 @@ a frame's navigation (the frame's), never another page's fetch or
 frame; a socket only from the port's own page. So an image's page may
 not frame its own ports either: a screen is one page, its sockets
 relative to it. A WebSocket on a port is bridged through
-the Computer DO and holds it awake while open. Nothing else reaches the
+the Computer DO and holds it awake while open; the container may speak
+first (an RFB server does), and its first word reaches the page. Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
 (decision 11). The page is served at the
 port's root and reaches its sockets by relative URLs (our images':
