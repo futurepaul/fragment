@@ -4,7 +4,7 @@ Exploration, 2026-10-05, on branch `spike/simplex-connector` from
 master at `2c313c39`. This is option F of docs/durable-computers.md
 ("F: messengers outside the computer"). Paul asked for it on 2026-10-05:
 "the spike to do btw would be simplex". Nothing here is product code.
-The spike's code is under `spikes/simplex/`, plus a four-line hook in
+The spike's code is under `spikes/simplex/`, plus a six-line hook in
 `crates/e2e/src/lanes/mod.rs` that adds its section. Where this file
 disagrees with docs/cloudflare-v1.md (decision 32), that file wins until
 Paul decides; "What it changes in decision 32", below, lists the changes.
@@ -50,8 +50,9 @@ SimpleX's private routing is on.
   - A planned stop (SIGTERM) loses nothing: save, then exit.
   - An unplanned loss of the host rolls back to the last save. It then
     heals automatically at the cost of the messages in flight.
-- **A connector fully inside a Durable Object (pure Workers)** would meet
-  F completely, but is a large build.
+- **A connector fully inside a Durable Object (pure Workers)** is the
+  only shape that could meet F completely (inferred), but it is a large
+  build.
   - SMP's transport works from a Worker: userland TLS over `connect()`
     reached SMP's handshake and a PING/PONG (run).
   - Nothing exists to build the rest on: no maintained Rust or
