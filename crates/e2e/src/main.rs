@@ -506,6 +506,8 @@ impl Suite {
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
             node_logs: true,
+            // a crash kills wrangler and workerd as one
+            own_group: true,
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);

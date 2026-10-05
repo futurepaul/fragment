@@ -473,6 +473,11 @@ pub struct NodeOptions {
     pub log_dir: PathBuf,
     /// wrangler's own debug logs in the log, beside the Workers' output.
     pub node_logs: bool,
+    /// A process group of its own, so the e2e crashes wrangler and workerd
+    /// as one. `xtask dev` keeps it in the terminal's, so Ctrl-C reaches it
+    /// as it reaches xtask: in a group of its own, it outlived a Ctrl-C,
+    /// holding its port.
+    pub own_group: bool,
 }
 
 /// Boots of one port whose logs one directory keeps; a start past this
@@ -502,10 +507,12 @@ pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/state")
 }
 
-/// One `wrangler dev` process, which runs workerd as its child: it runs in
-/// a process group of its own, so a crash kills both.
+/// One `wrangler dev` process, which runs workerd as its child: in a
+/// process group of its own (`NodeOptions::own_group`), so a crash kills
+/// both, or in the terminal's.
 pub struct Node {
     child: Child,
+    own_group: bool,
     pub base: String,
     pub port: u16,
     /// This boot's log.
@@ -536,10 +543,12 @@ impl Node {
         cmd.current_dir(&opts.project)
             .env("WRANGLER_LOG_PATH", &opts.log_dir)
             .env("WRANGLER_REGISTRY_PATH", opts.project.join(".wrangler/registry"));
-        cmd.process_group(0);
+        if opts.own_group {
+            cmd.process_group(0);
+        }
         let t0 = Instant::now();
         let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
-        let mut node = Node { child, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
+        let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
             if text.contains(&format!("Ready on http://127.0.0.1:{}", opts.port)) {
@@ -558,9 +567,12 @@ impl Node {
         Ok((node, t0.elapsed()))
     }
 
+    /// Signals its group when it has one of its own, else wrangler alone
+    /// (which stops workerd).
     fn signal_group(&self, signal: &str) -> Result<()> {
-        let status = Command::new("kill").args([signal, "--", &format!("-{}", self.child.id())]).status()?;
-        anyhow::ensure!(status.success(), "kill {signal} delivered to the node's group");
+        let target = if self.own_group { format!("-{}", self.child.id()) } else { self.child.id().to_string() };
+        let status = Command::new("kill").args([signal, "--", &target]).status()?;
+        anyhow::ensure!(status.success(), "kill {signal} delivered to the node");
         Ok(())
     }
 
@@ -596,8 +608,13 @@ impl Node {
         Ok(status)
     }
 
+    /// SIGKILL to its group, when it has one of its own (workerd may outlive
+    /// wrangler in it). Without one there is no group to reach, and a
+    /// reaped process's id is never signalled.
     fn kill_group(&self) {
-        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        if self.own_group {
+            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", self.child.id())]).stderr(Stdio::null()).status();
+        }
     }
 
     fn kill(&mut self) {
