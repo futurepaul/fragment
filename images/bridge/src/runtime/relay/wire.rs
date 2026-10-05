@@ -358,6 +358,23 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
     json!({ "type": "inbound", "bufferId": buffer_id, "event": event })
 }
 
+/// What a Stop answers a question asked in words with, so the clarify
+/// waiting on it lets go and the interrupted turn ends.
+pub const STOP_WORDS: &str = "Stop.";
+
+/// Hermes asking its person something to answer in words, as Relay carries
+/// it: an open `clarify` (the base adapter's `❓ <question>`, its choices
+/// numbered when it has some) or, after "Other" on a clarify's card,
+/// `✏️ Type your answer:`. The words to show for it; `None` for any other
+/// message. Hermes takes the person's next message as the answer (its
+/// gateway's clarify intercept), even while the turn runs.
+pub fn question(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    let asked = t.strip_prefix('❓').or_else(|| t.strip_prefix("✏️").filter(|rest| rest.trim_start().starts_with("Type your answer")))?;
+    let asked = asked.trim();
+    (!asked.is_empty()).then(|| asked.to_string())
+}
+
 /// A message's text without the edit stream's cursor, and whether it still
 /// streams.
 pub fn uncursored(content: &str) -> (&str, bool) {
@@ -390,6 +407,20 @@ pub fn step_of(line: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A question in words is an open clarify (`❓`, as Hermes' base
+    /// adapter sends it, with or without numbered choices) or the prompt to
+    /// type after "Other"; anything else, an empty question or a `✏️` that
+    /// asks nothing included, is not one.
+    #[test]
+    fn a_question_in_words() {
+        assert_eq!(question("❓ What do you plant in your garden?").as_deref(), Some("What do you plant in your garden?"));
+        assert_eq!(question("  ❓ Which?\n\n  1. a\n  2. b\n\nReply with the number").as_deref(), Some("Which?\n\n  1. a\n  2. b\n\nReply with the number"));
+        assert_eq!(question("✏️ Type your answer:").as_deref(), Some("Type your answer:"));
+        for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️ edited notes.md", "💻 terminal ❓"] {
+            assert_eq!(question(not), None, "{not}");
+        }
+    }
 
     /// The gateway's own test vector (docs/hermes-relay.md): its token is
     /// ours, and ours is checked as the gateway mints it.

@@ -8,6 +8,9 @@
 //! - `approve` or `risky`: a step, then a prompt (`once`, `deny`) the
 //!   owner answers; the reply says `(approved)`, `(denied)`, or
 //!   `(not approved)` once it expired;
+//! - `ask-me`: the reply's first part asks "What should I call it?", and the
+//!   turn waits for the asker's next message (`Event::Asked`), then ends
+//!   saying `(told: <their words>)`;
 //! - `slow`: twenty drafts, `pace` apart, before the reply (for Stop);
 //! - `fail`: the turn ends as an error;
 //! - `silent`: the turn ends with no reply;
@@ -67,6 +70,7 @@ impl Runtime for Script {
 enum Heard {
     Stop,
     Answer(Option<String>),
+    Told(String),
 }
 
 async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime::RuntimeError> {
@@ -99,6 +103,11 @@ async fn run(cfg: ScriptConfig, mut io: RuntimeIo) -> Result<(), crate::runtime:
             }
             Command::Forget { turn } => {
                 turns.remove(&turn);
+            }
+            Command::Tell { turn, text, .. } => {
+                if let Some(tx) = turns.get(&turn) {
+                    let _ = tx.send(Heard::Told(text)).await;
+                }
             }
         }
     }
@@ -267,13 +276,30 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         let said = match rx.recv().await {
             Some(Heard::Answer(Some(o))) if o == "once" => "approved",
             Some(Heard::Answer(Some(_))) => "denied",
-            Some(Heard::Answer(None)) => "not approved",
+            Some(Heard::Answer(None) | Heard::Told(_)) => "not approved",
             Some(Heard::Stop) | None => {
                 emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
                 return;
             }
         };
         reply = format!("{reply} ({said})");
+    }
+    let mut part = 1;
+    if text.split_whitespace().any(|w| w == "ask-me") {
+        emit(Event::Reply { turn: id.clone(), part, text: "What should I call it?".into() }).await;
+        emit(Event::Asked { turn: id.clone() }).await;
+        part += 1;
+        let told = loop {
+            match rx.recv().await {
+                Some(Heard::Told(words)) => break words,
+                Some(Heard::Answer(_)) => continue,
+                Some(Heard::Stop) | None => {
+                    emit(Event::End { turn: id, outcome: Outcome::Stopped }).await;
+                    return;
+                }
+            }
+        };
+        reply = format!("{reply} (told: {told})");
     }
     if !ts.files.is_empty() {
         let names: Vec<&str> = ts.files.iter().map(|f| f.name.as_str()).collect();
@@ -288,13 +314,13 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
             return;
         }
     }
-    emit(Event::Reply { turn: id.clone(), part: 1, text: reply }).await;
+    emit(Event::Reply { turn: id.clone(), part, text: reply }).await;
     if text.contains("draw") {
         let path = cfg.scratch.join(format!("{id}-drawing.txt"));
         let body = format!("a drawing for {}\n", ts.asker_name);
         if tokio::fs::write(&path, &body).await.is_ok() {
             let file = LocalFile { path, media_type: "text/plain".into(), name: "drawing.txt".into(), size: body.len() as u64 };
-            emit(Event::Attachment { turn: id.clone(), part: 1, file }).await;
+            emit(Event::Attachment { turn: id.clone(), part, file }).await;
         }
     }
     emit(Event::End { turn: id, outcome: Outcome::Idle }).await;

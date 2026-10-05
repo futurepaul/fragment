@@ -167,6 +167,36 @@ async fn an_approval_expired() {
     bridge.stop().await;
 }
 
+/// Goal: a turn that asks its asker something in words (Hermes' open
+/// clarify) posts the question, and the asker's next message is its
+/// answer, mid-turn: the turn ends saying it, and the message starts no
+/// turn of its own. Someone else's message meanwhile waits its turn.
+#[tokio::test]
+async fn a_question_answered_in_words() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.add_member(&chat, &person("skyler"), "editor");
+    let dir = support::dir("question");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 2).await;
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
+    let turn = turn_of("juniper", &chat, seq(&asked));
+    fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+    let other = fake.say(&chat, &person("skyler"), json!({ "text": "hello juniper" }));
+    let answer = fake.say(&chat, &person("paul"), json!({ "text": "Fernando" }));
+    fake.until(WAIT, "the asking turn's end, then skyler's", |w| w.bodies(&chat, "work", "turn.end").len() == 2).await;
+    fake.with(|w| {
+        let r = replies(w, &chat);
+        assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }));
+        assert_eq!(r[1], json!({ "text": "echo: [paul] name my plant, ask-me (told: Fernando)", "turn": turn }));
+        let started: Vec<Value> = w.bodies(&chat, "work", "turn.start").iter().map(|b| b["turn"].clone()).collect();
+        assert_eq!(started, vec![json!(turn), json!(turn_of("juniper", &chat, seq(&other)))], "the answer started no turn; skyler's ran after");
+        assert!(!started.contains(&json!(turn_of("juniper", &chat, seq(&answer)))));
+        assert!(w.bodies(&chat, "work", "turn.end").iter().all(|e| e["outcome"] == "idle"));
+    });
+    bridge.stop().await;
+}
+
 /// Goal: only the turn's asker stops it; a Stop from anyone else is
 /// ignored and the turn answers.
 #[tokio::test]
