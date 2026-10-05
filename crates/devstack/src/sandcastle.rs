@@ -38,6 +38,21 @@ pub const NODE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const NODE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A node's secret, made here: 32 random bytes, as hex.
 const SECRET_HEX_BYTES: usize = 32;
+/// A unix socket's path, at most this many bytes: Linux's `sun_path` holds
+/// 108, the last a NUL. A node handed a longer one cannot bind it, and says
+/// so only in its own log.
+pub const SOCKET_PATH_MAX: usize = 107;
+
+/// `dir/name`, the path of a socket a node binds or dials, refused when it
+/// is too long to be one (a deep checkout's scratch).
+pub fn socket_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    let path = dir.join(name);
+    let len = path.as_os_str().len();
+    if len > SOCKET_PATH_MAX {
+        bail!("{} is {len} bytes, past a unix socket's {SOCKET_PATH_MAX}: name its directory shorter", path.display());
+    }
+    Ok(path)
+}
 
 /// The deployment's nodes as the cell reads them: `FRAGMENT_NODES`, and
 /// each node's secret under the name the cell looks for
@@ -158,12 +173,12 @@ pub struct NodeSpec {
 }
 
 /// The node's config (sandcastle's crates/node/src/config.rs).
-fn node_config(spec: &NodeSpec) -> Value {
+fn node_config(spec: &NodeSpec) -> Result<Value> {
     let engine = spec.engine.dir(&spec.dir);
     let mut config = json!({
-        "engine": engine.join("engine.sock"),
-        "ports": engine.join("ports.sock"),
-        "egress": spec.dir.join("egress.sock"),
+        "engine": socket_path(&engine, "engine.sock")?,
+        "ports": socket_path(&engine, "ports.sock")?,
+        "egress": socket_path(&spec.dir, "egress.sock")?,
         "secret_file": spec.dir.join("node.secret"),
         "platform": spec.platform,
     });
@@ -171,7 +186,7 @@ fn node_config(spec: &NodeSpec) -> Value {
         Reach::Listen(port) => config["listen"] = json!(format!("127.0.0.1:{port}")),
         Reach::Uplink => config["uplink"] = json!({ "url": format!("{}/api/nodes/uplink", spec.platform.replacen("http", "ws", 1)), "id": spec.id }),
     }
-    config
+    Ok(config)
 }
 
 /// One node: the engine double and the node in front of it.
@@ -189,6 +204,8 @@ pub struct SandcastleNode {
     /// A real engine's API socket, and when this node started: the
     /// containers started there since are the run's, destroyed at `stop`.
     real: Option<(PathBuf, u64)>,
+    /// Its engine's API socket (the double's, or the real one).
+    engine_sock: PathBuf,
     node: Option<Child>,
 }
 
@@ -206,7 +223,7 @@ impl SandcastleNode {
         let mut f = fs::OpenOptions::new().create(true).truncate(true).write(true).mode(0o600).open(spec.dir.join("node.secret"))?;
         std::io::Write::write_all(&mut f, secret.as_bytes())?;
         let config = spec.dir.join("node.json");
-        fs::write(&config, serde_json::to_string_pretty(&node_config(spec))?)?;
+        fs::write(&config, serde_json::to_string_pretty(&node_config(spec)?)?)?;
         let log_of = |what: &str| spec.log_dir.join(format!("sandcastle-{}-{what}.log", spec.id));
         let engine_log = log_of("engine");
         let sock = engine_dir.join("engine.sock");
@@ -244,6 +261,7 @@ impl SandcastleNode {
             log: log_of("node"),
             engine,
             real,
+            engine_sock: sock.clone(),
             node: None,
         };
         n.wait_for("the engine's socket", &engine_log, || std::os::unix::net::UnixStream::connect(&sock).is_ok())?;
@@ -282,6 +300,7 @@ impl SandcastleNode {
             log: log_of("node"),
             engine: Some(engine),
             real: None,
+            engine_sock: engine_dir.join("engine.sock"),
             node: None,
         };
         let sock = engine_dir.join("engine.sock");
@@ -303,11 +322,11 @@ impl SandcastleNode {
             .arg(&self.config)
             .args(["--name", name])
             .arg("--engine")
-            .arg(engine.join("engine.sock"))
+            .arg(socket_path(&engine, "engine.sock")?)
             .arg("--ports")
-            .arg(engine.join("ports.sock"))
+            .arg(socket_path(&engine, "ports.sock")?)
             .arg("--egress")
-            .arg(dir.join("egress.sock"))
+            .arg(socket_path(dir, "egress.sock")?)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(err)
@@ -397,6 +416,21 @@ impl SandcastleNode {
     pub fn down(&mut self) -> Result<()> {
         let child = self.node.take().context("the node is already down")?;
         stop(child, "sandcastle-node")
+    }
+
+    /// The containers running on its engine that started at or after
+    /// `since_ms` (on a real engine, which other runs share, only this
+    /// run's), by name.
+    pub fn running_since(&self, since_ms: u64) -> Result<Vec<String>> {
+        Ok(containers(&self.engine_sock)?.into_iter().filter(|c| c.running && c.started_at_ms >= since_ms).map(|c| c.name).collect())
+    }
+
+    /// Kills container `name` on its engine (SIGKILL), behind the platform's
+    /// back: to its computer, the container died under it.
+    pub fn kill(&self, name: &str) -> Result<()> {
+        let (status, body) = engine_call(&self.engine_sock, "POST", &format!("/v1/containers/{name}/signal"), Some(EngineBody::Bytes(br#"{"signal":9}"#.to_vec())))?;
+        anyhow::ensure!(status == 200 || status == 204, "the engine's signal to {name}: {status} {}", String::from_utf8_lossy(&body));
+        Ok(())
     }
 
     /// Both processes stop: the node, then the engine double, which removes
@@ -529,7 +563,8 @@ impl Drop for SandcastleNode {
     }
 }
 
-fn now_ms() -> u64 {
+/// The time now, as an engine's `startedAtMs` counts it.
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
@@ -633,18 +668,32 @@ pub fn real_engine_vms(engine_dir: &Path) -> Result<u32> {
     v["vms_max"].as_u64().and_then(|n| u32::try_from(n).ok()).filter(|n| *n > 0).context("the real engine's health names its vms_max")
 }
 
+/// One container as an engine lists it (sandcastle's `api::Info`).
+struct Listed {
+    name: String,
+    running: bool,
+    started_at_ms: u64,
+}
+
+/// The containers an engine holds (at most its VMs).
+fn containers(sock: &Path) -> Result<Vec<Listed>> {
+    let (status, body) = engine_call(sock, "GET", "/v1/containers", None)?;
+    anyhow::ensure!(status == 200, "the engine's containers: {status}");
+    let list: Value = serde_json::from_slice(&body)?;
+    let all = list.as_array().cloned().or_else(|| list["containers"].as_array().cloned()).unwrap_or_default();
+    Ok(all
+        .iter()
+        .filter_map(|c| Some(Listed { name: c["name"].as_str()?.to_string(), running: c["running"].as_bool().unwrap_or(false), started_at_ms: c["startedAtMs"].as_u64()? }))
+        .collect())
+}
+
 /// Every container on a real engine started at or after `since_ms` (the
 /// run's), destroyed.
 fn destroy_since(sock: &Path, since_ms: u64) -> Result<()> {
-    let (status, body) = engine_call(sock, "GET", "/v1/containers", None)?;
-    anyhow::ensure!(status == 200, "the real engine's containers: {status}");
-    let list: Value = serde_json::from_slice(&body)?;
-    let all = list.as_array().cloned().or_else(|| list["containers"].as_array().cloned()).unwrap_or_default();
     // bounded: the engine's containers (at most its VMs)
-    for c in all {
-        let (Some(name), Some(started)) = (c["name"].as_str(), c["startedAtMs"].as_u64()) else { continue };
-        if started >= since_ms {
-            let _ = engine_call(sock, "POST", &format!("/v1/containers/{name}/destroy"), Some(EngineBody::Bytes(b"{}".to_vec())));
+    for c in containers(sock)? {
+        if c.started_at_ms >= since_ms {
+            let _ = engine_call(sock, "POST", &format!("/v1/containers/{}/destroy", c.name), Some(EngineBody::Bytes(b"{}".to_vec())));
         }
     }
     Ok(())
@@ -708,20 +757,34 @@ mod tests {
     /// sockets, their secret's file and the platform.
     #[test]
     fn a_node_is_configured_to_listen_or_dial() {
-        let listen = node_config(&spec(Reach::Listen(9401)));
+        let listen = node_config(&spec(Reach::Listen(9401))).unwrap();
         assert_eq!(listen["listen"], "127.0.0.1:9401");
         assert!(listen.get("uplink").is_none());
         assert_eq!(listen["engine"], "/tmp/n/e/engine.sock");
         assert_eq!(listen["secret_file"], "/tmp/n/node.secret");
-        let dial = node_config(&spec(Reach::Uplink));
+        let dial = node_config(&spec(Reach::Uplink)).unwrap();
         assert!(dial.get("listen").is_none());
         assert_eq!(dial["uplink"], json!({ "url": "ws://127.0.0.1:9000/api/nodes/uplink", "id": "uplink" }));
         assert_eq!(dial["platform"], "http://127.0.0.1:9000");
         // in front of a real engine, its own sockets
-        let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) });
+        let real = node_config(&NodeSpec { engine: Engine::Real(PathBuf::from("/var/lib/sandcastle")), ..spec(Reach::Listen(9401)) }).unwrap();
         assert_eq!(real["engine"], "/var/lib/sandcastle/engine.sock");
         assert_eq!(real["ports"], "/var/lib/sandcastle/ports.sock");
         assert_eq!(real["secret_file"], "/tmp/n/node.secret");
+    }
+
+    /// Goal: a socket's path that fits is given back; one past `sun_path`
+    /// (a deep checkout's scratch, as the e2e's impostor's was) is refused,
+    /// saying which and why, before a node is handed it.
+    #[test]
+    fn a_socket_path_fits_sun_path_or_is_refused() {
+        let fits = PathBuf::from(format!("/{}", "d".repeat(SOCKET_PATH_MAX - "/egress.sock".len() - 1)));
+        assert_eq!(socket_path(&fits, "egress.sock").unwrap().as_os_str().len(), SOCKET_PATH_MAX);
+        let long = PathBuf::from(format!("/{}", "d".repeat(SOCKET_PATH_MAX - "/egress.sock".len())));
+        let e = socket_path(&long, "egress.sock").unwrap_err().to_string();
+        assert!(e.contains("108 bytes") && e.contains("egress.sock"), "{e}");
+        let deep = NodeSpec { dir: long, ..spec(Reach::Uplink) };
+        assert!(node_config(&deep).is_err());
     }
 
     /// Goal: a chunked answer is joined; one cut short is refused.

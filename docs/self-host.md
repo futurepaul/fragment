@@ -1227,7 +1227,53 @@ These are listed as found. Each names where it bites and what to do.
       object adopts or starts;
     - a start refused 409 replaces the container it could not see
       (lesson 6: never reused half-known).
+20. **The pairing section's impostor could not bind its socket in a
+    deep checkout.** It made its directory `n/impostor-<id>`, and a
+    person's node's id is 23 characters: under `fragment-selfhost/` its
+    `egress.sock` was 110 bytes, past `sun_path`'s 107, so the node
+    exited before it dialed ("path must be shorter than SUN_LEN"), and
+    the check read "no refusal within 20 s". Under `fragment-pair/`, 4
+    bytes shorter, it fit: the fold broke nothing, and it was no race.
+    Its directory is now `n/x-<label>`, and every socket path the harness
+    hands a node is checked first (`sandcastle::socket_path`), refused
+    with its length.
 
+21. **On celld, a computer started again by its exit's report never came
+    up.** Its exec failed at once, every 100 ms for two minutes ("the
+    container took no exec within 120s"), for three starts, and the
+    computer ended "won't wake: its container kept stopping". It struck
+    intermittently, on the real engine and the double alike, in the
+    computers section's second agent. In those runs every start made by an
+    exit's report failed, and every start made by a request came up.
+    - The trigger was no crash. The lane puts the computer to sleep so its
+      stub reads its second agent: the SIGTERM ends the container (code 0),
+      and the agent's `joined` wake, landing during the sleep, asks for a
+      start once it is gone. When the exit's report beat the sleep's own
+      `Asleep`, that report made the start. A container that dies under an
+      awake computer takes the same path, and no check killed one.
+    - The cause: `ContainerHost` called the object's Rust directly from
+      `monitor()`'s continuation, which celld runs as part of the request
+      that started the container, answered long before. celld ties a
+      WebSocket to the request that opens it, and closes it as that request
+      retires: the exec's upgrade failed at once ("isolate stopped reading
+      WebSocket") on a node that listens, and its socket closed before the
+      process exited on one that dials in. Plain fetches (the start, the
+      intercepts) went through, so only a start with a backup to restore,
+      which execs first, failed. workerd keeps an object's I/O for the
+      object, not the request.
+    - Fixed: every report (an exit, a tab's socket) comes back in through
+      the object's namespace, a request of its own. The placement section
+      now kills each computer's container under it while it is awake (on
+      the node that listens, and on the one that dials in) and waits for
+      it to come up again, and the computers section does the same on any
+      node the run started, the real engine's included. Before the fix
+      both placement checks failed on celld (stuck `starting`); on
+      wrangler dev they pass with or without it.
+    - After: on the double, computers, pairing and placement passed six
+      runs in a row, every check (158 with the computers section's own
+      kill); on the real engine, computers and chat 176 of 176, the killed
+      microVM's computer up again in 0.5 s; on wrangler dev, placement,
+      computers and chat 190 of 190.
 ## The spike, on this box
 
 This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
@@ -1400,6 +1446,8 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     - each one's screen answers through its node, whether the node
       listens or dials in;
     - asleep and woken, a computer wakes on its node, `/data` restored;
+    - its container killed under it while awake, on either node, it is
+      started again there by itself and comes up (found 21);
     - each node down in turn: a wake answers 503 `node_down`, naming the
       node, within 15 s (at once for `direct`, about 5 s for `uplink`);
       the view says why, and a new computer goes to the node that is up;
