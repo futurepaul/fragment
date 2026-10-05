@@ -148,9 +148,16 @@ sockets only); and whether the protocol's library can run on Workers or
 needs a small stateless container doing the cryptography while the
 Durable Object keeps the state.
 
-**First: a SimpleX spike** (Paul, 2026-10-05): one connector, end to
-end, against a local SMP server. Decision 32 (SimpleX on the always-on
-computer) moves here once it proves out.
+**The SimpleX spike (2026-10-05) is parked** (Paul: "too much of a
+lift for now"; docs/explorations/simplex-connector.md). It ran end to
+end against a local SMP server, but no SimpleX library exists outside
+the Haskell app: the practical shape is a small always-on container per
+account running `simplex-chat`, and only a pure-Workers client (about
+1.5 to 2 months) fully meets "never goes back in time". Not built now.
+SimpleX stays on an always-on computer (decision 32), whose disk can
+still go back in time at a host restart; the exploration's rollback
+runs show `/_sync` heals the connection in about 0.2 s, losing the
+messages in flight.
 
 ## Deferred, with the recommendation
 
