@@ -33,6 +33,8 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
    `docs/phase-5.md` — agents (choices for review);
+   `docs/durable-computers.md` — how a computer's state survives a
+   sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
    (its connector went at the cut);
    `docs/phase-3.md` — hosting on fragment.club;
