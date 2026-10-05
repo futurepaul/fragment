@@ -21,6 +21,7 @@
 pub mod fake;
 pub mod hermes;
 pub mod model;
+pub mod rfb;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
