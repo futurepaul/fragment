@@ -85,17 +85,22 @@ pub enum Purpose {
 
 /// The role a caller acts with, or `None` when they cannot see the fragment.
 /// An agent acting for them (`standing.cap`) acts with the lower of that
-/// and its cap.
+/// and its cap, and of its hold: a hold limits what an agent does with its
+/// owner's access (decision 36; Paul, 2026-10-05), never its own
+/// memberships, so an agent held at viewer still answers in the chats it is
+/// a member of, recording its turns there.
 pub fn effective_role(visibility: Visibility, standing: Standing, purpose: Purpose) -> Option<Role> {
     let own = own_role(visibility, standing, purpose);
-    let role = match standing.cap {
+    match standing.cap {
         None => own,
         // `None` is below every role: nothing on either side is nothing
-        Some(cap) => own.min(cap_role(visibility, cap, standing.link)),
-    };
-    match standing.held {
-        Some(held) => role.map(|r| r.min(held)),
-        None => role,
+        Some(cap) => {
+            let role = own.min(cap_role(visibility, cap, standing.link));
+            match standing.held {
+                Some(held) => role.map(|r| r.min(held)),
+                None => role,
+            }
+        }
     }
 }
 
@@ -322,8 +327,9 @@ mod tests {
 
     /// Goal: decision 36's example and its two limits. Skyler's agent edits
     /// what Paul shared with Skyler as an editor, acting for Skyler; a
-    /// people-only share lends it nothing; held at viewer it only reads,
-    /// wherever it is and for whomever it acts.
+    /// people-only share lends it nothing; held at viewer it only reads
+    /// with whatever it reaches for whomever it acts, and keeps its own
+    /// memberships.
     #[test]
     fn delegation_and_its_limits() {
         let d = |s, needs| decide(V::Members, s, Purpose::Act, needs);
@@ -337,9 +343,9 @@ mod tests {
         let held = Standing { held: Some(Viewer), ..skylers_agent };
         assert_eq!(d(held, Editor), Decision::Forbidden);
         assert_eq!(d(held, Viewer), Decision::Allow(Viewer));
-        // held applies when it acts as itself too
+        // a hold never limits what it is a member of itself (its chats)
         let as_itself = Standing { member: Some(Editor), held: Some(Viewer), ..st(None, false, true) };
-        assert_eq!(d(as_itself, Editor), Decision::Forbidden);
+        assert_eq!(d(as_itself, Editor), Decision::Allow(Editor));
         // a hold never raises anything
         let raised = Standing { held: Some(Editor), ..acting(Some(Viewer), None, Some(Editor)) };
         assert_eq!(d(raised, Editor), Decision::Forbidden);

@@ -197,6 +197,49 @@ async fn a_question_answered_in_words() {
     bridge.stop().await;
 }
 
+/// Goal (P1, with a question in flight): a turn asking in words that a
+/// crash cuts ends once, as lost, and is never run again, whether the next
+/// life wakes with the state the crash left (the turn asking), one from
+/// before it, or none; and the asker's answer, said to the next life, is
+/// told to no turn that life does not own: it is a turn of its own,
+/// answered once.
+#[tokio::test]
+async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
+    for wakes in ["during", "before", "none"] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("question-cut-{wakes}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let runs = support::Runs::default();
+
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+        following(&fake, 2).await;
+        let before = support::save_state(&dir);
+        let asked = fake.say(&chat, &person("paul"), json!({ "text": "name my plant, ask-me" }));
+        let turn = turn_of("juniper", &chat, seq(&asked));
+        fake.until(WAIT, "the question", |w| replies(w, &chat).iter().any(|r| r["text"] == "What should I call it?")).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        match wakes {
+            "before" => support::restore_state(&dir, &before),
+            "during" => {}
+            _ => support::lose_state(&dir),
+        }
+
+        let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+        fake.until(WAIT, "the cut turn's end", |w| !ends_of(w, &chat, &turn).is_empty()).await;
+        let answer = said_and_ended(&fake, &chat, "Fernando").await;
+        assert_eq!(runs.all(), vec![turn.clone(), answer.clone()], "{wakes}: the asking turn ran once, and the answer is a turn of its own");
+        fake.with(|w| {
+            assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
+            let r = replies(w, &chat);
+            assert_eq!(r, vec![json!({ "text": "What should I call it?", "turn": turn }), json!({ "text": "echo: [paul] Fernando", "turn": answer })], "{wakes}: the question, then the answer's own reply");
+            assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
+        });
+        bridge.stop().await;
+    }
+}
+
 /// Goal: only the turn's asker stops it; a Stop from anyone else is
 /// ignored and the turn answers.
 #[tokio::test]
@@ -561,5 +604,339 @@ async fn the_restore_gate_holds() {
     fake.with(|w| assert!(w.calls.is_empty(), "nothing asked before the restore: {:?}", w.calls));
     std::fs::write(dir.join("restored"), b"").unwrap();
     following(&fake, 2).await;
+    bridge.stop().await;
+}
+
+// ---- crashes and rollbacks (docs/explorations/pi-durable.md, F2, F3 and
+// P1). Counted in runs (support::Runs: each turn the runtime was given),
+// never in records: a second run's posts are replays of the first's, or
+// 409s. A negative is proved by a later positive, never by a sleep: turns
+// of a chat run in order, and a new life reads the old records before the
+// new, so once one more message's turn has ended, every older turn has been
+// run again or fenced. ----
+
+fn starts_of(w: &World, chat: &str, turn: &str) -> Vec<Value> {
+    w.bodies(chat, "work", "turn.start").into_iter().filter(|s| s["turn"] == turn).collect()
+}
+
+fn ends_of(w: &World, chat: &str, turn: &str) -> Vec<Value> {
+    w.bodies(chat, "work", "turn.end").into_iter().filter(|e| e["turn"] == turn).collect()
+}
+
+fn work_posts(w: &World, chat: &str) -> usize {
+    let route = format!("POST /api/f/{chat}/channels/work");
+    w.calls.iter().filter(|c| **c == route).count()
+}
+
+/// How many times the keepalive was opened: once more is the proof that the
+/// bridge has a new turn in hand.
+fn keepalive_opens(w: &World) -> usize {
+    w.keepalive_log.iter().filter(|open| **open).count()
+}
+
+/// paul says `text` in `chat`; its turn, once that has ended.
+async fn said_and_ended(fake: &Fake, chat: &str, text: &str) -> String {
+    let said = fake.say(chat, &person("paul"), json!({ "text": text }));
+    let turn = turn_of("juniper", chat, seq(&said));
+    fake.until(WAIT, &format!("{text:?}'s end"), |w| !ends_of(w, chat, &turn).is_empty()).await;
+    turn
+}
+
+/// Two turns, a save after the first, a crash after the second; then the
+/// save put back (or the state removed), a new life, and a third message.
+async fn rollback_case(name: &str, lose_it_all: bool) {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir(name);
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let t1 = said_and_ended(&fake, &chat, "one").await;
+    // the save: /data as it is after turn one (its end was written to the
+    // state before it was posted)
+    let saved = support::save_state(&dir);
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+
+    // the crash's wake: /data goes back to the save, or is gone
+    if lose_it_all {
+        support::lose_state(&dir);
+    } else {
+        support::restore_state(&dir, &saved);
+    }
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+    let t3 = said_and_ended(&fake, &chat, "three").await;
+    assert_eq!(runs.all(), vec![t1.clone(), t2.clone(), t3.clone()], "each turn ran once");
+    fake.with(|w| {
+        for t in [&t1, &t2, &t3] {
+            let ends = ends_of(w, &chat, t);
+            assert_eq!(ends.len(), 1, "{t}: one end");
+            assert_eq!(ends[0]["outcome"], "idle", "{t}: its own life's end stands");
+        }
+        assert_eq!(replies(w, &chat).len(), 3, "one reply each");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (I3): a turn that ran is never run again after a rollback: the
+/// next life wakes with a save from before it.
+#[tokio::test]
+async fn a_rollback_runs_nothing_twice() {
+    rollback_case("rollback", false).await;
+}
+
+/// Goal (I3): a turn that ran is never run again after `/data` is lost:
+/// the next life reads every chat from the start.
+#[tokio::test]
+async fn a_lost_state_runs_nothing_twice() {
+    rollback_case("lost-state", true).await;
+}
+
+/// Goal (I1, I2): a turn a crash cut short ends once, as an error, and is
+/// never run again, whether the next life wakes with the state from before
+/// the turn, the state the crash left (the turn running), or none.
+#[tokio::test]
+async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
+    for wakes in ["before", "during", "none"] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("cut-{wakes}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let runs = support::Runs::default();
+        // drafts 100 ms apart: `slow` runs two seconds, time to kill it in
+        let pace = Duration::from_millis(100);
+
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+        following(&fake, 2).await;
+        let t1 = said_and_ended(&fake, &chat, "one").await;
+        let before = support::save_state(&dir);
+        let slow = fake.say(&chat, &person("paul"), json!({ "text": "slow" }));
+        let ts = turn_of("juniper", &chat, seq(&slow));
+        fake.until(WAIT, "the slow turn running", |w| w.drafts.iter().any(|d| d.2 == ts)).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        match wakes {
+            "before" => support::restore_state(&dir, &before),
+            "during" => {}
+            _ => support::lose_state(&dir),
+        }
+
+        let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+        let t3 = said_and_ended(&fake, &chat, "after").await;
+        assert_eq!(runs.all(), vec![t1.clone(), ts.clone(), t3.clone()], "{wakes}: the cut turn ran once, in the life it was cut in");
+        fake.with(|w| {
+            let ends = ends_of(w, &chat, &ts);
+            assert_eq!(ends.len(), 1, "{wakes}: one end");
+            assert_eq!(ends[0]["outcome"], "error", "{wakes}: ended as lost: {ends:?}");
+            assert!(!replies(w, &chat).iter().any(|r| r["turn"] == ts.as_str()), "{wakes}: a cut turn gives no answer");
+            assert_eq!(ends_of(w, &chat, &t3)[0]["outcome"], "idle", "{wakes}: the next message is answered");
+        });
+        bridge.stop().await;
+    }
+}
+
+/// Goal (I2): a turn whose run ended, but whose end a crash kept from the
+/// platform (its posts failing, the lane retrying, when the bridge dies),
+/// ends once and as itself: the state kept it, owing its end, and the next
+/// life posts that end again under the same id and body. Its run is not
+/// run again.
+#[tokio::test]
+async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("owed-end");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+    let pace = Duration::from_millis(100);
+
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+    following(&fake, 2).await;
+    let slow = fake.say(&chat, &person("paul"), json!({ "text": "slow" }));
+    let ts = turn_of("juniper", &chat, seq(&slow));
+    fake.until(WAIT, "the slow turn running", |w| w.drafts.iter().any(|d| d.2 == ts)).await;
+    // from here every post fails: the turn's reply, then its end, wait in the lane
+    let chat_posts = |w: &World| w.calls.iter().filter(|c| **c == format!("POST /api/f/{chat}/channels/chat")).count();
+    let before = fake.with(|w| {
+        w.fail_posts = 1_000;
+        chat_posts(w)
+    });
+    fake.until(WAIT, "its reply refused twice: the run is over, its end owed", |w| chat_posts(w) >= before + 2).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    fake.with(|w| {
+        assert!(ends_of(w, &chat, &ts).is_empty(), "its end never reached the platform");
+        w.fail_posts = 0;
+    });
+
+    let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+    let t2 = said_and_ended(&fake, &chat, "after").await;
+    assert_eq!(runs.all(), vec![ts.clone(), t2], "the slow turn ran once");
+    fake.with(|w| {
+        let ends = ends_of(w, &chat, &ts);
+        assert_eq!(ends, vec![json!({ "kind": "turn.end", "turn": ts, "outcome": "idle" })], "one end, its own (not lost)");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (I4): a message said while the computer was down is answered once
+/// by the next life, even one that wakes with an older save, and the turn
+/// that save does not know is not run again for it.
+#[tokio::test]
+async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("down-rollback");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let t1 = said_and_ended(&fake, &chat, "one").await;
+    let saved = support::save_state(&dir);
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+
+    // said while it was down; it wakes with the save from before turn two
+    let three = fake.say(&chat, &person("paul"), json!({ "text": "three" }));
+    let t3 = turn_of("juniper", &chat, seq(&three));
+    support::restore_state(&dir, &saved);
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+    fake.until(WAIT, "three's end", |w| !ends_of(w, &chat, &t3).is_empty()).await;
+    assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
+    fake.with(|w| {
+        let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
+        assert_eq!(r, vec![json!({ "text": "echo: [paul] three", "turn": t3 })], "answered once");
+        assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (P1): a turn whose claim (its `turn.start`) the platform does not
+/// answer is not run. Method: every post fails as the message arrives;
+/// once the fake has refused the claim twice (the lane tried it again),
+/// nothing has run; then the platform answers, and the turn runs once.
+#[tokio::test]
+async fn a_claim_the_platform_never_answers_runs_nothing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("unanswered-claim");
+    let runs = support::Runs::default();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    fake.with(|w| w.fail_posts = 1_000);
+    let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
+    let t = turn_of("juniper", &chat, seq(&one));
+    fake.until(WAIT, "its claim refused twice", |w| work_posts(w, &chat) >= 2).await;
+    assert_eq!(runs.of(&t), 0, "not run while its claim is unanswered");
+    fake.with(|w| assert!(starts_of(w, &chat, &t).is_empty(), "nor claimed"));
+    fake.with(|w| w.fail_posts = 0);
+    fake.until(WAIT * 2, "its end, once the platform answers", |w| !ends_of(w, &chat, &t).is_empty()).await;
+    assert_eq!(runs.all(), vec![t.clone()], "run once its claim was answered");
+    fake.with(|w| assert_eq!(ends_of(w, &chat, &t)[0]["outcome"], "idle"));
+    bridge.stop().await;
+}
+
+/// Goal (P1): a claim the platform refuses (403: the agent is held below
+/// editor in the chat, so `work` is not its to post on) runs nothing, is
+/// asked once, and lets the computer go; once the agent may post there
+/// again, the next message runs, and the refused one was never asked again.
+#[tokio::test]
+async fn a_claim_the_agent_may_not_post_runs_nothing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("refused-claim");
+    let runs = support::Runs::default();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let role = |w: &mut World, role: &str| w.fragments.get_mut(&chat).expect("the chat").members.iter_mut().find(|m| m.principal == "id:juniper").expect("juniper's membership").role = role.to_string();
+    fake.with(|w| role(w, "viewer"));
+    let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
+    let t1 = turn_of("juniper", &chat, seq(&one));
+    fake.until(WAIT, "the computer held for it, then let go", |w| w.keepalive_log.len() >= 2 && w.keepalive_log.last() == Some(&false) && w.keepalive_open == 0).await;
+    assert_eq!(runs.of(&t1), 0, "refused: not run");
+    fake.with(|w| assert_eq!(work_posts(w, &chat), 1, "its claim, once"));
+    fake.with(|w| role(w, "editor"));
+    let t2 = said_and_ended(&fake, &chat, "two").await;
+    assert_eq!(runs.all(), vec![t2], "only the message the agent could claim ran");
+    fake.with(|w| {
+        assert!(starts_of(w, &chat, &t1).is_empty() && ends_of(w, &chat, &t1).is_empty(), "nothing of one's on work");
+        assert_eq!(work_posts(w, &chat), 3, "one's refused claim, then two's claim and end: never one's again");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (P1's hold): while the platform holds the computer (the mark a
+/// sleep makes before its save), the bridge claims nothing. A message is
+/// kept, unclaimed, while the computer is held awake for it (its keepalive,
+/// the proof the bridge has it), and is claimed and run once the hold goes.
+#[tokio::test]
+async fn held_it_claims_nothing() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("held");
+    let runs = support::Runs::default();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    support::hold(&dir);
+    let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
+    let t = turn_of("juniper", &chat, seq(&one));
+    fake.until(WAIT, "the bridge holding the computer awake for it", |w| keepalive_opens(w) == 1).await;
+    assert_eq!(runs.of(&t), 0, "held: not run");
+    fake.with(|w| assert_eq!(work_posts(w, &chat), 0, "held: nothing claimed"));
+    let unheld_at = fake.with(|w| w.log.len());
+    support::unhold(&dir);
+    fake.until(WAIT, "its end once the hold is gone", |w| !ends_of(w, &chat, &t).is_empty()).await;
+    assert_eq!(runs.all(), vec![t.clone()], "run once, after the hold");
+    fake.with(|w| {
+        let start_seq = w.records(&chat, "work").iter().find(|r| r["body"]["kind"] == "turn.start" && r["body"]["turn"] == t.as_str()).map(seq).expect("its claim");
+        let claimed_at = w.log.iter().position(|l| *l == format!("record {chat} work {start_seq}")).expect("its claim in the log");
+        assert!(claimed_at >= unheld_at, "claimed after the hold went, not before");
+    });
+    bridge.stop().await;
+}
+
+/// Goal (P1's hold, F3): a message that arrives while a sleep holds the
+/// computer is never claimed by the life the sleep ends: the next life,
+/// woken from the save the sleep took, answers it once.
+#[tokio::test]
+async fn a_message_during_a_hold_waits_for_the_next_life() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("hold-next-life");
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let runs = support::Runs::default();
+
+    let bridge = support::start_killable(cfg.clone(), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    let t1 = said_and_ended(&fake, &chat, "one").await;
+    fake.until(WAIT, "the keepalive let go after one", |w| w.keepalive_open == 0 && w.keepalive_log.last() == Some(&false)).await;
+    let opens = fake.with(|w| keepalive_opens(w));
+    // the sleep: its hold, then its save
+    support::hold(&dir);
+    let saved = support::save_state(&dir);
+    let claims_before = fake.with(|w| work_posts(w, &chat));
+    let two = fake.say(&chat, &person("paul"), json!({ "text": "two" }));
+    let t2 = turn_of("juniper", &chat, seq(&two));
+    fake.until(WAIT, "the dying life holding the computer awake for it", |w| keepalive_opens(w) > opens).await;
+    assert_eq!(runs.all(), vec![t1.clone()], "the dying life runs nothing more");
+    fake.with(|w| assert_eq!(work_posts(w, &chat), claims_before, "nor claims it"));
+    // the sleep's destroy; the next container's /run is fresh, its /data the save
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    support::unhold(&dir);
+    support::restore_state(&dir, &saved);
+
+    let bridge = support::start_killable(cfg, support::counting(support::script(), &runs));
+    fake.until(WAIT, "two's end, in the next life", |w| !ends_of(w, &chat, &t2).is_empty()).await;
+    assert_eq!(runs.all(), vec![t1, t2.clone()], "two ran once, in the next life");
+    fake.with(|w| {
+        assert_eq!(starts_of(w, &chat, &t2).len(), 1);
+        assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle");
+        assert_eq!(replies(w, &chat).iter().filter(|r| r["turn"] == t2.as_str()).count(), 1, "answered once");
+    });
     bridge.stop().await;
 }
