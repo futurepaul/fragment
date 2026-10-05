@@ -312,6 +312,11 @@ impl Lifecycle {
                 if !matches!(&self.phase, Phase::Sleeping { .. } | Phase::Awake { .. } | Phase::Starting { .. }) => {}
             (Phase::Sleeping { generation, .. }, Event::Asleep { generation: g }) if g == generation => self.gone(now_ms, &mut step),
             (Phase::Awake { generation, .. } | Phase::Starting { generation, .. }, Event::Exited { generation: g }) if g == generation => {
+                // one that died before it was ready was never awake: nothing
+                // since it last was is metered (its sleep, its start)
+                if matches!(self.phase, Phase::Starting { .. }) {
+                    self.metered_to_ms = now_ms;
+                }
                 // a container that died under us counts against its starts
                 self.failures += 1;
                 if self.failures >= STARTS_FAILED_MAX {
@@ -559,6 +564,45 @@ mod tests {
         let s = l.apply(Event::Exited { generation: g }, T + IDLE_MS + 1);
         assert!(!s.actions.iter().any(|a| matches!(a, Action::Start { .. })));
         assert_eq!(l.phase, Phase::Asleep);
+    }
+
+    /// Goal: a container that dies while it starts, before it was ever
+    /// ready, meters nothing: not the start, and not the sleep before it
+    /// (the last awake interval was metered as it slept). Its start is tried
+    /// again, as an exit of an awake one is, and the next awake time is
+    /// metered from its ready.
+    #[test]
+    fn an_exit_while_starting_meters_nothing() {
+        let mut l = Lifecycle::new();
+        let g = started(&mut l, T);
+        l.apply(Event::Sleep, T + 10_000);
+        let s = l.apply(Event::Asleep { generation: g }, T + 12_000);
+        assert_eq!(s.actions, vec![Action::Meter { from_ms: T + 3_000, to_ms: T + 12_000 }]);
+        // asleep an hour, then woken: it dies as it starts
+        let later = T + 3_600_000;
+        let s = l.apply(Event::Wake { why: Wake::Owner }, later);
+        let Some(Action::Start { generation: g2 }) = s.actions.first().cloned() else { panic!("a wake starts it: {s:?}") };
+        let s = l.apply(Event::Exited { generation: g2 }, later + 2_000);
+        assert!(!s.actions.iter().any(|a| matches!(a, Action::Meter { .. })), "nothing was awake: {s:?}");
+        assert!(s.actions.contains(&Action::Start { generation: g2 + 1 }), "it is wanted, so it starts again: {s:?}");
+        // the same exit again (a replay) changes nothing
+        assert!(l.apply(Event::Exited { generation: g2 }, later + 2_500).actions.is_empty());
+        l.apply(Event::Ready { generation: g2 + 1 }, later + 5_000);
+        let s = l.apply(Event::Sleep, later + 65_000);
+        assert!(s.actions.contains(&Action::Sleep { generation: g2 + 1 }));
+        let s = l.apply(Event::Asleep { generation: g2 + 1 }, later + 66_000);
+        assert_eq!(s.actions, vec![Action::Meter { from_ms: later + 5_000, to_ms: later + 66_000 }]);
+        // its starts dying one after another: none of it metered, then it won't wake
+        let mut l = Lifecycle::new();
+        let mut at = T;
+        let mut s = l.apply(Event::Wake { why: Wake::Owner }, at);
+        for _ in 0..STARTS_FAILED_MAX {
+            let Some(Action::Start { generation }) = s.actions.iter().find(|a| matches!(a, Action::Start { .. })).cloned() else { break };
+            at += 1_000;
+            s = l.apply(Event::Exited { generation }, at);
+            assert!(!s.actions.iter().any(|a| matches!(a, Action::Meter { .. })), "{s:?}");
+        }
+        assert!(matches!(l.phase, Phase::Failed { .. }), "{:?}", l.phase);
     }
 
     /// Goal: the owner's sleep lets go of what held it, so it stays asleep
