@@ -345,15 +345,16 @@ class ContainerHost {
   // A request to one of the container's ports. A WebSocket is bridged
   // through this Durable Object (both ends accepted here, so an open tab
   // keeps the computer awake), its opening and closing reported as
-  // `computer/tab`.
+  // `computer/tab`. Each end's listeners are added before it is accepted
+  // and before anything is awaited: a message that arrives with no
+  // listener is gone, and a container's socket may speak first (an RFB
+  // server's version, the screen's control socket's holder), whose first
+  // word the report's await used to lose.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
     const [client, server] = Object.values(new WebSocketPair());
-    upstream.accept();
-    server.accept();
-    await this.#report("computer/tab", { open: true });
     let closed = false;
     const close = (code, reason) => {
       if (closed) return;
@@ -371,6 +372,9 @@ class ContainerHost {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
       ws.addEventListener("error", () => close(1011, "the other end failed"));
     }
+    server.accept();
+    upstream.accept();
+    await this.#report("computer/tab", { open: true });
     return new Response(null, { status: 101, webSocket: client });
   }
 }
