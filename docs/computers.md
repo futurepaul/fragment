@@ -672,6 +672,36 @@ and how a runtime finds them, is the image's.
   the interception CA appended at boot is its too. The image holds no
   secret of it. The google-workspace skill prefers it.
 
+### Root in our Hermes image
+
+Paul, 2026-10-05: "hermes needs to be able to install binaries (not
+persisted)".
+
+- **Passwordless sudo.** Hermes runs as its unprivileged user, as
+  upstream runs it, and its user may run anything as root with `sudo`
+  (no password, so Hermes' terminal runs `sudo` as written, never asking
+  for one). The system's directories stay root's, as on a CI runner, so
+  `sudo apt-get install`, `sudo install … /usr/local/bin/` and `sudo npm
+  install -g` are how an agent installs software. The computer is one
+  person's VM with no secret in it (decisions 13, 43), and one person's
+  agents are not fenced from each other (decision 44), so root inside it
+  opens nothing of anyone else's.
+- **How long an install lasts.** `/data` is the only place a computer
+  keeps; an install outside it lasts until the computer's next start from
+  its image (a crash, or an image update), and a wake from a snapshot
+  keeps it.
+- **Hermes' own settings.** Its file tools (`write_file`, `patch`) may
+  write `/tmp` as well as its home (`HERMES_WRITE_SAFE_ROOT`, which binds
+  only them, not the terminal: defense in depth, as Hermes says), for the
+  scratch an install is made from; they run as its user, so `/usr/local`
+  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  Hermes' own optional backends (providers, platforms, speech), which a
+  computer configures none of.
+- **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
+  intercept catches (decision 43); the image keeps apt's lists as of its
+  build, and a `.deb` on disk installs offline. An intranet computer
+  needs an apt mirror (and PyPI's and npm's) named in the image.
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
@@ -725,7 +755,9 @@ and how a runtime finds them, is the image's.
   computer's `uses`), never records, which a second run replays.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
-  first's turn runs included.
+  first's turn runs included, and an install as root (a `.deb` through
+  apt and a program into `/usr/local/bin`, offline), its home intact
+  after a sleep and a wake.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API, with the
