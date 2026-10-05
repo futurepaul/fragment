@@ -223,9 +223,87 @@ new image already is (decision 18).
 `FRAGMENT_NODES`, and otherwise the `NodeContainer` of the computer's
 node. The single-node variables (`FRAGMENT_NODE_URL`, `_SECRET` and
 `_IMAGES`) are gone: a cell that still has them refuses its first request
-and names what replaced them. **Not built:** an owner's preference (a
-field at creation); for now, the deployment's preference is the list's
-order.
+and names what replaced them. An owner's choice of node is the next
+part's.
+
+**Bring your own computer (experimental; branch `selfhost-pair`).** A
+person starts sandcastle on a machine of theirs, pairs it with their
+account, and it becomes a node for their computers alone. Paul's sketch
+(2026-10-05): "fire up sandcastle on whatever machine and then somehow
+pair it with their fragment account and it becomes avail as a resource";
+"picking your node should be in settings".
+
+- **Two kinds of node.** The deployment's (`FRAGMENT_NODES`, the
+  operator's, everyone's) and a person's own (paired, theirs alone).
+- **The switch: `FRAGMENT_BYOC`, `on` or `off`, off unless the deployment
+  says on.** Off is a company's intranet, whose IT provides every node; on
+  is a home or personal deployment. Off is the default because on opens an
+  unsigned endpoint (a node's start) and lets any account attach a
+  machine, and a deployment should choose that, not inherit it. On needs
+  `FRAGMENT_NODES` for its images (a person's node runs the references for
+  its architecture), and may then list no node of its own (`"nodes": []`).
+  Off, every step below is refused, saying why.
+- **Pairing is a device authorization** (RFC 8628's shape; the CLI's key
+  approval is the model, `fragment_core::pairing`):
+  1. `sandcastle-node pair https://fragment.home.arpa --config
+     /etc/sandcastle-node/node.json` asks the platform, unsigned (`POST
+     /api/nodes/pair`, its name and architecture). It prints a link and an
+     8-letter code (two groups of four; 20 consonants, so about 2^34.6).
+     The device code it polls with is 32 random bytes that only it holds;
+     the platform keeps its SHA-256.
+  2. The person opens the link where they are signed in (`/nodes/pair`),
+     checks the code against the node's terminal, and approves. The form
+     posts from the platform's own origin, with the session, as `/cli`'s
+     does. The page warns: approve only a machine you started.
+  3. The platform names the node (`paired-<16 hex>`, never the node's
+     choice) and mints its secret (32 random bytes), sealed in the registry
+     for that id (`keys::seal`, scope `PairedNode:<id>`).
+  4. The node's next poll takes the id and the secret, once: the pairing
+     row goes with the answer, so a replay finds nothing. The node writes
+     the secret to its file (0600) and its config (the platform, its
+     uplink as that id, the secret's file, and `ca_file` for a private
+     CA), then `serve` dials. The secret is never printed or shown.
+- **Bounds.** A code lives 10 minutes. At most 32 pairings wait and 10
+  begin a minute, platform-wide (a start is unsigned). A poll sooner than
+  its interval (5 s) answers `slow_down` and adds 5 s. A person may try 5
+  wrong codes in 10 minutes; past that, nothing is looked up. A person
+  holds at most 8 live nodes, and 32 rows with revoked ones.
+- **Ids.** A deployment node may not begin `paired-` (its list is refused
+  at the first request), and a person's node never has another's id: the
+  uplink checks a paired id's dial against the secret the registry holds
+  for it. A node that dials as someone else's node, or as the deployment's,
+  without its secret is refused (401), and as a deployment node that does
+  not dial in, 403.
+- **Revoking** (settings, or `DELETE /api/nodes/{id}`): the registry drops
+  the secret and keeps the row, so the node's computers can say what became
+  of it; the node's `Node` object closes its uplink (4003), fails every
+  call in flight, and from then on refuses its dials (403) and answers
+  every call `node_revoked` (410). A computer placed there stays placed
+  (moving is not built): its wake answers 410 `node_revoked`, typed, and
+  its view says why. Its intercepts are refused too.
+- **The choice, in settings: "where new computers run".** Automatic (the
+  deployment's rule over the deployment's nodes), or one node the person
+  may use: one of the deployment's, or one of theirs. A person's own node
+  is never in the deployment's rule: a node someone was tricked into
+  approving runs nothing until they pick it.
+- **Placement honors it at a computer's first start** (`rank_for`): the
+  chosen node first if it can take the computer, then the deployment's
+  rule. When it cannot (down, another architecture than it is listed or
+  paired with, no image for its architecture, full, or no longer theirs:
+  revoked, delisted, or BYOC off), the deployment's rule places it, and the
+  computer says so in its view's `placed`: "by the deployment's rule: mac,
+  its owner's choice, is down (…)". With nowhere to fall back, the wake
+  answers `no_node`, each node's reason given, the choice's first. A
+  fallback is for life, as every placement is; a laptop that sleeps is the
+  case to know.
+- **Experimental, and why.** A person has one computer today, placed once.
+  So the choice matters for a computer that has not started yet (a new
+  person's, or after a choice is set before the first agent); an existing
+  computer stays where it is, and settings show where. Several computers
+  for one person, one per machine, is the part with no UI yet. Settings'
+  "Computers (experimental)" lists the person's nodes and the deployment's
+  (each up or down, their computers on each), the choice, and each of
+  their nodes' Revoke.
 
 **Images per architecture.** Both computer images now build for
 `linux/amd64` and `linux/arm64` from one Dockerfile each, every stage for
@@ -1343,6 +1421,38 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
     - `xtask deploy` rendering `FRAGMENT_NODES` and the node secrets for
       a blend on Cloudflare.
 
+- **Bring your own computer: built, experimental** (2026-10-05; branch
+  `selfhost-pair`, and sandcastle's `node-pair`). The design is seam 2's
+  part of that name.
+  - Host tests (11 here, 7 in sandcastle): `fragment_core::pairing` (7:
+    a pairing valid, a wrong code, an expired one, a replayed approval,
+    the bounds, revoking, and BYOC off), `placement`'s choices (3: a
+    choice first, each fallback with its reason, BYOC's switch), proto's
+    poll answers (1), and sandcastle's `pair` (5 in the crate: its
+    arguments, the uplink, the config it writes; 2 in process against a
+    stand-in platform: a pairing to its files, and five refusals that
+    write nothing). `cargo xtask check` passes.
+  - The e2e's `pairing` section (`FRAGMENT_E2E_NODES=two`, which turns
+    BYOC on): the device flow over HTTP; three impostors refused; a real
+    `sandcastle-node pair` in front of the Docker engine double, approved,
+    dialing in; the person's computer placed there by choice, its screen
+    through the uplink; a choice that is down falling back, saying why;
+    the pairing and choice across a restart; revoking (the uplink cut,
+    the wake `node_revoked`, before and after a restart); BYOC off; and
+    starts past their bound. With Chrome, settings' Computers
+    (experimental) shows the node up, the computer on it, the choice, and
+    Revoke. **On celld: pairing 37 of 37; with computers, shell-ui,
+    placement and restart, 226 passed, 0 failed, 0 skipped.**
+  - Found on the way: a computer whose node is gone (delisted, or a
+    person's revoked) answered its wake "no image for its architecture"
+    (the gone node has no images) instead of why; its start now throws
+    the node's own error, so a delisted node is `node_down` and a revoked
+    one `node_revoked`.
+  - Not built: moving a computer; several computers per person; a node
+    renamed; a paired node's capacity from its engine (it is
+    `OWN_CAPACITY`); billing a computer on its owner's own machine
+    differently (its awake time is metered as any computer's).
+
 ### Running it
 
 On the home network, as an intranet: docs/self-host-lan.md.
@@ -1440,6 +1550,12 @@ first). Give it the model through a unix socket: `socat` on the host from
 the socket to the model's port, and in the namespace from a loopback
 port to the socket.
 
+People pair nodes of their own with `FRAGMENT_BYOC=on` beside
+`FRAGMENT_NODES_FILE` (its images): on the machine,
+`sandcastle-node pair http://127.0.0.1:8790 --config <dir>/node.json
+--engine <engine.sock> --ports <ports.sock> --egress <egress.sock>`
+(seam 2, Bring your own computer; the e2e's `pairing` section does this).
+
 A node the platform cannot reach dials it instead (the uplink):
 
 - `"uplink": true` for it in the platform's node list, with no `url`;
@@ -1481,10 +1597,13 @@ default dev ports.
 - **The root the engine needs on this box.** sandcastle's engine jails
   each VM, so it runs as root (`sudo systemd-run …`). Someone has to
   start it.
-- **Placement's preference** (seam 2). Today it is the deployment's: the
-  list's order breaks ties. Should an owner name a node (say, "my
-  computer on my Mac")? That is a field at creation. A computer pinned to
-  a laptop is down whenever the laptop sleeps.
+- **Placement's preference** (seam 2): answered by Bring your own
+  computer, a person's choice in settings. Left open: whether a choice
+  that is down should wait rather than fall back (a fallback is for life),
+  and whether automatic should ever use a person's own nodes (today never,
+  so a node someone was tricked into approving takes nothing).
+- **BYOC's default** (seam 2): off, so an intranet is safe as deployed;
+  a home deployment says `FRAGMENT_BYOC=on`.
 - **The Mac as a node.** Its Linux VM builds the arm64 images natively
   (`docker build --platform linux/arm64 -f images/hermes/Dockerfile .`),
   loads them into its engine, and dials the box with `"uplink"` in its
