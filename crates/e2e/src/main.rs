@@ -360,6 +360,12 @@ impl Suite {
         matches!(self.rung, needs::Rung::Celld { .. })
     }
 
+    /// Whether the run's one node fronts the machine's real engine
+    /// (`FRAGMENT_E2E_NODES=real`).
+    pub fn real_engine(&self) -> bool {
+        self.nodes.iter().any(|n| n.is_real())
+    }
+
     /// Whether the run's computers are placed on sandcastle nodes it started.
     pub fn has_nodes(&self) -> bool {
         !self.nodes.is_empty()
@@ -398,6 +404,7 @@ impl Suite {
         let spec = devstack::sandcastle::NodeSpec {
             id: label.into(),
             reach: devstack::sandcastle::Reach::Uplink,
+            engine: devstack::sandcastle::Engine::Double,
             dir: self.scratch.join("n").join(label),
             platform: self.platform(),
             capacity: 1,
@@ -1225,7 +1232,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         renderer,
         nodes: vec![],
         node_images: Value::Null,
-        sandcastle: sandcastle.clone(),
+        sandcastle: sandcastle.as_ref().map(|(tools, _)| tools.clone()),
         byoc: true,
         image_tags: vec![],
         port,
