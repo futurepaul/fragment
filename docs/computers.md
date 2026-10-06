@@ -269,8 +269,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
     unassigned signs nothing from that moment (the intercept refuses it),
     and its placeholders are refused, whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
-    computer stays awake. Hold it while busy; drop it while waiting on a
-    person (decision 42).
+    computer stays awake. Hold it while busy, and while a turn waits on
+    its card, until the card is answered or expires (decision 42 as
+    amended; docs/bridge.md, "A card keeps its computer awake").
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record; the agent must be a member who may read
@@ -722,6 +723,37 @@ and how a runtime finds them, is the image's.
   the interception CA appended at boot is its too. The image holds no
   secret of it. The google-workspace skill prefers it.
 
+### Root in our Hermes image
+
+Paul, 2026-10-05: "hermes needs to be able to install binaries (not
+persisted)".
+
+- **Passwordless sudo.** Hermes runs as its unprivileged user, as
+  upstream runs it, and its user may run anything as root with `sudo`
+  (no password, so Hermes' terminal runs `sudo` as written, never asking
+  for one). The system's directories stay root's, as on a CI runner, so
+  `sudo apt-get install`, `sudo install … /usr/local/bin/` and `sudo npm
+  install -g` are how an agent installs software. The computer is one
+  person's VM with no secret in it (decisions 13, 43), and one person's
+  agents are not fenced from each other (decision 44), so root inside it
+  opens nothing of anyone else's.
+- **How long an install lasts.** `/data` is the only place a computer
+  keeps; an install outside it lasts until the computer's next start from
+  its image (a crash, or an image update), and a wake from a snapshot
+  keeps it.
+- **Hermes' own settings.** Its file tools (`write_file`, `patch`) may
+  write its home, its agents' work directories (`/data/work`, where its
+  terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
+  only them, not the terminal: defense in depth, as Hermes says), for the
+  scratch an install is made from; they run as its user, so `/usr/local`
+  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  Hermes' own optional backends (providers, platforms, speech), which a
+  computer configures none of.
+- **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
+  intercept catches (decision 43); the image keeps apt's lists as of its
+  build, and a `.deb` on disk installs offline. An intranet computer
+  needs an apt mirror (and PyPI's and npm's) named in the image.
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
@@ -771,7 +803,9 @@ and how a runtime finds them, is the image's.
   computer's `uses`), never records, which a second run replays.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
-  first's turn runs included, and that agent (on the medium tier) looking
+  first's turn runs included, and an install as root (a `.deb` through
+  apt and a program into `/usr/local/bin`, offline), its home intact
+  after a sleep and a wake; and that agent (on the medium tier) looking
   at its screen: its `computer_use` screenshot goes to the route's
   `vision` as that agent, settled on its owner's ledger at GLM-5.3
   Flash's price, and its answer is what the vision model saw. The
