@@ -362,7 +362,13 @@ class ContainerHost {
   // that named none, as a bridge's plain close is) and 1006 (dropped) are
   // a receiver's to report, which workerd refuses to send, and passing one
   // on left the other end open: a screen whose desktop restarted kept its
-  // page's stream, frozen (p5, 2026-10-05). Those go on as 1000.
+  // page's stream, frozen (p5, 2026-10-05). Those go on as 1000. A message
+  // that arrives once the bridge is closed is dropped, not sent: an end we
+  // closed still delivers until its peer answers the close, and `send()`
+  // throws on an end closed for sending. Only `close` closes one
+  // (workerd's own answer to a peer's close comes in the step that
+  // dispatches the close event `close` hears), so `closed` covers every
+  // such send.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
@@ -385,8 +391,12 @@ class ContainerHost {
       }
       this.#report("computer/tab", { open: false });
     };
-    upstream.addEventListener("message", (e) => server.send(e.data));
-    server.addEventListener("message", (e) => upstream.send(e.data));
+    upstream.addEventListener("message", (e) => {
+      if (!closed) server.send(e.data);
+    });
+    server.addEventListener("message", (e) => {
+      if (!closed) upstream.send(e.data);
+    });
     for (const ws of [upstream, server]) {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
       ws.addEventListener("error", () => close(1011, "the other end failed"));
