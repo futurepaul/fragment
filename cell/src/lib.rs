@@ -441,6 +441,44 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     Ok(made)
 }
 
+/// `GET /api/fragments/watch`: a socket on which the caller's list says
+/// it changed (principal.rs, Watching). A key signs it (the CLI's); the
+/// shell opens it with the platform session, which a socket carries
+/// without the shell's header (a browser sets none on an upgrade), so it
+/// counts only on the platform's host from the platform's own page: a
+/// socket has no CORS, and a browser names its page on every upgrade
+/// (`Origin`). One from any other page, a fragment's (one site with the
+/// platform, so its cookie rides along) or none, is no one's.
+async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
+    if !is_socket(req)? {
+        return Err(CellError::invalid("/api/fragments/watch is a WebSocket; send Upgrade: websocket"));
+    }
+    let identity = match req.headers().get("authorization")? {
+        Some(_) => signer(env, req, url, &[]).await?.identity.id,
+        None => {
+            let platform = cfg.platform(url);
+            let own_page = cfg.is_platform_host(url.host_str().unwrap_or_default())
+                && req.headers().get("origin")?.is_some_and(|o| o.trim_end_matches('/') == platform);
+            let token = if own_page { auth::platform_session_token(req, url)? } else { None };
+            let token = token.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign in: a list is watched from the platform's own page, or signed"))?;
+            ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity.id
+        }
+    };
+    // a fresh request: the upgrade's handshake, nothing else of the caller's
+    let headers = Headers::new();
+    headers.set("upgrade", "websocket")?;
+    headers.set("connection", "Upgrade")?;
+    for k in WEBSOCKET_HEADERS {
+        if let Some(v) = req.headers().get(k)? {
+            headers.set(k, &v)?;
+        }
+    }
+    let mut init = RequestInit::new();
+    init.with_method(Method::Get).with_headers(headers);
+    let watch = Request::new_with_init("https://principal.internal/watch", &init)?;
+    Ok(env.durable_object("PRINCIPAL")?.get_by_name(&identity)?.fetch_with_request(watch).await?)
+}
+
 /// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
 /// its refusal is theirs to read, 403 for a guest and 402 past the
 /// overdraft. A ledger that does not answer refuses nothing, as a write's
@@ -983,6 +1021,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             agents::route(req, env, &url, &segs).await
         }
+        (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {
