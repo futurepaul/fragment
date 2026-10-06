@@ -465,8 +465,12 @@ pub struct Swept {
 pub fn sweep_on(api: &Api) -> Result<Swept> {
     assert!(api.signs_in_by_levers(), "a sweep signs the e2e people in through the levers");
     let (mut people, mut deleted, mut kept, mut slept) = (0usize, 0usize, 0usize, 0usize);
-    // one that did not go (a delete past the client's timeout) is named at
-    // the end; the rest still go, and a sweep again finishes it
+    // one that did not go is named at the end; the rest still go, and a
+    // sweep again finishes it. A delete answers within one round of its
+    // members' lists (the cell's ended.rs), well inside the client's 60 s:
+    // before, it told each of a 1000-member fragment's lists in turn and
+    // answered after 300 s, so the sweep saw a timeout for a delete that
+    // finished later
     let mut left: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
     for page in 0..=SWEEP_PAGES_MAX {

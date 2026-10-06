@@ -136,7 +136,13 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     // while the collector still awaits the bucket), so wait for it too
     let logged = s.eventually(Duration::from_secs(10), || api.signed(&keys, "GET", &format!("/api/f/{name}/events"), None).is_ok_and(|r| r.text.contains("blobs.collected")));
     s.ok("the event log says so", logged, "no blobs.collected event in 10 s");
-    pages(s, api, (&keys, &home), &name, &viewer)
+    pages(s, api, (&keys, &home), &name, &viewer)?;
+    // a deleted fragment's blobs go after its delete answers (cell ended.rs)
+    let r = api.signed(&keys, "DELETE", &format!("/api/f/{name}"), None)?;
+    s.ok("a fragment holding blobs is deleted", r.status == 200, &r);
+    let (cleaned, last) = s.ended_cleaned(api, &name);
+    s.ok("and its blobs go after: its ended life is cleaned up", cleaned, last);
+    Ok(())
 }
 
 /// Pages read a blob by its hash on the fragment's own origin (`__blob`):
