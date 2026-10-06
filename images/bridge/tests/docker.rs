@@ -8,7 +8,8 @@
 //! fakes at the platform's boundary.
 //!
 //! Run: `cargo test -p fragment-bridge --test docker -- --ignored --nocapture`
-//! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built).
+//! (`FRAGMENT_DOCKER_SKIP_BUILD=1` reuses images already built;
+//! `FRAGMENT_DOCKER_HERMES_TAG` names the Hermes image's tag).
 
 mod support;
 
@@ -51,6 +52,12 @@ fn build(context: &std::path::Path, dockerfile: &str, tag: &str) -> Duration {
     t.elapsed()
 }
 
+/// The Hermes image's tag (`FRAGMENT_DOCKER_HERMES_TAG`, so two checkouts
+/// on one Docker never build over each other's).
+fn hermes_tag() -> String {
+    std::env::var("FRAGMENT_DOCKER_HERMES_TAG").unwrap_or_else(|_| "fragment-hermes:test".into())
+}
+
 fn size(tag: &str) -> u64 {
     let out = Command::new(docker()).args(["image", "inspect", tag, "--format", "{{.Size}}"]).output().expect("docker runs");
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap_or(0)
@@ -79,10 +86,19 @@ impl Container {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
         }
+        // its screen's port, on a port of this host's loopback (`port`)
+        args.extend(["-p".into(), "127.0.0.1::6080".into()]);
         args.push(tag.into());
         let out = Command::new(docker()).args(&args).output().expect("docker runs");
         assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
         Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
+    }
+
+    /// The host's port its `port` is published on.
+    fn port(&self, port: u16) -> u16 {
+        let out = Command::new(docker()).args(["port", &self.id, &format!("{port}/tcp")]).output().expect("docker runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().find_map(|l| l.rsplit_once(':').and_then(|(_, p)| p.trim().parse().ok())).unwrap_or_else(|| panic!("{port} is not published: {text}"))
     }
 
     fn exec(&self, cmd: &[&str]) -> bool {
@@ -92,6 +108,20 @@ impl Container {
     fn exec_out(&self, cmd: &[&str]) -> String {
         let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// `cmd`'s exit code and what it printed.
+    fn exec_code(&self, cmd: &[&str]) -> (i32, String) {
+        let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
+        (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    }
+
+    /// A container of `tag` that runs nothing but a sleep: a disk to restore
+    /// into and check, as a fresh start's is before its gate opens.
+    fn idle(tag: &str) -> Container {
+        let out = Command::new(docker()).args(["run", "-d", "--platform", "linux/amd64", "--entrypoint", "/bin/sleep", tag, "infinity"]).output().expect("docker runs");
+        assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
     }
 
     fn logs(&self) -> String {
@@ -165,8 +195,9 @@ async fn the_stub_image() {
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_hermes_image() {
-    let built = build(&repo_dir(), "images/hermes/Dockerfile", "fragment-hermes:test");
-    eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size("fragment-hermes:test") / 1_000_000);
+    let tag = hermes_tag();
+    let built = build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size(&tag) / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
         let f = w.fragments.get_mut("juniper.paul").unwrap();
@@ -191,7 +222,7 @@ async fn the_hermes_image() {
     let chat = fake.chat("talk", &["juniper"]);
 
     let t = Instant::now();
-    let c = Container::run("fragment-hermes:test", fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1"), ("HERMES_BOOT_SYNC_MS", "2000"), ("HERMES_BOOT_SKILLS_MS", "2000")]);
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}", fake.with(|w| w.calls.clone()));
     let gate = Instant::now();
@@ -237,6 +268,9 @@ async fn the_hermes_image() {
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
     assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper-paul/SOUL.md"]), "the agent's repo is in its profile");
+    // the seam (step 2 of docs/durable-computers.md): its work is its own
+    assert!(c.exec(&["test", "-d", "/data/work/juniper-paul/browser-profile"]), "its work directory, with its browser's profile");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile", "Hermes' browser profile is a link into its work");
     assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper-paul/SOUL.md"]));
     // What Hermes writes in its profile is committed back to the agent's
     // fragment, as the agent.
@@ -260,32 +294,50 @@ async fn the_hermes_image() {
         let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills.paul/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
         assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=id%3Apaul") && r.2.as_deref() == Some("juniper.paul") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
     });
-    assert!(c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\"]")), "its profile names the managed skills");
-    // what Hermes itself finds for the profile: its own first, then the managed set
-    let found = c.exec_out(&[
-        "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
-        "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
-    ]);
-    let found: serde_json::Value = serde_json::from_str(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"));
+    assert!(
+        c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"/opt/fragment/skills\"]")),
+        "its profile names the managed skills, then the platform skill"
+    );
+    // what Hermes itself finds for the profile: its own first, then the
+    // managed set, then the platform skill (the image's: its CLI's own)
+    let hermes_finds = || {
+        let found = c.exec_out(&[
+            "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
+            "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
+        ]);
+        serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
+    };
+    let found = hermes_finds();
     eprintln!("hermes: {} skills for juniper's profile", found.as_object().map_or(0, |o| o.len()));
     assert!(found["arxiv-finite"].as_str().is_some_and(|d| d.contains("Search arXiv")), "a managed skill: {found}");
     assert!(found["garden-notes"].as_str().is_some_and(|d| d.contains("Juniper's own")), "its own skill: {found}");
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
+    assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
+    let platform = c.exec_out(&["cat", "/opt/fragment/skills/platform/fragment/SKILL.md"]);
+    let cli = c.exec_out(&["fragment", "skill"]);
+    let cli_body = cli.split_once("\n---\n").map_or("", |(_, body)| body.trim());
+    assert!(platform.contains("# Your computer") && !cli_body.is_empty() && platform.contains(cli_body), "the platform skill is the image's CLI's own, after the computer's page:\n{platform}");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /opt/fragment/skills/platform/fragment/SKILL.md"]), "the platform skill is read-only to the agents");
 
     let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:paul fragment login 2>&1; echo exit=$?"]);
     assert!(login.contains("needs no login") && login.contains("exit=2"), "an agent logs in to nothing: {login}");
 
-    // a change to the managed set is followed while it runs
+    // a change to the managed set is followed while it runs: one skill
+    // changed, a file gone, and a managed `fragment`, which shadows the
+    // platform's
     fake.with(|w| {
         let f = w.fragments.get_mut(&skills).unwrap();
         f.files.insert("skills/research/arxiv-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: arxiv-finite\ndescription: Search arXiv, again.\n---\n"));
         f.files.remove("skills/research/arxiv-finite/scripts/search.py");
+        f.files.insert("skills/fragment/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: fragment\ndescription: The managed fragment, which wins.\n---\n"));
     });
     let t_follow = Instant::now();
-    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py")) {
+    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py") && installed("fragment/SKILL.md")) {
         assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    let found = hermes_finds();
+    assert!(found["fragment"].as_str().is_some_and(|d| d.contains("which wins")), "a managed `fragment` shadows the platform skill: {found}");
 
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));
@@ -393,4 +445,408 @@ async fn the_hermes_image() {
     if took >= Duration::from_secs(5) {
         panic!("SIGTERM took {took:?}; the container said:\n{}", c.logs());
     }
+}
+
+// ---- saves under the hold (docs/computers.md, "The hold"; rung 3 of
+// docs/explorations/pi-durable.md) ----
+
+/// The platform's hold of `/data`, as the Computer DO makes it, in a
+/// running container: its answer (`held`, within 20 s) and what it names
+/// as left out.
+fn hold(c: &Container) -> Option<Vec<String>> {
+    assert!(c.exec(&["sh", "-c", "rm -f /run/computer/held && mkdir -p /run/computer && touch /run/computer/hold"]), "the hold");
+    let t = Instant::now();
+    // bounded by the DO's 20 s
+    while t.elapsed() < Duration::from_secs(20) {
+        if c.exec(&["test", "-e", "/run/computer/held"]) {
+            return Some(c.exec_out(&["cat", "/run/computer/held"]).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn unhold(c: &Container) {
+    assert!(c.exec(&["rm", "-f", "/run/computer/hold", "/run/computer/held"]), "the hold let go");
+}
+
+/// One save, as the Computer DO takes it: `/data` read out whole as a tar
+/// (the DirectoryBackup's archive, on this rung), leaving out what `left_out`
+/// names (anchored patterns, `/` being `/data`, as gitignore reads them).
+/// Its bytes.
+fn save_data(c: &Container, left_out: &[String], to: &std::path::Path) -> u64 {
+    let mut args = vec!["exec".to_string(), c.id.clone(), "tar".into(), "-C".into(), "/data".into(), "-cf".into(), "-".into(), "--anchored".into()];
+    for p in left_out {
+        assert!(p.starts_with('/'), "our image names exactly what it copied: {p}");
+        args.push(format!("--exclude=.{p}"));
+    }
+    args.push(".".into());
+    let out = Command::new(docker()).args(&args).output().expect("docker runs");
+    // 1: a file changed as it was read, which a hot save is
+    assert!(out.status.success() || out.status.code() == Some(1), "tar: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(to, &out.stdout).expect("the save written");
+    out.stdout.len() as u64
+}
+
+/// A save restored into a fresh container of `tag`, as a wake from the
+/// image and the save does, before its gate: the image's check (its exit
+/// code and what it said), then every SQLite file under `/data` with its
+/// `quick_check`, as the hermes user.
+fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<serde_json::Value>) {
+    let c = Container::idle(tag);
+    assert!(c.exec(&["mkdir", "/data"]), "the restore's target");
+    let tar = std::fs::File::open(save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
+    let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    (code, said, files)
+}
+
+/// The Hermes image, running against the fake API and the scripted model,
+/// its agent answering in its chat.
+async fn hermes_running() -> (Fake, Model, String, Container) {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    (fake, model, chat, c)
+}
+
+/// A turn whose tool writes a SQLite database of its own for about six
+/// seconds (a commit every few ms), while Hermes writes its own.
+const WRITING: &str = "run: python3 -c \"import sqlite3,time;c=sqlite3.connect('tool.db');c.execute('pragma journal_mode=wal');c.execute('create table if not exists t(x)');[(c.execute('insert into t values(randomblob(8000))'),c.commit(),time.sleep(0.01)) for _ in range(500)];print('wrote')\"";
+
+/// Whether a reported file is one of Hermes' own databases (its home's
+/// `*.db`), or another SQLite file.
+fn hermes_db(file: &serde_json::Value) -> bool {
+    file["path"].as_str().is_some_and(|p| p.starts_with("/data/hermes/") && p.ends_with(".db"))
+}
+
+/// Goal (I8, F4): a save taken under the hold while turns write opens:
+/// every one of Hermes' databases in it passes `quick_check`, whatever was
+/// writing as it was taken. Method: saves taken many times during turns
+/// whose tool writes a database of its own (and Hermes its own), half under
+/// the hold (the databases copied by SQLite's online backup, their live
+/// files left out) and half hot (no hold: `/data` as it is, the platform's
+/// save before the hold), each restored into a fresh container, checked by
+/// the image's own check as the platform runs it, then every SQLite file
+/// found checked. Asserts the held saves are whole; reports the hot ones'
+/// tear rate, and any other SQLite file's (a measure, not an assertion).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_save_taken_while_it_writes_opens() {
+    const ROUNDS: u32 = 12;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("saves");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut saves = vec![];
+    for round in 0..ROUNDS {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
+        let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
+        // Hermes asks its owner before a script runs from `-c` ("script
+        // execution via -e/-c flag"): allowed for the session, once
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if let Some(card) = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t)) {
+            fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
+        }
+        // the tool writing for about six seconds: the save is taken in its midst
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let held = round % 2 == 0;
+        let t0 = Instant::now();
+        let left_out = if held { hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs())) } else { vec![] };
+        let answered_ms = t0.elapsed().as_millis();
+        let path = dir.join(format!("save-{round}.tar"));
+        let bytes = save_data(&c, &left_out, &path);
+        let saved_ms = t0.elapsed().as_millis();
+        if held {
+            unhold(&c);
+        }
+        eprintln!("save {round}: {} {bytes} bytes, answered in {answered_ms} ms, saved in {saved_ms} ms", if held { "held" } else { "hot" });
+        saves.push((held, path));
+        fake.until(120_000, "the writing turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    }
+    // the seam: the tool wrote in its agent's work directory, not in Hermes' home
+    assert!(c.exec(&["test", "-f", "/data/work/juniper-paul/tool.db"]), "the tool's database is the agent's work: {}", c.exec_out(&["sh", "-c", "find /data -name tool.db"]));
+    let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
+    for (held, path) in &saves {
+        let t = Instant::now();
+        let (code, said, files) = restore_and_check(&hermes_tag(), path);
+        let torn: Vec<&serde_json::Value> = files.iter().filter(|f| f["ok"] != true).collect();
+        eprintln!("{}: check {code} in {} ms ({}); {} SQLite files, torn: {torn:?}", path.display(), t.elapsed().as_millis(), said.trim(), files.len());
+        let ours = files.iter().filter(|f| hermes_db(f)).count();
+        let ours_torn = torn.iter().filter(|f| hermes_db(f)).count();
+        assert!(ours > 0, "a save holds Hermes' databases: {files:?}");
+        if *held {
+            assert_eq!(code, 0, "the image's check of a held save passes: {said}");
+            (held_dbs, held_torn) = (held_dbs + ours, held_torn + ours_torn);
+        } else {
+            (hot_dbs, hot_torn) = (hot_dbs + ours, hot_torn + ours_torn);
+        }
+        others += files.len() - ours;
+        other_torn += torn.len() - ours_torn;
+    }
+    eprintln!("tear rate: Hermes' databases held {held_torn}/{held_dbs}, hot {hot_torn}/{hot_dbs}; other SQLite files {other_torn}/{others}");
+    assert_eq!(held_torn, 0, "a held save's databases are whole");
+}
+
+/// Goal (P2): once the guest says `held`, no file its save keeps changes:
+/// the bridge claims nothing, the sync, the skills and the agents' reads
+/// start no round, and the copy is done before the answer. Hermes' gateway
+/// is not paused (P2: it cannot be asked), so the hold comes between turns,
+/// and what Hermes writes on its own while idle (its kanban dispatcher opens
+/// its board's database on a timer, making its `-wal` and `-shm`) is in the
+/// files its answer names, which the save leaves out (their copies kept).
+/// Method: an idle Hermes held, a listing of the files under `/data` (each
+/// path, size and time) but those the answer names, then another five
+/// seconds later. Then a message said while it is held is not claimed
+/// until the hold goes (its bridge records it, unclaimed: its state file
+/// is rewritten, whole).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn held_nothing_under_data_changes() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let files = |leave: &[String]| -> Vec<String> {
+        let listed = c.exec_out(&["sh", "-c", "find /data -type f -printf '%p %s %T@\\n' | sort"]);
+        listed.lines().filter(|l| !leave.iter().any(|p| l.starts_with(&format!("/data{p} ")))).map(str::to_string).collect()
+    };
+    // between turns: once Hermes' start-up writes are done (its lazy
+    // packages; its kanban dispatcher makes its board's database some
+    // seconds after the gateway starts), two windows of three seconds with
+    // no file but a database's journal changed
+    let journals = |l: &String| [".db-wal ", ".db-shm ", ".db-journal "].iter().any(|s| l.contains(s));
+    let settled = |all: Vec<String>| all.into_iter().filter(|l| !journals(l)).collect::<Vec<_>>();
+    let quiet = Instant::now();
+    // bounded: two minutes
+    while !c.exec(&["test", "-f", "/data/hermes/kanban.db"]) {
+        assert!(quiet.elapsed() < Duration::from_secs(120), "Hermes never made its kanban board's database");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let mut last = settled(files(&[]));
+    let mut still = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let now = settled(files(&[]));
+        still = if now == last { still + 1 } else { 0 };
+        if still >= 2 {
+            break;
+        }
+        last = now;
+    }
+    eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
+    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper-paul/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
+    let before = files(&left_out);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after = files(&left_out);
+    let changed: Vec<_> = before.iter().zip(after.iter()).filter(|(a, b)| a != b).collect();
+    assert!(before == after, "a file the save keeps changed while held ({} before, {} after): {changed:?}", before.len(), after.len());
+    // a message as it is held: recorded, never claimed while held
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "said while held" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    fake.with(|w| assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["turn"] != t), "held, the message is not claimed"));
+    unhold(&c);
+    fake.until(120_000, "the message answered once the hold goes", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!c.exec(&["test", "-e", "/data/held-copies"]), "the copies go with the hold");
+}
+
+/// What the agent's desktop looks like from inside the container, as the
+/// hermes user: the pointer's position and the windows' titles, read from
+/// the X server the profile publishes (`<profile>/bot-desktop/env`).
+fn desk(c: &Container, profile: &str) -> serde_json::Value {
+    const SCRIPT: &str = r#"import ctypes, json, os, re, subprocess, sys
+env = dict(l.split("=", 1) for l in open(sys.argv[1]).read().splitlines() if "=" in l)
+os.environ.update(env)
+x = ctypes.cdll.LoadLibrary("libX11.so.6")
+x.XOpenDisplay.restype, x.XOpenDisplay.argtypes = ctypes.c_void_p, [ctypes.c_char_p]
+x.XDefaultRootWindow.restype, x.XDefaultRootWindow.argtypes = ctypes.c_ulong, [ctypes.c_void_p]
+x.XQueryPointer.argtypes = [ctypes.c_void_p, ctypes.c_ulong] + [ctypes.c_void_p] * 7
+d = x.XOpenDisplay(env["DISPLAY"].encode())
+root = x.XDefaultRootWindow(d)
+v = [ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_uint()]
+x.XQueryPointer(d, root, *[ctypes.byref(a) for a in v])
+ids = re.findall(r"0x[0-9a-f]+", subprocess.run(["xprop", "-root", "_NET_CLIENT_LIST"], capture_output=True, text=True).stdout)
+names = [subprocess.run(["xprop", "-id", w, "_NET_WM_NAME"], capture_output=True, text=True).stdout.split("=", 1)[-1].strip().strip('"') for w in ids]
+print(json.dumps({"pointer": [v[2].value, v[3].value], "windows": names}))
+"#;
+    let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
+    let out = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SCRIPT, &env]);
+    serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
+}
+
+/// An HTTP server that answers every request `{}` and keeps each one's
+/// request line and headers: what a vendor's API would be sent.
+struct Recorder {
+    port: u16,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recorder {
+    async fn start() -> Recorder {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.expect("the recorder listens");
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        tokio::spawn(async move {
+            // bounded by the test: it ends with the runtime
+            while let Ok((mut s, _)) = listener.accept().await {
+                let kept = kept.clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut b = [0u8; 4096];
+                    // bounded: a request's head is at most 64 KiB
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 65_536 {
+                        match s.read(&mut b).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&b[..n]),
+                        }
+                    }
+                    kept.lock().unwrap().push(String::from_utf8_lossy(&head).into_owned());
+                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                });
+            }
+        });
+        Recorder { port, seen }
+    }
+}
+
+/// The container's memory now, in MiB: its cgroup's anonymous memory (what
+/// its processes hold, without the page cache).
+fn anon_mib(c: &Container) -> u64 {
+    let stat = c.exec_out(&["cat", "/sys/fs/cgroup/memory.stat"]);
+    stat.lines().find_map(|l| l.strip_prefix("anon ")).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0) / 1_048_576
+}
+
+/// Goal: a person can watch and take over the agent's desktop, and the
+/// agent operates it (docs/computers.md, Ports; Paul, 2026-10-05): before
+/// any agent's call the screen's page, its control socket and its RFB
+/// stream answer, the first agent's desktop started for its first viewer;
+/// a viewer who takes over moves the pointer, and one who has not cannot;
+/// the agent's `computer_use` is among its tools and captures the screen;
+/// its browser opens on that desktop.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_hermes_desktop() {
+    use fragment_bridge::net::Base;
+    use support::rfb::{colours, Control, Viewer};
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    // its owner connected Google: the agent's placeholder, as the platform makes one
+    let google = "fcx_google_0123456789abcdef0123456789abcdef";
+    fake.with(|w| {
+        w.computer["agents"][0]["credentials"] = json!([{ "provider": "google", "kind": "connection", "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "placeholder": google, "hosts": ["www.googleapis.com"] }]);
+        w.computer["credentialEnv"] = json!(["GOOGLE_OAUTH_ACCESS_TOKEN"]);
+    });
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("desk", &["juniper"]);
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let before = anon_mib(&c);
+    eprintln!("desktop: the container holds {before} MiB before any screen");
+
+    // before any agent's call: the page, the control socket, the RFB stream
+    assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
+    let mut watching = Control::open(&base, "watcher").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "holder": null }), "a viewer hears who holds control");
+    let t = Instant::now();
+    let opened = Viewer::open(&base, "watcher", Duration::from_secs(60)).await;
+    let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"])));
+    eprintln!("desktop: first viewer to the RFB greeting {} ms; {}x{} {:?}", t.elapsed().as_millis(), watcher.width, watcher.height, watcher.name);
+    // the desktop drawn: its wallpaper and panel, not one colour
+    let t = Instant::now();
+    let mut frame = watcher.frame().await.unwrap();
+    while colours(&frame) <= 16 && t.elapsed() < Duration::from_secs(30) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        frame = watcher.frame().await.unwrap();
+    }
+    let after = anon_mib(&c);
+    eprintln!("desktop: a frame of {} colours {} ms on; the container holds {after} MiB with the desktop (+{})", colours(&frame), t.elapsed().as_millis(), after.saturating_sub(before));
+    assert!(colours(&frame) > 16, "the desktop shows something: {} colours\n{}", colours(&frame), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"]));
+
+    // Take over: the holder's pointer moves the screen's; a watcher's does not
+    let mut driving = Control::open(&base, "driver").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+    let mut driver = Viewer::open(&base, "driver", Duration::from_secs(30)).await.unwrap();
+    assert!(driver.clipboard_caps, "Xvnc offers its extended clipboard, and the viewer answers it as noVNC does (a ClientCutText of negative length)");
+    driving.say("take").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], "driver");
+    assert_eq!(watching.next().await.unwrap()["holder"], "driver", "every viewer hears who took over");
+    driver.pointer(101, 57, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the holder moves the pointer");
+    watcher.pointer(301, 257, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "a watcher does not");
+    driving.say("give").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+
+    // the agent's computer_use: among its tools, and it captures the screen
+    let reply = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "look at your screen" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "the capture's reply", |w| reply(w, &turn).is_some()).await;
+    let offered = model.calls.lock().unwrap().iter().find(|c| c.path.ends_with("/chat/completions") && c.body["messages"].to_string().contains("look at your screen")).map(|c| c.body["tools"].clone()).unwrap_or_default();
+    let tools: Vec<&str> = offered.as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
+    let search = offered.as_array().into_iter().flatten().find(|t| t["function"]["name"] == "tool_search").and_then(|t| t["function"]["description"].as_str()).unwrap_or("");
+    let listed = search.find("computer_use").map(|i| search[i..].chars().take(160).collect::<String>());
+    eprintln!("desktop: the agent's tools: {tools:?}; computer_use in tool_search's listing: {listed:?}");
+    let captured = fake.with(|w| reply(w, &turn)).unwrap_or_default();
+    eprintln!("desktop: the capture's reply: {}", captured.chars().take(600).collect::<String>());
+    assert!(tools.contains(&"computer_use") || listed.is_some(), "computer_use is the agent's, directly or through tool_search: {tools:?}");
+    assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
+
+    // its browser, on its desktop
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "the browser's reply", |w| reply(w, &turn).is_some()).await;
+    eprintln!("desktop: the browser's reply: {:?}", fake.with(|w| reply(w, &turn)));
+    let t = Instant::now();
+    let shown = loop {
+        let d = desk(&c, "juniper-paul");
+        if d["windows"].as_array().is_some_and(|w| w.iter().any(|n| n.as_str().is_some_and(|n| n.contains("Example Domain")))) {
+            break d;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "the browser never showed on the desktop: {d}\n{}", c.logs());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("desktop: its windows {}; the container holds {} MiB", shown["windows"], anon_mib(&c));
+
+    // gws, Google's Workspace CLI: in the image, and run in the agent's
+    // terminal it sends the agent's Google placeholder as its bearer token
+    // (the computer's egress swaps it on Google's hosts). Its Drive API is
+    // pointed at a recorder (a discovery document in its cache) to see it.
+    let version = c.exec_out(&["gws", "--version"]);
+    assert!(version.contains("0.22.5"), "gws is pinned: {version}");
+    let api = Recorder::start().await;
+    let doc = json!({
+        "name": "drive", "version": "v3", "rootUrl": format!("http://api.fragment.internal:{}/", api.port), "servicePath": "drive/v3/",
+        "resources": { "files": { "methods": { "list": { "id": "drive.files.list", "httpMethod": "GET", "path": "files", "scopes": ["https://www.googleapis.com/auth/drive"] } } } },
+    });
+    let planted = format!("mkdir -p /tmp/gws/cache && printf '%s' '{doc}' > /tmp/gws/cache/drive_v3.json");
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &planted]));
+    let asked = fake.say(&chat, &person("paul"), json!({ "text": "run: GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/tmp/gws gws drive files list" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    fake.until(240_000, "gws's reply", |w| reply(w, &turn).is_some()).await;
+    let seen = api.seen.lock().unwrap().clone();
+    eprintln!("desktop: gws in the agent's terminal said {:?}; its API saw {seen:?}", fake.with(|w| reply(w, &turn)));
+    assert!(
+        seen.iter().any(|r| r.starts_with("GET /drive/v3/files") && r.to_ascii_lowercase().contains(&format!("authorization: bearer {google}"))),
+        "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
+        fake.with(|w| reply(w, &turn))
+    );
 }

@@ -182,6 +182,28 @@ speaking Cloudflare's APIs) returns once this product works.
     - Missing: image editing (FLUX.1 [schnell] is text to image), other
       vendors' models in the model council, and operator keys or
       connections a deployment does not offer (the README's table).
+
+    Status, 2026-10-05 (branch `claude/agents-know-the-platform`; Paul, on
+    p5 before a demo: the agent knew nothing of fragment or of its Google
+    connection):
+    - Built: a platform skill, `fragment`, in every profile of our Hermes
+      image whatever the skills fragment holds: the image's CLI's own
+      `fragment skill` after a page of the computer's (acting for its
+      owner, the apps and brain skills, connections and
+      `GOOGLE_OAUTH_ACCESS_TOKEN`, its desktop), written at the image's
+      build, named after the managed set in `skills.external_dirs` so a
+      managed or own `fragment` wins (docs/computers.md). The shell makes
+      a skills fragment, once, for a person with an agent and none (set up
+      before 2026-10-03), and an awake computer looks for one every minute
+      while its owner has none.
+    - Evidence: hermes-boot's tests (the platform skill with no skills
+      fragment, a managed one shadowing it); shell-ui (the backfill); the
+      real-Hermes lane (with no skills fragment Hermes lists `fragment` in
+      its model's skills index, and a skills fragment made while awake is
+      installed within the minute: 46 and 50 s). Sections shell, shell-ui,
+      computers and hermes: 257 passed, 0 failed.
+    - Not yet: the same on a preview (the hosted lane), and the platform
+      skill in the shell's Skills list.
 18. **Backups are a computer feature.** `/data` is saved with
     `DirectoryBackup` every few minutes while written. A sleep is driven
     by the Computer DO, in this order:
@@ -208,20 +230,35 @@ speaking Cloudflare's APIs) returns once this product works.
     "temporarily unavailable" start (spike S3b).
 
     The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. The
-    Hermes image uses it for Litestream, streaming Hermes' SQLite
-    continuously. Litestream is for disaster recovery only: it restores
-    about 3 s per database, so it stays off the wake path. The agent's
-    self is in its fragment. CI runs a restore drill into an empty
-    computer.
+    R2 prefix through an intercept, so the guest holds no credential. It
+    stays the image's, for whatever it keeps outside `/data`. The agent's
+    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
+    it with Litestream, for disaster recovery, until step 1 of
+    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
+    Its replicas were never read, no restore drill existed, and a restore
+    would have put a `state.db` of seconds ago into a `/data` of the last
+    save. The saves themselves now carry Hermes' databases whole.)
+
+    *The design of record is now docs/durable-computers.md (Paul,
+    2026-10-05): A+ now, toward E; messengers outside the computer (F).*
 
     *Status (2026-10-05, #136 and #137).* The hold, the snapshot as a
     cache of the save, and a wake that says what it restored are built.
-    `/data` is still saved only at sleep, not every few minutes, and
-    Litestream's replicas are never read: both are open in
-    docs/explorations/pi-durable.md (P2, P4) and in the debt ledger. A
-    rolled-back or lost `/data` no longer runs a turn again: a turn runs
+    A rolled-back or lost `/data` no longer runs a turn again: a turn runs
     only in the life that claimed it on `work` (lesson 2's journal).
+
+    *Status (2026-10-05, step 1 of docs/durable-computers.md, which is the
+    newer word here).* "Every few minutes while written" became: `/data`
+    is saved when a computer's work ends (its last keepalive closes, 30 s
+    settle), every 15 minutes while it stays busy, and at every sleep, an
+    action of the pure lifecycle. The hold is a handshake (the guest
+    answers `held`), three saves are kept, a wake falls back to the save
+    before one that will not restore, and a sleep whose save fails keeps
+    its container for at most `computers.unsaved_max_ms` (30 minutes by
+    default, Paul's to confirm). Litestream is cut from the image (P4).
+    Step 2, the seam:
+    `/data/work` (the tools') is saved as a record of its own beside the
+    rest of `/data` (the guest's own state), restored together.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

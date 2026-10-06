@@ -36,6 +36,10 @@ const ROUTINE: Duration = Duration::from_secs(420);
 /// gateway serve it; its bridge follows the agent within a second of that
 /// (the lower rung, `images/bridge/tests/docker.rs`, takes about one).
 const NEW_AGENT: Duration = Duration::from_secs(30);
+/// A skills fragment made while the computer is awake, to its managed set
+/// installed: the image looks for one every minute while its owner has none
+/// (images/hermes/boot: `skills::ABSENT_EVERY_MS`), then installs it.
+const SKILLS_APPEAR: Duration = Duration::from_secs(120);
 /// A 1×1 PNG: an image a person attaches.
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
@@ -97,6 +101,62 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
     answered
 }
 
+/// Its screen through the platform (docs/computers.md, Ports; Paul,
+/// 2026-10-05), before the agent has used its desktop: the first agent's
+/// desktop starts for the screen's first viewer, its RFB stream and its
+/// control socket pass through the computer's port, each server's first
+/// word included, and in a frame of the platform's page (as the shell's
+/// "Its computer's screen" opens it) the page connects and takes over.
+/// That input then reaches the screen is the lower rung's
+/// (`images/bridge/tests/docker.rs`, `the_hermes_desktop`).
+fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str) -> Result<()> {
+    let ticket = || -> Result<String> {
+        let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
+        anyhow::ensure!(r.status == 200, "a ticket: {r}");
+        Ok(r.body["url"].as_str().unwrap_or("").to_string())
+    };
+    let first = ticket()?;
+    let origin = first.split("/__ticket").next().unwrap_or("").to_string();
+    let r = api.call(Call { method: "GET", url: first, ..Call::default() })?;
+    let cookie = r.cookies().into_iter().find(|c| c.starts_with("fragment_computer=")).map(|c| c.split(';').next().unwrap_or("").to_string());
+    let socket = |path: &str| Socket::connect(api, &format!("{origin}/p/6080/{path}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let t = std::time::Instant::now();
+    let greeting = socket("websockify?viewer=e2e").and_then(|mut rfb| {
+        rfb.patience(Duration::from_secs(30))?;
+        let version = rfb.bytes(12)?;
+        rfb.close();
+        Ok(String::from_utf8_lossy(&version).into_owned())
+    });
+    println!("      (the screen's first viewer to its RFB greeting: {:.1?})", t.elapsed());
+    s.ok("its screen's RFB stream opens through its port before the agent used its desktop: the desktop starts for its first viewer", greeting.as_deref().is_ok_and(|g| g.starts_with("RFB 003.")), format!("{greeting:?}"));
+    let control = socket("control?viewer=e2e").and_then(|mut c| {
+        let first = c.next()?;
+        c.close();
+        Ok(first)
+    });
+    s.ok("its control socket says who holds the screen, through its port", control.as_ref().is_ok_and(|c| c["type"] == "control" && c["holder"].is_null()), format!("{control:?}"));
+
+    let Some(mut chrome) = super::frames::safari_like(s)? else {
+        s.ok("Chrome is installed for the computer's screen (set CHROME_BIN)", false, "no Chrome found");
+        return Ok(());
+    };
+    let session = api.sign_in(&Api::email_of(owner))?;
+    chrome.set_cookie(&format!("{}/", api.base), "fragment_session", &session)?;
+    let shell = super::frames::platform_page(&mut chrome, api, super::frames::SIGNED_IN)?;
+    super::isolation::frame(&mut chrome, &shell, &ticket()?)?;
+    let computer = origin.split("//").nth(1).unwrap_or("").to_string();
+    let wait = Duration::from_secs(60);
+    // shown, and Take over ready: its button is enabled once both sockets are open
+    let ready = "document.getElementById('status')?.textContent === \"Watching the agent's screen\" && !document.getElementById('control').disabled";
+    let watching = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, ready).ok() == Some(json!(true)));
+    let said = |chrome: &mut crate::browser::Browser| chrome.eval_in_frame(&shell, &computer, "document.getElementById('status')?.textContent ?? ''").unwrap_or_default();
+    s.ok("in a frame of the platform's page, the screen's page connects to it (noVNC through the port), Take over ready", watching, said(&mut chrome));
+    chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
+    let taken = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "You have the screen", Duration::from_secs(20));
+    s.ok("and Take over gives the person the screen", taken, said(&mut chrome));
+    Ok(())
+}
+
 fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let owner_id = api.identity(&owner)?;
@@ -120,11 +180,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         ],
     );
     s.deploy(&agent);
-    // the owner's skills fragment (decision 17): its computer installs its managed set
-    let skills_label = s.name("skills");
-    let r = api.create_with(&owner, json!({ "name": skills_label, "template": "skills" }))?;
-    let skills_name = r.body["name"].as_str().unwrap_or("").to_string();
-    s.ok("its owner has a skills fragment on the blessed template", r.status == 200 && !skills_name.is_empty(), &r);
+    // its owner has no skills fragment yet (one is made below, as the shell
+    // backfills it): the agent still knows its platform
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent to it", r.status == 200 && identity.starts_with("id:"), &r);
@@ -144,6 +201,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     });
     println!("      (Hermes following its chat {:.1?} after the wake)", t0.elapsed());
     s.ok("Hermes' bridge follows the chat as the agent", subscribed, "");
+    screen(s, api, &owner, &id)?;
 
     let say = |n: u32, text: &str| api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("h{n}"), "body": { "text": text } })));
     let turn_for = |r: &crate::api::Reply| turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
@@ -179,6 +237,18 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": reply_of(&first), "record": format!("{record:?}") }),
     );
     s.ok("its turn ends idle", s.eventually(TURN, || ended(&first) == Some(json!("idle"))), json!(work_of(&records(api, &owner, &chat_name, "work"), &first)));
+    // with no skills fragment, the platform skill (images/hermes: the CLI's
+    // own, after the computer's page) is the profile's: Hermes lists it to its
+    // model in the turn's skills index, and no managed skill beside it
+    let indexed = s.ai.chats().iter().find_map(|c| {
+        let system = c["messages"].as_array()?.iter().find(|m| m["role"] == "system")?["content"].to_string();
+        (c["messages"].to_string().contains("hello hermes") && system.contains("<available_skills>")).then_some(system)
+    });
+    s.ok(
+        "with no skills fragment, Hermes lists the platform skill to its model: `fragment`, an agent on a Fragment computer",
+        indexed.as_deref().is_some_and(|t| t.contains("- fragment: You are an agent on a Fragment computer") && t.contains("- garden-notes: ") && !t.contains("- apps-finite: ")),
+        json!(indexed.as_deref().and_then(|t| t.find("<available_skills>").map(|at| t[at..].chars().take(1200).collect::<String>()))),
+    );
     let calls = s.ai.calls().split_off(calls_at_start);
     s.ok(
         "every model call went through the platform's route, on the agent's tier, as the agent",
@@ -299,29 +369,45 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": reply_of(&keyed), "seen": seen }),
     );
 
-    // The managed skills and its own, where its profile looks: its own
-    // `skills/` (its fragment's) and the managed set its config names (the
-    // images' Docker lane checks Hermes' own view of the two, its own
-    // winning on a name); and its terminal runs the fragment CLI as itself,
+    // The platform skill where its config says, and the managed skills and
+    // its own, where its profile looks: its own `skills/` (its fragment's),
+    // then the managed set and the platform skill its config names (the
+    // images' Docker lane checks Hermes' own view of the three, the first of
+    // a name winning); and its terminal runs the fragment CLI as itself,
     // acting for its owner, with no key: it lists its owner's fragments
     // (their skills fragment, which it is no member of, among them).
+    let platform = "/opt/fragment/skills/platform/fragment/SKILL.md";
+    let r = say(39, &format!("run: grep -q /opt/fragment/skills \"$HERMES_HOME/config.yaml\" && sed -n 2p {platform} | sed 's/^/platform-/'"))?;
+    let asked = turn_for(&r);
+    s.eventually(TURN, || ended(&asked).is_some());
+    s.ok("its config names the platform skill, which is in the image, named `fragment`", reply_of(&asked).is_some_and(|t| t.contains("platform-name: fragment")), json!(reply_of(&asked)));
+    // the owner's skills fragment appears (decision 17; the shell makes it for
+    // a person who lacks one): its computer, awake, installs its managed set
+    // within a minute, as it looks for one that often while there is none
+    let skills_label = s.name("skills");
+    let r = api.create_with(&owner, json!({ "name": skills_label, "template": "skills" }))?;
+    let skills_name = r.body["name"].as_str().unwrap_or("").to_string();
+    s.ok("its owner then has a skills fragment on the blessed template", r.status == 200 && !skills_name.is_empty(), &r);
+    let appeared = std::time::Instant::now();
     let managed = "/data/hermes/managed-skills/software-development/apps-finite/SKILL.md";
     let found = format!("cd \"$HERMES_HOME\" && grep -c managed-skills config.yaml && ls skills/garden-notes/SKILL.md {managed}");
     let has_both = |t: &str| t.contains("skills/garden-notes/SKILL.md") && t.contains(managed) && !t.contains("No such file");
     let mut skills_seen = None;
-    // the managed set is installed off the boot's path: asked again until it is
-    for n in 0..6u32 {
-        let r = say(40 + n, &format!("run: {found}"))?;
+    // the managed set is installed off the boot's path: asked again until it
+    // is, for the minute it may wait and the install
+    for n in 0..20u32 {
+        let r = say(80 + n, &format!("run: {found}"))?;
         let asked = turn_for(&r);
         s.eventually(TURN, || ended(&asked).is_some());
         skills_seen = reply_of(&asked);
-        if skills_seen.as_deref().is_some_and(has_both) {
+        if skills_seen.as_deref().is_some_and(has_both) || appeared.elapsed() > SKILLS_APPEAR {
             break;
         }
         std::thread::sleep(Duration::from_secs(5));
     }
+    println!("      (the skills fragment made, to its managed set installed: {:.1?})", appeared.elapsed());
     s.ok(
-        "its profile has the managed skills (its config naming them) and its own",
+        &format!("its profile has the managed skills within {}s of the skills fragment's making (its config naming them), and its own", SKILLS_APPEAR.as_secs()),
         skills_seen.as_deref().is_some_and(has_both),
         json!(skills_seen),
     );

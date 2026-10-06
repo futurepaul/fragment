@@ -7,7 +7,7 @@
 // too; they only call and call back: every decision is Rust's (jobs.rs,
 // computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
-import { DirectoryBackup } from "@cloudflare/sandbox";
+import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
 
@@ -250,8 +250,23 @@ class ContainerHost {
     return false;
   }
 
-  // Runs `argv` in the container, answering within `ms` when it is given.
-  async exec(generation, argv, ms) {
+  // Runs `argv` until it exits 0 (polling every 100 ms), for at most `ms`:
+  // whether it did. The guest's answer to a hold (`held`) is read so.
+  async execUntil(generation, argv, ms) {
+    const t0 = Date.now();
+    while (generation === this.#generation && Date.now() - t0 < ms) {
+      try {
+        const out = await this.exec(generation, argv, Math.max(1, ms - (Date.now() - t0)));
+        if (out.exitCode === 0) return true;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return false;
+  }
+
+  // Runs `argv` in the container, answering within `ms` when it is given,
+  // with the last `keep` bytes of its output (4 KiB unless named).
+  async exec(generation, argv, ms, keep) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     const run = (async () => (await this.#c.exec(argv, { stderr: "combined" })).output())();
     // a late failure, once the bound answered, is no one's to hear
@@ -262,20 +277,34 @@ class ContainerHost {
     });
     try {
       const out = await (ms ? Promise.race([run, late]) : run);
-      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-4096) };
+      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-(keep || 4096)) };
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async backup(generation) {
+  // Saves `dir`, leaving out what `exclude` names (gitignore patterns,
+  // relative to `dir`): its record.
+  async backup(generation, dir, exclude) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    return this.#backups.backup({ dir: "/data", name: `generation ${generation}` });
+    return this.#backups.backup({ dir, name: `generation ${generation}`, exclude: exclude || [] });
   }
 
+  // Restores `record` into its directory: null once it is in place, or
+  // `{unusable}` when the save itself will never restore (its archive gone
+  // or altered: the SDK's BACKUP_NOT_FOUND and BACKUP_INTEGRITY), which the
+  // Rust side tells from a failure that may pass (it throws).
   async restore(generation, record) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    await this.#backups.restore(record);
+    try {
+      await this.#backups.restore(record);
+      return null;
+    } catch (e) {
+      if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
+        return { unusable: `${e.code}: ${e.detail || e.message}` };
+      }
+      throw e;
+    }
   }
 
   async forget(record) {
@@ -316,15 +345,16 @@ class ContainerHost {
   // A request to one of the container's ports. A WebSocket is bridged
   // through this Durable Object (both ends accepted here, so an open tab
   // keeps the computer awake), its opening and closing reported as
-  // `computer/tab`.
+  // `computer/tab`. Each end's listeners are added before it is accepted
+  // and before anything is awaited: a message that arrives with no
+  // listener is gone, and a container's socket may speak first (an RFB
+  // server's version, the screen's control socket's holder), whose first
+  // word the report's await used to lose.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
     const [client, server] = Object.values(new WebSocketPair());
-    upstream.accept();
-    server.accept();
-    await this.#report("computer/tab", { open: true });
     let closed = false;
     const close = (code, reason) => {
       if (closed) return;
@@ -342,6 +372,9 @@ class ContainerHost {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
       ws.addEventListener("error", () => close(1011, "the other end failed"));
     }
+    server.accept();
+    upstream.accept();
+    await this.#report("computer/tab", { open: true });
     return new Response(null, { status: 101, webSocket: client });
   }
 }

@@ -21,6 +21,7 @@
 pub mod fake;
 pub mod hermes;
 pub mod model;
+pub mod rfb;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +54,7 @@ pub fn script() -> Box<dyn Runtime> {
 
 /// The scripted agent with drafts `pace` apart (`slow` is twenty of them).
 pub fn script_paced(pace: Duration) -> Box<dyn Runtime> {
-    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script") } })
+    Box::new(Script { config: ScriptConfig { pace, scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } })
 }
 
 /// A bridge running in this process: on the test's own runtime (`start`),
@@ -65,7 +66,7 @@ pub struct Running {
 }
 
 pub fn config(api: &str, state: &Path, settings: Settings) -> Config {
-    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), settings, agents_file: None }
+    Config { api: api.to_string(), state_dir: state.join("bridge"), media_dir: state.join("media"), restore_pending: false, restored: state.join("restored"), hold: hold_path(state), held: held_path(state), left_out: vec![], settings, agents_file: None }
 }
 
 /// A bridge on the test's runtime, beside the fakes, as the tests have run
@@ -181,14 +182,38 @@ pub fn hold_path(dir: &Path) -> PathBuf {
     dir.join("hold")
 }
 
-/// The platform holds the computer, as a sleep does before its save.
+/// Waits until `done` (looked at every 50 ms), for at most `ms`.
+pub async fn until(ms: u64, what: &str, done: impl Fn() -> bool) {
+    let started = Instant::now();
+    // bounded by `ms`
+    while !done() {
+        assert!(started.elapsed() < Duration::from_millis(ms), "waited {ms} ms for {what}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Where the tests' bridges answer the hold.
+pub fn held_path(dir: &Path) -> PathBuf {
+    dir.join("held")
+}
+
+/// The platform holds the computer, as a save does (a sleep's included),
+/// clearing any answer to an earlier hold first.
 pub fn hold(dir: &Path) {
+    let _ = std::fs::remove_file(held_path(dir));
     std::fs::write(hold_path(dir), b"").expect("the hold touched");
 }
 
-/// The hold is gone (the sleep was called off, or a new container).
+/// Whether the bridge answered the hold (`held`).
+pub fn held(dir: &Path) -> bool {
+    held_path(dir).exists()
+}
+
+/// The hold is gone (the save done, the sleep called off, or a new
+/// container), and its answer with it.
 pub fn unhold(dir: &Path) {
     let _ = std::fs::remove_file(hold_path(dir));
+    let _ = std::fs::remove_file(held_path(dir));
 }
 
 // ---- runs ----

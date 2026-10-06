@@ -2,7 +2,7 @@
 # Our Hermes computer image (docs/computers.md; decisions 15, 18, 21; spike
 # S3b's boot list). Everything Hermes-specific lives here, never in the
 # platform: Hermes v0.21.5's desktop image, the bridge as its Relay
-# connector, hermes-boot around it, Litestream, sandbox-shim, the screen.
+# connector, hermes-boot around it, sandbox-shim, the screen.
 # The image holds no secret.
 #
 # Build from the repo root (it carries the fragment CLI, of the root
@@ -13,6 +13,11 @@ ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
+# A target cache is every build's on this Docker, another checkout's
+# included, and cargo takes a path crate as built when its sources are older
+# than its last build: the sources copied in are touched first, so a build
+# of other sources since never stands for these (the step runs only when
+# they changed).
 FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY images/Cargo.toml images/Cargo.lock ./
@@ -20,12 +25,14 @@ COPY images/bridge bridge
 COPY images/hermes/boot hermes/boot
 RUN --mount=type=cache,id=images-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=images-target,target=/src/target \
-    cargo build --release --locked -p fragment-bridge -p hermes-boot \
+    find bridge hermes/boot -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-bridge -p hermes-boot \
  && mkdir -p /out && cp target/release/fragment-bridge target/release/hermes-boot /out/
 
 # The fragment CLI (cli/), static, for the agents' terminals: it acts as the
 # agent its profile names, through the computer's API egress, with no key
-# (cli/GUIDE.md, "As an agent"; docs/computers.md).
+# (cli/GUIDE.md, "As an agent"; docs/computers.md). Its sources are touched
+# as the build stage's are.
 FROM rust:1.99-alpine AS cli
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -35,7 +42,8 @@ COPY templates templates
 COPY xtask xtask
 RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=cli-target,target=/src/target \
-    cargo build --release --locked -p fragment-cli \
+    find cli crates templates -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
 # noVNC, the screen page's RFB client (pinned by hash).
@@ -45,8 +53,24 @@ RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
-ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
-RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
+# cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
+# desktop, XTest input): without it Hermes offers the agent no computer_use.
+# Pinned (the release current at Hermes v0.21.5's), named to Hermes by
+# HERMES_CUA_DRIVER_CMD below, so Hermes never runs its upstream installer.
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
+ && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
+# gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
+# wrapper hands it the agent's Google connection: the placeholder in
+# GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
+# which the computer's egress swaps for the real token on Google's hosts.
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
+ && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
+      '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
+      'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
+ && chmod 0755 /usr/local/bin/gws \
+ && /usr/local/bin/gws --version | grep -q '0\.22\.5'
 
 # Root for the session (Paul, 2026-10-05: "hermes needs to be able to
 # install binaries (not persisted)"). Hermes stays its unprivileged user, as
@@ -63,6 +87,11 @@ RUN apt-get -o Acquire::Retries=3 update \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/
+# The check the platform runs after it restores /data, before the gate
+# (docs/computers.md): the last hold's copies of Hermes' databases put back,
+# then each one's quick_check (hermes-boot's held.rs).
+RUN printf '#!/bin/sh\n# The platform runs this after a restore, before the gate (docs/computers.md).\nexec /opt/fragment/bin/hermes-boot check-restore\n' > /usr/local/bin/computer-check \
+ && chmod 755 /usr/local/bin/computer-check
 COPY --from=cli /out/fragment /usr/local/bin/fragment
 COPY images/hermes/preload.py /opt/fragment/preload.py
 COPY images/hermes/screen /opt/fragment/screen
@@ -95,8 +124,10 @@ RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchec
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
 
 # What the boot reads instead of finding it each time: the lean plugin list,
-# Hermes' revision, the browser's path; and the files the gateway loads,
-# read ahead on the second CPU while /data is restored (S3b, cut h).
+# Hermes' revision, the browser's path; the platform skill every profile
+# has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
+# and the files the gateway loads, read ahead on the second CPU while /data
+# is restored (S3b, cut h).
 RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /tmp/rh \
  && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
@@ -105,9 +136,10 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
 # restated, without upstream's VOLUME. Two differ from upstream's:
-# - Hermes' file tools (write_file, patch) may write /tmp as well as its
-#   home (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
-#   to it), for the scratch an install is made from. /usr/local is not
+# - Hermes' file tools (write_file, patch) may write its home, its agents'
+#   work directories (/data/work, the terminal's cwd since the seam) and
+#   /tmp (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
+#   to it), the last for the scratch an install is made from. /usr/local is not
 #   theirs to write: they run as Hermes' user, and root is the terminal's,
 #   through sudo.
 # - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
@@ -125,7 +157,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
-    HERMES_WRITE_SAFE_ROOT=/data/hermes:/tmp \
+    HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
@@ -134,6 +166,9 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     S6_CMD_RECEIVE_SIGNALS=1 \
     S6_SERVICES_GRACETIME=1000 \
     S6_KILL_GRACETIME=1000 \
+    HERMES_CUA_DRIVER_CMD=/usr/local/bin/cua-driver \
+    CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
+    CUA_DRIVER_RS_UPDATE_CHECK=false \
     FRAGMENT_API=http://api.fragment.internal \
     FRAGMENT_MODEL=http://model.fragment.internal
 WORKDIR /opt/hermes

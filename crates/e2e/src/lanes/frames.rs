@@ -55,7 +55,7 @@ const WHO_JSON: &str = r#"{ "operations": { "whoami": { "kind": "mutation", "rol
 /// The shell at `/settings`, once it has asked who is signed in and shows
 /// them their settings (which a person with no chat yet sees too: `/`
 /// would make their first agent).
-const SIGNED_IN: &str = "!document.getElementById('layout').hidden && !document.getElementById('settings-page').hidden";
+pub(super) const SIGNED_IN: &str = "!document.getElementById('layout').hidden && !document.getElementById('settings-page').hidden";
 /// The shell signed out: it asks them to sign in.
 const SIGNED_OUT: &str = "!!document.querySelector('#first-run-card a[href^=\"/auth/login\"]')";
 
@@ -213,7 +213,7 @@ pub(super) fn safari_like(s: &Suite) -> Result<Option<Browser>> {
 
 /// The shell's page at `/settings`, loaded (`ready`: `SIGNED_IN` or `SIGNED_OUT`),
 /// listening to its frames.
-fn platform_page(chrome: &mut Browser, api: &Api, ready: &str) -> Result<Page> {
+pub(super) fn platform_page(chrome: &mut Browser, api: &Api, ready: &str) -> Result<Page> {
     let page = chrome.open(&format!("{}/settings", api.base))?;
     let loaded = chrome.until(&page, &format!("document.readyState === 'complete' && ({ready})"), Duration::from_secs(20));
     anyhow::ensure!(loaded, "the shell did not open ({ready}): {}", chrome.eval(&page, "document.body.innerText.slice(0, 300)")?);

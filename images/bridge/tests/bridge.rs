@@ -395,7 +395,7 @@ async fn agents_the_image_makes_ready() {
     let mut cfg = support::config(&fake.url(), &dir, support::settings());
     cfg.agents_file = Some(file.clone());
     // a pace that makes `slow` take five seconds: a turn that runs through the change
-    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script") } });
+    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } });
     let bridge = support::start(cfg, script);
     following(&fake, 2).await;
     let slow = fake.say(&talk, &person("paul"), json!({ "text": "slow, while maple arrives" }));
@@ -896,6 +896,48 @@ async fn held_it_claims_nothing() {
         let claimed_at = w.log.iter().position(|l| *l == format!("record {chat} work {start_seq}")).expect("its claim in the log");
         assert!(claimed_at >= unheld_at, "claimed after the hold went, not before");
     });
+    bridge.stop().await;
+}
+
+/// Goal (P2's handshake): the bridge answers the platform's hold (`held`)
+/// once no claim of its is in flight, never while one is (a claim that
+/// lands after the save would be a turn the save does not know), and takes
+/// its answer back once the hold goes. Method: a hold with nothing in
+/// flight; then a hold made while a claim's post is held open by the fake.
+#[tokio::test]
+async fn it_answers_the_hold_once_no_claim_is_in_flight() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("held-answer");
+    let runs = support::Runs::default();
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::counting(support::script(), &runs));
+    following(&fake, 2).await;
+    assert!(!support::held(&dir), "no hold, no answer");
+    support::hold(&dir);
+    support::until(WAIT, "its answer to the hold", || support::held(&dir)).await;
+    // the hold goes: its answer goes with it, and is not made again
+    std::fs::remove_file(support::hold_path(&dir)).expect("the hold");
+    support::until(WAIT, "its answer taken back", || !support::held(&dir)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!support::held(&dir), "no answer without a hold");
+
+    // a claim in flight as the hold comes: no answer until it lands
+    fake.with(|w| w.work_post_delay_ms = 3_000);
+    let one = fake.say(&chat, &person("paul"), json!({ "text": "one" }));
+    let t = turn_of("juniper", &chat, seq(&one));
+    let claim = format!("POST /api/f/{chat}/channels/work");
+    fake.until(WAIT, "its claim's post, in flight", |w| w.calls.contains(&claim)).await;
+    support::hold(&dir);
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(!support::held(&dir), "held while a claim is in flight");
+    fake.until(WAIT, "the claim landed", |w| !starts_of(w, &chat, &t).is_empty()).await;
+    support::until(WAIT, "its answer once the claim landed", || support::held(&dir)).await;
+    // the turn it claimed before the hold runs (the platform's keepalive
+    // sees it busy: an idle sleep's hold is cancelled by that)
+    fake.with(|w| w.work_post_delay_ms = 0);
+    fake.until(WAIT, "the claimed turn's end", |w| !ends_of(w, &chat, &t).is_empty()).await;
+    assert_eq!(runs.all(), vec![t], "the turn claimed before the hold ran, once");
+    support::unhold(&dir);
     bridge.stop().await;
 }
 

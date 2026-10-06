@@ -103,6 +103,15 @@ pub const RECONNECT_MS_MAX: u64 = 30_000;
 
 /// An HTTP call to the fragment API is given this long.
 pub const HTTP_TIMEOUT_MS: u64 = 15_000;
+/// The bridge looks at the platform's hold this often, to answer it (the
+/// platform waits 20 s for the answer: docs/computers.md).
+pub const HOLD_POLL_MS: u64 = 100;
+/// An answer to the hold (what the save may leave out) is at most this
+/// long: the platform reads it whole, and refuses a longer one.
+pub const HELD_ANSWER_MAX_BYTES: usize = 2048;
+/// Patterns an answer names at most, each at most this long.
+pub const HELD_PATTERNS_MAX: usize = 16;
+pub const HELD_PATTERN_MAX_BYTES: usize = 128;
 /// A WebSocket's connect and its first frame are given this long.
 pub const WS_OPEN_TIMEOUT_MS: u64 = 10_000;
 /// A `__live` socket pings this often, and is given up on after twice that

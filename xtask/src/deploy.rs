@@ -143,6 +143,11 @@ struct Computers {
     /// repo (`images/hermes/Dockerfile`, `.`: the Hermes image carries the CLI,
     /// so it builds from the repo root), and its build variables.
     images: BTreeMap<String, Image>,
+    /// How long a computer whose sleep's save keeps failing stays awake
+    /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; thirty
+    /// minutes when unset: docs/computers.md).
+    #[serde(default)]
+    unsaved_max_ms: Option<u64>,
     // No size here: a Durable Object's container is sized as it starts, at
     // the instance its awake time is priced at (fragment_core::price
     // `instance_size`; decision 13's 2 vCPU and 6 GiB), and wrangler
@@ -646,6 +651,9 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
     }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
+        if let Some(ms) = computers.unsaved_max_ms {
+            v.insert("FRAGMENT_COMPUTER_UNSAVED_MAX_MS".into(), json!(ms.to_string()));
+        }
     }
     if !catalog.is_empty() {
         v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(catalog.providers())?));
@@ -1045,7 +1053,7 @@ mod tests {
         let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key": "k" });
         assert!(checked(with(vec![google])).is_err(), "a connection has no key");
         let mut d = deployment(None, None);
-        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new() });
+        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
     }

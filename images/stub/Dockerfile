@@ -6,7 +6,10 @@
 #
 # Build from images/: docker build --platform linux/amd64 -f stub/Dockerfile .
 
-# The bridge, static (Alpine's Rust targets musl), built where it runs.
+# The bridge, static (Alpine's Rust targets musl), built where it runs. Its
+# sources are touched first: the target cache is every build's on this
+# Docker, and cargo takes a path crate as built when its sources are older
+# than its last build (images/hermes/Dockerfile).
 FROM rust:1.99-alpine AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -14,7 +17,8 @@ COPY bridge bridge
 COPY hermes/boot hermes/boot
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p fragment-bridge \
+    find bridge -type f -exec touch {} + \
+ && cargo build --release --locked -p fragment-bridge \
  && cp target/release/fragment-bridge /fragment-bridge
 
 # busybox for the few commands the Computer DO runs in a container (`true`
@@ -28,7 +32,11 @@ COPY stub/screen /opt/fragment/screen
 # rollback lane reads it through the computer's port)
 ARG STUB_VERSION=1
 RUN echo "$STUB_VERSION" > /opt/fragment/screen/version.txt
+# Its answer to a save's hold names `*.scratch` as what the save leaves out
+# (docs/computers.md, "The hold"): nothing it keeps another way, only so the
+# platform's lanes can see a save leave out what a guest names.
 ENV BRIDGE_RUNTIME=script \
+    BRIDGE_HELD_LEAVE_OUT=*.scratch \
     BRIDGE_STATE_DIR=/data/bridge \
     BRIDGE_MEDIA_DIR=/tmp/bridge-media \
     BRIDGE_SCRIPT_SCRATCH=/tmp/bridge-script \

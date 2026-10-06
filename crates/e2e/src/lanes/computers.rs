@@ -116,19 +116,138 @@ fn runs(s: &Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str) -> 
 
 /// A lever on computer `id` (`POST /api/test/computer`, docs/api.md).
 fn lever(api: &Api, id: &str, op: &str) -> Result<crate::api::Reply> {
-    api.unsigned("POST", "/api/test/computer", Some(&json!({ "computer": id, "op": op })))
+    lever_with(api, id, json!({ "op": op }))
+}
+
+/// A lever with its arguments (`{op, times?, on?}`).
+fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply> {
+    body["computer"] = json!(id);
+    api.unsigned("POST", "/api/test/computer", Some(&body))
+}
+
+/// The newest save computer `id` keeps (the lever's `saves`), if any.
+fn newest_save(api: &Api, id: &str) -> Value {
+    lever(api, id, "saves").map(|r| r.body["saves"][0].clone()).unwrap_or(Value::Null)
+}
+
+/// A save is asked for this long after a turn's end, once nothing more is
+/// busy (fragment_core::computer::SAVE_SETTLE_MS), and taken within a few
+/// seconds more.
+const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 30);
+
+/// The save checks (docs/durable-computers.md, step 1), each skipped off
+/// the stub and the fakes.
+const SAVE_CHECKS: [&str; 7] = [
+    "awake and idle after a turn, it has a save newer than the turn, held",
+    "it keeps at most three saves, newest first, and its view lists them",
+    "an always-on computer is saved without sleeping",
+    "a save leaves out what its guest's answer to the hold names, and keeps the rest (DirectoryBackup's exclude)",
+    "a save is two records, /data and its work (/data/work), and a wake restores both",
+    "a sleep whose save fails keeps its container, and its view says so",
+    "a save that then works lets it sleep, and its view says no more of it",
+];
+
+/// Its saves, rung 4 of docs/explorations/pi-durable.md: a turn's end
+/// saves it awake, an always-on computer is saved, a failed save keeps
+/// its container (the lever's `fail-saves`), and one that works sleeps it.
+/// Starts awake, ends asleep. Answers how many replies of its agent it
+/// added.
+fn save_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let view = || api.signed(c.owner, "GET", &format!("/api/computers/{}", c.id), None).map(|r| r.body).unwrap_or(Value::Null);
+    let reply_of = |seq: i64| {
+        let turn = turn_of(c.agent, c.chat, "chat", seq);
+        agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
+    };
+    let seq_of = |r: &crate::api::Reply| r.body["record"]["seq"].as_i64().unwrap_or(0);
+    let saved_after = |at: i64| newest_save(api, c.id)["atMs"].as_i64().is_some_and(|saved| saved > at);
+    // a turn, then nothing: its end is saved, awake
+    let said = say(60, "a turn to be saved")?;
+    let answered = s.eventually(c.wake, || reply_of(seq_of(&said)).is_some());
+    let replied_at = reply_of(seq_of(&said)).and_then(|r| r["at"].as_i64()).unwrap_or(i64::MAX);
+    let saved = answered && s.eventually(SAVED_AFTER_WORK, || saved_after(replied_at));
+    let newest = newest_save(api, c.id);
+    let v = view();
+    s.ok(
+        SAVE_CHECKS[0],
+        saved && v["phase"] == "awake" && newest["held"] == true && newest["generation"] == v["restored"]["generation"],
+        format!("replied at {replied_at}; newest save {newest}; {v}"),
+    );
+    let all = lever(api, c.id, "saves")?.body["saves"].clone();
+    let numbers: Vec<u64> = all.as_array().map(|l| l.iter().filter_map(|x| x["number"].as_u64()).collect()).unwrap_or_default();
+    s.ok(
+        SAVE_CHECKS[1],
+        (1..=3).contains(&numbers.len()) && numbers.windows(2).all(|w| w[0] > w[1]) && v["saves"].as_array().map(|l| l.len()) == Some(numbers.len()) && v["saves"][0]["id"] == newest["id"],
+        format!("{all} / {}", v["saves"]),
+    );
+    // always on: a turn's end saves it, and it never sleeps for it
+    let r = lever_with(api, c.id, json!({ "op": "always-on", "on": true }))?;
+    let said = say(61, "a turn while always on")?;
+    let answered = r.status == 200 && s.eventually(c.wake, || reply_of(seq_of(&said)).is_some());
+    let replied_at = reply_of(seq_of(&said)).and_then(|r| r["at"].as_i64()).unwrap_or(i64::MAX);
+    let saved = answered && s.eventually(SAVED_AFTER_WORK, || saved_after(replied_at));
+    let generation = view()["restored"]["generation"].clone();
+    let v = view();
+    s.ok(SAVE_CHECKS[2], saved && v["phase"] == "awake" && v["restored"]["generation"] == generation, format!("{r} / {}", newest_save(api, c.id)));
+    lever_with(api, c.id, json!({ "op": "always-on", "on": false }))?;
+    // what the guest's answer to the hold names is left out of its save (the
+    // stub names `*.scratch`), and the rest is kept, across a sleep and a wake
+    let said = |n: u32, text: &str| -> Result<String> {
+        let r = say(n, text)?;
+        s.eventually(c.wake, || reply_of(seq_of(&r)).is_some());
+        Ok(reply_of(seq_of(&r)).and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let wrote = [said(62, "write notes/keep.txt kept")?, said(63, "write notes/gone.scratch left out")?, said(66, "write work/notes.txt in the work")?];
+    std::thread::sleep(QUEUE_DRAIN);
+    let slept = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
+    let records = newest_save(api, c.id)["records"].as_array().map(|l| l.iter().map(|r| r["dir"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let woke = api.signed(c.owner, "POST", &format!("/api/computers/{}/wake", c.id), Some(&json!({})))?;
+    let read = [said(64, "read notes/keep.txt")?, said(65, "read notes/gone.scratch")?, said(67, "read work/notes.txt")?];
+    s.ok(
+        SAVE_CHECKS[3],
+        wrote.iter().all(|w| w.starts_with("wrote ")) && slept.body["phase"] == "asleep" && woke.body["restored"]["from"] == "backup" && read[..2] == ["read notes/keep.txt: kept", "read notes/gone.scratch: none"],
+        format!("{wrote:?} / {read:?} / {}", woke.body["restored"]),
+    );
+    s.ok(SAVE_CHECKS[4], records == ["/data", "/data/work"] && read[2] == "read work/notes.txt: in the work", format!("{records:?} / {read:?}"));
+    let generation = view()["restored"]["generation"].clone();
+    // a sleep whose save fails keeps its container: the same start, awake
+    std::thread::sleep(QUEUE_DRAIN);
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 1 }))?;
+    let saves_before = newest_save(api, c.id);
+    let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
+    let kept = lever(api, c.id, "saves")?;
+    s.ok(
+        SAVE_CHECKS[5],
+        failing.status == 200
+            && r.body["phase"] == "awake"
+            && r.body["why"].as_str().is_some_and(|w| w.contains("could not save") && w.contains("the test lever failed it"))
+            && r.body["restored"]["generation"] == generation
+            && kept.body["generation"] == generation
+            && newest_save(api, c.id) == saves_before
+            && kept.body["unsavedSince"].is_i64(),
+        format!("{r} / {kept}"),
+    );
+    // its owner asks again: the save works, and it sleeps
+    let r = api.signed(c.owner, "POST", &format!("/api/computers/{}/sleep", c.id), Some(&json!({})))?;
+    let newest = newest_save(api, c.id);
+    s.ok(
+        SAVE_CHECKS[6],
+        r.body["phase"] == "asleep" && r.body.get("why").is_none() && newest["generation"] == generation && newest["id"] != saves_before["id"],
+        format!("{r} / {newest}"),
+    );
+    Ok(8)
 }
 
 /// The crash checks, each skipped off the stub and the fakes. The ones
 /// marked P1 pass once the bridge claims each turn on `work` before it runs
 /// it (docs/explorations/pi-durable.md, P1): until then a crash's restore
 /// runs every turn since the save again.
-const CRASH_CHECKS: [&str; 9] = [
+const CRASH_CHECKS: [&str; 10] = [
     "asleep, it is no computer to kill, and the lever refuses what it does not have",
     "after its owner's sleep and wake, its wake says what it restored: that sleep's save, no rollback",
-    "the lever answers its saves: the current save's record, the one its last start restored",
+    "the lever answers its saves: the newest, the one its last start restored",
     "a think turn and a key's fetch turn run once each, before the crash",
-    "the lever's kill (SIGKILL to the guest's PID 1) is a crash: it comes back at once, from its last save",
+    "awake, their end is saved: a save newer than the sleep's",
+    "the lever's kill (SIGKILL to the guest's PID 1) is a crash: it comes back at once, from the save after its last turn",
     "a crash wakes it from its last save, and nothing that started runs again (P1)",
     "its wake says what it restored: after the kill, a rollback is counted",
     "a turn cut by a crash ends once, as an error, and its model was called once (P1)",
@@ -176,10 +295,10 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
         &r,
     );
     let saves = lever(api, c.id, "saves")?;
-    let save = saves.body["record"]["id"].as_str().unwrap_or("").to_string();
+    let slept = saves.body["saves"][0]["id"].as_str().unwrap_or("").to_string();
     s.ok(
         CRASH_CHECKS[2],
-        saves.status == 200 && !save.is_empty() && restored["save"] == save.as_str() && saves.body["restored"] == restored && saves.body["generation"] == restored["generation"],
+        saves.status == 200 && !slept.is_empty() && restored["save"] == slept.as_str() && saves.body["restored"] == restored && saves.body["generation"] == restored["generation"],
         &saves,
     );
     // a model turn and a key turn, each run once
@@ -192,6 +311,11 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let settled = s.eventually(Duration::from_secs(20), || runs(s, api, c.owner, c.owner_id, c.id) == once);
     let ran = runs(s, api, c.owner, c.owner_id, c.id);
     s.ok(CRASH_CHECKS[3], answered && settled, format!("{before:?} -> {ran:?}; {:?}", replied(seq_of(&fetch)).map(|r| r["body"]["text"].clone())));
+    // its work's end is saved, awake: the save a crash now wakes from
+    let last_at = [&think, &fetch].iter().filter_map(|r| replied(seq_of(r)).and_then(|x| x["at"].as_i64())).max().unwrap_or(i64::MAX);
+    s.eventually(SAVED_AFTER_WORK, || newest_save(api, c.id)["atMs"].as_i64().is_some_and(|at| at > last_at));
+    let save = newest_save(api, c.id)["id"].as_str().unwrap_or("").to_string();
+    s.ok(CRASH_CHECKS[4], !save.is_empty() && save != slept, format!("the sleep's save {slept}, its turns' {save}"));
     // the crash
     let generation = restored["generation"].as_u64().unwrap_or(0);
     let killed = lever(api, c.id, "kill")?;
@@ -202,7 +326,7 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let came_back = killed.status == 200 && s.eventually(c.wake, || back(generation));
     let restored = view()["restored"].clone();
     s.ok(
-        CRASH_CHECKS[4],
+        CRASH_CHECKS[5],
         came_back && killed.body["killed"] == generation && restored["from"] == "backup" && restored["save"] == save.as_str() && restored["after"] == "exit",
         format!("{killed} / {restored}"),
     );
@@ -211,9 +335,9 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let after = say(52, "after the crash")?;
     let answered = s.eventually(c.wake, || replied(seq_of(&after)).is_some());
     let again = runs(s, api, c.owner, c.owner_id, c.id);
-    s.ok(CRASH_CHECKS[5], answered && again == ran, format!("before the crash {ran:?}, after it {again:?}"));
+    s.ok(CRASH_CHECKS[6], answered && again == ran, format!("before the crash {ran:?}, after it {again:?}"));
     let v = view();
-    s.ok(CRASH_CHECKS[6], v["restored"]["rollback"] == true && v["rollbacks"].as_u64() == rollbacks.checked_add(1), &v);
+    s.ok(CRASH_CHECKS[7], v["restored"]["rollback"] == true && v["rollbacks"].as_u64() == rollbacks.checked_add(1), &v);
     // a turn cut by a crash: its model call is held, and the guest killed under it
     let generation = v["restored"]["generation"].as_u64().unwrap_or(0);
     let called = s.ai.chats().len();
@@ -229,11 +353,11 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     let answered = s.eventually(c.wake, || replied(seq_of(&next)).is_some());
     let ends = ends();
     s.ok(
-        CRASH_CHECKS[7],
+        CRASH_CHECKS[8],
         ended && ends.len() == 1 && ends[0]["body"]["outcome"] == "error" && replied(seq_of(&cut)).is_none() && s.ai.chats().len() == called + 1,
         format!("{} model calls since; {}", s.ai.chats().len() - called, json!(work_of(&records(api, c.owner, c.chat, "work"), &cut_turn))),
     );
-    s.ok(CRASH_CHECKS[8], answered, json!(replied(seq_of(&next))));
+    s.ok(CRASH_CHECKS[9], answered, json!(replied(seq_of(&next))));
     // its replies: the think, the fetch, after the crash, after the cut (and
     // the cut turn's, where a crash's restore ran it again)
     let added = [&think, &fetch, &after, &cut, &next].iter().filter(|r| replied(seq_of(r)).is_some()).count();
@@ -531,12 +655,14 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         format!("runs {ran:?} -> {again:?}; {}", json!(replies)),
     );
 
-    // a crash wakes it from its last save, and nothing that started runs again
+    // its saves, awake and at sleep; then a crash wakes it from its last
+    // save, and nothing that started runs again
     if fakes && scripted {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
+        replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
     } else {
-        for label in CRASH_CHECKS {
+        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
@@ -612,6 +738,22 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
+    // a socket on its port, bridged through the Computer DO both ways: the
+    // screen's control socket speaks first (who holds control), as an RFB
+    // server does, and that first word reaches the page
+    let control = || Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let heard = control().and_then(|mut c| {
+        let first = c.next()?;
+        c.send(&json!({ "type": "take" }))?;
+        let taken = c.next()?;
+        c.close();
+        Ok((first, taken))
+    });
+    s.ok(
+        "a socket on its port opens from its own page, and carries the container's first word and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| *first == json!({ "type": "control", "holder": null }) && taken["holder"] == "e2e"),
+        format!("{heard:?}"),
+    );
     // and in a frame of the platform's page (the shell's tab onto its screen),
     // where the platform is cross-site from the computer's origin
     match s.hosted() {
