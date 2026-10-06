@@ -349,7 +349,12 @@ class ContainerHost {
   // and before anything is awaited: a message that arrives with no
   // listener is gone, and a container's socket may speak first (an RFB
   // server's version, the screen's control socket's holder), whose first
-  // word the report's await used to lose.
+  // word the report's await used to lose. A close is passed on to the
+  // other end with its code where that end may send it: 1005 (a close
+  // that named none, as a bridge's plain close is) and 1006 (dropped) are
+  // a receiver's to report, which workerd refuses to send, and passing one
+  // on left the other end open: a screen whose desktop restarted kept its
+  // page's stream, frozen (p5, 2026-10-05). Those go on as 1000.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
@@ -359,10 +364,16 @@ class ContainerHost {
     const close = (code, reason) => {
       if (closed) return;
       closed = true;
+      const sendable = code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code);
       for (const ws of [upstream, server]) {
         try {
-          ws.close(code || 1000, reason || "");
-        } catch {}
+          ws.close(sendable ? code : 1000, sendable ? reason || "" : "");
+        } catch {
+          // a reason too long for a close frame: the code alone
+          try {
+            ws.close(sendable ? code : 1000);
+          } catch {}
+        }
       }
       this.#report("computer/tab", { open: false });
     };

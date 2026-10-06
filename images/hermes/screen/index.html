@@ -38,30 +38,64 @@
   };
   const status = document.getElementById("status");
   const button = document.getElementById("control");
+  const screen = document.getElementById("screen");
   // The screen is shown once its RFB stream connects; Take over works once
   // the control socket is open too (a click before would be lost).
-  let shown = false, closed = null, mine = false, holder = null;
+  // The stream follows the desktop: one that closes while the control
+  // socket is open (the desktop stopped or restarted on a computer still
+  // up) is opened again, after RETRY_MIN_MS, doubling to RETRY_MAX_MS, and
+  // the bridge starts the desktop for it. The control socket is the
+  // computer's: once it closes, nothing is opened again until a reload.
+  const RETRY_MIN_MS = 1000, RETRY_MAX_MS = 10000;
+  let rfb = null, connects = 0, retry = RETRY_MIN_MS, shown = false, closed = null, mine = false, holder = null;
   const control = new WebSocket(socket("control"));
   const show = () => {
-    const ready = shown && control.readyState === WebSocket.OPEN;
+    // a holder may give back while the stream reconnects
+    const ready = control.readyState === WebSocket.OPEN && (shown || mine);
     button.disabled = !ready || closed !== null;
-    status.textContent = closed ?? (!shown ? "Connecting to the screen…" : mine ? "You have the screen" : holder ? "Someone else has the screen" : "Watching the agent's screen");
+    const waiting = connects === 0 ? "Connecting to the screen…" : "The screen restarted. Reconnecting…";
+    status.textContent = closed ?? (!shown ? waiting : mine ? "You have the screen" : holder ? "Someone else has the screen" : "Watching the agent's screen");
   };
 
-  const rfb = new RFB(document.getElementById("screen"), socket("websockify"), { shared: true });
-  rfb.viewOnly = true;
-  rfb.scaleViewport = true;
-  rfb.addEventListener("connect", () => { shown = true; show(); });
-  rfb.addEventListener("disconnect", () => { closed = "The screen closed. Reload to see it again."; show(); });
+  const connect = () => {
+    rfb = new RFB(screen, socket("websockify"), { shared: true });
+    rfb.viewOnly = !mine;
+    rfb.scaleViewport = true;
+    rfb.addEventListener("connect", () => {
+      shown = true;
+      retry = RETRY_MIN_MS;
+      connects += 1;
+      // how many streams this page has opened, for its checks (crates/e2e: hermes)
+      screen.dataset.connects = String(connects);
+      show();
+    });
+    rfb.addEventListener("disconnect", () => {
+      shown = false;
+      rfb = null;
+      if (closed === null) {
+        setTimeout(again, retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
+      }
+      gone();
+    });
+  };
+  // The stream again, unless the control socket closed meanwhile; and what
+  // the page says once both are closed.
+  const again = () => (closed === null ? connect() : gone());
+  const gone = () => {
+    if (closed !== null && !shown) closed = "The screen closed. Reload to see it again.";
+    show();
+  };
+  connect();
 
   control.addEventListener("open", show);
-  control.addEventListener("close", () => { closed ??= "Take over is unavailable. Reload to try again."; show(); });
+  control.addEventListener("close", () => { closed ??= "Take over is unavailable. Reload to try again."; gone(); });
   control.addEventListener("message", (e) => {
     const m = JSON.parse(e.data);
     if (m.type !== "control") return;
     holder = m.holder;
     mine = holder === viewer;
-    rfb.viewOnly = !mine;
+    if (rfb) rfb.viewOnly = !mine;
     button.textContent = mine ? "Give back" : "Take over";
     button.setAttribute("aria-pressed", String(mine));
     show();
