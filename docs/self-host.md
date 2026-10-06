@@ -1617,6 +1617,42 @@ These are listed as found. Each names where it bites and what to do.
     the same port, so the node's port path is not it. sandcastle#7 makes
     the links in the guest's init; the box's installed engine is the
     `node` branch's, so the three checks fail here until it carries it.
+31. **celld's early answer to an upload it refused can be lost** (master's
+    vision checks, #154, first run on celld, 2026-10-06). The model route
+    refuses a body past its cap from its declared length, before reading
+    any of it (`read_body`), and celld's HTTP server (hyper) then closes
+    the connection on the unread body. A client still uploading (the
+    e2e's reqwest, 6 MiB) may get a broken pipe and never read the 413
+    that was sent: three of the five runs here that reached the check. A
+    client that reads after a failed write sees it (a raw socket did).
+    `wrangler dev` reads the whole upload first, and so does Cloudflare's
+    edge. Hermes' shrink-and-retry is not affected on a node: its call
+    reaches the cell through the egress route, which reads the whole body
+    (`nodeEgress`) before the model's cap is checked. The e2e takes the 413 as a skip on celld,
+    and still checks that nothing was reserved or sent. Once, the 5 MiB
+    call before it (under the cap) broke the same way; four runs since
+    did not, so its cause is open.
+    - **celld:** a lingering close (read and drop the rest of a refused
+      upload, bounded, before closing), as nginx does: an upstream celld
+      issue for Paul to post.
+32. **Hermes' install check clashed with the managed skills' asks** (on
+    master too). The install posts `h90` and `h91`, inside the skills
+    check's `h80` to `h99`. #146 merged before its fix (6be7cdf, pushed
+    to its branch after the merge), and master's 0cbe9ea moved only the
+    screen's stop, to `h120`. The install is now `h130` and `h131`, and a
+    refused post says so at once: master PR #170.
+33. **macrofiche commits a pack that changes nothing** (master's #163,
+    first run against macrofiche, 2026-10-06). code.storage refuses one
+    (412, `precondition_failed`, "no changes to commit"; the fake does
+    since #163), and the cell now answers main's tip for it. macrofiche
+    makes an empty commit instead, so the templates section's "a write of
+    what main holds commits nothing" and the "main moves" check after it
+    fail there (40 passed, 2 failed); the cell works either way, an empty
+    commit the only cost. The section also pulled the fake's latency lever
+    on any local run, which panics on an external store: it asks
+    `store_levers` first now.
+    - **macrofiche:** refuse a pack whose tree is its parent's as
+      code.storage does, and add it to the codestore section's probe.
 
 ## The spike, on this box
 
@@ -1656,6 +1692,64 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
 - **S7. The uplink.** The node dials out. Exit: S2's checks with the
   node behind NAT and no inbound port, then against a Cloudflare preview
   (the first real blend; deploying a preview is Paul's call).
+
+### Rebased onto master, 2026-10-06
+
+Onto 923bb5c: Hermes installs (#146), the Docker test (#145), `/data`
+before the bridge's first write (#151), the agents' race (#157), the
+seam and `/data/work`'s own save (#149, #150: Litestream is cut), the
+vision model (#154), the live sidebar (#158), an open card keeping its
+computer awake (#159), one reply per turn (#160), the hosted desktop
+(#161), a late skills backfill (#162), a template in one seed (#163), the
+Docker rung's tool turn (#153), and stacks kept apart in one Docker
+(#155). The backup before it is the tag `pre-rebase-2026-10-06`.
+
+- **Dropped as master's:** the #146 cherry-pick (its net is master's
+  c0708a1, which went further: `/data/work` in Hermes' write root),
+  "a first start makes its state directory" (#151, the same patch as
+  a8e6444) and "wait for the say's ops record" (#157, the same as
+  bd260cd). The install's ids (498e09b) were not master's: #146 merged
+  without them (found 32), so the branch carries the master PR's commit
+  in their place.
+- **Layered on master's shapes:**
+  - `write_local_config` keeps master's `absolute_images` and
+    `scope_images`, then drops `containers` when computers are a node's.
+  - `xtask dev` keeps master's `outlive_interrupt`, and removes the
+    containers the node left only when it ran the runtime's own (not on
+    celld, nor with nodes).
+  - The e2e's end removes the runtime's containers (master's), then stops
+    the sandcastle nodes and their image tags, then macrofiche.
+  - Master's `kill_nodes` (the e2e's signal handler) knew only `wrangler
+    dev`'s nodes; celld's spawn through the same `spawn_node` now.
+  - Litestream is cut on master, so its arm64 stage goes; sandbox-shim,
+    cua-driver and gws keep theirs.
+- **Images:** master's scoping is wrangler's alone. The local config's
+  images point at copies of their Dockerfiles under `.wrangler/images`,
+  labeled for the project. A node's images are built from the project's
+  own `wrangler.jsonc`, unscoped: `fragment-<name>:e2e-<run>` in the e2e,
+  `fragment-<name>:<tag>` from `xtask node-images`, each loaded into an
+  engine as `docker.io/library/<tag>`. Both paths name images by the same
+  keys (`stub`, `stub-next`, `hermes`, `hermes-next`). A stack with nodes
+  drops `containers` from its local config, so nothing is scoped there,
+  and `containers::remove` takes only `workerd-<worker>-Computer-<id>`
+  names, never the Docker double's.
+- **Evidence:** `cargo xtask check`, 560 passed, 0 failed.
+  - On celld with OpenBao, the core sections (auth, signin, create,
+    deploy, live, channels, jobs, blobs, secrets, keys, site, ledger,
+    agents, restart, codestore): 596 passed, 0 failed, 5 skips (codestore
+    probes only an external store; found 31's 413; three checks of the
+    two-node run). The first run, before found 31's change, was 586 and 1.
+  - Against macrofiche: codestore 22 and 0; templates 40 and 2 (found 33).
+  - Two nodes (computers, chat, shell-ui, placement, pairing, restart;
+    sandcastle's `node`): 342 passed, 0 failed.
+  - The real engine (computers, chat, hermes): 251 passed, 0 failed, the
+    install on `h130` and `h131` among them.
+  - On `wrangler dev`, the sections master's changes touched (auth,
+    signin, keys, secrets, ledger): 207 and 0. Its computers section fails
+    from the guest's first call to the host ("gateway connection failed:
+    Connection reset by peer"), this box's ufw as before: 25 passed and 26
+    failed when stopped, and the stop (SIGTERM) removed its 2 containers
+    through master's signal path.
 
 ### Rebased onto master, 2026-10-05
 
@@ -1994,14 +2088,16 @@ The e2e starts two nodes of its own with `FRAGMENT_E2E_NODES=two`: one
 that listens, and one that dials in. Each is a `sandcastle-node` in front
 of sandcastle's Docker engine double, which runs each container in local
 Docker (no root, no VMs). `SANDCASTLE_DIR` names a sandcastle checkout
-(branch `node-placement`) with `sandcastle-node` and
-`sandcastle-docker-engine` built, and `sandcastle-docker-relay` built
-static (`--target x86_64-unknown-linux-musl`). The run builds the cell's
-images for them, tagged for the run.
+(branch `node`, whose double runs a container's entrypoint as its PID 1,
+with no `--init`) with `sandcastle-node` and `sandcastle-docker-engine`
+built, and `sandcastle-docker-relay` built static (`--target
+x86_64-unknown-linux-musl`). The run builds the cell's images for them,
+tagged for the run. It needs Docker: on this box, pipe the command to
+`newgrp docker`.
 
 ```sh
-FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-placement FRAGMENT_E2E_RUNTIME=celld \
-  CELLD_BIN=../celld/target/release/celld cargo xtask e2e --only computers,chat,shell-ui,placement,restart
+FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-node FRAGMENT_E2E_RUNTIME=celld \
+  CELLD_BIN=../celld/target/release/celld cargo xtask e2e --only computers,chat,shell-ui,placement,pairing,restart
 ```
 
 Sign-in (seam 4) is one OpenID Connect provider:

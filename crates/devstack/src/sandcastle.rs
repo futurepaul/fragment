@@ -109,7 +109,7 @@ impl Tools {
     pub fn locate(real: bool) -> Result<Tools> {
         let dir = std::env::var_os(SANDCASTLE_DIR_VAR)
             .map(PathBuf::from)
-            .with_context(|| format!("set {SANDCASTLE_DIR_VAR} to a sandcastle checkout (its branch node-placement), with sandcastle-node, sandcastle-docker-engine and the static sandcastle-docker-relay built"))?;
+            .with_context(|| format!("set {SANDCASTLE_DIR_VAR} to a sandcastle checkout (its branch node), with sandcastle-node, sandcastle-docker-engine and the static sandcastle-docker-relay built"))?;
         let musl = format!("{}-unknown-linux-musl", std::env::consts::ARCH);
         let tools = Tools {
             node: dir.join("target/release/sandcastle-node"),
