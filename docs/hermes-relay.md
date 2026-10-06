@@ -52,7 +52,12 @@ image against it.
   - `edit {message_id, content}`: the whole text again;
   - `delete`, `typing`, `react {message_id, emoji, remove}`;
   - `draft {draft_id, content, final}`: a reply streaming; for any
-    platform but Slack the final is a separate `send`;
+    platform but Slack the final is a separate `send`. Its stream
+    consumer ends a draft segment at every tool boundary with that
+    `send` too (`gateway/stream_consumer.py`, `_send_or_edit` with
+    `finalize`), so the model's text before a tool call arrives as a
+    reply like any other, whatever `display.interim_assistant_messages`
+    says; the bridge takes it back as the step's words (docs/bridge.md);
   - `prompt {prompt_kind, prompt_id, content, options: [{id, label,
     style?}], timeout_s?}`: buttons; exec approvals offer `once`,
     `session`, `always`, `deny` (fewer after a smart deny);
@@ -84,7 +89,7 @@ group_sessions_per_user: false     # one session per chat, "[name] …" each mes
 gateway: {multiplex_profiles: true}
 onboarding: {profile_build: "off"}
 streaming: {enabled: true, transport: "draft"}
-display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", long_running_notifications: false}
+display: {busy_input_mode: "queue", tool_progress: "all", tool_progress_grouping: "accumulate", long_running_notifications: false, interim_assistant_messages: false}
 platforms: {relay: {gateway_restart_notification: false}}
 approvals: {mode: "smart", timeout: 3600, destructive_slash_confirm: false}
 agent: {disabled_toolsets: ["cronjob"]}   # its routines are fragment cron (decision 38)
@@ -96,3 +101,14 @@ and in the gateway's environment `GATEWAY_MULTIPLEX_PROFILES=true`
 per-profile gateway slots), `RELAY_HOME_CHANNEL=none` (otherwise it asks
 each new chat to become its home), `HERMES_GATEWAY_BUSY_INPUT_MODE=queue`
 and `HERMES_GATEWAY_NO_SUPERVISE=1`.
+
+Hermes reads `display` for a turn from the profile's own `config.yaml`
+with the overlay merged over it (`_load_gateway_config` under the
+profile's scope, `gateway/run_turn.py`), so the overlay's
+`display.interim_assistant_messages: false` holds for `relay`, which
+has no tier of its own in `_PLATFORM_DEFAULTS` and would otherwise get
+the global `true`: a model's completed text beside a tool call is never
+sent again as a mid-turn message (`interim_assistant_callback` is unset).
+`display.show_commentary` (Codex models' commentary channel) rides on
+that callback, so it is off with it. `browser` is the exception: Hermes
+reads it from the profile's file alone (`read_raw_config`).
