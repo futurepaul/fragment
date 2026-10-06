@@ -439,6 +439,16 @@ async fn the_hermes_image() {
     });
     assert!(c.exec(&["dpkg", "-s", "fragment-hello"]), "installed as a package, through apt");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /usr/local/bin/fragment-hi"]), "the system's directories stay root's: an install goes through sudo");
+    // Hermes' file tools (write_file, patch) may write where its terminal
+    // works, its home and /tmp, and nowhere else (HERMES_WRITE_SAFE_ROOT),
+    // as Hermes' own check decides
+    let denied = |path: &str| {
+        let check = format!("from agent.file_safety import is_write_denied; import sys; sys.exit(1 if is_write_denied({path:?}) else 0)");
+        !c.exec(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", &check])
+    };
+    assert!(!denied("/data/work/juniper-paul/notes.txt"), "its file tools write its work directory");
+    assert!(!denied("/data/hermes/profiles/juniper-paul/notes.txt") && !denied("/tmp/notes.txt"), "and its home and /tmp");
+    assert!(denied("/usr/local/bin/notes"), "and not the system's directories");
 
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());
