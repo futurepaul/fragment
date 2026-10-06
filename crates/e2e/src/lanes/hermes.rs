@@ -478,6 +478,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // terminal, acting for its owner
     let run = |s: &Suite, n: u32, cmd: &str| -> Result<Option<String>> {
         let r = say(n, &format!("run: {cmd}"))?;
+        // a post the chat refused (its id another check's, say) runs
+        // nothing: said at once, not after a whole turn's wait
+        if r.status != 200 {
+            return Ok(Some(format!("the post h{n} was refused: {r}")));
+        }
         let turn = turn_for(&r);
         s.eventually(TURN, || ended(&turn).is_some());
         Ok(reply_of(&turn))
@@ -578,8 +583,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
     // in our Hermes image"): Hermes' user runs anything as root with sudo,
     // here offline (a package it builds, through apt; a program into
-    // /usr/local/bin)
-    let installed = run(s, 90, INSTALL)?;
+    // /usr/local/bin). Its ids are past the managed skills' asks (h80 to
+    // h99), which a fresh image's slower install reaches, and the screen's
+    // stop (h120).
+    let installed = run(s, 130, INSTALL)?;
     s.ok(
         "Hermes installs software as root with passwordless sudo, a package through apt and a program into /usr/local/bin, and runs both",
         said(&installed, "hello-from-apt hello-from-usr-local"),
@@ -621,7 +628,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // what it wrote in its home came back with /data; the install may or
     // may not have (docs/computers.md, "Root in our Hermes image")
-    let after = run(s, 91, HOME_AFTER)?;
+    let after = run(s, 131, HOME_AFTER)?;
     s.ok(
         "after the sleep and the wake, what it wrote in its home beside the install is kept",
         said(&after, "kept-in-its-home"),
