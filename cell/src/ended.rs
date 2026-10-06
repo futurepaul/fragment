@@ -71,7 +71,8 @@ struct Stored {
 
 impl FragmentCell {
     /// Ends this life in one synchronous step, with no await: a crash
-    /// leaves the life whole, or ended with all its cleanup recorded.
+    /// leaves the life whole, or ended with all its cleanup recorded, and
+    /// a delete asked again after an error records nothing twice.
     /// Records what the alarm cleans after, stops the app, closes the
     /// sockets, and drops the life's tables, made again empty.
     pub(crate) fn end_life(&self) -> CellResult<Ended> {
@@ -86,14 +87,16 @@ impl FragmentCell {
         let facet = self.app_facet()?;
         let now = SqlStorageValue::Integer(js::now_ms());
         self.exec(
-            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (incarnation) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), name.as_str().into(), npub.into(), facet.as_str().into(), now.clone(), now.clone()],
         )?;
         // every member's list, and any a change still waits for (a member
         // removed whose list was not told yet)
         self.exec(
             "INSERT INTO ended_index (incarnation, principal, version, next_at)
-             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox)",
+             SELECT ?, principal, ?, ? FROM (SELECT principal FROM members UNION SELECT principal FROM index_outbox) WHERE true
+             ON CONFLICT (incarnation, principal) DO NOTHING",
             vec![SqlStorageValue::Integer(incarnation), SqlStorageValue::Integer(version), now],
         )?;
         // its database goes with the alarm; nothing runs in it from now
