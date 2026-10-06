@@ -275,6 +275,66 @@ async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
     bridge.stop().await;
 }
 
+/// Goal (P5; F10, bit on p5 on 2026-10-05): a turn a restart cuts (here an
+/// owner's sleep while its card waits) is never redone by the chat's next
+/// message. The next life hands Hermes that message as a turn of its own:
+/// its words alone as the text, the new turn as its id, and the platform's
+/// note on what was cut (from the journal) as the inbound's read-only
+/// context. With the cut turn closed in Hermes' session by our image's
+/// boot (`Hermes::after_boot`; the real Hermes in tests/docker.rs), its
+/// model is handed the note and the message, never the cut request joined
+/// to it: the cut command's approval is not asked again, and the message
+/// after is told nothing.
+#[tokio::test]
+async fn a_turn_cut_by_a_restart_is_told_and_never_folded() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("relay-cut-told");
+    let listen = free_port();
+    let cfg = support::config(&fake.url(), &dir, support::settings());
+    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let say = |text: &str| records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let risky = say("something risky");
+    fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
+    // the owner's sleep under the card: the hold and its answer, then the
+    // container gone, its bridge and its Hermes with it
+    support::hold(&dir);
+    support::until(WAIT, "the bridge's answer to the hold", || support::held(&dir)).await;
+    bridge.kill().await;
+    fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+    // the next message wakes it, its /data as it slept
+    let next = say("good morning");
+    support::unhold(&dir);
+    let bridge = support::start_killable(cfg, relay(listen, &dir));
+    let woken = hermes.after_boot(listen, "computer-test", SECRET);
+    fake.until(WAIT, "the next message's turn to end", |w| !work_of(w, &chat, &next, "turn.end").is_empty()).await;
+    let after = say("and after that");
+    fake.until(WAIT, "the turn after's end", |w| !work_of(w, &chat, &after, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &chat, &risky, "turn.end")[0]["error"], "lost when the computer restarted", "the cut turn ends once, as lost");
+        assert!(work_of(w, &chat, &next, "turn.prompt").is_empty(), "the cut approval is not asked again");
+        let answer = |t: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == t).map(|r| r["text"].clone());
+        assert_eq!(answer(&next), Some(json!("echo: [paul] good morning")), "the next message is answered, and only it");
+        assert_eq!(answer(&after), Some(json!("echo: [paul] and after that")));
+    });
+    woken.with(|s| {
+        assert_eq!(s.closed, 1, "the boot closed the cut turn");
+        let heard = |t: &str| s.heard.iter().find(|e| e["message_id"] == t).cloned().unwrap_or_else(|| panic!("Hermes heard {t}: {:?}", s.heard));
+        let n = heard(&next);
+        assert_eq!(n["text"], "good morning", "the message's words alone: {n}");
+        let note = n["context"][0]["text"].as_str().unwrap_or_else(|| panic!("the note, as the inbound's context: {n}"));
+        for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “something risky”", "It asked: “⚠️ **Dangerous command** `rm -rf x`” (expired)"] {
+            assert!(note.contains(said), "{said:?} in {note}");
+        }
+        assert!(heard(&after).get("context").is_none(), "the turn after is told nothing: {}", heard(&after));
+        let handed: Vec<&str> = s.handed.iter().map(|(_, h)| h.as_str()).collect();
+        assert_eq!(handed, vec![format!("[Recent channel messages]\n{note}\n\n[New message]\n[paul] good morning").as_str(), "[paul] and after that"], "its model is handed the note and the message, never the cut request joined to it");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: a message said while a card is open waits behind its turn (one
 /// turn of an agent in a chat at a time), and is claimed and answered once
 /// the card expires and its turn ends: nothing queues behind an expired
