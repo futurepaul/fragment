@@ -190,7 +190,8 @@ ends it.
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
 waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart), or `stopped`.
+across a restart, and the agent's next turn is told the card was cut
+with it), or `stopped`.
 
 ```json
 { "kind": "turn.end", "turn": "…", "outcome": "idle" }
@@ -203,6 +204,17 @@ was lost when its computer restarted (the next life ends every turn an
 earlier life claimed and did not finish, `lost when the computer
 restarted`, and never runs it again), or it was refused (too many
 waiting).
+
+**After a lost turn.** The agent's next turn in that chat is told what
+was cut, once (docs/durable-computers.md, P5; docs/bridge.md, "The turn
+after a cut one is told"). The note is built from these records alone,
+so it is the same in every life: on `work`, the agent's latest
+`turn.start` before the new turn's own (a refusal's passed over), whose
+`turn.end` is `lost when the computer restarted`, with that turn's
+`turn.step`s and `turn.prompt`s (and how they closed); on `chat` (or the
+agent's `tasks`, for a routine), its cause's text and the replies it had
+posted (`rp:<turn>:<n>`). Nothing records the note itself: at the turn
+after, the turn before is the noted one, which did not end as lost.
 
 ## Attachments
 

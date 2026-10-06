@@ -1,6 +1,7 @@
 //! The sections, in the order they run.
 
 mod addon;
+mod agent_smoke;
 mod agents;
 mod app;
 mod appfiles;
@@ -102,6 +103,7 @@ const LANES: &[Lane] = &[
     chat::chat,
     shell::shell_ui,
     hermes::hermes,
+    agent_smoke::agent_smoke,
     sync::folder_sync,
     restart::restart,
     restart::pathmode,
@@ -112,7 +114,8 @@ const LANES: &[Lane] = &[
 /// lanes' order. Every section is in exactly one shard (a test below), so
 /// the shards together run what one whole run does; CI's `e2e` job checks
 /// that from their summaries (`cargo xtask e2e-summary`). `hermes` runs
-/// only by name, so its shard reports it as the whole run does: one skip.
+/// only by name, and `agent-smoke` only on a preview, so their shard
+/// reports each as the whole run does: one skip.
 ///
 /// Balanced by measured time (each summary's `ms`, as `cargo xtask
 /// e2e-summary` prints it, on CI's runners): each shard about a quarter of
@@ -123,7 +126,7 @@ const LANES: &[Lane] = &[
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "sync", "restart", "pathmode"],
+    &["shell", "computers", "chat", "hermes", "agent-smoke", "sync", "restart", "pathmode"],
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[

@@ -415,6 +415,10 @@ impl FragmentCell {
     /// (docs/api.md, `FRAGMENT_TEST_SECRET`).
     pub(crate) async fn test_fragment(&self, body: &Value) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "the route answers only on fleets with test hooks");
+        if body["op"] == "ended" {
+            // an ended life's cleanup, which outlives it (ended.rs)
+            return self.ended_view();
+        }
         self.name()?;
         let ms = || body["ms"].as_i64().filter(|ms| *ms >= 0).ok_or_else(|| CellError::invalid("ms is a duration"));
         Ok(match body["op"].as_str() {
@@ -535,7 +539,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, or poll-now")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
         })
     }
 }

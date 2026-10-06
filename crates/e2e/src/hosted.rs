@@ -229,14 +229,12 @@ pub fn run(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> Re
 
 /// What a hosted run would have: levers when it has a secret, computers
 /// and models when its deployment offers them (models only with paid calls
-/// to lend), and Chrome when it is installed.
+/// to lend), a real agent when it has both (its computers run the
+/// deployment's own image on its real model), and Chrome when it is
+/// installed.
 fn offers(hosted: &Hosted) -> Offers {
-    Offers {
-        levers: hosted.secret_file.is_some(),
-        computers: hosted.computers,
-        models: hosted.models && hosted.max_paid_calls > 0,
-        chrome: browser::chrome().is_some(),
-    }
+    let models = hosted.models && hosted.max_paid_calls > 0;
+    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models }
 }
 
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
@@ -305,7 +303,8 @@ pub fn plan(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted) -> 
 /// The plan as the dry run prints it.
 pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> String {
     let o = offers(hosted);
-    let offered: Vec<&str> = [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.chrome, "chrome")].iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
+    let offered: Vec<&str> =
+        [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome")].iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
     let needs = |n: &[Need]| match n.is_empty() {
         true => "nothing local".to_string(),
         false => n.iter().map(|n| n.name()).collect::<Vec<_>>().join(", "),
@@ -485,8 +484,12 @@ pub struct Swept {
 pub fn sweep_on(api: &Api) -> Result<Swept> {
     assert!(api.signs_in_by_levers(), "a sweep signs the e2e people in through the levers");
     let (mut people, mut deleted, mut kept, mut slept) = (0usize, 0usize, 0usize, 0usize);
-    // one that did not go (a delete past the client's timeout) is named at
-    // the end; the rest still go, and a sweep again finishes it
+    // one that did not go is named at the end; the rest still go, and a
+    // sweep again finishes it. A delete answers within one round of its
+    // members' lists (the cell's ended.rs), well inside the client's 60 s:
+    // before, it told each of a 1000-member fragment's lists in turn and
+    // answered after 300 s, so the sweep saw a timeout for a delete that
+    // finished later
     let mut left: Vec<String> = Vec::new();
     let mut after: Option<String> = None;
     for page in 0..=SWEEP_PAGES_MAX {

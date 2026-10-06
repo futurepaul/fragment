@@ -23,6 +23,11 @@
 //! - `media` uploads a file to `/relay/media` and sends it; inbound media
 //!   is downloaded with the token and its bytes counted in the reply;
 //! - the reply echoes what it heard: `echo: [<user_name>] <text>`;
+//! - what its model is handed for a turn (`Seen::handed`) is the message as
+//!   v0.21.5 renders it in a shared chat: `[<user_name>] <text>`, after an
+//!   inbound's read-only `context` when it has one (`[Recent channel
+//!   messages]\n<context>\n\n[New message]\n…`); the context is reference,
+//!   never what it acts on;
 //! - its session keeps each chat's message until its turn's reply (Hermes
 //!   persists the message as its turn starts, the rest as it ends): a turn
 //!   cut before its reply (its container gone, `dead`) leaves its message
@@ -30,7 +35,11 @@
 //!   (`Hermes::after`) folds the chat's next message into, as v0.21.5 does
 //!   with two user messages in a row (seen in the real image: the model was
 //!   given `[paul] do the risky thing at bedtime\n\n[paul] good morning`),
-//!   and answers both: a cut `risky` asks its approval again.
+//!   and answers both: a cut `risky` asks its approval again. Our image's
+//!   boot closes such a turn before its gateway starts
+//!   (`Hermes::after_boot`: hermes-boot's `close_cut_turns` writes Hermes'
+//!   own failed-turn boundary after the cut message, proven against the
+//!   real Hermes in tests/docker.rs), so nothing is folded.
 
 #![allow(dead_code)]
 
@@ -72,8 +81,15 @@ pub struct Seen {
     /// they are, finishing nothing.
     pub dead: bool,
     /// Its session, as its `/data` keeps it: by chat, the message whose
-    /// turn has not replied yet (one cut short stays).
-    pub session: HashMap<String, String>,
+    /// turn has not replied yet (one cut short stays), as its model was
+    /// handed it.
+    pub session: HashMap<String, (String, String)>,
+    /// What its model was handed for each turn, in order: `(message id,
+    /// the turn's user message)`, a cut one's folded in when the session
+    /// held it.
+    pub handed: Vec<(String, String)>,
+    /// Cut turns the boot closed before this gateway started.
+    pub closed: usize,
 }
 
 pub struct Hermes {
@@ -92,6 +108,18 @@ impl Hermes {
         let seen = self.with(|s| {
             s.dead = true;
             Seen { turn_ms: s.turn_ms, approval_ms: s.approval_ms, session: s.session.clone(), ..Seen::default() }
+        });
+        Hermes::spawn_with(addr, id, secret, seen)
+    }
+
+    /// The next life as our image starts it: on the same `/data`, its boot
+    /// first closes each turn a restart cut (a session whose last message
+    /// has no answer gets Hermes' failed-turn boundary, so it is no longer
+    /// the session's open tail), then its gateway starts.
+    pub fn after_boot(&self, addr: std::net::SocketAddr, id: &str, secret: &str) -> Hermes {
+        let seen = self.with(|s| {
+            s.dead = true;
+            Seen { turn_ms: s.turn_ms, approval_ms: s.approval_ms, closed: s.session.len(), ..Seen::default() }
         });
         Hermes::spawn_with(addr, id, secret, seen)
     }
@@ -284,22 +312,32 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
+    let user = event["source"]["user_name"].as_str().unwrap_or("?").to_string();
+    // as v0.21.5 renders a shared chat's message: the sender, after the
+    // inbound's read-only context when it has one
+    let context: Vec<&str> = event["context"].as_array().map(|c| c.iter().filter_map(|i| i["text"].as_str()).collect()).unwrap_or_default();
+    let rendered = match context.is_empty() {
+        true => format!("[{user}] {message}"),
+        false => format!("[Recent channel messages]\n{}\n\n[New message]\n[{user}] {message}", context.join("\n")),
+    };
     // its session: a message whose turn was cut before its reply is still
     // the last one, and this one is folded into it; this one stays there
-    // until its own reply
+    // until its own reply. `text` is what its model acts on (the context
+    // is reference only), `rendered` what it is handed.
     let text = {
         let mut s = gw.seen.lock().unwrap();
-        let text = match s.session.get(&chat) {
-            Some(cut) => format!("{cut}\n\n{message}"),
-            None => message,
+        let (text, rendered) = match s.session.get(&chat) {
+            Some((cut, cut_rendered)) => (format!("{cut}\n\n{message}"), format!("{cut_rendered}\n\n{rendered}")),
+            None => (message, rendered),
         };
-        s.session.insert(chat.clone(), text.clone());
+        s.session.insert(chat.clone(), (text.clone(), rendered.clone()));
+        s.handed.push((mid.clone(), rendered));
         text
     };
     let done = || {
         gw.seen.lock().unwrap().session.remove(&chat);
     };
-    let mut reply = format!("echo: [{}] {text}", event["source"]["user_name"].as_str().unwrap_or("?"));
+    let mut reply = format!("echo: [{user}] {text}");
     if text.contains("narrate") {
         // The model's text beside a tool call, as Hermes' stream consumer
         // delivers it: drafts, then, at the tool boundary, a send answering

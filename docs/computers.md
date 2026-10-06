@@ -37,9 +37,12 @@ container starts until someone asks again).
 - **Wakes:** a record on a channel one of its agents subscribed to with
   `wake: true`; an open port tab; a pre-wake (a page opened a subscribed
   fragment, or someone started typing there: it starts at once and stops
-  after 60 s if nothing arrives); one of its agents added as a member of
-  any fragment (below: the platform posts `joined` and wakes it, held as
-  a record holds it); the owner's `POST /api/computers/{id}/wake`.
+  after 60 s if nothing arrives; never by its own agents' sockets, which
+  its guest opens as it boots and again after one drops, so its own guest
+  never starts it again as it goes to sleep); one of its agents added as
+  a member of any fragment (below: the platform posts `joined` and wakes
+  it, held as a record holds it); the owner's `POST
+  /api/computers/{id}/wake`.
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
@@ -112,9 +115,10 @@ that names a PID from before a sleep can name a live process after it.
 
 - `/usr/local/bin/sandbox-shim` from `cloudflare/sandbox:1.0.0`: the
   DO's `DirectoryBackup` saves and restores `/data` through it.
-- `sh` (and its `test`), `true`, `mkdir`, `touch` and `rm`: the DO polls
-  with `true`, opens the restore gate and makes a hold with `touch`, reads
-  the guest's answer with `test -e`, and lets go of a hold with `rm`.
+- `sh` (and its `test`), `true`, `mkdir`, `touch`, `rm` and `cat`: the
+  DO polls with `true`, opens the restore gate and makes a hold with
+  `touch`, looks for the guest's answer with `test -e` and reads it with
+  `cat`, and lets go of a hold with `rm`.
 - **The hold**, a handshake before every save (P2 of
   docs/explorations/pi-durable.md). The DO removes `/run/computer/held`,
   touches `/run/computer/hold`, and waits up to 20 s for the guest to
@@ -132,6 +136,15 @@ that names a PID from before a sleep can name a live process after it.
   the DO removes them from a container started from a snapshot (the sleep
   that took the snapshot held it) before that start is ready. A container
   that outlives its sleep (a destroy that did not take) has them removed.
+- **A hold not answered.** Until it answers, a guest may say why in
+  `/run/computer/unheld` (optional; at most 1 KiB of text: what it waits
+  on, or why it cannot answer). Only once the 20 s run out does the DO
+  read it, and it logs it with the hold, in the hold's one line
+  (`{computer, hold, held, sleep, ms, tries, last, unheld}`: `tries` the
+  DO's looks for the answer, `last` the last one's exit code or error;
+  `fragment_core::computer::unheld`). Nothing is decided by it. The DO
+  removes it with the hold's other files. Our Hermes image says it
+  (below); the stub says nothing.
 - **What the save leaves out.** The guest's `held` may name, one per
   line, what its save leaves out: gitignore patterns relative to `/data`,
   of letters, digits and `._-/*?[]`, at most 512 of at most 256 bytes, the
@@ -527,7 +540,11 @@ frame; a socket only from the port's own page. So an image's page may
 not frame its own ports either: a screen is one page, its sockets
 relative to it. A WebSocket on a port is bridged through
 the Computer DO and holds it awake while open; the container may speak
-first (an RFB server does), and its first word reaches the page. Nothing else reaches the
+first (an RFB server does), and its first word reaches the page. A close
+at either end closes the other, with its code, or 1000 for one that only
+a receiver reports (1005, none given; 1006, dropped), which workerd
+refuses to send: passed on as it was, it left the page's end open (p5,
+2026-10-05: a desktop that restarted froze its screen's page). Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
 (decision 11). The page is served at the
 port's root and reaches its sockets by relative URLs (our images':
@@ -559,7 +576,14 @@ settings and state):
   signalled, so a restored one always reads as an unclean exit, and a
   resumed turn would carry the old turn's message id and fold the
   person's next message into it, while the bridge has already ended it
-  (docs/chat-records.md). The managed skills and the fragment CLI: below,
+  (docs/chat-records.md). Then it closes each turn a restart cut in its
+  Hermes session (`hermes::CLOSE_CUT_TURNS`): a gateway session whose last
+  message has no answer gets the row Hermes itself writes when a turn ends
+  without one, its failed-turn boundary, through Hermes' own session code;
+  left open, Hermes would join the next message to the cut request and its
+  model would do it again (docs/durable-computers.md, P5; the bridge tells
+  the next turn what was cut, docs/bridge.md). The managed skills and
+  the fragment CLI: below,
   "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
@@ -576,9 +600,10 @@ settings and state):
   bridge answers to `/var/lib/fragment-run/bridge-held`, and `hermes-boot`
   answers the platform. Held, it starts no new round of its repo sync, its
   skills install or its agents' reads, and waits (at most 8 s) for those
-  under way. Once its bridge has answered it copies every `*.db` under
-  `/data` but its work (Hermes' `state.db` of each profile, and whatever else Hermes or
-  a plugin keeps) with SQLite's online backup, one step each (one read
+  under way. Once its bridge has answered it copies every SQLite database
+  under `/data` but its work (Hermes' `state.db` of each profile, and
+  whatever else Hermes or a plugin keeps: each file named `*.db` that
+  begins with SQLite's header) with SQLite's online backup, one step each (one read
   transaction: a copy of one moment whatever writes beside it, never
   restarted), as the hermes user, into `/data/held-copies/<n>.sqlite`,
   and writes its manifest last; then it answers, naming exactly what it
@@ -586,8 +611,23 @@ settings and state):
   `-journal`, anchored (`/hermes/state.db`, …). A database Hermes makes
   after the copy (its kanban board appears a few seconds after a first
   start) is named by none, so the save keeps it hot rather than losing it;
-  so is one whose path no pattern can name. A copy that fails answers
-  nothing: the platform then saves it whole, not held. Hermes'
+  so is one whose path no pattern can name. A file named `*.db` that is
+  no SQLite database is no database to copy, and the save keeps it as it
+  is: the agent's desktop keeps Mesa's shader cache, in its own format,
+  as `bot-desktop/xdg/.cache/mesa_shader_cache_db/part<n>/mesa_cache.db`
+  under its profile once it has drawn (until 2026-10-06 the copy took it
+  for one and failed, so every hold after the desktop's first use went
+  unanswered, and a restore's check would have found every such save
+  unusable). A database its owner holds locked through the copy's tries
+  (1 s: SQLite's exclusive locking mode, in which a running Chromium keeps
+  its own, such as `.config/chromium/Default/declarative_performance_observer.db`
+  under Hermes' home) cannot be copied as of one moment while it runs, so
+  it is kept hot too, and the rest copied and answered (until 2026-10-06
+  it failed the whole copy, so no hold was answered while a browser ran).
+  Any other copy that fails answers nothing: the platform then saves
+  it whole, not held. Until it answers, `/run/computer/unheld` says what
+  it waits on (the bridge, the rounds under way, the copy) or why its
+  copy failed. Hermes'
   own `hermes backup --quick` was not used: it copies a fixed list of files
   under one home, and its `_safe_copy_db` copies 256 pages a step with
   0.1 s between, which a busy database restarts. Once the hold goes the
@@ -622,15 +662,28 @@ settings and state):
   for the screen's first viewer (about a second on the lower rung, and
   about 300 MiB more while it runs), or by Hermes at an agent's first
   `computer_use` or browser call (`bot_desktop.auto_start`), never at
-  boot. On that desktop an agent operates: Hermes' `computer_use` (its
-  backend, cua-driver 0.28.3, is in the image, pinned, and named by
+  boot. The screen's page follows the desktop: a stream that ends (the
+  desktop stopped or restarted, its viewers' streams ending with it) is
+  opened again on its own, from 1 s backing off to 10 s, while the page's
+  control socket stays open, and the bridge starts the desktop for it at
+  once; Take over is kept. On that desktop an agent operates: Hermes'
+  `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
   `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
   bridge and the agent calls it through `tool_call`; each screenshot is
   described by the route's vision model: Models), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
   with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Events: `agents.changed`,
+  `/data` at the first call). Its browser, and the desktop's Browser icon a
+  person uses after Take over, are the image's Chromium
+  (`/opt/fragment/bin/chromium`, named to Hermes by
+  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
+  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
+  where it sees Docker's marker (`/.dockerenv`), and Containers gives a
+  container neither that marker nor a `/dev/shm` (Docker mounts one in
+  every container), so there Chromium died as it started (p5,
+  2026-10-05); the lower rung runs the desktop as Containers does
+  (`--ipc=none`, no marker). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 

@@ -75,9 +75,30 @@ impl Drop for Container {
     }
 }
 
+/// Where the container runs: Docker as it is, or as Cloudflare Containers
+/// runs an image, where Docker's defaults differ.
+#[derive(Clone, Copy, PartialEq)]
+enum Runtime {
+    Docker,
+    /// No `/dev/shm` (`--ipc=none`; Docker mounts a 64 MB one in every
+    /// container, Containers none), and no `/.dockerenv`, Docker's marker,
+    /// which Hermes reads as "in a container" to start Chromium with
+    /// `--no-sandbox --disable-dev-shm-usage` (p5, 2026-10-05: the agent's
+    /// browser died for want of `/dev/shm`).
+    Hosted,
+}
+
 impl Container {
     fn run(tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
+        Container::run_on(Runtime::Docker, tag, api, model, extra)
+    }
+
+    fn run_on(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
         let mut args: Vec<String> = ["run", "-d", "--platform", "linux/amd64", "--add-host", "api.fragment.internal:host-gateway", "--add-host", "model.fragment.internal:host-gateway"].iter().map(|s| s.to_string()).collect();
+        if runtime == Runtime::Hosted {
+            // the marker goes before the image's own entrypoint runs, as PID 1
+            args.extend(["--ipc=none", "--entrypoint", "/bin/sh"].map(String::from));
+        }
         for (k, v) in [("FRAGMENT_API", format!("http://api.fragment.internal:{api}")), ("FRAGMENT_MODEL", format!("http://model.fragment.internal:{model}")), ("FRAGMENT_COMPUTER", "computer:00aa".into()), ("FRAGMENT_IMAGE", tag.into())] {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
@@ -89,6 +110,9 @@ impl Container {
         // its screen's port, on a port of this host's loopback (`port`)
         args.extend(["-p".into(), "127.0.0.1::6080".into()]);
         args.push(tag.into());
+        if runtime == Runtime::Hosted {
+            args.extend(["-c", "rm -f /.dockerenv && exec /opt/fragment/bin/hermes-boot pre-init"].map(String::from));
+        }
         let out = Command::new(docker()).args(&args).output().expect("docker runs");
         assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
         Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
@@ -346,7 +370,11 @@ async fn the_hermes_image() {
     fake.until(120_000, "the second reply", |w| answered(w, &t2).is_some()).await;
     eprintln!("hermes: warm message to reply: {} ms", warm.elapsed().as_millis());
 
-    // A tool call: Hermes' progress line is a step, then its answer.
+    // A tool call: Hermes' progress line is a step, then its answer. The
+    // command sleeps 2 s first: a turn that ends before Hermes' progress
+    // sender next polls (every 0.3 s) after its tool starts sends no
+    // progress line (the debt ledger, "A quick tool's step can be lost in
+    // Hermes").
     let third = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal" }));
     let t3 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", third["seq"].as_u64().unwrap());
     fake.until(120_000, "the tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t3)).await;
@@ -359,6 +387,21 @@ async fn the_hermes_image() {
         let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t3).collect();
         assert!(steps.iter().any(|s| s["tool"] == "terminal"), "a terminal step: {steps:?}; the reply {:?}; the model saw (newest first) {:#?}", answered(w, &t3), model_saw());
         assert!(answered(w, &t3).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t3));
+    });
+
+    // Two tool calls back to back, the second within Hermes' 1.5 s progress
+    // edit interval of the first (a real model's quick call after a skill
+    // read, seen on a preview): each is a step. Upstream's sender kept the
+    // second line until a newer one came, and none did (the image's patch
+    // of `send_progress_messages`, images/hermes/Dockerfile).
+    let twice = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal twice" }));
+    let t_twice = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", twice["seq"].as_u64().unwrap());
+    fake.until(120_000, "the two-tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t_twice)).await;
+    fake.with(|w| {
+        let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t_twice).collect();
+        let args: Vec<&str> = steps.iter().filter(|s| s["tool"] == "terminal").filter_map(|s| s["args"].as_str()).collect();
+        assert_eq!(args, ["echo first-ran", "sleep 2 && echo tool-ran"], "a step for each terminal call, in order: {steps:?}; the reply {:?}", answered(w, &t_twice));
+        assert!(answered(w, &t_twice).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran")), "{:?}", answered(w, &t_twice));
     });
 
     // An approval: Hermes flags `rm -rf`, its guardian escalates, the card
@@ -697,6 +740,69 @@ print(json.dumps({"pointer": [v[2].value, v[3].value], "windows": names}))
     serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
 }
 
+/// Where the window titled `title` is on the agent's desktop, `[x, y, w,
+/// h]`, as its X server has it (`xwininfo`, as the hermes user).
+fn window(c: &Container, profile: &str, title: &str) -> Option<[usize; 4]> {
+    let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
+    let script = format!("set -a; . {env}; xwininfo -root -tree");
+    let tree = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script]);
+    // `0x200003 "Example Domain - …": ("chromium-browser" "Chromium-browser")  1004x748+10+10  +10+10`
+    let line = tree.lines().find(|l| l.contains(&format!("\"{title}")))?;
+    let mut fields = line.split_whitespace().rev();
+    let at = fields.next()?.trim_start_matches('+');
+    let size = fields.next()?;
+    let (x, y) = at.split_once('+')?;
+    let (w, rest) = size.split_once('x')?;
+    let h = rest.split('+').next()?;
+    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+}
+
+/// The share of `rect`'s pixels in `frame` (`width` wide) that are
+/// example.com's background (`#eee`, or `#222` in a dark scheme): the page
+/// drawn where its window is, as a viewer sees it.
+fn page_shown(frame: &[u32], width: usize, rect: [usize; 4]) -> f64 {
+    let [x, y, w, h] = rect;
+    let (mut page, mut all) = (0usize, 0usize);
+    for row in y..y + h {
+        for col in x..(x + w).min(width) {
+            if let Some(&p) = frame.get(row * width + col) {
+                all += 1;
+                page += usize::from(p == 0x00ee_eeee || p == 0x0022_2222);
+            }
+        }
+    }
+    page as f64 / all.max(1) as f64
+}
+
+/// The command line of the browser's Chromium (its first process).
+fn chromium(c: &Container) -> String {
+    c.exec_out(&["sh", "-c", "for p in $(pgrep -f -- '/chrome(-headless-shell)? ' | head -1); do tr '\\0' ' ' < /proc/$p/cmdline; done"])
+}
+
+/// Waits until `viewer`'s frame shows the browser's page where its window
+/// is (within 30 s): where it is, `[x, y, w, h]`.
+async fn browser_shown(c: &Container, viewer: &mut support::rfb::Viewer, what: &str) -> [usize; 4] {
+    let t = Instant::now();
+    loop {
+        let at = window(c, "juniper-paul", "Example Domain");
+        let frame = viewer.frame().await.unwrap_or_else(|e| panic!("{what}: the viewer's frame: {e}"));
+        let page = at.map(|r| page_shown(&frame, viewer.width as usize, r));
+        if let (Some(rect), Some(p)) = (at, page) {
+            if p > 0.4 {
+                return rect;
+            }
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "{what}: the browser never showed in the viewer's frame: its window at {at:?}, the page {page:?} of it; the desktop {}; chromium {}\n{}",
+            desk(c, "juniper-paul"),
+            chromium(c),
+            c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// An HTTP server that answers every request `{}` and keeps each one's
 /// request line and headers: what a vendor's API would be sent.
 struct Recorder {
@@ -747,7 +853,12 @@ fn anon_mib(c: &Container) -> u64 {
 /// stream answer, the first agent's desktop started for its first viewer;
 /// a viewer who takes over moves the pointer, and one who has not cannot;
 /// the agent's `computer_use` is among its tools and captures the screen;
-/// its browser opens on that desktop.
+/// its browser opens on that desktop, in the frame of the viewer that has
+/// watched since before it started; and the desktop restarted under its
+/// viewers, a viewer that opens the screen again (the page does, on its
+/// own) sees the browser on the new one. All run as Containers runs the
+/// image (`Runtime::Hosted`: no `/dev/shm`, no Docker marker; p5,
+/// 2026-10-05).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_hermes_desktop() {
@@ -764,7 +875,8 @@ async fn the_hermes_desktop() {
     });
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("desk", &["juniper"]);
-    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[]);
+    assert!(!c.exec(&["test", "-e", "/dev/shm"]) && !c.exec(&["test", "-e", "/.dockerenv"]), "run as Containers runs it: no /dev/shm, no Docker marker");
     fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
     let before = anon_mib(&c);
@@ -836,21 +948,41 @@ async fn the_hermes_desktop() {
     );
     assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
 
-    // its browser, on its desktop
-    let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
-    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    // its browser, on its desktop, seen by the viewer that has watched
+    // since before the desktop started
+    let browse = |fake: &Fake| {
+        let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
+        fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap())
+    };
+    let turn = browse(&fake);
     fake.until(240_000, "the browser's reply", |w| reply(w, &turn).is_some()).await;
     eprintln!("desktop: the browser's reply: {:?}", fake.with(|w| reply(w, &turn)));
+    let rect = browser_shown(&c, &mut watcher, "the first browse").await;
+    let started = chromium(&c);
+    eprintln!("desktop: the browser's window at {rect:?} in the watcher's frame; chromium {started}; the container holds {} MiB", anon_mib(&c));
+    assert!(started.contains(" --no-sandbox --disable-dev-shm-usage "), "the image's Chromium, with the flags a container needs: {started}");
+    // and the desktop's Browser icon, a person's after Take over, starts the same
+    let panel = "/data/hermes/profiles/juniper-paul/bot-desktop/xdg/xfce4/panel";
+    let icon = c.exec_out(&["sh", "-c", &format!("cat {panel}/launcher-$(cat {panel}/.hermes-browser-launcher)/hermes.desktop")]);
+    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/fragment/bin/chromium\" ")), "the Browser icon starts the image's Chromium: {icon}");
+
+    // The desktop restarts under its viewers (stopped as `hermes
+    // computer-use screen stop` stops it): each viewer's stream ends with
+    // its display, so a viewer knows to open it again (the screen's page
+    // does, on its own); the one it opens starts the display at once, and
+    // shows the browser on it at the agent's next call.
+    let stopped = c.exec_code(&["env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/hermes", "-p", "juniper-paul", "computer-use", "screen", "stop"]);
+    eprintln!("desktop: stopped: {stopped:?}");
+    let ended = tokio::time::timeout(Duration::from_secs(15), watcher.frame()).await.map(|r| r.map(|f| f.len()));
+    assert!(matches!(ended, Ok(Err(_))), "the watcher's stream ends with its display: {ended:?}");
     let t = Instant::now();
-    let shown = loop {
-        let d = desk(&c, "juniper-paul");
-        if d["windows"].as_array().is_some_and(|w| w.iter().any(|n| n.as_str().is_some_and(|n| n.contains("Example Domain")))) {
-            break d;
-        }
-        assert!(t.elapsed() < Duration::from_secs(30), "the browser never showed on the desktop: {d}\n{}", c.logs());
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    eprintln!("desktop: its windows {}; the container holds {} MiB", shown["windows"], anon_mib(&c));
+    let mut again = Viewer::open(&base, "watcher", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
+    eprintln!("desktop: the watcher back on a desktop started for it in {} ms", t.elapsed().as_millis());
+    let turn = browse(&fake);
+    fake.until(240_000, "the browser's reply after the restart", |w| reply(w, &turn).is_some()).await;
+    eprintln!("desktop: the browser's reply after the restart: {:?}", fake.with(|w| reply(w, &turn)));
+    let rect = browser_shown(&c, &mut again, "after the desktop's restart").await;
+    eprintln!("desktop: the browser's window at {rect:?} after the restart; chromium {}", chromium(&c));
 
     // gws, Google's Workspace CLI: in the image, and run in the agent's
     // terminal it sends the agent's Google placeholder as its bearer token
@@ -1059,4 +1191,111 @@ async fn an_expired_approval_ends_its_turn() {
         assert!(x.cards(w, &meanwhile).is_empty(), "it asks nothing again: {:?}", x.cards(w, &meanwhile));
         assert!(x.reply(w, &meanwhile).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("hello while you wait")), "{:?}", x.reply(w, &meanwhile));
     });
+}
+
+// ---- a turn a restart cuts, then the next message (P5; F10) ----
+
+/// The text of a model message (its content, or its parts' text).
+fn content_text(m: &serde_json::Value) -> String {
+    match &m["content"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    }
+}
+
+/// Of the first model request whose last user message says `said`: that
+/// message's text, and the message before it (its role and text).
+fn asked_with(calls: &[support::model::Call], said: &str) -> Option<(String, (String, String))> {
+    calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find_map(|c| {
+        let messages = c.body["messages"].as_array()?;
+        let at = messages.iter().rposition(|m| m["role"] == "user")?;
+        let last = content_text(&messages[at]);
+        if !last.contains(said) {
+            return None;
+        }
+        let before = at.checked_sub(1).map(|i| (messages[i]["role"].as_str().unwrap_or("").to_string(), content_text(&messages[i]))).unwrap_or_default();
+        Some((last, before))
+    })
+}
+
+/// Goal (P5; F10, with real Hermes v0.21.5): a turn a restart cuts while its
+/// card waits (here an owner's sleep: the hold, a save of `/data`, SIGTERM)
+/// is never redone by the chat's next message. Woken from that save, the
+/// image's boot closes the cut turn in Hermes' session with Hermes' own
+/// failed-turn boundary, and the bridge tells the next turn what was cut,
+/// from the journal. So the model's request for "good morning" ends with a
+/// user message of its own (the note as its channel context, then the
+/// message) after an assistant message (the boundary), never joined to the
+/// cut request; no request after the wake has the model call the cut
+/// command again, no card is shown again, "good morning" is answered, and
+/// the message after it is told nothing.
+///
+/// Method: the image with a 20 s approval, the scripted model asking for a
+/// command Hermes flags (`risky`), and the DO's owner's sleep under the
+/// card, taken as the expiry test above takes an idle one; then a wake from
+/// that save. On master (no closing at boot, no note) Hermes joins the next
+/// message to the cut request (its model is given `[paul] do the risky
+/// thing\n\n[paul] good morning`), the scripted model calls the cut command
+/// again, and its card is shown again (`FRAGMENT_DOCKER_SKIP_BUILD=1
+/// FRAGMENT_DOCKER_HERMES_TAG=<an image of master's>` runs this against it).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_turn_cut_by_a_restart_is_closed_and_told() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let risky = x.say("do the risky thing");
+    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    // the owner's sleep under the card: held, saved, stopped
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cut-told");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    let (took, _) = c.sigterm();
+    eprintln!("cut: held, saved and stopped under the card ({} ms to exit)", took.as_millis());
+    let _ = told(fake, chat, &c);
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let calls_before = x.model.calls.lock().unwrap().len();
+
+    // the next message wakes it from the save
+    let next = x.say("good morning");
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {said}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    // its end, or the cut command's card shown again (master: the fold)
+    within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty() || !x.cards(w, &next).is_empty()).await;
+    let again = fake.with(|w| x.cards(w, &next));
+    assert!(again.is_empty(), "the cut command's card is not shown again: {again:?}; the model saw {:#?}", x.model_saw(calls_before));
+    let after = x.say("and after that");
+    within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("rm -rf")).collect();
+    let logs = c.logs();
+    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_closed") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
+    let saw = x.model_saw(calls_before);
+    fake.with(|w| {
+        assert_eq!(x.ends(w, &risky).len(), 1, "the cut turn ends once");
+        assert_eq!(x.ends(w, &risky)[0]["error"], "lost when the computer restarted");
+        assert!(redone.is_empty(), "no request after the wake has the model call the cut command again: {redone:?}; the model saw {saw:#?}");
+        assert!(x.cards(w, &next).is_empty() && x.cards(w, &after).is_empty(), "no card shown again: {:?}; the model saw {saw:#?}", x.cards(w, &next));
+        assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
+    });
+    let (asked, (before_role, before)) = asked_with(&calls, "good morning").unwrap_or_else(|| panic!("a model request for good morning; it saw {saw:#?}"));
+    assert!(asked.starts_with("[Recent channel messages]\n"), "the note first, nothing joined before it: {asked:?}");
+    for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “do the risky thing”", "[New message]\n[paul] good morning"] {
+        assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
+    }
+    assert!(!asked.contains("[paul] do the risky thing"), "the cut request is never joined to it: {asked:?}");
+    assert_eq!(before_role, "assistant", "the cut turn is closed before it (Hermes' failed-turn boundary; {closed}): {before:?}");
+    let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
+    assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
+    eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
 }

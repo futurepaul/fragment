@@ -125,13 +125,18 @@ const EXIT_WAIT_MS: i64 = 5_000;
 /// guest reads as "claim no turn, and say `held` once nothing is claimed
 /// and what you keep is copied" (P2 of docs/explorations/pi-durable.md).
 /// A hold clears the last answer before it asks, so only an answer to it
-/// counts. Each needs only `sh` (and its `test`), `mkdir`, `touch` and `rm`,
-/// which every image carries.
+/// counts. Each needs only `sh` (and its `test`), `mkdir`, `touch`, `rm`
+/// and `cat`, which every image carries.
 const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/restored";
-const HOLD_MARK: &str = "rm -f /run/computer/held && mkdir -p /run/computer /data/work && touch /run/computer/hold";
-const HOLD_UNMARK: &str = "rm -f /run/computer/hold /run/computer/held";
+const HOLD_MARK: &str = "rm -f /run/computer/held /run/computer/unheld && mkdir -p /run/computer /data/work && touch /run/computer/hold";
+const HOLD_UNMARK: &str = "rm -f /run/computer/hold /run/computer/held /run/computer/unheld";
 const HELD_TEST: &str = "test -e /run/computer/held";
 const HELD_READ: &str = "cat /run/computer/held";
+/// A guest's word on a hold it has not answered (docs/computers.md, "The
+/// hold"), read only once the hold's wait ran out, as logged.
+const UNHELD_READ: &str = "cat /run/computer/unheld 2>/dev/null || true";
+/// The read of it answers within this, or the hold's line says so.
+const UNHELD_EXEC_MS: i64 = 5_000;
 /// The image's check of what a start restored (docs/computers.md, "Data and
 /// the restore gate"), when it carries one: run after the restore and
 /// before the gate opens. Its exit `CHECK_UNUSABLE` says the save is
@@ -880,9 +885,27 @@ impl ComputerCell {
             return Event::Held { generation, held: false };
         }
         let argv = js::to_js(&json!(["sh", "-c", HELD_TEST]));
-        let held = self.call("execUntil", &[g, argv, JsValue::from_f64(HOLD_WAIT_MS as f64)]).await.is_ok_and(|r| r.as_bool() == Some(true));
-        console_log!("{}", json!({ "computer": id, "hold": generation, "held": held, "sleep": sleeping, "ms": js::now_ms() - t0 }));
+        // `{ok, tries, last}`: whether it answered, the looks it took, and the last one's answer
+        let polled: Value = match self.call("execUntil", &[g.clone(), argv, JsValue::from_f64(HOLD_WAIT_MS as f64)]).await {
+            Ok(r) => js::from_js(&r).unwrap_or(Value::Null),
+            Err(e) => json!({ "ok": false, "last": { "error": e.message } }),
+        };
+        let held = polled["ok"] == true;
+        // one line per hold; one unanswered says what the guest said of it
+        let unheld = if held { None } else { Some(self.unheld(&g).await) };
+        console_log!("{}", json!({ "computer": id, "hold": generation, "held": held, "sleep": sleeping, "ms": js::now_ms() - t0, "tries": polled["tries"], "last": polled["last"], "unheld": unheld }));
         Event::Held { generation, held }
+    }
+
+    /// What the guest of start `g` says of a hold it has not answered (its
+    /// `/run/computer/unheld`, `fragment_core::computer::unheld`): `null`
+    /// when it says nothing, as an image need not.
+    async fn unheld(&self, g: &JsValue) -> Value {
+        let argv = js::to_js(&json!(["sh", "-c", UNHELD_READ]));
+        match self.call("exec", &[g.clone(), argv, JsValue::from_f64(UNHELD_EXEC_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host)) {
+            Ok(out) => json!(fragment_core::computer::unheld(out["output"].as_str().unwrap_or_default())),
+            Err(e) => json!(format!("(unread: {})", e.message)),
+        }
     }
 
     /// Saves `/data` as save `seq` of start `generation` (`held`: its guest

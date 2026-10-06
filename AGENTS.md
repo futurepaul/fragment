@@ -95,7 +95,7 @@ prebuilt bundle is in the debt ledger).
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  hermes, agent-smoke, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
@@ -128,6 +128,14 @@ prebuilt bundle is in the debt ledger).
   The node's test levers (`/api/test/*`) take a secret made per run.
   A wait that runs out its limit prints `(a wait ran out its …s at
   <file>:<line>)`: one that does so on a passing run costs every run.
+  A call that fails says when it was sent (UTC, as the node's logs stamp
+  their lines) and how long it waited: a dropped connection fails at
+  once, a hung call after its wait. A boot's log can lack its last
+  seconds when a failure stops the node at once (the Workers' output
+  reaches it late, in bursts): logs that just stop are not a node that
+  died. The run's client never reuses a connection idle 4 s: workerd
+  closes one idle 5 s, and a request written onto it as it closes is
+  lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
 - `cargo xtask e2e --shard <k>/4 [--summary <file> [--attempt <n>]]`:
   one of the four shards CI runs, each on its own runner with its own
   build and node (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every
@@ -155,7 +163,12 @@ prebuilt bundle is in the debt ledger).
   fragments are `e2e-…`, and a section that needs what a preview lacks is
   a skip that says why. Paid calls (models, AI steps) are lent from the
   run's budget (default 60), each person's capped by their ledger, and the
-  run ends saying what it spent. `--dry-run` prints the plan (base URL,
+  run ends saying what it spent. `agent-smoke` runs only here, and only
+  by name (`--only agent-smoke`): a real agent (our Hermes image on its
+  real model, `Need::RealAgent`) and Chrome, through the flows a person
+  uses (a first reply, the CLI, an app, the desktop and its screen, an
+  approval, a sleep and a wake), for about half an hour and up to 50 paid
+  calls (crates/e2e/src/lanes/agent_smoke.rs). `--dry-run` prints the plan (base URL,
   what runs, what is skipped and why) and calls nothing; `--sweep` deletes
   the e2e people's `e2e-…` fragments there and puts their computers to
   sleep. `cargo xtask e2e --rehearse` keeps the hosted lane's rules on the

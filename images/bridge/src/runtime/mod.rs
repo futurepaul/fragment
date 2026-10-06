@@ -100,6 +100,20 @@ pub struct TurnStart {
     pub files: Vec<LocalFile>,
     /// A routine (its agent's cron) rather than a person's message.
     pub routine: bool,
+    /// Where the turn's claim (its `turn.start`) is on its chat's `work`:
+    /// the journal before it says what the turn is told (`note`). `None`
+    /// when the platform's answer did not say.
+    pub claim_seq: Option<u64>,
+    /// What the runtime tells the agent before the message, once
+    /// (docs/durable-computers.md, P5): its turn before this one in this
+    /// chat was cut by a restart, what that turn was asked, the steps and
+    /// replies the journal recorded of it, and to check what was done before
+    /// doing any of it again. Built from the chat's journal alone
+    /// (crate::note), by the driver, before the runtime hears of the turn;
+    /// `None` when that turn ended any other way. Every runtime is handed
+    /// it: Relay as the inbound's read-only `context`, the scripted agent
+    /// echoes it.
+    pub note: Option<String>,
 }
 
 /// What the bridge asks of a runtime.

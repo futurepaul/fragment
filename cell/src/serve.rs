@@ -260,8 +260,9 @@ impl FragmentCell {
                 }
             };
             let resp = self.live(&req, caller, credential, &principal, link)?;
-            // a page following this fragment may soon post to a computer's channel
-            self.prewake();
+            // a page following this fragment may soon post to a computer's
+            // channel (an agent's own socket wakes no computer it runs on)
+            self.prewake(&principal);
             resp
         } else {
             match req.method() {

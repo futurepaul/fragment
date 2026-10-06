@@ -1,6 +1,8 @@
 //! Membership as live cell state: grants, invites, leaving, the
 //! per-person list, and secrets sealed in the cell.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
@@ -146,8 +148,40 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the fragment holds exactly the cap", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
     let r = api.status(&frank, &name)?;
     s.ok("the refused person is not a member", r.status == 403, &r);
+
+    // a delete answers promptly, whatever its members: it tells one round
+    // of their lists, its owner's first, and its alarm tells the rest
+    let t0 = Instant::now();
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let took = t0.elapsed();
+    println!("      (the delete answered in {took:.2?})");
+    s.ok(
+        &format!("the owner deletes a fragment of {} members within {DELETE_ANSWERS_IN:?}", limits::MEMBERS_MAX),
+        r.status == 200 && r.body["deleted"] == name.as_str() && took < DELETE_ANSWERS_IN,
+        format!("{took:.2?}: {r}"),
+    );
+    s.ok("its owner's list drops it at once", listed(api, &owner, &name)?.is_none(), "");
+    let r = api.status(&carol, &name)?;
+    s.ok("and it is gone at once, for its members too (404)", r.status == 404, &r);
+    // the name is free at once, while the ended life's cleanup goes on
+    s.create(api, &owner, &name)?;
+    let r = api.signed(&owner, "PUT", &path(&format!("members/{}", npub_of(&erin))), Some(&json!({ "role": "viewer" })))?;
+    s.ok("the name is made again at once, and shared with a member of the ended life", r.status == 200, &r);
+    let (cleaned, last) = s.ended_cleaned(api, &name);
+    s.ok("the ended life's cleanup completes: every member's list told, the app's database and the blobs gone", cleaned, last);
+    s.ok("a member of the ended life alone has lost it from their list", listed(api, &carol, &name)?.is_none(), "");
+    s.ok(
+        "and the one shared with again keeps the new life's row: the ended life's change never undoes it",
+        listed(api, &erin, &name)?.as_deref() == Some("viewer"),
+        "",
+    );
     Ok(())
 }
+
+/// How soon a delete answers, at any count of members: one round of
+/// Principal calls, at most (it took 300 s at 1000 on the e2e preview,
+/// telling each list in turn, 2026-10-06).
+const DELETE_ANSWERS_IN: Duration = Duration::from_secs(5);
 
 pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("secrets", &[]) {

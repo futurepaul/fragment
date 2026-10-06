@@ -251,17 +251,25 @@ class ContainerHost {
   }
 
   // Runs `argv` until it exits 0 (polling every 100 ms), for at most `ms`:
-  // whether it did. The guest's answer to a hold (`held`) is read so.
+  // `{ok, tries, last}`, whether it did, how many runs it took, and the
+  // last run's answer (`{exitCode}`, or `{error}`). The guest's answer to a
+  // hold (`held`) is read so.
   async execUntil(generation, argv, ms) {
     const t0 = Date.now();
+    let tries = 0;
+    let last = null;
     while (generation === this.#generation && Date.now() - t0 < ms) {
+      tries++;
       try {
         const out = await this.exec(generation, argv, Math.max(1, ms - (Date.now() - t0)));
-        if (out.exitCode === 0) return true;
-      } catch {}
+        last = { exitCode: out.exitCode, ms: Date.now() - t0 };
+        if (out.exitCode === 0) return { ok: true, tries, last };
+      } catch (e) {
+        last = { error: String((e && e.message) || e).slice(0, 300), ms: Date.now() - t0 };
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
-    return false;
+    return { ok: false, tries, last };
   }
 
   // Runs `argv` in the container, answering within `ms` when it is given,
@@ -349,7 +357,18 @@ class ContainerHost {
   // and before anything is awaited: a message that arrives with no
   // listener is gone, and a container's socket may speak first (an RFB
   // server's version, the screen's control socket's holder), whose first
-  // word the report's await used to lose.
+  // word the report's await used to lose. A close is passed on to the
+  // other end with its code where that end may send it: 1005 (a close
+  // that named none, as a bridge's plain close is) and 1006 (dropped) are
+  // a receiver's to report, which workerd refuses to send, and passing one
+  // on left the other end open: a screen whose desktop restarted kept its
+  // page's stream, frozen (p5, 2026-10-05). Those go on as 1000. A message
+  // that arrives once the bridge is closed is dropped, not sent: an end we
+  // closed still delivers until its peer answers the close, and `send()`
+  // throws on an end closed for sending. Only `close` closes one
+  // (workerd's own answer to a peer's close comes in the step that
+  // dispatches the close event `close` hears), so `closed` covers every
+  // such send.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
@@ -359,15 +378,25 @@ class ContainerHost {
     const close = (code, reason) => {
       if (closed) return;
       closed = true;
+      const sendable = code >= 1000 && code < 5000 && ![1004, 1005, 1006, 1015].includes(code);
       for (const ws of [upstream, server]) {
         try {
-          ws.close(code || 1000, reason || "");
-        } catch {}
+          ws.close(sendable ? code : 1000, sendable ? reason || "" : "");
+        } catch {
+          // a reason too long for a close frame: the code alone
+          try {
+            ws.close(sendable ? code : 1000);
+          } catch {}
+        }
       }
       this.#report("computer/tab", { open: false });
     };
-    upstream.addEventListener("message", (e) => server.send(e.data));
-    server.addEventListener("message", (e) => upstream.send(e.data));
+    upstream.addEventListener("message", (e) => {
+      if (!closed) server.send(e.data);
+    });
+    server.addEventListener("message", (e) => {
+      if (!closed) upstream.send(e.data);
+    });
     for (const ws of [upstream, server]) {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
       ws.addEventListener("error", () => close(1011, "the other end failed"));

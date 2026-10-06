@@ -36,6 +36,7 @@ use fragment_proto::{
     limits, CreateInvite, ErrorCode, Identity, IdentityKind, Invite, InviteList, Join, Member, MemberList, Role, Rotated, SetRole, SetVisibility,
     Sharing, Visibility,
 };
+use futures_util::future::join_all;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use worker::*;
@@ -43,6 +44,13 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
 use crate::js;
+
+/// Index changes one flush sends at most, all at once (and a delete, of
+/// its ended life's: ended.rs). Sent one at a time, a fragment of
+/// `MEMBERS_MAX` members took 300 s to tell their lists it was deleted on
+/// the e2e preview (2026-10-06): about 0.3 s a list, each a Principal made
+/// on the spot.
+pub(crate) const INDEX_FLUSH_MAX: i64 = 32;
 
 fn refusal(actor_is_owner: bool, why: &str) -> CellError {
     if actor_is_owner {
@@ -170,7 +178,25 @@ impl FragmentCell {
         self.set_meta(MetaKey::SharingSent, "1")
     }
 
-    /// Delivers due index changes to the people's `Principal` cells. A
+    /// Sends one index change to `principal`'s list: whether it took it.
+    pub(crate) async fn send_index(&self, principal: &str, body: &Value) -> bool {
+        let sent = async {
+            let headers = Headers::new();
+            headers.set("content-type", "application/json")?;
+            let mut init = RequestInit::new();
+            init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
+            let req = Request::new_with_init("https://principal.internal/index", &init)?;
+            let resp = self.env.durable_object("PRINCIPAL")?.get_by_name(principal)?.fetch_with_request(req).await?;
+            Ok::<bool, worker::Error>(resp.status_code() == 200)
+        }
+        .await;
+        matches!(sent, Ok(true))
+    }
+
+    /// Delivers due index changes to the people's `Principal` cells, at
+    /// most `INDEX_FLUSH_MAX` of them, all at once, the newest first: a
+    /// request that flushes sends its own change and waits one round,
+    /// whatever its members; the alarm sends the rest, a batch a pass. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
     /// A fragment from before the owner's row carried its sharing sends it
     /// once, here (on its next change, or its alarm).
@@ -183,11 +209,13 @@ impl FragmentCell {
         }
         let due = self
             .rows(
-                "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ?",
-                vec![SqlStorageValue::Integer(js::now_ms())],
+                "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ? ORDER BY version DESC LIMIT ?",
+                vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(INDEX_FLUSH_MAX)],
             )
             .unwrap_or_default();
-        for row in due {
+        assert!(due.len() as i64 <= INDEX_FLUSH_MAX, "a flush sends a bounded batch");
+        let mut batch = Vec::with_capacity(due.len());
+        for row in &due {
             let principal = row["principal"].as_str().unwrap_or("").to_string();
             let version = row["version"].as_i64().unwrap_or(0);
             let mut body = json!({
@@ -210,23 +238,17 @@ impl FragmentCell {
                     Err(e) => console_error!("{name}: its sharing did not read ({:?}): {}", e.code, e.message),
                 }
             }
-            let delivered = async {
-                let headers = Headers::new();
-                headers.set("content-type", "application/json")?;
-                let mut init = RequestInit::new();
-                init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
-                let req = Request::new_with_init("https://principal.internal/index", &init)?;
-                let resp = self.env.durable_object("PRINCIPAL")?.get_by_name(&principal)?.fetch_with_request(req).await?;
-                Ok::<bool, worker::Error>(resp.status_code() == 200)
-            }
-            .await;
-            if matches!(delivered, Ok(true)) {
+            batch.push((principal, version, row["attempts"].as_i64().unwrap_or(0), body));
+        }
+        let delivered = join_all(batch.iter().map(|(principal, _, _, body)| self.send_index(principal, body))).await;
+        for ((principal, version, attempts, _), delivered) in batch.into_iter().zip(delivered) {
+            if delivered {
                 let _ = self.exec(
                     "DELETE FROM index_outbox WHERE principal = ? AND version = ?",
                     vec![principal.as_str().into(), SqlStorageValue::Integer(version)],
                 );
             } else {
-                let attempts = row["attempts"].as_i64().unwrap_or(0) + 1;
+                let attempts = attempts + 1;
                 let _ = self.exec(
                     "UPDATE index_outbox SET attempts = ?, next_at = ? WHERE principal = ? AND version = ?",
                     vec![
@@ -238,11 +260,13 @@ impl FragmentCell {
                 );
             }
         }
-        // a cursor made with a role is due at once: the alarm sends it
+        // what the batch left, or did not deliver, is the alarm's; and a
+        // cursor made with a role is due at once: the alarm sends it
         // (search.rs), after the row it follows is delivered here
-        if self.search_due_at().ok().flatten().is_some_and(|at| at <= js::now_ms()) {
+        let left = self.rows("SELECT 1 FROM index_outbox LIMIT 1", vec![]).is_ok_and(|r| !r.is_empty());
+        if left || self.search_due_at().ok().flatten().is_some_and(|at| at <= js::now_ms()) {
             if let Err(e) = self.schedule().await {
-                console_error!("{name}: the alarm was not armed for its search outbox ({:?}): {}", e.code, e.message);
+                console_error!("{name}: the alarm was not armed for its index or search outbox ({:?}): {}", e.code, e.message);
             }
         }
     }

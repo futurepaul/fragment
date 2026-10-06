@@ -40,9 +40,16 @@ image against it.
   {bufferId}` once its handler has taken the event. The event:
   `{text, message_id, source: {platform, chat_id, chat_type, chat_name,
   user_id, user_name, profile, message_id}, media_urls?, media?,
-  prompt_response?}`. `source.profile` routes it to a profile of the
+  prompt_response?, context?}`. `source.profile` routes it to a profile of the
   multiplexed gateway. Hermes drops an event it saw by
-  `(platform, chat_id, message_id)`, so a replay is harmless.
+  `(platform, chat_id, message_id)`, so a replay is harmless. `context`
+  (`[{text, source?}]`, read-only channel context: "it never triggers the
+  agent") is rendered before the message as `[Recent channel
+  messages]\n…\n\n[New message]\n[name] text`
+  (`gateway/relay/ws_transport.py`, `_render_relay_context`); the bridge
+  sends a turn's note on a cut turn there (docs/bridge.md). No field of an
+  event changes how a session's unanswered tail is read: two user
+  messages in a row are joined (`_merge_consecutive_users`).
 - Hermes: `outbound {requestId, action}` → the connector:
   `outbound_result {requestId, result}` (Hermes waits 30 s). The ops in
   v0.21.5, each sent only when advertised:

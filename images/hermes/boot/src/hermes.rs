@@ -184,6 +184,39 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     y
 }
 
+/// The flags Chromium needs in a container: Hermes' own
+/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_tool_session.py`),
+/// which it gives its browser and its desktop's Browser icon only as root
+/// or where it sees Docker's marker (`/.dockerenv`). Cloudflare Containers
+/// has neither that marker nor a `/dev/shm`, and Chromium without these
+/// dies as it starts: no usable sandbox (no user namespaces), or no shared
+/// memory (p5, 2026-10-05).
+pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
+
+/// The image's Chromium: a script that starts Playwright's with
+/// `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
+/// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
+/// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
+pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
+
+/// The script at `CHROMIUM`, written at image build: on a desktop
+/// (`DISPLAY` set) the full Chromium, `full`; with none the headless
+/// shell, `shell`, as Hermes picks between them itself (its boot pins the
+/// shell, and a running desktop swaps in the full one).
+pub fn chromium_script(full: &Path, shell: &Path) -> String {
+    let quoted = |p: &Path| {
+        let s = p.display().to_string();
+        assert!(p.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
+        format!("'{s}'")
+    };
+    let flags = CHROMIUM_FLAGS.join(" ");
+    format!(
+        "#!/bin/sh\n# The image's Chromium (hermes-boot build-info: images/hermes/boot/src/hermes.rs):\n# Playwright's, always with the flags a container needs.\n[ -n \"$DISPLAY\" ] && exec {} {flags} \"$@\"\nexec {} {flags} \"$@\"\n",
+        quoted(full),
+        quoted(shell)
+    )
+}
+
 /// What the computer keeps as its guest's tools' work, saved as a record
 /// of its own (docs/computers.md, "Data and the restore gate").
 pub const WORK: &str = "/data/work";
@@ -291,13 +324,82 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // HERMES_AUTO_CONTINUE_FRESHNESS: one second, so no message after a
     // restart is wrapped in Hermes' recovery notes (the boot's clean-exit
     // receipt already discards the turns a restart cut short, which the
-    // bridge ends: docs/chat-records.md).
+    // bridge ends: docs/chat-records.md; the boot closes them in their
+    // sessions, CLOSE_CUT_TURNS, and the bridge tells the next turn what was
+    // cut instead, from the journal).
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
 }
 
 /// A profile's directory, under the Hermes home.
 pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
+}
+
+/// Closes each turn a restart cut, in Hermes' own sessions, before the
+/// gateway starts (docs/durable-computers.md, P5), run by Hermes' Python as
+/// the hermes user with each `state.db` to look in as its arguments.
+///
+/// Why: Hermes persists a turn's message as the turn starts and the rest as
+/// it goes, so a turn the container's end cut leaves its session's tail open
+/// (its message, or its tool calls, with no answer). v0.21.5 then joins the
+/// next message to the open request (two user messages in a row are one:
+/// `agent/agent_runtime_helpers.py`, `_merge_consecutive_users`; and
+/// `get_messages_as_conversation(repair_alternation=True)` as the gateway
+/// loads a transcript), and its model redoes the cut request (F10: seen on
+/// the real image, `[paul] do the risky thing\n\n[paul] good morning`). The
+/// bridge has already ended that turn as lost (P1), and tells the next turn
+/// what was cut, from the journal.
+///
+/// How, through Hermes' own code and nothing else: the row Hermes itself
+/// writes when a turn ends without an answer, its failed-turn boundary
+/// (`agent/turn_failure_copy.py`: an assistant row, `display_kind`
+/// `failed_turn`, its copy chosen by `failed_turn_notice` from the turn's
+/// rows: "Some actions may already have run" when a tool call is among
+/// them). Hermes writes it for a turn that fails in its process
+/// (`agent/conversation_loop.py`, `_close_durable_failed_turn`;
+/// `gateway/run_turn.py`, `_hmwa_close_failed_turn`, keyed on the durable
+/// tail); a process that was killed never does, and neither its clean-exit
+/// path (it only discards turn markers) nor its unclean one (it resumes the
+/// turn under its old message id, the auto-continue kept off above) closes
+/// it. No Relay frame does either: an inbound's fields (text, media,
+/// context, reply, prompt response) never change how the session's tail is
+/// read. So the boot writes the same row for the turns a restart cut:
+/// every gateway session of the relay platform (`SessionDB.
+/// list_gateway_sessions`, the newest session per chat) whose last message
+/// is a user row, a tool result or a tool call, appended with
+/// `SessionDB.append_message`. At boot every such tail is a cut turn: the
+/// gateway that ran it is gone, and the bridge ended it. Idempotent: a
+/// closed tail is an assistant row. Prints `{"sessions": n, "closed": n}`.
+pub const CLOSE_CUT_TURNS: &str = r#"import json, sys
+from pathlib import Path
+from hermes_state import SessionDB
+from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, failed_turn_notice
+sessions = closed = 0
+for p in sys.argv[1:]:
+    db = SessionDB(Path(p))
+    try:
+        for s in db.list_gateway_sessions(platform="relay"):
+            sessions += 1
+            rows = [m for m in db.get_messages_as_conversation(s["id"]) if m.get("role") in ("user", "assistant", "tool")]
+            if not rows or (rows[-1]["role"] == "assistant" and not rows[-1].get("tool_calls")):
+                continue
+            asked = max((i for i, m in enumerate(rows) if m["role"] == "user"), default=0)
+            db.append_message(s["id"], "assistant", failed_turn_notice(rows[asked:]), display_kind=FAILED_TURN_DISPLAY_KIND)
+            closed += 1
+    finally:
+        db.close()
+print(json.dumps({"sessions": sessions, "closed": closed}))
+"#;
+
+/// What `CLOSE_CUT_TURNS` printed: the sessions it looked at and those it
+/// closed (its last line), or why that is not its answer.
+pub fn cut_turns_closed(out: &str) -> Result<(u64, u64), String> {
+    let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
+    match (v["sessions"].as_u64(), v["closed"].as_u64()) {
+        (Some(sessions), Some(closed)) if closed <= sessions => Ok((sessions, closed)),
+        _ => Err(format!("not its answer: {line}")),
+    }
 }
 
 /// The gateway's control socket (Hermes' `gateway/control_socket.py`):
@@ -352,6 +454,26 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The closer's answer is its last line, and nothing else is: a line
+    /// Hermes logged before it is passed over, a missing or impossible count
+    /// is no answer. (Run against the real Hermes in the bridge's
+    /// tests/docker.rs.)
+    #[test]
+    fn the_closers_answer() {
+        assert_eq!(cut_turns_closed("{\"sessions\": 2, \"closed\": 1}\n"), Ok((2, 1)));
+        assert_eq!(cut_turns_closed("a warning Hermes logged\n{\"sessions\": 0, \"closed\": 0}\n\n"), Ok((0, 0)));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"sessions\": 1}", "{\"sessions\": 1, \"closed\": 2}", "{\"sessions\": -1, \"closed\": 0}"] {
+            assert!(cut_turns_closed(bad).is_err(), "{bad:?}");
+        }
+        // only Hermes' own session code writes: its boundary row, through its API
+        for uses in ["from hermes_state import SessionDB", "list_gateway_sessions(platform=\"relay\")", "failed_turn_notice(", "display_kind=FAILED_TURN_DISPLAY_KIND", "db.append_message("] {
+            assert!(CLOSE_CUT_TURNS.contains(uses), "{uses}");
+        }
+        for never in ["sqlite3", "execute(", "DELETE", "UPDATE", "INSERT"] {
+            assert!(!CLOSE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
+        }
+    }
 
     fn agent() -> Agent {
         Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] }
@@ -423,6 +545,45 @@ mod tests {
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
+    }
+
+    /// The image's Chromium starts Playwright's with the container's flags,
+    /// headed on a desktop and the headless shell with none: run here by
+    /// `sh`, as Hermes runs it.
+    #[test]
+    fn the_images_chromium_carries_the_containers_flags() {
+        let s = chromium_script(Path::new("/opt/p/chrome-linux64/chrome"), Path::new("/opt/p/shell/chrome-headless-shell"));
+        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
+        assert_eq!(CHROMIUM_FLAGS, ["--no-sandbox", "--disable-dev-shm-usage"], "Hermes' CHROMIUM_SANDBOX_BYPASS_ARGS");
+        let dir = std::env::temp_dir().join(format!("hermes-chromium-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // the two browsers, each saying what it was started with
+        let echo = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\necho {name} \"$@\"\n")).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            p
+        };
+        let script = dir.join("chromium");
+        std::fs::write(&script, chromium_script(&echo("full"), &echo("shell"))).unwrap();
+        let run = |display: Option<&str>| {
+            let mut c = std::process::Command::new("sh");
+            c.arg(&script).args(["--user-data-dir=/p", "https://example.com"]).env_remove("DISPLAY");
+            if let Some(d) = display {
+                c.env("DISPLAY", d);
+            }
+            String::from_utf8(c.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(run(Some(":20")), "full --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "on a desktop, the full Chromium");
+        assert_eq!(run(None), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "with none, the headless shell");
+        assert_eq!(run(Some("")), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "an empty DISPLAY is none");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "a browser's path, absolute, quotable")]
+    fn a_browser_path_a_shell_would_misread_is_a_bug() {
+        chromium_script(Path::new("/opt/it's/chrome"), Path::new("/opt/shell"));
     }
 
     fn credential(provider: &str, env: &[&str], placeholder: &str) -> fragment_bridge::runtime::Credential {

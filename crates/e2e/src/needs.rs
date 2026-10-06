@@ -37,10 +37,15 @@ pub enum Need {
     /// 127.0.0.1 from `*.fragment.localhost`). A branch preview puts both
     /// in one zone: one site.
     TwoSites,
+    /// A real agent: the deployment's own image (our Hermes) answered by a
+    /// real model, as a person's agent runs. Only a preview has one: a
+    /// local run's computers answer through the scripted model (the stub,
+    /// or the hermes section's Hermes), and so do a rehearsal's.
+    RealAgent,
 }
 
 impl Need {
-    pub const ALL: [Need; 9] = [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites];
+    pub const ALL: [Need; 10] = [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -53,6 +58,7 @@ impl Need {
             Need::Computers => "computers",
             Need::Models => "models",
             Need::TwoSites => "two-sites",
+            Need::RealAgent => "real-agent",
         }
     }
 }
@@ -69,6 +75,9 @@ pub struct Offers {
     pub models: bool,
     /// Chrome is installed here.
     pub chrome: bool,
+    /// Its computers are real agents (a preview's own image on a real
+    /// model, with paid calls to lend), not a rehearsal's scripted ones.
+    pub real_agent: bool,
 }
 
 /// Where a run runs.
@@ -82,7 +91,12 @@ pub enum Rung {
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
-    let Rung::Hosted(offers) = rung else { return None };
+    let Rung::Hosted(offers) = rung else {
+        return match need {
+            Need::RealAgent => Some("it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model"),
+            _ => None,
+        };
+    };
     match need {
         Need::Fakes => Some("it needs the vendor fakes (a scripted model, code.storage's git, WorkOS' accounts, the push service, a local upstream), which only a local run has"),
         Need::Node => Some("it needs the node itself (a crash, a restart, settings of its own, its local address or clock), which only a local run has"),
@@ -93,7 +107,10 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Chrome if !offers.chrome => Some("it needs Chrome, and none is installed here"),
         Need::Computers if !offers.computers => Some("it needs computers, and the deployment makes none (no `computers` in its config)"),
         Need::Models if !offers.models => Some("it needs models, and the deployment calls none (no `ai_gateway` in its config), or the run lends no paid calls"),
-        Need::Levers | Need::Chrome | Need::Computers | Need::Models => None,
+        Need::RealAgent if !offers.real_agent => {
+            Some("it needs a real agent (the deployment's own image on a real model), and this run has none: a rehearsal's computers answer through the scripted model, or the deployment makes no computers or calls no models")
+        }
+        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent => None,
     }
 }
 
@@ -111,16 +128,30 @@ pub fn unmet(needs: &[Need], rung: Rung) -> Option<(Need, &'static str)> {
 mod tests {
     use super::*;
 
-    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true };
-    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false };
+    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true, real_agent: true };
+    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false, real_agent: false };
 
-    /// A local run has everything: every section's needs are met, as before.
+    /// A local run has everything but a real agent: every other need is
+    /// met, as before.
     #[test]
-    fn a_local_run_has_everything() {
-        assert_eq!(unmet(&Need::ALL, Rung::Local), None);
-        for need in Need::ALL {
+    fn a_local_run_has_everything_but_a_real_agent() {
+        let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
+        assert_eq!(unmet(&local, Rung::Local), None);
+        for need in local {
             assert_eq!(missing(need, Rung::Local), None, "{need:?}");
         }
+    }
+
+    /// A real agent (our Hermes on a real model) is a preview's alone: a
+    /// local run and a rehearsal answer through the scripted model.
+    #[test]
+    fn a_real_agent_is_a_previews_alone() {
+        let (need, why) = unmet(&[Need::Computers, Need::RealAgent], Rung::Local).expect("no real agent locally");
+        assert_eq!(need, Need::RealAgent);
+        assert!(why.contains("scripted model"), "{why}");
+        let rehearsal = Offers { real_agent: false, ..EVERYTHING };
+        assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(rehearsal)).map(|(n, _)| n), Some(Need::RealAgent));
+        assert_eq!(unmet(&[Need::Levers, Need::Computers, Need::Models, Need::RealAgent], Rung::Hosted(EVERYTHING)), None);
     }
 
     /// A hosted run never has what stands in for a vendor or controls the
@@ -133,10 +164,10 @@ mod tests {
         }
     }
 
-    /// Levers, Chrome, computers and models are there when offered.
+    /// Levers, Chrome, computers, models and a real agent are there when offered.
     #[test]
     fn a_hosted_run_has_what_its_deployment_offers() {
-        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models] {
+        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models, Need::RealAgent] {
             assert_eq!(missing(need, Rung::Hosted(EVERYTHING)), None, "{need:?}");
             assert!(missing(need, Rung::Hosted(NOTHING)).is_some(), "{need:?}");
         }
