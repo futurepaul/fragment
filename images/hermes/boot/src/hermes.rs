@@ -55,9 +55,19 @@ fn q(s: &str) -> String {
 /// card and its command expire together.
 pub const APPROVAL_TIMEOUT_S: u64 = fragment_bridge::limits::PROMPT_TTL_MS_DEFAULT / 1000;
 
+/// The approval timeout a boot uses, in seconds: `setting`
+/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`, a test's) within the bounds the
+/// bridge holds a prompt's life to, else `APPROVAL_TIMEOUT_S`. The bridge
+/// is given the same (`BRIDGE_PROMPT_TTL_MS`), so a card and its command
+/// still expire together.
+pub fn approval_timeout_s(setting: Option<&str>) -> u64 {
+    use fragment_bridge::limits::{PROMPT_TTL_MS_MAX, PROMPT_TTL_MS_MIN};
+    setting.and_then(|v| v.trim().parse::<u64>().ok()).map_or(APPROVAL_TIMEOUT_S, |s| s.clamp(PROMPT_TTL_MS_MIN / 1000, PROMPT_TTL_MS_MAX / 1000))
+}
+
 /// The managed overlay: how every profile streams, shows progress, asks for
-/// approvals, and what it never runs.
-pub fn managed_config(disabled_plugins: &[String]) -> String {
+/// approvals (waiting `approval_timeout_s` on each), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -77,7 +87,7 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
     // Approvals default to Hermes' `smart` mode (decision 16); a card waits as long as
     // the bridge's prompt does. Slash confirmations stay off: a person's leading `/`
     // never reaches Hermes as a command.
-    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {APPROVAL_TIMEOUT_S}\n  destructive_slash_confirm: false\n"));
+    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
     // The first agent's desktop starts for the screen's first viewer (the
@@ -354,7 +364,7 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()]);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
@@ -367,6 +377,12 @@ mod tests {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
+        // a test's shorter approval, held within the bridge's bounds
+        assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);
+        assert_eq!(approval_timeout_s(Some("20")), 20);
+        assert_eq!(approval_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
+        assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
+        assert!(managed_config(&[], 20).contains("timeout: 20\n"));
         let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
         let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");

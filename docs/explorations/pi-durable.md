@@ -382,6 +382,16 @@ start `recover()` ends the turn and marks its card `expired`.
 docs/chat-records.md says as much ("Hermes cannot resume a turn across a
 restart"). It is the gap Pi Durable's memo closes.
 
+*Bit on p5, 2026-10-05, and closed for the idle sleep:* the cut turn's
+message stays the last of Hermes' session, unanswered, and Hermes folds
+the next message into it, so the model was given `[paul] do the risky
+thing\n\n[paul] good morning` and asked the cut command's approval
+again: every message after a missed card met the card again, and the
+computer slept under each. An open card now holds the keepalive (P6 for
+now; docs/bridge.md, "A card keeps its computer awake"). Any other
+restart under a card (an owner's sleep, a crash, a deploy) still does
+this; F10 is the same fold, for any cut turn.
+
 ### F10. The model is never told a turn was cut (read)
 
 The person gets `turn.end` with an error. Hermes is made to forget: the
@@ -389,7 +399,13 @@ clean-exit receipt discards the cut turn's markers and its recovery
 notes are off, for a good reason (a resumed turn would carry the old
 message id and fold the person's next message into it, while the bridge
 has already ended it). So the next turn's model does not know it sent
-two of five emails, or left a file half written.
+two of five emails, or left a file half written. Worse (run on the
+real image, 2026-10-05): Hermes persists a turn's message as it starts
+and the rest as it ends, so a cut turn leaves its message the session's
+last, and the next message is folded into it. The model is handed the
+cut request again, as if it were new, beside the next message, and does
+it again (the scripted model does; what a real model does is a hosted
+run's to see).
 
 ### F11. Smaller ones
 

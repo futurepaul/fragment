@@ -177,8 +177,10 @@ turn.
 Part `p:<prompt>`: a card with buttons. `prompt` and option ids are
 `^[A-Za-z0-9._-]{1,64}$` (options `{1,32}`), 1 to 8 options, `style`
 optional (`primary`, `danger`). Only `asks` may answer, until
-`expiresAt` (ms). While every open turn of a computer waits on a person,
-its computer may sleep (decision 42).
+`expiresAt` (ms). An open card keeps its computer awake until it is
+answered or expires (docs/bridge.md, "A card keeps its computer awake"),
+so it expires with its runtime there, and its turn ends as the runtime
+ends it.
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
@@ -187,7 +189,8 @@ its computer may sleep (decision 42).
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
-waited: Hermes cannot resume a turn across a restart), or `stopped`.
+waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
+across a restart), or `stopped`.
 
 ```json
 { "kind": "turn.end", "turn": "…", "outcome": "idle" }
