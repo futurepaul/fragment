@@ -340,7 +340,7 @@ impl FragmentCell {
             body["reasoning_effort"] = json!(effort);
         }
         let body_bytes = body.to_string().len();
-        let bounded = bounds::bound(tier, body, false).map_err(|why| permanent(why.message()))?;
+        let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, false)).map_err(|why| permanent(why.message()))?;
         self.reserve(&p, bounded.worst(body_bytes)).await?;
         let (status, bytes, log_id) = crate::models::call(&self.env, &bounded, &p.owner, p.agent.as_deref()).await.map_err(retry)?;
         if status != 200 {
