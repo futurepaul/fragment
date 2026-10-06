@@ -1060,3 +1060,110 @@ async fn an_expired_approval_ends_its_turn() {
         assert!(x.reply(w, &meanwhile).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("hello while you wait")), "{:?}", x.reply(w, &meanwhile));
     });
 }
+
+// ---- a turn a restart cuts, then the next message (P5; F10) ----
+
+/// The text of a model message (its content, or its parts' text).
+fn content_text(m: &serde_json::Value) -> String {
+    match &m["content"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+        _ => String::new(),
+    }
+}
+
+/// Of the first model request whose last user message says `said`: that
+/// message's text, and the message before it (its role and text).
+fn asked_with(calls: &[support::model::Call], said: &str) -> Option<(String, (String, String))> {
+    calls.iter().filter(|c| c.path.ends_with("/chat/completions")).find_map(|c| {
+        let messages = c.body["messages"].as_array()?;
+        let at = messages.iter().rposition(|m| m["role"] == "user")?;
+        let last = content_text(&messages[at]);
+        if !last.contains(said) {
+            return None;
+        }
+        let before = at.checked_sub(1).map(|i| (messages[i]["role"].as_str().unwrap_or("").to_string(), content_text(&messages[i]))).unwrap_or_default();
+        Some((last, before))
+    })
+}
+
+/// Goal (P5; F10, with real Hermes v0.21.5): a turn a restart cuts while its
+/// card waits (here an owner's sleep: the hold, a save of `/data`, SIGTERM)
+/// is never redone by the chat's next message. Woken from that save, the
+/// image's boot closes the cut turn in Hermes' session with Hermes' own
+/// failed-turn boundary, and the bridge tells the next turn what was cut,
+/// from the journal. So the model's request for "good morning" ends with a
+/// user message of its own (the note as its channel context, then the
+/// message) after an assistant message (the boundary), never joined to the
+/// cut request; no request after the wake has the model call the cut
+/// command again, no card is shown again, "good morning" is answered, and
+/// the message after it is told nothing.
+///
+/// Method: the image with a 20 s approval, the scripted model asking for a
+/// command Hermes flags (`risky`), and the DO's owner's sleep under the
+/// card, taken as the expiry test above takes an idle one; then a wake from
+/// that save. On master (no closing at boot, no note) Hermes joins the next
+/// message to the cut request (its model is given `[paul] do the risky
+/// thing\n\n[paul] good morning`), the scripted model calls the cut command
+/// again, and its card is shown again (`FRAGMENT_DOCKER_SKIP_BUILD=1
+/// FRAGMENT_DOCKER_HERMES_TAG=<an image of master's>` runs this against it).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_turn_cut_by_a_restart_is_closed_and_told() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let risky = x.say("do the risky thing");
+    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    // the owner's sleep under the card: held, saved, stopped
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cut-told");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    let (took, _) = c.sigterm();
+    eprintln!("cut: held, saved and stopped under the card ({} ms to exit)", took.as_millis());
+    let _ = told(fake, chat, &c);
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let calls_before = x.model.calls.lock().unwrap().len();
+
+    // the next message wakes it from the save
+    let next = x.say("good morning");
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {said}");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    // its end, or the cut command's card shown again (master: the fold)
+    within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty() || !x.cards(w, &next).is_empty()).await;
+    let again = fake.with(|w| x.cards(w, &next));
+    assert!(again.is_empty(), "the cut command's card is not shown again: {again:?}; the model saw {:#?}", x.model_saw(calls_before));
+    let after = x.say("and after that");
+    within(fake, chat, &c, 120_000, "the turn after's end", |w| !x.ends(w, &after).is_empty()).await;
+
+    let calls: Vec<support::model::Call> = x.model.calls.lock().unwrap()[calls_before..].to_vec();
+    let redone: Vec<String> = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).filter_map(|c| support::model::answer(&c.body).1).map(|call| call.to_string()).filter(|call| call.contains("rm -rf")).collect();
+    let logs = c.logs();
+    let closed = logs.lines().find(|l| l.contains("boot.cut_turns_closed") || l.contains("boot.cut_turns_failed")).unwrap_or("no word from the boot's closer").to_string();
+    let saw = x.model_saw(calls_before);
+    fake.with(|w| {
+        assert_eq!(x.ends(w, &risky).len(), 1, "the cut turn ends once");
+        assert_eq!(x.ends(w, &risky)[0]["error"], "lost when the computer restarted");
+        assert!(redone.is_empty(), "no request after the wake has the model call the cut command again: {redone:?}; the model saw {saw:#?}");
+        assert!(x.cards(w, &next).is_empty() && x.cards(w, &after).is_empty(), "no card shown again: {:?}; the model saw {saw:#?}", x.cards(w, &next));
+        assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
+    });
+    let (asked, (before_role, before)) = asked_with(&calls, "good morning").unwrap_or_else(|| panic!("a model request for good morning; it saw {saw:#?}"));
+    assert!(asked.starts_with("[Recent channel messages]\n"), "the note first, nothing joined before it: {asked:?}");
+    for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “do the risky thing”", "[New message]\n[paul] good morning"] {
+        assert!(asked.contains(said), "{said:?} in the model's request: {asked:?}");
+    }
+    assert!(!asked.contains("[paul] do the risky thing"), "the cut request is never joined to it: {asked:?}");
+    assert_eq!(before_role, "assistant", "the cut turn is closed before it (Hermes' failed-turn boundary; {closed}): {before:?}");
+    let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
+    assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
+    eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
