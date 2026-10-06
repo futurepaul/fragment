@@ -215,12 +215,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let ended = |turn: &str| work_of(&records(api, &owner, &chat_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
     // the agent stops its desktop from its terminal, as Hermes' own command does
     let stop_desktop = |s: &Suite| -> Result<String> {
-        let r = say(90, "run: hermes computer-use screen stop")?;
+        let r = say(90, "run: /opt/hermes/.venv/bin/hermes computer-use screen stop")?;
         let turn = turn_for(&r);
         s.eventually(TURN, || ended(&turn).is_some());
         Ok(reply_of(&turn).unwrap_or_default())
     };
-    screen(s, api, &owner, &id, &stop_desktop)?;
 
     // a reply, streamed: a page sees its draft live, then the reply
     let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
@@ -285,6 +284,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!(steps),
     );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
+
+    // its screen, the agent's desktop not used yet; after the step above:
+    // with the screen's terminal call before it, that step went missing in
+    // 3 runs of 4 (Hermes sends progress on a tick, and a turn this model
+    // ends at once can end before it)
+    screen(s, api, &owner, &id, &stop_desktop)?;
 
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
     let r = say(3, "run: rm -rf /tmp/fragment-risky && echo tool-ran")?;
