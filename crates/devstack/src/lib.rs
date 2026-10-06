@@ -795,8 +795,9 @@ pub fn state_dir(project: &Path) -> PathBuf {
 }
 
 /// The nodes this process started in process groups of their own and has
-/// not dropped, which a terminal's Ctrl-C does not reach (it signals the
-/// terminal's group), and whether the process is ending (`kill_nodes`).
+/// not dropped (`wrangler dev`'s, and celld's: celld.rs), which a
+/// terminal's Ctrl-C does not reach (it signals the terminal's group), and
+/// whether the process is ending (`kill_nodes`).
 struct Live {
     ending: bool,
     groups: Vec<u32>,
@@ -819,6 +820,28 @@ pub fn kill_nodes() {
     for group in live.groups.drain(..) {
         let _ = Command::new("kill").args(["-KILL", "--", &format!("-{group}")]).stderr(Stdio::null()).status();
     }
+}
+
+/// Spawns a node's process (`cmd`, its output directed), on either
+/// runtime: refused once this process is ending, and in a group of its own
+/// (`own_group`, which `cmd` makes) recorded for `kill_nodes`. The lock is
+/// held across the spawn: `kill_nodes` either finds the node's group or
+/// has already refused it.
+pub(crate) fn spawn_node(cmd: &mut Command, own_group: bool) -> Result<Child> {
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
+    let child = cmd.spawn()?;
+    if own_group {
+        assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
+        live.groups.push(child.id());
+    }
+    Ok(child)
+}
+
+/// A node's group dropped from `kill_nodes`' (its `Drop`, once it is
+/// killed or stopped).
+pub(crate) fn forget_node(group: u32) {
+    LIVE.lock().unwrap_or_else(PoisonError::into_inner).groups.retain(|g| *g != group);
 }
 
 /// One `wrangler dev` process, which runs workerd as its child: in a
@@ -859,18 +882,7 @@ impl Node {
             cmd.process_group(0);
         }
         let t0 = Instant::now();
-        let child = {
-            // held across the spawn: `kill_nodes` either finds this node's
-            // group or has already refused it
-            let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
-            anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
-            let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
-            if opts.own_group {
-                assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
-                live.groups.push(child.id());
-            }
-            child
-        };
+        let child = spawn_node(cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()), opts.own_group)?;
         let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -957,7 +969,7 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.kill();
         if self.own_group {
-            LIVE.lock().unwrap_or_else(PoisonError::into_inner).groups.retain(|g| *g != self.child.id());
+            forget_node(self.child.id());
         }
     }
 }

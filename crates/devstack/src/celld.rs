@@ -142,7 +142,9 @@ impl CelldNode {
             cmd.process_group(0);
         }
         let t0 = Instant::now();
-        let mut child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn().with_context(|| format!("start {}", tools.celld.display()))?;
+        // in its own group, killed by `kill_nodes` as wrangler's is (the
+        // e2e's signal handler)
+        let mut child = crate::spawn_node(cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()), opts.own_group).with_context(|| format!("start {}", tools.celld.display()))?;
         let ready = format!("ready  http://127.0.0.1:{}", opts.port);
         // Bounded by READY_TIMEOUT.
         loop {
@@ -202,6 +204,9 @@ impl Drop for CelldNode {
     /// (the supervisor and its node) goes with it.
     fn drop(&mut self) {
         self.signal_group("-INT");
+        if self.own_group {
+            crate::forget_node(self.child.id());
+        }
     }
 }
 
