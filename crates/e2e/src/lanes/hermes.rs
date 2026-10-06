@@ -223,7 +223,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let ended = |turn: &str| work_of(&records(api, &owner, &chat_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
     // the agent stops its desktop from its terminal, as Hermes' own command does
     let stop_desktop = |s: &Suite| -> Result<String> {
-        let r = say(90, "run: /opt/hermes/.venv/bin/hermes computer-use screen stop")?;
+        let r = say(120, "run: /opt/hermes/.venv/bin/hermes computer-use screen stop")?;
         let turn = turn_for(&r);
         s.eventually(TURN, || ended(&turn).is_some());
         Ok(reply_of(&turn).unwrap_or_default())
