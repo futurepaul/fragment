@@ -230,12 +230,14 @@ speaking Cloudflare's APIs) returns once this product works.
     "temporarily unavailable" start (spike S3b).
 
     The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. The
-    Hermes image uses it for Litestream, streaming Hermes' SQLite
-    continuously. Litestream is for disaster recovery only: it restores
-    about 3 s per database, so it stays off the wake path. The agent's
-    self is in its fragment. CI runs a restore drill into an empty
-    computer.
+    R2 prefix through an intercept, so the guest holds no credential. It
+    stays the image's, for whatever it keeps outside `/data`. The agent's
+    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
+    it with Litestream, for disaster recovery, until step 1 of
+    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
+    Its replicas were never read, no restore drill existed, and a restore
+    would have put a `state.db` of seconds ago into a `/data` of the last
+    save. The saves themselves now carry Hermes' databases whole.)
 
     *The design of record is now docs/durable-computers.md (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
@@ -253,8 +255,10 @@ speaking Cloudflare's APIs) returns once this product works.
     answers `held`), three saves are kept, a wake falls back to the save
     before one that will not restore, and a sleep whose save fails keeps
     its container for at most `computers.unsaved_max_ms` (30 minutes by
-    default, Paul's to confirm). Litestream is still in the image, and its
-    replicas are never read (P4: the debt ledger).
+    default, Paul's to confirm). Litestream is cut from the image (P4).
+    Step 2, the seam:
+    `/data/work` (the tools') is saved as a record of its own beside the
+    rest of `/data` (the guest's own state), restored together.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

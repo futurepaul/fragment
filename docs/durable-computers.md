@@ -44,12 +44,32 @@ file is the newer word, and decision 18 points here.
   computer again; a slow sleep's second ask keeps the first's snapshot.
 - **A hold limits what an agent does for its owner, never its own
   memberships** (Paul, with #137): a held agent still records its turns.
+- **Step 1, A+ (#147, #148).** Saving is an action of the pure lifecycle:
+  when work ends (30 s settle), every 15 minutes busy, at every sleep;
+  the hold is a handshake (`held`, within 20 s); three saves are kept and
+  a wake falls back to the save before one that will not restore; a sleep
+  whose save fails keeps its container for at most
+  `computers.unsaved_max_ms` (30 minutes by default, Paul's to confirm).
+  Our Hermes image copies every database with SQLite's online backup
+  (from Rust: Hermes' own covers a fixed list, and restarts a busy copy)
+  and its answer names exactly what it copied, so the save leaves out the
+  live files (a database made after the copy is kept hot, not lost); a
+  restore puts the copies back and `quick_check`s each before a turn.
+  Measured in Docker: none of 54 held databases tore (none of 54 hot ones
+  either: the hold makes rarely into never). docs/computers.md.
+- **Step 2, the seam (#149).** `/data/work` is the tools' (Hermes'
+  terminal's cwd and its browser's profile, per agent), saved as a
+  record of its own; the rest of `/data` is Hermes' home and the bridge's
+  state, saved beside it, restored together.
+- **Litestream is cut (P4, #150).** Its replicas were never read; the
+  saves carry Hermes' databases whole. The storage endpoint stays, the
+  image's for whatever it keeps outside `/data`.
 
 ## The open problem
 
-`/data` is still saved only at sleep (F1), as a hot copy (F4), with one
-save kept (F5), and a failed save still destroys the container (F6). A
-save asked of the guest only covers writers we know of: a messenger
+With steps 1 and 2 built, `/data` is saved between turns and on a timer,
+Hermes' databases whole. A save asked of the guest only covers writers we
+know of: a messenger
 adapter's SQLite, a browser profile or something a skill installed can
 be mid-write. And some state must never go back in time at all: a
 messenger's encryption ratchets, which a clean but older copy breaks.
@@ -88,7 +108,12 @@ Sprite workspaces that paused warm (docs/finite-next-lessons.md). Five
 steps, each its own pull request with its tests, each leaving master
 whole:
 
-1. **A+ (P2, reframed).**
+1. **A+ (P2, reframed).** *Built (#147, #148; Litestream cut in
+   #150), with two refinements: the copy is SQLite's online backup from
+   Rust, since Hermes' own covers a fixed list of files and restarts a
+   busy copy; and the save leaves out exactly what the image names as
+   copied, never `*.db`, so a database Hermes makes after the copy is kept
+   hot rather than lost.*
    - The Computer DO saves `/data` when work ends (the last keepalive
      closes, after a settle), at every sleep, and every 15 minutes of
      activity, as Cloudflare's auto-save guide does. Saving is an action
@@ -111,7 +136,10 @@ whole:
    sessions, profiles) and a work directory for everything its tools
    write (projects, scratch files, the browser profile), each saved on
    its own. Nothing moves yet; the split is what lets each live
-   elsewhere later.
+   elsewhere later. *Built (#149): the platform names no runtime, so its
+   contract is `/data/work` (the tools') and the rest of `/data` (the
+   guest's own: for ours, Hermes' home at `/data/hermes` and the bridge's
+   state), two records a save.*
 3. **Our terminal backend.** Hermes runs its tools' commands through a
    terminal-backend plugin of ours, at first locally in the work
    directory of the same container. We then know when tools are busy,
@@ -148,9 +176,16 @@ sockets only); and whether the protocol's library can run on Workers or
 needs a small stateless container doing the cryptography while the
 Durable Object keeps the state.
 
-**First: a SimpleX spike** (Paul, 2026-10-05): one connector, end to
-end, against a local SMP server. Decision 32 (SimpleX on the always-on
-computer) moves here once it proves out.
+**The SimpleX spike (2026-10-05) is parked** (Paul: "too much of a
+lift for now"; docs/explorations/simplex-connector.md). It ran end to
+end against a local SMP server, but no SimpleX library exists outside
+the Haskell app: the practical shape is a small always-on container per
+account running `simplex-chat`, and only a pure-Workers client (about
+1.5 to 2 months) fully meets "never goes back in time". Not built now.
+SimpleX stays on an always-on computer (decision 32), whose disk can
+still go back in time at a host restart; the exploration's rollback
+runs show `/_sync` heals the connection in about 0.2 s, losing the
+messages in flight.
 
 ## Deferred, with the recommendation
 

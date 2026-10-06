@@ -787,18 +787,3 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** `rollback`'s default target is the commit live served
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
-
-## Litestream's replicas are written and never read
-
-- **Observed:** 2026-10-05 (docs/explorations/pi-durable.md, F8).
-  `hermes-boot` runs `litestream replicate` for each profile's
-  `state.db` (images/hermes/boot). Nothing runs `litestream restore`,
-  and decision 18's restore drill does not exist.
-- **Risk:** it reads as disaster recovery and is none. A restore added
-  later would put a `state.db` from seconds ago into a `/data` from the
-  last sleep.
-- **First proof:** the first time a computer's `/data` is lost and
-  someone reaches for the replicas.
-- **Delete when:** Litestream is cut from the image (the exploration's
-  P4), or a restore that is never mixed with an older `/data` runs as a
-  drill in CI.

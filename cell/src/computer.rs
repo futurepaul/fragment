@@ -128,7 +128,7 @@ const EXIT_WAIT_MS: i64 = 5_000;
 /// counts. Each needs only `sh` (and its `test`), `mkdir`, `touch` and `rm`,
 /// which every image carries.
 const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/restored";
-const HOLD_MARK: &str = "rm -f /run/computer/held && mkdir -p /run/computer && touch /run/computer/hold";
+const HOLD_MARK: &str = "rm -f /run/computer/held && mkdir -p /run/computer /data/work && touch /run/computer/hold";
 const HOLD_UNMARK: &str = "rm -f /run/computer/hold /run/computer/held";
 const HELD_TEST: &str = "test -e /run/computer/held";
 const HELD_READ: &str = "cat /run/computer/held";
@@ -139,9 +139,15 @@ const HELD_READ: &str = "cat /run/computer/held";
 const CHECK: &str = "test ! -x /usr/local/bin/computer-check || exec /usr/local/bin/computer-check";
 const CHECK_EXEC_MS: i64 = 120_000;
 const CHECK_UNUSABLE: i64 = 3;
-/// What a save saves: `/data`, whole (docs/computers.md, "Saves and what a
-/// wake restores").
-const SAVED_DIRS: [&str; 1] = ["/data"];
+/// What a save saves (docs/computers.md, "Data and the restore gate"; step 2
+/// of docs/durable-computers.md): `/data/work`, what the guest's tools
+/// write, and the rest of `/data`, the guest's own state, each a record of
+/// its own and restored together, the first first (a restore replaces its
+/// directory whole, so `/data`'s record goes in before the work's).
+/// `/data`'s record leaves the work out (`WORK_LEFT_OUT`), and what a held
+/// guest names; the work's record leaves nothing out.
+const SAVED_DIRS: [&str; 2] = ["/data", "/data/work"];
+const WORK_LEFT_OUT: &str = "/work/";
 /// The lever's failed saves at most at once (`fail-saves`).
 const FAIL_SAVES_MAX: u32 = 100;
 /// A marker's exec answers within this, or it failed: a sleep goes on
@@ -900,7 +906,13 @@ impl ComputerCell {
         let left_out = if held { self.left_out(&g).await } else { vec![] };
         let mut records: Vec<Value> = Vec::with_capacity(SAVED_DIRS.len());
         for dir in SAVED_DIRS {
-            let exclude = js::to_js(&json!(left_out));
+            // the guest's own state leaves its work out (a record of its
+            // own) and what it copied; its work is saved as it is
+            let exclude = match dir {
+                "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
+                _ => vec![],
+            };
+            let exclude = js::to_js(&json!(exclude));
             match self.call("backup", &[g.clone(), dir.into(), exclude]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => records.push(record),
                 Err(e) => {
