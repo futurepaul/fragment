@@ -24,6 +24,10 @@ pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
 }
 
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_millis() as i64
+}
+
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))

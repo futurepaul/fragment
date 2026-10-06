@@ -27,7 +27,8 @@
 //!    what it made before the sleep is still in `/data/work`;
 //! 7. its paid calls stay within what the run lent it, and the run says
 //!    what it cost;
-//! 8. it sleeps at the end (`--sweep` deletes its `e2e-` fragments).
+//! 8. it sleeps at the end (`--sweep` deletes the run's `e2e-<run>-`
+//!    fragments).
 //!
 //! A check that depends on what the model chooses to do says so in its
 //! text. Every wait is a real model's: generous, a positive looked for
@@ -663,7 +664,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      (its paid calls by step: {by_step}; {used} of the {PAID_CALLS} lent; ${charged:.4} charged to the person, its computer's awake time included)");
     s.ok(&format!("its paid calls (model calls and AI steps, from its ledger) stayed within the {PAID_CALLS} the run lent it"), used as u64 <= PAID_CALLS, json!({ "used": used, "byStep": by_step, "totals": totals }));
 
-    // ---- 8. asleep at the end; the sweep deletes its e2e- fragments
+    // ---- 8. asleep at the end; the run's sweep deletes its fragments
     let (slept, last, answers) = sleep(api, &keys, &id);
     println!("      (its owner's sleeps answered: {})", answers.join(", "));
     s.ok("it sleeps at the end", slept, &last);

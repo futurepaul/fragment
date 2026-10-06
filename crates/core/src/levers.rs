@@ -27,8 +27,9 @@ pub const E2E_EMAIL_DOMAIN: &str = "e2e.test";
 pub const E2E_ISSUER: &str = "e2e.test";
 /// An e2e email's name, before the `@`.
 pub const E2E_EMAIL_NAME_BYTES_MAX: usize = 64;
-/// The labels of the fragments the hosted e2e makes start with this, so a
-/// sweep deletes only its own.
+/// The labels of the fragments the hosted e2e makes start with this (then
+/// the run's id: `e2e-<run>-…`), so a sweep deletes only the e2e's own, and
+/// a run's sweep only its run's.
 pub const E2E_LABEL_PREFIX: &str = "e2e-";
 /// The paid calls (model calls and AI steps, each one reservation on the
 /// ledger) an e2e person may make at most; a hosted run lends each person

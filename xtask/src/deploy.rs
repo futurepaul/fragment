@@ -679,15 +679,16 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
 }
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
-/// --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the suite's
+/// --except …] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls
+/// <n>]`: the suite's
 /// own arguments for that branch deployment, from its config: the zone, the
 /// test secret's file (named, never read here), and what the deployment
 /// offers (computers, models). A deployment of its own is refused: the
 /// hosted lane runs on a preview.
 pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep] [--max-paid-calls <n>]");
+    let usage = || anyhow::anyhow!("usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>]");
     let (mut config, mut branch, mut passed) = (None, None, vec![]);
-    let mut it = rest.iter();
+    let mut it = rest.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -698,7 +699,13 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
                 passed.push(a.clone());
                 passed.push(it.next().ok_or_else(usage)?.clone());
             }
-            "--dry-run" | "--sweep" => passed.push(a.clone()),
+            "--dry-run" | "--sweep-all" => passed.push(a.clone()),
+            // the run it names, when the next argument is not another flag
+            // (the suite checks it is one)
+            "--sweep" => {
+                passed.push(a.clone());
+                passed.extend(it.next_if(|next| !next.starts_with("--")).cloned());
+            }
             _ => return Err(usage()),
         }
     }
@@ -829,6 +836,14 @@ mod tests {
         let path = config_file("hosted-args-bare", &v);
         let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5"]).unwrap();
         assert_eq!(got, ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test"]);
+        // a sweep: one run's (named, or the last that finished here), or all
+        let base = ["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/run/secrets/p5-test"];
+        let with = |more: &[&str]| base.iter().chain(more).map(|s| s.to_string()).collect::<Vec<_>>();
+        let sweep = |more: &[&str]| args(&[&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5"][..], more].concat()).unwrap();
+        assert_eq!(sweep(&["--sweep", "c58b2a"]), with(&["--sweep", "c58b2a"]));
+        assert_eq!(sweep(&["--sweep"]), with(&["--sweep"]));
+        assert_eq!(sweep(&["--sweep", "--max-paid-calls", "0"]), with(&["--sweep", "--max-paid-calls", "0"]), "a flag after it is not its run");
+        assert_eq!(sweep(&["--sweep-all"]), with(&["--sweep-all"]));
         // production: a deployment of its own runs no hosted lane
         v["platform_host"] = json!("fragment.club");
         v["fragment_suffix"] = json!("fragment.boats");
