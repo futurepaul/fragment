@@ -257,12 +257,15 @@ const COPY_RETRY_MS: u64 = 5_000;
 /// database under `/data` is copied by SQLite's online backup into the
 /// staging, as the hermes user, and `held` names the live files as what
 /// the save leaves out. A copy that fails answers nothing: the platform
-/// then saves the guest whole, not held. Once the hold goes (the save is
-/// done, or the sleep called off) the copies go too. Looked at every
-/// `HOLD_POLL_MS`, for the boot's life.
+/// then saves the guest whole, not held. Until it answers, `unheld` says
+/// what it waits on or why its copy failed, which the platform logs with
+/// a hold that goes unanswered (docs/computers.md, "The hold"). Once the
+/// hold goes (the save is done, or the sleep called off) the copies go
+/// too. Looked at every `HOLD_POLL_MS`, for the boot's life.
 async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
     let mut since: Option<Instant> = None;
     let mut failed_at: Option<Instant> = None;
+    let mut said = Unheld::default();
     // bounded by the boot's life: one look per HOLD_POLL_MS
     loop {
         tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)).await;
@@ -270,6 +273,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
             if since.take().is_some() {
                 quiet.paused.store(false, std::sync::atomic::Ordering::SeqCst);
                 failed_at = None;
+                said.say(None);
                 if let Err(e) = held::clear_staging(Path::new(held::STAGING)) {
                     ev!("held.staging_failed", { "error": e.to_string() });
                 }
@@ -282,37 +286,82 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
         if Path::new(held::HELD).exists() || failed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(COPY_RETRY_MS)) {
             continue;
         }
-        let rounds_done = quiet.busy.load(std::sync::atomic::Ordering::SeqCst) == 0 || first.elapsed() > Duration::from_millis(QUIET_WAIT_MS);
-        if !(Path::new(held::BRIDGE_HELD).exists() && rounds_done) {
+        if !Path::new(held::BRIDGE_HELD).exists() {
+            said.say(Some("waiting for the bridge's answer: a claim of a turn is in flight".into()));
             continue;
         }
+        let busy = quiet.busy.load(std::sync::atomic::Ordering::SeqCst);
+        if busy > 0 && first.elapsed() <= Duration::from_millis(QUIET_WAIT_MS) {
+            said.say(Some(format!("waiting for {busy} rounds under way (the repo sync, the skills install, the agents' read), at most {QUIET_WAIT_MS} ms")));
+            continue;
+        }
+        said.say(Some("copying the databases".into()));
         let t = Instant::now();
         match copy_databases(ids).await {
-            Ok((manifest, unnamed)) => match write_answer(&manifest) {
-                Ok(()) => ev!("held", {
-                    "copied": manifest.copies.len(),
-                    "bytes": manifest.copies.iter().map(|c| c.bytes).sum::<u64>(),
-                    "unnamed": unnamed,
-                    "ms": t.elapsed().as_millis() as u64,
-                    "sinceHoldMs": first.elapsed().as_millis() as u64
-                }),
-                Err(e) => {
-                    failed_at = Some(Instant::now());
-                    ev!("held.failed", { "error": e.to_string() });
+            Ok(Copies { manifest, unnamed, locked }) => {
+                said.say(None);
+                match write_answer(&manifest) {
+                    Ok(()) => ev!("held", {
+                        "copied": manifest.copies.len(),
+                        "bytes": manifest.copies.iter().map(|c| c.bytes).sum::<u64>(),
+                        "unnamed": unnamed,
+                        "locked": locked,
+                        "ms": t.elapsed().as_millis() as u64,
+                        "sinceHoldMs": first.elapsed().as_millis() as u64
+                    }),
+                    Err(e) => {
+                        failed_at = Some(Instant::now());
+                        said.say(Some(format!("its answer was not written: {e}")));
+                        ev!("held.failed", { "error": e.to_string() });
+                    }
                 }
-            },
+            }
             Err(why) => {
                 failed_at = Some(Instant::now());
+                said.say(Some(format!("the copy failed, so no answer (tried again in {COPY_RETRY_MS} ms): {why}")));
                 ev!("held.refused", { "why": why, "ms": t.elapsed().as_millis() as u64 });
             }
         }
     }
 }
 
+/// What `unheld` says now (held.rs `UNHELD`): written whole when it
+/// changes, at most `held::UNHELD_MAX_BYTES`, removed when there is
+/// nothing to say.
+#[derive(Default)]
+struct Unheld(Option<String>);
+
+impl Unheld {
+    fn say(&mut self, why: Option<String>) {
+        let why = why.map(|w| held::cut(&w, held::UNHELD_MAX_BYTES).to_string());
+        // said already, unless a new hold's mark cleared it meanwhile
+        if why == self.0 && (why.is_none() || Path::new(held::UNHELD).exists()) {
+            return;
+        }
+        let tmp = format!("{}.tmp", held::UNHELD);
+        let done = match &why {
+            Some(w) => std::fs::write(&tmp, w).and_then(|()| std::fs::rename(&tmp, held::UNHELD)),
+            None => std::fs::remove_file(held::UNHELD).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+        };
+        if let Err(e) = done {
+            ev!("held.unheld_failed", { "error": e.to_string() });
+        }
+        self.0 = why;
+    }
+}
+
+/// What one hold copied: the manifest, and the databases it kept hot, as
+/// the save keeps any other file (`unnamed`: named by no pattern the
+/// platform takes; `locked`: held locked by their owner through the copy).
+struct Copies {
+    manifest: held::Manifest,
+    unnamed: Vec<String>,
+    locked: Vec<String>,
+}
+
 /// Every database under `/data` the answer can name, copied into a
-/// staging made anew, as the hermes user: the copies' manifest, and the
-/// databases left hot (named by no pattern the platform takes).
-async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<String>), String> {
+/// staging made anew, as the hermes user.
+async fn copy_databases(ids: Option<(u32, u32)>) -> Result<Copies, String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
     let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
@@ -323,8 +372,10 @@ async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<
         return Err(String::from_utf8_lossy(&out.stdout).trim().chars().take(300).collect());
     }
     let manifest = held::read_manifest(data, staging).map_err(|e| e.to_string())?.ok_or("the copy wrote no manifest")?;
-    assert_eq!(manifest.copies.len(), dbs.len(), "a manifest names every copy");
-    Ok((manifest, unnamed.iter().map(|p| p.display().to_string()).collect()))
+    let copied: std::collections::BTreeSet<&str> = manifest.copies.iter().map(|c| c.path.as_str()).collect();
+    assert!(copied.len() == manifest.copies.len() && manifest.copies.iter().all(|c| dbs.iter().any(|d| d.as_os_str() == c.path.as_str())), "a manifest names each database it was asked for at most once");
+    let locked = dbs.iter().map(|d| d.display().to_string()).filter(|d| !copied.contains(d.as_str())).collect();
+    Ok(Copies { manifest, unnamed: unnamed.iter().map(|p| p.display().to_string()).collect(), locked })
 }
 
 /// `held`, whole: exactly what was copied, which the save leaves out.

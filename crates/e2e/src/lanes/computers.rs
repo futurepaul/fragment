@@ -115,7 +115,7 @@ fn runs(s: &Suite, api: &Api, owner: &crate::Keys, owner_id: &str, id: &str) -> 
 }
 
 /// A lever on computer `id` (`POST /api/test/computer`, docs/api.md).
-fn lever(api: &Api, id: &str, op: &str) -> Result<crate::api::Reply> {
+pub(super) fn lever(api: &Api, id: &str, op: &str) -> Result<crate::api::Reply> {
     lever_with(api, id, json!({ "op": op }))
 }
 
@@ -126,7 +126,7 @@ fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply>
 }
 
 /// The newest save computer `id` keeps (the lever's `saves`), if any.
-fn newest_save(api: &Api, id: &str) -> Value {
+pub(super) fn newest_save(api: &Api, id: &str) -> Value {
     lever(api, id, "saves").map(|r| r.body["saves"][0].clone()).unwrap_or(Value::Null)
 }
 
@@ -134,6 +134,12 @@ fn newest_save(api: &Api, id: &str) -> Value {
 /// busy (fragment_core::computer::SAVE_SETTLE_MS), and taken within a few
 /// seconds more.
 const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 30);
+/// On a preview, a model call Hermes makes after its reply (a title) can
+/// keep its work open a while, and a save of its `/data` takes seconds more.
+const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
+/// The deployment's own image answers the hold: before its saves, awake
+/// and at its sleep (the hosted rung of the stub's save checks).
+const HELD_AWAKE: &str = "its turn's end is saved awake, and its guest answered the hold (held)";
 
 /// The save checks (docs/durable-computers.md, step 1), each skipped off
 /// the stub and the fakes.
@@ -462,6 +468,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.eventually(Duration::from_secs(10), || started_and_ended(&records(api, &owner, &chat_name, "work")));
     let work = records(api, &owner, &chat_name, "work");
     s.ok("its turn starts and ends on work", started_and_ended(&work), json!(work));
+    // the deployment's own image answers the hold (docs/computers.md, "The
+    // hold"), as the stub does (its save checks, below): its turn's end is
+    // saved awake, held, so no database it keeps is copied hot
+    if !scripted {
+        let replied_at = replies.first().and_then(|r| r["at"].as_i64()).unwrap_or(i64::MAX);
+        let saved = s.eventually(HOSTED_SAVED_AFTER_WORK, || newest_save(api, &id)["atMs"].as_i64().is_some_and(|at| at > replied_at));
+        let newest = newest_save(api, &id);
+        s.ok(HELD_AWAKE, saved && newest["held"] == true, format!("replied at {replied_at}; newest save {newest}"));
+    } else {
+        s.skip(HELD_AWAKE, "the stub's awake save is the save checks' (below)");
+    }
     let mut replies_so_far = 1;
     if !scripted {
         for label in [
@@ -634,8 +651,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // asleep, a record wakes it, restored, and nothing runs twice
     std::thread::sleep(QUEUE_DRAIN);
     let ran = fakes.then(|| runs(s, api, &owner, &owner_id, &id));
+    let numbered = lever(api, &id, "saves").map(|r| r.body["numbered"].as_u64().unwrap_or(0)).unwrap_or(0);
+    let t_sleep = std::time::Instant::now();
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    let slept_in = t_sleep.elapsed();
     s.ok("its owner puts it to sleep", r.status == 200 && r.body["phase"] == "asleep", &r);
+    // its sleep's save is held (docs/computers.md, "The hold"): the guest,
+    // the stub or the deployment's own image, answered it, so the sleep
+    // never waited out the hold's 20 s
+    let newest = newest_save(api, &id);
+    println!("      (asleep in {slept_in:.1?}; its sleep's save held: {})", newest["held"]);
+    s.ok("its sleep's save is held: its guest answered the hold", newest["number"].as_u64().is_some_and(|n| n > numbered) && newest["held"] == true, &newest);
     let awake = entries(api, &owner_id, &format!("awake:{id}:"));
     s.ok(
         "its awake time reaches its owner's ledger at the sleep, priced",

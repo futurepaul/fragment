@@ -251,17 +251,25 @@ class ContainerHost {
   }
 
   // Runs `argv` until it exits 0 (polling every 100 ms), for at most `ms`:
-  // whether it did. The guest's answer to a hold (`held`) is read so.
+  // `{ok, tries, last}`, whether it did, how many runs it took, and the
+  // last run's answer (`{exitCode}`, or `{error}`). The guest's answer to a
+  // hold (`held`) is read so.
   async execUntil(generation, argv, ms) {
     const t0 = Date.now();
+    let tries = 0;
+    let last = null;
     while (generation === this.#generation && Date.now() - t0 < ms) {
+      tries++;
       try {
         const out = await this.exec(generation, argv, Math.max(1, ms - (Date.now() - t0)));
-        if (out.exitCode === 0) return true;
-      } catch {}
+        last = { exitCode: out.exitCode, ms: Date.now() - t0 };
+        if (out.exitCode === 0) return { ok: true, tries, last };
+      } catch (e) {
+        last = { error: String((e && e.message) || e).slice(0, 300), ms: Date.now() - t0 };
+      }
       await new Promise((r) => setTimeout(r, 100));
     }
-    return false;
+    return { ok: false, tries, last };
   }
 
   // Runs `argv` in the container, answering within `ms` when it is given,

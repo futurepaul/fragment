@@ -995,6 +995,24 @@ pub fn left_out(answer: &str) -> Result<Vec<String>, String> {
     Ok(patterns)
 }
 
+/// What the DO keeps of a guest's word on a hold it has not answered.
+pub const UNHELD_MAX_BYTES: usize = 1024;
+
+/// What a guest says of a hold it has not answered (`/run/computer/unheld`,
+/// docs/computers.md, "The hold"), as the Computer DO logs it once the
+/// hold's wait runs out: its text, trimmed, its control characters but
+/// newlines as spaces, at most `UNHELD_MAX_BYTES` (cut at a character);
+/// `None` for none. Only a log line: nothing is decided by it.
+pub fn unheld(text: &str) -> Option<String> {
+    let clean: String = text.trim().chars().map(|c| if c.is_control() && c != '\n' { ' ' } else { c }).collect();
+    let mut end = clean.len().min(UNHELD_MAX_BYTES);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = clean[..end].trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
+}
+
 /// A save of `/data`, as the Computer DO keeps it: the `DirectoryBackup`
 /// records it was taken as (the authority on what a wake restores, handed
 /// back to restore and to delete them), and what the platform knows of it.
@@ -2225,6 +2243,20 @@ mod tests {
         for bad in ["!keep.db", "a b", "$(rm -rf /)", "*.db;rm", "é", too_long.as_str(), too_many.as_str(), too_big.as_str()] {
             assert!(left_out(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A guest's word on a hold it has not answered, as logged: none for
+    /// nothing said, its text trimmed, its control characters spaces, and
+    /// never past its bound, cut at a character.
+    #[test]
+    fn a_guest_says_why_it_has_not_answered_within_a_bound() {
+        assert_eq!(unheld(""), None);
+        assert_eq!(unheld(" \n\t"), None);
+        assert_eq!(unheld("copy refused: copying /data/a.db: file is not a database\n"), Some("copy refused: copying /data/a.db: file is not a database".into()));
+        assert_eq!(unheld("a\u{1b}[31mb\nc"), Some("a [31mb\nc".into()));
+        let long = format!("{}é{}", "x".repeat(UNHELD_MAX_BYTES - 1), "y".repeat(100));
+        let cut = unheld(&long).unwrap();
+        assert!(cut.len() <= UNHELD_MAX_BYTES && cut.chars().all(|c| c == 'x'), "{} bytes", cut.len());
     }
 
     #[test]

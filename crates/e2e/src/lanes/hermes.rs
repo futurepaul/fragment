@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::computers::{agent_replies, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
+use super::computers::{agent_replies, newest_save, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
@@ -592,6 +592,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &lost).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
     std::thread::sleep(QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    // its desktop has drawn (its screen, above), and the hold is answered
+    // still (the hosted hold, 2026-10-06: the desktop's Mesa shader cache,
+    // named `*.db`, failed the image's copy, so every hold after it went
+    // unanswered)
+    let newest = newest_save(api, &id);
+    s.ok("its sleep's save, its desktop used, is held: the image answered the hold", newest["held"] == true, &newest);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.ok("woken again", r.body["phase"] == "awake", &r);
     let closed = s.eventually(WAKE, || {
