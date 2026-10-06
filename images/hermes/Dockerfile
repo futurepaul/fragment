@@ -2,7 +2,7 @@
 # Our Hermes computer image (docs/computers.md; decisions 15, 18, 21; spike
 # S3b's boot list). Everything Hermes-specific lives here, never in the
 # platform: Hermes v0.21.5's desktop image, the bridge as its Relay
-# connector, hermes-boot around it, Litestream, sandbox-shim, the screen.
+# connector, hermes-boot around it, sandbox-shim, the screen.
 # The image holds no secret.
 #
 # Build from the repo root (it carries the fragment CLI, of the root
@@ -53,8 +53,6 @@ RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
-ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
-RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's), named to Hermes by

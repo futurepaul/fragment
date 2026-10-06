@@ -263,6 +263,9 @@ async fn the_hermes_image() {
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
     assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper-paul/SOUL.md"]), "the agent's repo is in its profile");
+    // the seam (step 2 of docs/durable-computers.md): its work is its own
+    assert!(c.exec(&["test", "-d", "/data/work/juniper-paul/browser-profile"]), "its work directory, with its browser's profile");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile", "Hermes' browser profile is a link into its work");
     assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper-paul/SOUL.md"]));
     // What Hermes writes in its profile is committed back to the agent's
     // fragment, as the agent.
@@ -553,6 +556,8 @@ async fn a_save_taken_while_it_writes_opens() {
         saves.push((held, path));
         fake.until(120_000, "the writing turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     }
+    // the seam: the tool wrote in its agent's work directory, not in Hermes' home
+    assert!(c.exec(&["test", "-f", "/data/work/juniper-paul/tool.db"]), "the tool's database is the agent's work: {}", c.exec_out(&["sh", "-c", "find /data -name tool.db"]));
     let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
     for (held, path) in &saves {
         let t = Instant::now();
