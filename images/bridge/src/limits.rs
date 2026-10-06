@@ -85,6 +85,32 @@ pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// holds the computer awake, so this is also how long one unanswered card
 /// keeps it awake (docs/durable-computers.md, P6 for now).
 pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
+/// The note a turn after a cut one carries (note.rs), at most: its bytes
+/// (its first line says what it is and what to do, so a cut keeps that,
+/// and its parts below fit whole unless they are far from ASCII); what the
+/// cut turn was asked, each step's tool and arguments, each card's text and
+/// each reply it had said, in characters; and the steps, cards and replies
+/// it names (the rest of the steps are counted).
+pub const NOTE_MAX_BYTES: usize = 4096;
+pub const NOTE_ASKED_MAX_CHARS: usize = 300;
+pub const NOTE_TOOL_MAX_CHARS: usize = 40;
+pub const NOTE_ARGS_MAX_CHARS: usize = 80;
+pub const NOTE_CARD_MAX_CHARS: usize = 200;
+pub const NOTE_REPLY_MAX_CHARS: usize = 200;
+pub const NOTE_STEPS_MAX: usize = 8;
+pub const NOTE_CARDS_MAX: usize = 3;
+pub const NOTE_REPLIES_MAX: usize = 2;
+/// The journal a note reads, at most: pages of this many records, back from
+/// the turn's claim on `work` (to the agent's turn before it) and back from
+/// the chat's tail (to that turn's start, for its replies), at most
+/// `NOTE_SCAN_RECORDS_MAX` records each. A turn before it further back than
+/// that is told nothing.
+pub const NOTE_PAGE_RECORDS: u32 = 100;
+pub const NOTE_SCAN_RECORDS_MAX: usize = 1000;
+/// A note's reads are given this long in all: a turn waits for its note
+/// at most this, and past it is handed without one.
+pub const NOTE_READ_MS_MAX: u64 = 5_000;
+
 /// A runtime's own prompt lifetime is honored within these bounds.
 pub const PROMPT_TTL_MS_MIN: u64 = 10 * 1000;
 pub const PROMPT_TTL_MS_MAX: u64 = 24 * 60 * 60 * 1000;
@@ -175,3 +201,5 @@ const _: () = assert!(PROMPT_TTL_MS_MIN <= PROMPT_TTL_MS_DEFAULT && PROMPT_TTL_M
 const _: () = assert!(SHUTDOWN_MS_MAX < 5_000, "the platform kills the guest 5 s after SIGTERM");
 const _: () = assert!(QUEUED_PER_CHAT_MAX < TURNS_OPEN_MAX);
 const _: () = assert!(LIVE_PING_MS > HTTP_TIMEOUT_MS);
+const _: () = assert!(NOTE_MAX_BYTES < MESSAGE_TEXT_MAX_BYTES, "a note is small beside the message it comes with");
+const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);

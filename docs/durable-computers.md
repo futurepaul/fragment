@@ -64,6 +64,22 @@ file is the newer word, and decision 18 points here.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The storage endpoint stays, the
   image's for whatever it keeps outside `/data`.
+- **The model is told what was cut (P5, 2026-10-06).** A turn a restart
+  cut is never redone by the chat's next message (F10, bit on p5: Hermes
+  kept the cut request as its session's last message and joined the next
+  message to it, so its model did the cut request again). Two parts. The
+  first turn an agent runs in a chat after one of its turns there ended as
+  lost carries a note, built from the journal alone (`work` and `chat`):
+  that a restart cut it and to check what was done before doing any of it
+  again, what was asked, the steps and cards it recorded, what it had
+  replied; said once, at most 4 KiB, handed to every runtime
+  (`TurnStart::note`; Relay's read-only `context`, the scripted agent
+  echoes it). And our image's boot closes the cut turn in Hermes' session
+  before the gateway starts, with the row Hermes writes itself when a turn
+  ends without an answer (its failed-turn boundary), through Hermes' own
+  session code, so the next message is a turn of its own. Hermes' own
+  recovery notes stay off. docs/bridge.md, "The turn after a cut one is
+  told"; docs/chat-records.md; docs/computers.md.
 
 ## The open problem
 
@@ -189,9 +205,6 @@ messages in flight.
 
 ## Deferred, with the recommendation
 
-- **P5, tell the model what was cut:** the first turn after a lost one
-  carries a note built from the journal. Recommended next, before P2's
-  later steps; independent of everything above.
 - **P6, approvals outlive a restart:** for now, an open approval card
   holds the keepalive until it is answered or expires (decision 42
   changes; built 2026-10-05, after Paul's missed card on p5:
