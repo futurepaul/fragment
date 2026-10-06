@@ -1,7 +1,7 @@
 [package]
 name = "hermes-boot"
 version = "0.1.0"
-description = "The Hermes image's boot: restore gate, preload, config, profiles from the computer's agents, their repos, Litestream, the bridge"
+description = "The Hermes image's boot: restore gate, preload, config, profiles from the computer's agents, their repos, the bridge, the hold's copies of its databases"
 edition.workspace = true
 license.workspace = true
 

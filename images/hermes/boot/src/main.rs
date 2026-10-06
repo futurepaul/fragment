@@ -6,8 +6,9 @@
 //!                          restore gate, then exec s6's /init with `main`
 //! hermes-boot main         /init's main program: config, profiles from the
 //!                          computer's agents and their repos, the bridge,
-//!                          the gateway, Litestream; then, until SIGTERM, the
-//!                          agents followed as they change (agents.rs)
+//!                          the gateway, its answer to the hold; then, until
+//!                          SIGTERM, the agents followed as they change
+//!                          (agents.rs)
 //! hermes-boot stamped <name> <input> -- <cmd…>
 //!                          a setup step, skipped when this image already ran
 //!                          it on this exact input
@@ -76,9 +77,6 @@ const AGENTS_EVERY_MS: u64 = 3_000;
 /// The gateway's answer to a control verb is waited for this long (its
 /// rescan waits up to 5 s on its own loop before answering `pending`).
 const CONTROL_WAIT_MS: u64 = 8_000;
-/// Litestream is given this long to stop before it is started again.
-const LITESTREAM_STOP_MS: u64 = 2_000;
-const LITESTREAM: &str = "/usr/local/bin/litestream";
 /// Under `RUN`: the bridge's ready file (the agents whose profiles are
 /// written: its `ready.rs`), the screen's socket (a link to the first
 /// agent's display), and that agent's name (what `screen-start` starts).
@@ -160,7 +158,7 @@ fn check_restore() -> ! {
             std::process::exit(1);
         }
     };
-    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING)]).unwrap_or_else(|e| {
+    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK)]).unwrap_or_else(|e| {
         println!("{e}");
         std::process::exit(1)
     });
@@ -312,7 +310,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
 /// databases left hot (named by no pattern the platform takes).
 async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<String>), String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
-    let found = held::databases(data, &[staging]).map_err(|e| e.to_string())?;
+    let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
     held::make_staging(staging, ids).map_err(|e| e.to_string())?;
     let run = tokio::process::Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "copy"]).arg(staging).args(&dbs).kill_on_drop(true).output();
@@ -592,6 +590,37 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
     write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
 }
 
+/// An agent's work directory (`/data/work/<profile>`, the hermes user's:
+/// its terminal's cwd) and its desktop browser's profile in it, linked from
+/// where Hermes keeps one in the profile, so what its tools write is the
+/// work the computer saves on its own (step 2 of docs/durable-computers.md).
+/// A browser profile that is a directory already stays where it is:
+/// nothing is moved.
+fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
+    let work = hermes::work_dir(&a.fragment);
+    let browser = work.join("browser-profile");
+    if let Err(e) = std::fs::create_dir_all(&browser) {
+        ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
+        return;
+    }
+    chown(&work, ids);
+    chown(&browser, ids);
+    let link = profile.join(hermes::BROWSER_PROFILE);
+    if let Some(parent) = link.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        chown(parent, ids);
+    }
+    match std::fs::symlink_metadata(&link) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::os::unix::fs::symlink(&browser, &link) {
+            Ok(()) => chown(&link, ids),
+            Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+        },
+        Ok(m) if m.file_type().is_symlink() => {}
+        Ok(_) => ev!("profile.browser_kept", { "agent": a.fragment, "why": "its browser profile is a directory of the profile's already" }),
+        Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+    }
+}
+
 /// One agent's profile: its directories, its config, its repo pulled. At a
 /// boot for each agent, and while awake for each one assigned since
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
@@ -608,6 +637,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         chown(&dir.join(sub), ids);
     }
     chown(&dir, ids);
+    work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
@@ -649,7 +679,7 @@ async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u3
 /// The bridge, which runs the agents the ready file names (its `ready.rs`)
 /// and shows the screen's socket, whichever agents come and go: nothing
 /// it is started with changes with them.
-fn spawn_bridge() -> Option<Child> {
+fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
     let mut c = Command::new(format!("{OPT}/bin/fragment-bridge"));
     c.arg("run")
         .env("BRIDGE_RUNTIME", "relay")
@@ -660,7 +690,8 @@ fn spawn_bridge() -> Option<Child> {
         // its answer to a hold is this image's to wait for: the platform's
         // `held` comes once Hermes' databases are copied too (held.rs)
         .env("BRIDGE_HELD", held::BRIDGE_HELD)
-        .env("BRIDGE_PROMPT_TTL_MS", (hermes::APPROVAL_TIMEOUT_S * 1000).to_string())
+        // a card lives as long as Hermes waits on its approval
+        .env("BRIDGE_PROMPT_TTL_MS", (approval_timeout_s * 1000).to_string())
         .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
@@ -888,30 +919,6 @@ for p in sys.argv[1:]:
     }
 }
 
-/// Litestream over `dbs` (those that exist: Hermes makes a profile's as
-/// it first runs it), off the wake path.
-fn start_litestream(dbs: &[(String, PathBuf)], storage: &str) -> Option<Child> {
-    if dbs.is_empty() {
-        return None;
-    }
-    let cfg = format!("{RUN}/litestream.yml");
-    std::fs::write(&cfg, hermes::litestream_config(dbs, storage)).ok()?;
-    ev!("litestream.started", { "dbs": dbs.len() });
-    Command::new(LITESTREAM).args(["replicate", "-config", &cfg]).spawn().ok()
-}
-
-/// Stops Litestream (SIGTERM, its last sync), at most `LITESTREAM_STOP_MS`.
-async fn stop_litestream(mut child: Child) {
-    signal(child.id(), libc::SIGTERM);
-    let t = Instant::now();
-    // bounded by LITESTREAM_STOP_MS
-    while matches!(child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_millis(LITESTREAM_STOP_MS) {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 async fn boot_main() {
     let t0 = Instant::now();
     ev!("boot.main");
@@ -940,7 +947,9 @@ async fn boot_main() {
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
-    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
+    // HERMES_BOOT_APPROVAL_TIMEOUT_S: a test's shorter approval (and card)
+    let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
+    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
@@ -958,18 +967,13 @@ async fn boot_main() {
     end_previous_life(&agents, &home);
     point_screen(agents.first(), &home);
     write_ready(&agents);
-    let mut bridge = spawn_bridge();
+    let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     // its answer to the platform's holds, for its whole life
     let quiet = std::sync::Arc::new(Quiet::default());
     tokio::spawn(answer_holds(quiet.clone(), ids));
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });
 
-    // Litestream streams the databases that exist, and starts again when
-    // that set changes (an agent's first turn makes its profile's).
-    let storage = env("FRAGMENT_STORAGE").filter(|_| Path::new(LITESTREAM).exists());
-    let mut litestream: Option<Child> = None;
-    let mut streamed: Option<Vec<(String, PathBuf)>> = None;
     let mut restarts = 0u32;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -999,7 +1003,7 @@ async fn boot_main() {
         }
         if !alive(gateway) {
             ev!("boot.gateway_exited");
-            stop(gateway, bridge.as_mut(), litestream.as_mut()).await;
+            stop(gateway, bridge.as_mut()).await;
             std::process::exit(1);
         }
         if let Some(b) = bridge.as_mut() {
@@ -1007,10 +1011,10 @@ async fn boot_main() {
                 restarts += 1;
                 ev!("boot.bridge_exited", { "status": status.code(), "restarts": restarts });
                 if restarts > BRIDGE_RESTARTS_MAX {
-                    stop(gateway, None, litestream.as_mut()).await;
+                    stop(gateway, None).await;
                     fail("the bridge keeps exiting");
                 }
-                bridge = spawn_bridge();
+                bridge = spawn_bridge(approval_timeout_s);
             }
         }
         // the managed skills again: the first as soon as there is an agent to
@@ -1066,16 +1070,6 @@ async fn boot_main() {
                     Err(_) => {}
                 }
             }
-            if let Some(storage) = storage.as_deref().filter(|_| t0.elapsed() > Duration::from_secs(10)) {
-                let dbs: Vec<(String, PathBuf)> = hermes::litestream_dbs(&agents, &home).into_iter().filter(|(_, p)| p.exists()).collect();
-                if streamed.as_ref() != Some(&dbs) {
-                    if let Some(old) = litestream.take() {
-                        stop_litestream(old).await;
-                    }
-                    litestream = start_litestream(&dbs, storage);
-                    streamed = Some(dbs);
-                }
-            }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
                 for a in &agents {
@@ -1098,22 +1092,21 @@ async fn boot_main() {
         }
     }
     ev!("boot.signal");
-    stop(gateway, bridge.as_mut(), litestream.as_mut()).await;
+    stop(gateway, bridge.as_mut()).await;
     std::process::exit(0);
 }
 
-/// SIGTERM to every child, then wait for them, at most `STOP_MS_MAX`.
-async fn stop(gateway: u32, bridge: Option<&mut Child>, litestream: Option<&mut Child>) {
+/// SIGTERM to the gateway and the bridge, then wait for them, at most
+/// `STOP_MS_MAX`.
+async fn stop(gateway: u32, mut bridge: Option<&mut Child>) {
     let t = Instant::now();
     signal(gateway, libc::SIGTERM);
-    let mut children: Vec<&mut Child> = Vec::new();
-    for c in [bridge, litestream].into_iter().flatten() {
-        signal(c.id(), libc::SIGTERM);
-        children.push(c);
+    if let Some(b) = bridge.as_deref_mut() {
+        signal(b.id(), libc::SIGTERM);
     }
     // bounded by STOP_MS_MAX
     while t.elapsed() < Duration::from_millis(STOP_MS_MAX) {
-        let waiting = alive(gateway) || children.iter_mut().any(|c| matches!(c.try_wait(), Ok(None)));
+        let waiting = alive(gateway) || bridge.as_deref_mut().is_some_and(|b| matches!(b.try_wait(), Ok(None)));
         if !waiting {
             break;
         }

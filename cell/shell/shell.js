@@ -127,6 +127,21 @@ function mark(name, size = "") {
   return stack;
 }
 
+// A list's rows, put in place (`data-key` names each): a row the same as
+// one shown keeps that element (its focus, its card, the scroll around
+// it), a new one goes where it belongs, and one no longer listed goes.
+function patch(box, rows) {
+  const shown = new Map([...box.children].filter((e) => e.dataset.key).map((e) => [e.dataset.key, e]));
+  const next = rows.map((row) => {
+    const was = shown.get(row.dataset.key);
+    return was?.isEqualNode(row) ? was : row;
+  });
+  next.forEach((row, i) => {
+    if (box.children[i] !== row) box.insertBefore(row, box.children[i] ?? null);
+  });
+  while (box.children.length > next.length) box.lastElementChild.remove();
+}
+
 function notice(title, text, ...actions) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
@@ -313,7 +328,7 @@ function renderHeading() {
 }
 function renderChats() {
   const list = shown(chats());
-  $("chats").replaceChildren(...(list.length ? list.map((f) => {
+  patch($("chats"), list.length ? list.map((f) => {
     const who = identity(f.name);
     const row = el("button", `row agent-row${f.name === state.current && !state.page ? " active" : ""}`);
     row.type = "button";
@@ -325,7 +340,7 @@ function renderChats() {
     row.append(mark(f.name), text, ...badges(f));
     row.onclick = () => { openChat(f.name); leaveSidebar(); };
     return row;
-  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : "Your first agent starts here")]));
+  }) : [el("div", "empty-row", chats().length ? "Every chat is archived" : "Your first agent starts here")]);
 }
 $("agent-heading").onclick = () => {
   const name = state.current;
@@ -410,14 +425,16 @@ async function loadCard(name) {
 }
 // every listed app's, again after a deploy may have made one: an app with
 // none yet is asked again, waiting longer each time (2 s to a minute), and
-// the rest when the page comes back after a minute away
+// the rest when the page comes back after a minute away. `only` (a set of
+// names, after a change to the list): those, and the apps still without one.
 const cardsLoad = { wait: 0, timer: null, at: 0 };
-async function loadCards() {
+async function loadCards(only = null) {
   clearTimeout(cardsLoad.timer);
   cardsLoad.at = Date.now();
   const listed = shown(apps()).map((f) => f.name);
   for (const [name, card] of cards) if (!listed.includes(name)) { URL.revokeObjectURL(card.url); cards.delete(name); }
-  const got = await Promise.all(listed.map((name) => loadCard(name).catch(() => "same")));
+  const asked = listed.filter((name) => !only || only.has(name) || !cards.has(name));
+  const got = await Promise.all(asked.map((name) => loadCard(name).catch(() => "same")));
   if (got.includes("new")) renderApps();
   if (got.includes("none") && cardsLoad.wait < 60_000) {
     cardsLoad.wait = Math.min(60_000, cardsLoad.wait ? cardsLoad.wait * 2 : 2_000);
@@ -445,7 +462,7 @@ const hidePeek = () => { peek.hidden = true; };
 function renderApps() {
   hidePeek();
   const list = shown(apps());
-  $("apps").replaceChildren(...(list.length ? list.map((f) => {
+  patch($("apps"), list.length ? list.map((f) => {
     const row = el("button", `row app-row${viewer.keys.includes(`app:${f.name}`) ? " open" : ""}`);
     row.type = "button";
     row.dataset.key = `app:${f.name}`;
@@ -455,7 +472,7 @@ function renderApps() {
     row.onpointerenter = (e) => { if (e.pointerType !== "touch") showPeek(row, f.name); };
     row.onpointerleave = hidePeek;
     return row;
-  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]));
+  }) : [el("div", "empty-row", apps().length ? "Every app is archived" : "No apps yet")]);
 }
 function openApp(name) {
   const f = byName(name);
@@ -1171,11 +1188,15 @@ async function skillsFragment() {
 // (2026-10-03) has none: it is made once, as setup makes it, as the shell
 // loads. Their agents' computers install it at their next skills read (each
 // looks every minute while its owner has none). Silent: a failure is tried
-// again at the next load, and the shell waits on it BACKFILL_WAIT_MS at most.
+// again at the next load, and the shell waits on it BACKFILL_WAIT_MS at most;
+// made later than that, open settings are drawn again to list it.
 const BACKFILL_WAIT_MS = 5_000;
 async function backfillSkills() {
   if (skillsFragmentOf() || !state.fragments.some((f) => f.kind === "agent" && own(f))) return;
-  await Promise.race([skillsFragment().catch(() => {}), new Promise((r) => setTimeout(r, BACKFILL_WAIT_MS))]);
+  const made = skillsFragment().then(() => true, () => false);
+  const inTime = await Promise.race([made, new Promise((r) => setTimeout(() => r(null), BACKFILL_WAIT_MS))]);
+  // made past the wait: the settings that rendered without it list it now
+  if (inTime === null) made.then((ok) => { if (ok && location.pathname === SETTINGS) openSettings(false); });
 }
 function skillNames(list) {
   const value = el("span", "settings-value");
@@ -1385,8 +1406,17 @@ function creatingAgent() {
 }
 
 // ---- the person's things, read again whenever they may have changed ----
-async function load() {
+// After a change their list told this page of (`watchList`: `changed`),
+// only the fragments whose rows it touched (new, or not as they were) have
+// their chat's members and newest message, or their app's card, read again.
+// An older read's answer that comes after a newer one's is not shown.
+const reads = { asked: 0, shown: 0 };
+async function load(changed = false) {
+  const mine = ++reads.asked;
   const [list, computers] = await Promise.all([api("GET", "/api/fragments"), api("GET", "/api/computers").catch(() => ({ computers: [] }))]);
+  if (mine < reads.shown) return;
+  reads.shown = mine;
+  const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   state.fragments = list.fragments ?? [];
   state.computer = computers.computers?.[0] ?? null;
   state.defaultImage = computers.defaultImage ?? null;
@@ -1395,16 +1425,19 @@ async function load() {
   renderApps();
   renderHeading();
   renderUpdate();
-  previews().catch(() => {});
-  chatMembers().catch(() => {});
+  const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
+  previews(touched).catch(() => {});
+  chatMembers(touched).catch(() => {});
   cardsLoad.wait = 0;
-  loadCards().catch(() => {});
+  loadCards(touched).catch(() => {});
 }
+// the chats `only` names (a set), or every one
+const among = (only) => (f) => !only || only.has(f.name);
 // each chat's agents, from its member list (the first added first): a
 // group is a chat with two or more; one that does not answer keeps what
 // was read of it before
-async function chatMembers() {
-  await Promise.all(chats().map(async (f) => {
+async function chatMembers(only = null) {
+  await Promise.all(chats().filter(among(only)).map(async (f) => {
     const listed = await api("GET", `/api/f/${f.name}/members`).catch(() => null);
     if (!listed) return;
     const agents = (listed.members ?? []).filter((m) => m.kind === "agent").map((m) => m.principal);
@@ -1414,8 +1447,8 @@ async function chatMembers() {
   renderHeading();
 }
 // each chat's newest message, for its row
-async function previews() {
-  await Promise.all(chats().map(async (f) => {
+async function previews(only = null) {
+  await Promise.all(chats().filter(among(only)).map(async (f) => {
     const listed = await api("GET", `/api/f/${f.name}/channels`);
     const seq = listed.channels?.find((c) => c.name === "chat")?.seq ?? 0;
     if (!seq) return;
@@ -1425,6 +1458,47 @@ async function previews() {
   }));
   renderChats();
 }
+
+// ---- live: the person's list tells this page when it changes ----
+// An app their agent makes, one someone shares with them, a delete or an
+// archive elsewhere (Paul on p5, 2026-10-05: his agent's app showed only
+// after a reload): their Principal tells this page's socket
+// (`GET /api/fragments/watch`, which names nothing), and a moment after,
+// so a burst is one read, the page reads the list again and patches the
+// sidebar in place. A socket that closes is opened again after a jittered
+// wait (1 s, doubling to 30 s); each opening reads the list again, for
+// what changed while it was shut.
+const LIST_SETTLE_MS = 200;
+const watching = { on: false, socket: null, wait: 1000, timer: null, settle: null };
+function listChanged() {
+  clearTimeout(watching.settle);
+  watching.settle = setTimeout(() => load(true).catch(() => {}), LIST_SETTLE_MS);
+}
+function watchList() {
+  watching.on = true;
+  clearTimeout(watching.timer);
+  if (watching.socket) return;
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/fragments/watch`);
+  watching.socket = ws;
+  ws.onopen = () => {
+    watching.wait = 1000;
+    listChanged();
+  };
+  ws.onmessage = (e) => {
+    try {
+      if (JSON.parse(e.data).type === "changed") listChanged();
+    } catch {}
+  };
+  ws.onclose = () => {
+    watching.socket = null;
+    watching.timer = setTimeout(watchList, watching.wait * (0.5 + Math.random()));
+    watching.wait = Math.min(watching.wait * 2, 30_000);
+  };
+}
+// back on the page, a socket waiting to open again opens now
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && watching.on && !watching.socket) watchList();
+});
 
 async function start(open) {
   let me;
@@ -1437,6 +1511,7 @@ async function start(open) {
   state.me = me;
   if (!me.username) return chooseUsername();
   await load();
+  watchList();
   // the first agent is asked for at home; settings open as asked, chats or not
   const settings = !open && location.pathname === SETTINGS;
   if (!chats().length && !open && !settings) return creatingAgent();

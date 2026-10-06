@@ -2,7 +2,7 @@
 # Our Hermes computer image (docs/computers.md; decisions 15, 18, 21; spike
 # S3b's boot list). Everything Hermes-specific lives here, never in the
 # platform: Hermes v0.21.5's desktop image, the bridge as its Relay
-# connector, hermes-boot around it, Litestream, sandbox-shim, the screen.
+# connector, hermes-boot around it, sandbox-shim, the screen.
 # The image holds no secret.
 #
 # Build from the repo root (it carries the fragment CLI, of the root
@@ -53,8 +53,6 @@ RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
-ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
-RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's), named to Hermes by
@@ -73,6 +71,21 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
+
+# Root for the session (Paul, 2026-10-05: "hermes needs to be able to
+# install binaries (not persisted)"). Hermes stays its unprivileged user, as
+# upstream runs it, and reaches root by passwordless sudo: `sudo apt-get
+# install`, a binary into /usr/local/bin, `sudo npm install -g`. The
+# computer is one person's VM and holds no secret (decisions 13, 43, 44),
+# so root inside it opens nothing of anyone else's. The system's
+# directories stay root's, as on a CI runner. What it installs lasts until
+# the computer's next start from this image (docs/computers.md, "Root in
+# our Hermes image"). apt's lists are kept, fresh as of this build.
+RUN apt-get -o Acquire::Retries=3 update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
+ && printf 'hermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && chmod 0440 /etc/sudoers.d/hermes \
+ && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/
 # The check the platform runs after it restores /data, before the gate
 # (docs/computers.md): the last hold's copies of Hermes' databases put back,
@@ -122,7 +135,18 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /run/computer /var/lib/fragment-run
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
-# restated, without upstream's VOLUME.
+# restated, without upstream's VOLUME. Two differ from upstream's:
+# - Hermes' file tools (write_file, patch) may write its home, its agents'
+#   work directories (/data/work, the terminal's cwd since the seam) and
+#   /tmp (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
+#   to it), the last for the scratch an install is made from. /usr/local is not
+#   theirs to write: they run as Hermes' user, and root is the terminal's,
+#   through sudo.
+# - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
+#   optional backends (providers, platforms, speech; tools/lazy_deps.py),
+#   which a computer configures none of (its model is the platform's route,
+#   its chat the relay). Software the agent wants is its terminal's to
+#   install.
 FROM scratch
 COPY --from=hermes / /
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -133,7 +157,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
-    HERMES_WRITE_SAFE_ROOT=/data/hermes \
+    HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \

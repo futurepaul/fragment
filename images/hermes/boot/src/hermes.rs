@@ -2,7 +2,7 @@
 //! agent assigned while it runs), as pure functions of the computer's
 //! agents: the managed overlay (`/etc/hermes/config.yaml`, merged over every
 //! profile's config), each agent's profile config, the gateway's Relay
-//! environment, and Litestream's configuration; and the wire of the
+//! environment; and the wire of the
 //! gateway's control socket. YAML is written by hand: every string is a
 //! JSON string, which is a YAML double-quoted scalar.
 
@@ -43,6 +43,10 @@ impl Tier {
     }
 }
 
+/// The model route's name for the deployment's vision model
+/// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it.
+pub const VISION_MODEL: &str = "vision";
+
 fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
@@ -51,9 +55,19 @@ fn q(s: &str) -> String {
 /// card and its command expire together.
 pub const APPROVAL_TIMEOUT_S: u64 = fragment_bridge::limits::PROMPT_TTL_MS_DEFAULT / 1000;
 
+/// The approval timeout a boot uses, in seconds: `setting`
+/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`, a test's) within the bounds the
+/// bridge holds a prompt's life to, else `APPROVAL_TIMEOUT_S`. The bridge
+/// is given the same (`BRIDGE_PROMPT_TTL_MS`), so a card and its command
+/// still expire together.
+pub fn approval_timeout_s(setting: Option<&str>) -> u64 {
+    use fragment_bridge::limits::{PROMPT_TTL_MS_MAX, PROMPT_TTL_MS_MIN};
+    setting.and_then(|v| v.trim().parse::<u64>().ok()).map_or(APPROVAL_TIMEOUT_S, |s| s.clamp(PROMPT_TTL_MS_MIN / 1000, PROMPT_TTL_MS_MAX / 1000))
+}
+
 /// The managed overlay: how every profile streams, shows progress, asks for
-/// approvals, and what it never runs.
-pub fn managed_config(disabled_plugins: &[String]) -> String {
+/// approvals (waiting `approval_timeout_s` on each), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -67,13 +81,17 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
     // A reply streams as Relay `draft` frames (the chat's drafts); its final is one send.
     y.push_str("streaming:\n  enabled: true\n  transport: \"draft\"\n");
     // The bridge hands one message of a chat at a time; tool progress is one growing
-    // message, each line a step.
-    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n");
+    // message, each line a step. No interim messages: the model's text beside a tool
+    // call is no message of its own (Hermes' default for a platform it has no tier
+    // for, as `relay`, is to send each as one). Hermes reads `display` for a turn
+    // from the profile's config with this overlay merged over it (its
+    // `_load_gateway_config`, under the profile's scope).
+    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
     // Approvals default to Hermes' `smart` mode (decision 16); a card waits as long as
     // the bridge's prompt does. Slash confirmations stay off: a person's leading `/`
     // never reaches Hermes as a command.
-    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {APPROVAL_TIMEOUT_S}\n  destructive_slash_confirm: false\n"));
+    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
     // The first agent's desktop starts for the screen's first viewer (the
@@ -96,7 +114,8 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
 
 /// An agent's profile config: its model, through the model intercept, as
 /// that agent (`x-fragment-agent` on every call, the main model's and the
-/// auxiliary ones'); and what its terminal is given: who it is
+/// auxiliary ones'), and its vision model (the route's `vision`); and what
+/// its terminal is given: who it is
 /// (`PROFILE_ENV`) and every credential's environment variable the
 /// deployment may give it (`credential_env`, the guest view's: Hermes reads
 /// the list once per gateway, so it names them all, held now or not, and
@@ -123,6 +142,20 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // agent's own wins, and a managed one over the platform's.
     let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
+    // Its eyes: Hermes' auxiliary vision (each computer_use screenshot, and
+    // an image a person attaches, described in words for the main model) on
+    // the route's `vision`, the deployment's vision model, whatever the
+    // agent's tier (the medium tier's GLM-5.3 reads no images). Named
+    // outright, Hermes routes every capture through it (its
+    // `tools/computer_use/vision_routing.py`, step 1) and sends it, as every
+    // call to a custom endpoint, with `model.default_headers`: the agent's
+    // `x-fragment-agent`, so the intercept meters it to the agent's owner.
+    // Always OpenAI's shape, the high tier's agents' too.
+    y.push_str(&format!(
+        "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        q(&format!("{base}/v1")),
+        q(VISION_MODEL)
+    ));
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
     // the screen shows it. Left unset, Hermes picks Browser Use mode (one
@@ -144,8 +177,28 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     y.push_str(&format!("terminal:\n  env_passthrough: [{}]\n", passed.iter().map(|k| q(k)).collect::<Vec<_>>().join(", ")));
     let init = ["~/.profile", "~/.bash_profile", "~/.bashrc"].iter().map(|f| q(f)).chain([q(&credentials_file.display().to_string())]);
     y.push_str(&format!("  shell_init_files: [{}]\n", init.collect::<Vec<_>>().join(", ")));
+    // Its commands run in the agent's work directory, which the computer
+    // saves on its own (the seam: step 2 of docs/durable-computers.md), never
+    // in Hermes' home (left unset, the gateway's own home, /data/hermes)
+    y.push_str(&format!("  cwd: {}\n", q(&work_dir(&agent.fragment).display().to_string())));
     y
 }
+
+/// What the computer keeps as its guest's tools' work, saved as a record
+/// of its own (docs/computers.md, "Data and the restore gate").
+pub const WORK: &str = "/data/work";
+
+/// An agent's work directory: its terminal's cwd, and its browser's
+/// profile (`BROWSER_PROFILE`).
+pub fn work_dir(agent_fragment: &str) -> PathBuf {
+    Path::new(WORK).join(wire::profile(agent_fragment))
+}
+
+/// Where Hermes keeps a profile's desktop browser's profile (its
+/// `tools/bot_desktop/browser.py`: `<profile>/bot-desktop/browser-profile`),
+/// relative to the profile: a link into the agent's work directory, so the
+/// cookies and history its tools make are its work, saved with it.
+pub const BROWSER_PROFILE: &str = "bot-desktop/browser-profile";
 
 /// What a profile's terminal knows of the agent it runs (cli/GUIDE.md, "As
 /// an agent"): the agent fragment its computer signs as, and the person it
@@ -242,27 +295,6 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
 }
 
-/// Litestream for each profile's `state.db`, to the computer's storage
-/// endpoint (disaster recovery only: off the wake path, decision 18). The
-/// keys are placeholders; the intercept scopes the bucket.
-pub fn litestream_config(dbs: &[(String, PathBuf)], storage: &str) -> String {
-    let mut y = String::from("# Written by hermes-boot: each profile's state.db, streamed for disaster recovery.\ndbs:\n");
-    for (name, path) in dbs {
-        y.push_str(&format!("  - path: {}\n    replica:\n      type: s3\n      bucket: computer\n      path: {}\n      endpoint: {}\n      region: auto\n      force-path-style: true\n      access-key-id: fragment\n      secret-access-key: fragment\n      sync-interval: 10s\n", q(&path.display().to_string()), q(&format!("litestream/{name}")), q(storage)));
-    }
-    y
-}
-
-/// The databases Litestream streams: the gateway's own and each agent
-/// profile's `state.db`, as `(replica name, path)`. Hermes makes a
-/// profile's database at its first turn, so the boot streams those that
-/// exist, and starts Litestream again when that set changes.
-pub fn litestream_dbs(agents: &[Agent], home: &Path) -> Vec<(String, PathBuf)> {
-    let mut dbs = vec![("default".to_string(), home.join("state.db"))];
-    dbs.extend(agents.iter().map(|a| (wire::profile(&a.fragment), profile_dir(home, &a.fragment).join("state.db"))));
-    dbs
-}
-
 /// A profile's directory, under the Hermes home.
 pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
@@ -336,7 +368,7 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()]);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
@@ -349,6 +381,17 @@ mod tests {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
+        // `display`'s own lines: the model's text beside a tool call is no
+        // message of its own, for every platform (none names `relay`)
+        let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
+        assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
+        assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
+        // a test's shorter approval, held within the bridge's bounds
+        assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);
+        assert_eq!(approval_timeout_s(Some("20")), 20);
+        assert_eq!(approval_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
+        assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
+        assert!(managed_config(&[], 20).contains("timeout: 20\n"));
         let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
         let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -356,10 +399,18 @@ mod tests {
         assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
+        // its eyes: the route's vision model, OpenAI's shape, whatever its tier
+        let vision = "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), Tier::Cheap, "http://model.fragment.internal", &[], creds))] {
+            assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
+        }
+        assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");
         assert!(p.contains("terminal:\n  env_passthrough: [\"FRAGMENT_AS_AGENT\", \"FRAGMENT_FOR\"]\n"), "its terminal acts as the agent: {p}");
+        assert!(p.contains("\n  cwd: \"/data/work/juniper-paul\"\n"), "its terminal works in its work directory: {p}");
+        assert_eq!(work_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul"));
         assert!(
             p.contains("  shell_init_files: [\"~/.profile\", \"~/.bash_profile\", \"~/.bashrc\", \"/data/hermes/profiles/juniper-paul/credentials.sh\"]\n"),
             "its shell starts as Hermes' does, then reads its credentials: {p}"
@@ -371,8 +422,6 @@ mod tests {
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
-        let l = litestream_config(&[("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))], "http://storage.fragment.internal");
-        assert!(l.contains("path: \"litestream/juniper-paul\"") && l.contains("endpoint: \"http://storage.fragment.internal\""), "{l}");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
     }
 
@@ -445,12 +494,6 @@ mod tests {
     #[should_panic(expected = "a control verb")]
     fn a_verb_out_of_shape_is_a_bug() {
         control_request("rescan profiles\n{");
-    }
-
-    #[test]
-    fn litestream_streams_the_gateways_and_each_profiles_database() {
-        let dbs = litestream_dbs(&[agent()], Path::new("/data/hermes"));
-        assert_eq!(dbs, vec![("default".into(), PathBuf::from("/data/hermes/state.db")), ("juniper-paul".into(), PathBuf::from("/data/hermes/profiles/juniper-paul/state.db"))]);
     }
 
     #[test]

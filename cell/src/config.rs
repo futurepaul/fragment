@@ -133,6 +133,12 @@ pub struct Config {
     /// deployment's computer instance (default the book's own default,
     /// decision 13's 2 vCPU and 6 GiB), its awake time priced by it.
     pub computer_instance: String,
+    /// `FRAGMENT_VISION_MODEL` (the deploy config's `vision_model`): the
+    /// model the route's `vision` runs, for a runtime's calls about an
+    /// image (Hermes' screenshots: docs/computers.md, Models). GLM-5.3
+    /// Flash unless named; one the price book does not price is refused
+    /// (`fragment_core::models::vision_model`), at the deploy and here.
+    pub vision_model: String,
     /// `FRAGMENT_SWAP_UPSTREAM` (the e2e only): a swapped request goes here,
     /// its host in `x-fragment-upstream-host`, instead of to its host.
     pub swap_upstream: Option<String>,
@@ -272,6 +278,8 @@ impl Config {
                 .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
                 .unwrap_or(1),
             computer_instance: var(env, "FRAGMENT_COMPUTER_INSTANCE").unwrap_or_else(|| fragment_core::price::DEFAULT_INSTANCES[0].0.into()),
+            vision_model: fragment_core::models::vision_model(var(env, "FRAGMENT_VISION_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
+                .unwrap_or_else(|e| panic!("FRAGMENT_VISION_MODEL: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
         }
     }
