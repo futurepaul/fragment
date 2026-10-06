@@ -52,6 +52,18 @@ enum Restored {
     Refused,
 }
 
+/// A commit pack's outcome.
+pub enum Packed {
+    /// The new head.
+    Landed(String),
+    /// The branch moved from the head the pack expected (409): read the
+    /// head again and rebuild.
+    Moved,
+    /// The pack would change nothing (412): the branch holds its files
+    /// already, and code.storage makes no empty commit.
+    Unchanged,
+}
+
 pub struct FileHead {
     pub size: u64,
     pub blob_sha: String,
@@ -268,16 +280,15 @@ impl<'a> Cs<'a> {
     }
 
     /// Commits an NDJSON pack (`fragment_core::codestorage::commit_pack`).
-    /// Answers the new head, or `None` when the branch moved from the head
-    /// the pack expected (409: read the head again and rebuild).
-    pub async fn commit(&self, repo: &str, pack: String) -> CellResult<Option<String>> {
+    pub async fn commit(&self, repo: &str, pack: String) -> CellResult<Packed> {
         let path = format!("/api/repos/{}/commit-pack", seg(repo));
         let (status, bytes) = self.call(Method::Post, &path, repo, &["git:write"], Some(("application/x-ndjson", pack))).await?;
         match status {
-            409 => Ok(None),
+            409 => Ok(Packed::Moved),
+            412 if core_cs::nothing_to_commit(&bytes) => Ok(Packed::Unchanged),
             200 | 201 => {
                 let v: Value = serde_json::from_slice(&bytes).map_err(|e| upstream("commit-pack", status, format!("not JSON: {e}").as_bytes()))?;
-                core_cs::committed(&v).map(Some).ok_or_else(|| upstream("commit-pack", status, &bytes))
+                core_cs::committed(&v).map(Packed::Landed).ok_or_else(|| upstream("commit-pack", status, &bytes))
             }
             _ => Err(upstream("commit-pack", status, &bytes)),
         }
