@@ -898,3 +898,28 @@ fragment.club until cutover (decisions 34–35).
   starts a new turn, told what was cut), so the keepalive can be let go
   while a card waits again, proven on the real-Hermes lane by a sleep
   under a card whose answer, after the wake, is acted on once.
+
+## A running browser's databases under Hermes' home are saved hot
+
+- **Observed:** 2026-10-06, the hosted hold (docs/durable-computers.md,
+  "The hold is answered once the desktop has drawn"). A Chromium the
+  agent runs with its default profile keeps it under Hermes' home
+  (`/data/hermes/.config/chromium`), not the work, and holds its SQLite
+  databases there in SQLite's exclusive locking mode while it runs, so no
+  copy of one moment can be had. Our image keeps such a database hot
+  (images/hermes/boot/src/held.rs, `copy_all`; its `held` event's
+  `locked`) and copies and answers the rest, rather than answering
+  nothing and leaving every database hot, as it did before.
+- **Risk:** a save taken while that browser writes one may carry it torn:
+  the browser then opens a damaged cache or history; and a wake that
+  restores the save from its backup (not a snapshot) runs the image's
+  check, which `quick_check`s every SQLite database under `/data` but the
+  work, and would find that save unusable and fall back to the one
+  before.
+- **First proof:** a `held` event whose `locked` names a database Hermes
+  keeps (not a browser's); or a `restore.checked` with code 3 naming a
+  browser's database, or a rollback after one.
+- **Delete when:** every browser the agent runs keeps its profile in its
+  work (`/data/work/<profile>`, as the desktop's browser already does: the
+  seam's rule, docs/computers.md), so nothing under Hermes' home is held
+  locked by one, and `locked` is empty on the real-Hermes lanes.

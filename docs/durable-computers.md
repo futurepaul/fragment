@@ -64,6 +64,21 @@ file is the newer word, and decision 18 points here.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The storage endpoint stays, the
   image's for whatever it keeps outside `/data`.
+- **The hold is answered once the desktop has drawn (2026-10-06).** On
+  the e2e preview every hold after an agent's desktop first drew went
+  unanswered (`held: false` after the 20 s), so those saves carried hot
+  copies of Hermes' databases. The desktop keeps Mesa's shader cache under
+  the profile as `mesa_cache.db`, in Mesa's own format, and our image took
+  every `*.db` for a SQLite database: its copy failed, and a failed copy
+  answers nothing. Once that was fixed, the next hold refused was a
+  running Chromium's: it keeps its own databases (under Hermes' home) in
+  SQLite's exclusive locking mode, so no copy of one could be had. A
+  database is now a `*.db` file that begins with SQLite's header, and one
+  its owner holds locked through the copy is kept hot, as one made after
+  the copy is, while the rest are copied and answered. A guest may say
+  why it has not answered (`/run/computer/unheld`), which the DO logs
+  with the hold: that is how the second cause showed.
+  docs/computers.md, "The hold".
 - **The model is told what was cut (P5, 2026-10-06).** A turn a restart
   cut is never redone by the chat's next message (F10, bit on p5: Hermes
   kept the cut request as its session's last message and joined the next
