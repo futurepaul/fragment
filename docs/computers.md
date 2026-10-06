@@ -269,8 +269,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
     unassigned signs nothing from that moment (the intercept refuses it),
     and its placeholders are refused, whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
-    computer stays awake. Hold it while busy; drop it while waiting on a
-    person (decision 42).
+    computer stays awake. Hold it while busy, and while a turn waits on
+    its card, until the card is answered or expires (decision 42 as
+    amended; docs/bridge.md, "A card keeps its computer awake").
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record; the agent must be a member who may read

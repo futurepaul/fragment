@@ -81,8 +81,9 @@ pub const ATTACHMENTS_MAX: usize = 8;
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
-/// otherwise. An hour: the person may be away from the chat, and the
-/// computer sleeps after 20 idle minutes anyway (decision 42).
+/// otherwise. An hour: the person may be away from the chat. An open card
+/// holds the computer awake, so this is also how long one unanswered card
+/// keeps it awake (docs/durable-computers.md, P6 for now).
 pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// A runtime's own prompt lifetime is honored within these bounds.
 pub const PROMPT_TTL_MS_MIN: u64 = 10 * 1000;
