@@ -138,10 +138,19 @@ impl FragmentCell {
             // arrive before `commit` returns, and the pin move it causes must
             // find the write's depth.
             let held = self.plane.lock().await;
-            let Some(tip) = cs.commit(&repo, pack).await? else { continue };
             let now = SqlStorageValue::Integer(js::now_ms());
-            self.exec("INSERT OR IGNORE INTO file_commits (key, sha, at) VALUES (?, ?, ?)", vec![key.into(), tip.as_str().into(), now.clone()])?;
-            self.exec("INSERT OR IGNORE INTO own_commits (sha, depth, at) VALUES (?, ?, ?)", vec![tip.as_str().into(), SqlStorageValue::Integer(depth.into()), now])?;
+            let tip = match cs.commit(&repo, pack).await? {
+                crate::cs::Packed::Landed(tip) => {
+                    self.exec("INSERT OR IGNORE INTO own_commits (sha, depth, at) VALUES (?, ?, ?)", vec![tip.as_str().into(), SqlStorageValue::Integer(depth.into()), now.clone()])?;
+                    tip
+                }
+                crate::cs::Packed::Moved => continue,
+                // main holds these files already (this key's commit landed
+                // and lost its answer, or the bytes were there): its tip is
+                // the write's commit, and no move of main is this write's
+                crate::cs::Packed::Unchanged => cs.branch_head(&repo, "main").await?.ok_or_else(|| CellError::host("code.storage: nothing to commit to a main that is gone"))?,
+            };
+            self.exec("INSERT OR IGNORE INTO file_commits (key, sha, at) VALUES (?, ?, ?)", vec![key.into(), tip.as_str().into(), now])?;
             drop(held);
             // The pin follows now (the webhook and the poll would, later).
             if let Err(e) = self.interpret(&["main"]).await {

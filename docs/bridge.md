@@ -227,6 +227,17 @@ get_chat_info`.
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.
+- One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
+  segment at every tool boundary with a `send` answering the message, so
+  the model's text beside a tool call ("Let me check that.") arrives as
+  a reply, whatever its `display.interim_assistant_messages` (off in our
+  image: docs/hermes-relay.md, "Hermes' settings"). The step that follows
+  takes it back (`Retract`) as its words, the step's `text`; when the
+  step reaches the bridge first, the `send` ending drafts that began
+  before it is its words, never a reply. A turn that ends idle having
+  said nothing since says the last words a step took as its reply:
+  Hermes' answer written beside a housekeeping call (`memory`), which it
+  sends once.
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
   Expiry needs no word: Hermes' `approvals.timeout` is the card's life

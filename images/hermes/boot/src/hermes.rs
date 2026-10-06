@@ -81,8 +81,12 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> S
     // A reply streams as Relay `draft` frames (the chat's drafts); its final is one send.
     y.push_str("streaming:\n  enabled: true\n  transport: \"draft\"\n");
     // The bridge hands one message of a chat at a time; tool progress is one growing
-    // message, each line a step.
-    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n");
+    // message, each line a step. No interim messages: the model's text beside a tool
+    // call is no message of its own (Hermes' default for a platform it has no tier
+    // for, as `relay`, is to send each as one). Hermes reads `display` for a turn
+    // from the profile's config with this overlay merged over it (its
+    // `_load_gateway_config`, under the profile's scope).
+    y.push_str("display:\n  busy_input_mode: \"queue\"\n  tool_progress: \"all\"\n  tool_progress_grouping: \"accumulate\"\n  long_running_notifications: false\n  interim_assistant_messages: false\n");
     y.push_str("platforms:\n  relay:\n    gateway_restart_notification: false\n");
     // Approvals default to Hermes' `smart` mode (decision 16); a card waits as long as
     // the bridge's prompt does. Slash confirmations stay off: a person's leading `/`
@@ -410,6 +414,11 @@ mod tests {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
+        // `display`'s own lines: the model's text beside a tool call is no
+        // message of its own, for every platform (none names `relay`)
+        let display: Vec<&str> = m.lines().skip_while(|l| *l != "display:").skip(1).take_while(|l| l.starts_with("  ")).collect();
+        assert!(display.contains(&"  interim_assistant_messages: false"), "no interim messages, under display: {m}");
+        assert!(!m.contains("\n  platforms:"), "no platform's display setting overrides it: {m}");
         // a test's shorter approval, held within the bridge's bounds
         assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);
         assert_eq!(approval_timeout_s(Some("20")), 20);

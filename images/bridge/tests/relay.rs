@@ -80,6 +80,43 @@ async fn a_reply_with_steps_and_drafts() {
     bridge.stop().await;
 }
 
+/// Goal: the model's text beside a tool call (Paul on p5, 2026-10-05: one
+/// message got two replies) is the step's words, never a reply of its
+/// own: Hermes' stream consumer ends the draft segment at the tool
+/// boundary with a send answering the turn, whatever its interim
+/// setting, and the turn's one reply is its answer, whether the tool's
+/// progress reaches the bridge after that send or before it. An answer
+/// said only beside a housekeeping call (Hermes sends nothing after it) is
+/// still the turn's reply. Method: the scripted gateway's three orders.
+#[tokio::test]
+async fn text_beside_a_tool_call_is_the_steps_words() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-narrate", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let of = |w: &World, kind: &str, turn: &str| -> Vec<Value> { w.bodies(&chat, if kind == "reply" { "chat" } else { "work" }, kind).into_iter().filter(|b| b["turn"] == turn).collect() };
+    // (what was said, the step's words): late, the step came before them
+    let only = "echo: [paul] narrate only please";
+    for (text, words) in [("narrate please", Some(support::hermes::NARRATION)), ("narrate late please", None), ("narrate only please", Some(only))] {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(WAIT, "the turn's end", |w| !of(w, "turn.end", &turn).is_empty()).await;
+        fake.with(|w| {
+            assert_eq!(of(w, "reply", &turn), vec![json!({ "text": format!("echo: [paul] {text}"), "turn": turn })], "{text}: one reply, its answer");
+            let steps = of(w, "turn.step", &turn);
+            assert_eq!(steps.len(), 1, "{text}: {steps:?}");
+            assert_eq!(steps[0]["text"].as_str(), words, "{text}: the words before the call are the step's, when it comes after them: {steps:?}");
+            assert_eq!(of(w, "turn.end", &turn)[0]["outcome"], "idle");
+        });
+    }
+    // the chat's draft of the taken words was put away with them
+    fake.with(|w| {
+        let last = w.drafts.iter().rev().find(|d| d.3.as_deref() == Some(support::hermes::NARRATION)).map(|d| d.2.clone());
+        let turn = last.expect("the words were drafted");
+        assert_eq!(w.drafts.iter().rev().find(|d| d.2 == turn).and_then(|d| d.3.clone()), None, "{:?}", w.drafts);
+    });
+    bridge.stop().await;
+}
+
 /// Goal: an approval is Hermes' `prompt` op as a card; the owner's answer
 /// goes back as a structured `prompt_response` mid-turn, and the turn
 /// finishes with it.
