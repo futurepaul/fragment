@@ -349,7 +349,12 @@ class ContainerHost {
   // and before anything is awaited: a message that arrives with no
   // listener is gone, and a container's socket may speak first (an RFB
   // server's version, the screen's control socket's holder), whose first
-  // word the report's await used to lose.
+  // word the report's await used to lose. A message that arrives once the
+  // bridge is closed is dropped, not sent: an end we closed still delivers
+  // until its peer answers the close, and `send()` throws on an end closed
+  // for sending. Only `close` closes one (workerd's own answer to a peer's
+  // close comes in the step that dispatches the close event `close`
+  // hears), so `closed` covers every such send.
   async port(port, request) {
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
@@ -366,8 +371,12 @@ class ContainerHost {
       }
       this.#report("computer/tab", { open: false });
     };
-    upstream.addEventListener("message", (e) => server.send(e.data));
-    server.addEventListener("message", (e) => upstream.send(e.data));
+    upstream.addEventListener("message", (e) => {
+      if (!closed) server.send(e.data);
+    });
+    server.addEventListener("message", (e) => {
+      if (!closed) upstream.send(e.data);
+    });
     for (const ws of [upstream, server]) {
       ws.addEventListener("close", (e) => close(e.code, e.reason));
       ws.addEventListener("error", () => close(1011, "the other end failed"));
