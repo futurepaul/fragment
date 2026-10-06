@@ -22,6 +22,11 @@ use serde_json::json;
 use support::fake::{person, Fake};
 use support::model::Model;
 
+/// An install for the session, offline (as the e2e's hermes lane has it):
+/// a package Hermes builds and installs through apt as root, and a program
+/// it puts in /usr/local/bin as root; then both run, on one line.
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo "$(fragment-hello) $(fragment-hi)""#;
+
 fn docker() -> String {
     std::env::var("DOCKER").unwrap_or_else(|_| if std::path::Path::new("/usr/local/bin/docker").exists() { "/usr/local/bin/docker".into() } else { "docker".into() })
 }
@@ -420,6 +425,30 @@ async fn the_hermes_image() {
         let cli: Vec<_> = w.requests[requests_before..].iter().filter(|r| r.0 == "GET /api/fragments").collect();
         assert!(cli.iter().any(|r| r.2.as_deref() == Some("juniper.paul") && r.1 == "for=id%3Apaul" && !r.3), "as juniper, for paul, unsigned: {cli:?}");
     });
+
+    // Root for the session (docs/computers.md, "Root in our Hermes image"):
+    // its terminal installs, offline, a package it builds through apt and a
+    // program into /usr/local/bin, both with passwordless sudo, and runs
+    // them.
+    let install = fake.say(&chat, &person("paul"), json!({ "text": format!("run: {INSTALL}") }));
+    let ti = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", install["seq"].as_u64().unwrap());
+    fake.until(120_000, "the install's answer", |w| answered(w, &ti).is_some()).await;
+    fake.with(|w| {
+        let reply = answered(w, &ti).unwrap();
+        assert!(reply["text"].as_str().unwrap_or("").contains("hello-from-apt hello-from-usr-local"), "installed as root, and run: {reply}");
+    });
+    assert!(c.exec(&["dpkg", "-s", "fragment-hello"]), "installed as a package, through apt");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /usr/local/bin/fragment-hi"]), "the system's directories stay root's: an install goes through sudo");
+    // Hermes' file tools (write_file, patch) may write where its terminal
+    // works, its home and /tmp, and nowhere else (HERMES_WRITE_SAFE_ROOT),
+    // as Hermes' own check decides
+    let denied = |path: &str| {
+        let check = format!("from agent.file_safety import is_write_denied; import sys; sys.exit(1 if is_write_denied({path:?}) else 0)");
+        !c.exec(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", &check])
+    };
+    assert!(!denied("/data/work/juniper-paul/notes.txt"), "its file tools write its work directory");
+    assert!(!denied("/data/hermes/profiles/juniper-paul/notes.txt") && !denied("/tmp/notes.txt"), "and its home and /tmp");
+    assert!(denied("/usr/local/bin/notes"), "and not the system's directories");
 
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());
