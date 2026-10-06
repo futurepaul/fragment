@@ -67,6 +67,10 @@ const ORG: &str = "fragment-e2e";
 pub const POLL_S: u32 = 2;
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
+/// How long a deleted fragment's cleanup may take (`Suite::ended_cleaned`):
+/// at `MEMBERS_MAX` members, its alarm tells the lists a batch a pass (a
+/// few seconds here; on a preview, each list a Principal made on the spot).
+const ENDED_CLEANUP_IN: Duration = Duration::from_secs(120);
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
@@ -659,6 +663,27 @@ impl Suite {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+
+    /// Waits until the object behind the fragment name `name` has no
+    /// ended life left to clean up (the `ended` lever; cell ended.rs: a
+    /// delete answers first, and its alarm tells the members' lists and
+    /// deletes the app's database and the blobs after): whether it got
+    /// there, and what the lever last answered.
+    #[track_caller]
+    pub fn ended_cleaned(&self, api: &Api, name: &str) -> (bool, String) {
+        let mut last = String::new();
+        let cleaned = self.eventually(ENDED_CLEANUP_IN, || match api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" }))) {
+            Ok(r) => {
+                last = r.to_string();
+                r.status == 200 && r.body["ended"].as_array().is_some_and(Vec::is_empty)
+            }
+            Err(e) => {
+                last = format!("{e:#}");
+                false
+            }
+        });
+        (cleaned, last)
     }
 
     /// Runs the CLI with its own HOME against the node.

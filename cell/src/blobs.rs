@@ -257,20 +257,22 @@ impl FragmentCell {
         Ok(stale.len())
     }
 
-    /// A deleted fragment's blobs go with it.
-    pub(crate) async fn delete_blobs(&self) -> CellResult<()> {
-        let prefix = format!("{}/", self.must(MetaKey::Npub)?);
-        let mut cursor: Option<String> = None;
-        loop {
-            let (keys, next) = js::blob_list(self.env.as_ref(), &prefix, cursor.as_deref()).await?;
+    /// A deleted fragment's blobs go after it (ended.rs): those under
+    /// `prefix` (its key's), at most `pages` pages of them a call. Whether
+    /// none is left.
+    pub(crate) async fn delete_blobs_under(&self, prefix: &str, pages: usize) -> CellResult<bool> {
+        assert!(prefix.ends_with('/') && pages > 0, "a life's blobs, a bounded number of pages");
+        for _ in 0..pages {
+            // each page listed is deleted, so the next list starts afresh
+            let (keys, next) = js::blob_list(self.env.as_ref(), prefix, None).await?;
             if !keys.is_empty() {
                 js::blob_delete(self.env.as_ref(), &keys).await?;
             }
-            match next {
-                Some(c) => cursor = Some(c),
-                None => return Ok(()),
+            if next.is_none() {
+                return Ok(true);
             }
         }
+        Ok(false)
     }
 
     /// Serves a file at a pin that is a pointer: its bytes, typed by the path.

@@ -205,7 +205,11 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   identities, so replacing a key rewrites no grant. Each identity's list
   of fragments is an index in its own `Principal` cell, fed from the
   fragment's outbox (phase 2 slice B; keyed by identity since phase 4
-  slice A).
+  slice A). A request sends at most one round of the outbox (32 lists at
+  once, its own change first) and the alarm the rest, so no request waits
+  on a list per member. A delete ends the life at once and leaves its
+  members' lists, the app's database and the blobs to the alarm
+  (cell `ended.rs`).
 - Visibility: `public`, `link` (a token that is a capability), or
   `members`. **A public fragment is a website anyone can use, writes
   included** (a public chat, a guestbook): an operation may declare

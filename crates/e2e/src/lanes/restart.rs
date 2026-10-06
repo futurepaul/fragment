@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use fragment_fakes::http::{Handler, Response, Server};
 use fragment_nip98::Keys;
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
 use super::app::ship;
@@ -183,6 +184,17 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     // (miniflare's engine: no alarm behind it), so one sleeping through a
     // crash of `wrangler dev` never wakes; Cloudflare's do.
     s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+    // a delete whose cleanup the crash cuts short (cell ended.rs): the
+    // fragment's alarm finishes it after
+    let ended = s.named(&api, &owner, "restart-ended")?;
+    s.create(&api, &owner, &ended)?;
+    api.signed(&owner, "PUT", &format!("/api/f/{ended}/members/{}", member.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "members", "fill": limits::MEMBERS_MAX })))?;
+    anyhow::ensure!(r.status == 200, "members setup: {r}");
+    let r = api.signed(&owner, "DELETE", &format!("/api/f/{ended}"), None)?;
+    anyhow::ensure!(r.status == 200, "delete setup: {r}");
+    let left = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "ended" })))?;
+    let lists_left = left.body["ended"][0]["lists"].as_i64().unwrap_or(0);
     s.crash()?;
     let api = s.start(false, true)?;
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
@@ -196,6 +208,10 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
     s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
+    let (cleaned, last) = s.ended_cleaned(&api, &ended);
+    s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
+    let r = api.signed(&member, "GET", "/api/fragments", None)?;
+    s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
     Ok(())
 }
 
