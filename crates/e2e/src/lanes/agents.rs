@@ -488,7 +488,9 @@ fn reply_operation(s: &mut Suite, api: &Api, owner: &Keys, name: &str, agent_npu
     let asked = s.ai.chats().len();
     let r = said("hello, agent", "m1")?;
     anyhow::ensure!(r.status == 200, "the stranger says hello: {r}");
-    let landed = s.eventually(wait, || answers(answer) == 1);
+    // the `say`'s `ops` record lands after the answer's (`mark_applied`
+    // follows its deliveries' await): wait for both
+    let landed = s.eventually(wait, || answers(answer) == 1 && !calls().is_empty());
     let ids = calls();
     s.ok(
         "its answer is said through the listen's operation: one `say`, as the agent, under the answer's id, its record on the chat",
