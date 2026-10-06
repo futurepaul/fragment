@@ -821,7 +821,7 @@ fragment.club until cutover (decisions 34–35).
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
 
-## An open card keeps its computer awake, and any other restart under it still cuts its turn
+## An open card keeps its computer awake, and any other restart under it still loses its card
 
 - **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
   his agent stopped answering: the idle sleep under the card cut its
@@ -829,18 +829,20 @@ fragment.club until cutover (decisions 34–35).
   asking its approval again. The bridge now holds the keepalive while a
   turn waits on its card (images/bridge/src/engine.rs, `finish`;
   docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
-  Paul agreed (docs/durable-computers.md).
+  Paul agreed (docs/durable-computers.md). The fold itself is closed by
+  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
+  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
+  in images/bridge/tests/docker.rs).
 - **Risk:** an unanswered card costs its life awake (an hour by default;
   a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
   other reason while a card is open (an owner's sleep, a crash, a deploy,
-  an image pinned) still cuts the turn, and Hermes still meets the next
-  message with the cut request (F9 and F10 of
+  an image pinned) still cuts the turn and closes its card `expired`
+  before its `expiresAt`: the owner's answer has no turn to go to (F9 of
   docs/explorations/pi-durable.md).
-- **First proof:** a chat where an agent's reply after a computer's wake
-  asks again what a turn before the wake asked; or a computer's awake
-  time dominated by turns waiting on cards.
-- **Delete when:** P5 and P6 land: a cut turn no longer leaves its
-  request for Hermes to fold the next message into (the next turn is told
-  what was cut), and a card outlives its turn, so the keepalive can be
-  let go while a card waits again, proven on the real-Hermes lane by a
-  sleep under a card whose next message is answered.
+- **First proof:** a computer's awake time dominated by turns waiting on
+  cards; or an owner who answers a card after a restart and sees nothing
+  happen.
+- **Delete when:** P6 lands: a card outlives its turn (a late answer
+  starts a new turn, told what was cut), so the keepalive can be let go
+  while a card waits again, proven on the real-Hermes lane by a sleep
+  under a card whose answer, after the wake, is acted on once.
