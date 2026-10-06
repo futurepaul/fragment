@@ -1641,18 +1641,22 @@ These are listed as found. Each names where it bites and what to do.
     to its branch after the merge), and master's 0cbe9ea moved only the
     screen's stop, to `h120`. The install is now `h130` and `h131`, and a
     refused post says so at once: master PR #170.
-33. **macrofiche commits a pack that changes nothing** (master's #163,
+33. **macrofiche committed a pack that changes nothing** (master's #163,
     first run against macrofiche, 2026-10-06). code.storage refuses one
     (412, `precondition_failed`, "no changes to commit"; the fake does
     since #163), and the cell now answers main's tip for it. macrofiche
-    makes an empty commit instead, so the templates section's "a write of
+    made an empty commit instead, so the templates section's "a write of
     what main holds commits nothing" and the "main moves" check after it
-    fail there (40 passed, 2 failed); the cell works either way, an empty
+    failed there (40 passed, 2 failed); the cell works either way, an empty
     commit the only cost. The section also pulled the fake's latency lever
     on any local run, which panics on an external store: it asks
     `store_levers` first now.
-    - **macrofiche:** refuse a pack whose tree is its parent's as
-      code.storage does, and add it to the codestore section's probe.
+    - **macrofiche** (macrofiche#1): a pack whose tree is its parent's
+      (on a branch it would make, empty), and a squash that adds nothing,
+      are refused with code.storage's 412 and its body exactly, after the
+      compare-and-swap. codestore and templates on celld against it: 64
+      passed, 0 failed (templates 42 and 0).
+    - **Open:** add it to the codestore section's probe.
 
 ## The spike, on this box
 
