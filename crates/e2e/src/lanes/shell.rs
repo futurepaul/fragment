@@ -746,18 +746,24 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
 
     // the agent makes an app for its owner, writes its page, and deploys it
     let as_agent = |method: &str, path: &str, body: Value| api.signed(&agent, method, &format!("{path}?for={me}"), Some(&body));
+    // the first tab is the one the person looks at
+    b.front(page)?;
     let made = as_agent("POST", "/api/fragments", json!({ "name": "meals", "template": "blank" }))?;
     let t0 = std::time::Instant::now();
     let name = made.body["name"].as_str().unwrap_or("").to_string();
-    let shown = both(b, &row(&name));
-    let took = t0.elapsed();
+    let first = b.until(page, &row(&name), SIDEBAR_LIVE_WAIT);
+    let first_ms = t0.elapsed().as_millis() as u64;
+    let other_tab = b.until(&second, &row(&name), SIDEBAR_LIVE_WAIT);
+    let second_ms = t0.elapsed().as_millis() as u64;
+    let shown = first && other_tab;
+    println!("      (the agent's app showed in the open tab in {first_ms} ms, in the second by {second_ms} ms)");
     let page_html = "<!doctype html><title>Meals</title><h1>Meals</h1><p>What we ate today.</p>";
     let wrote = as_agent("POST", &format!("/api/f/{name}/files"), json!({ "message": "the page", "files": [{ "path": "site/index.html", "text": page_html }] }))?;
     let deployed = as_agent("POST", &format!("/api/f/{name}/deploy"), json!({}))?;
     s.ok(
         "an app the person's agent makes for them shows in the open shell's sidebar within a few seconds, with no reload, and in a second tab",
         ready && made.status == 200 && shown,
-        json!({ "made": made.status, "inMs": took.as_millis() as u64, "first": b.eval(page, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")?, "second": b.eval(&second, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")? }),
+        json!({ "made": made.status, "firstInMs": first_ms, "secondInMs": second_ms, "first": b.eval(page, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")?, "second": b.eval(&second, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")? }),
     );
     let carded = b.until(page, &format!("{}?.querySelector('.app-card.shot img')?.src.startsWith('blob:')", row(&name)), super::site::CARD_WAIT);
     s.ok("its row shows its preview card once the platform shoots its deploy", wrote.status == 200 && deployed.status == 200 && carded, json!([wrote.status, deployed.status]));
