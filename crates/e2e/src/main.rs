@@ -237,6 +237,21 @@ pub struct Suite {
     agents_project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
+    /// Whether the containers the run's nodes left are removed
+    /// (`remove_containers`): at its end, or as it drops.
+    containers_removed: bool,
+}
+
+impl Drop for Suite {
+    /// A run that ends early (an error out of `local`, a panic) leaves
+    /// none of its containers either: its node is killed first (its own
+    /// drop), so it makes none after they are removed.
+    fn drop(&mut self) {
+        drop(self.node.take());
+        if let Err(e) = self.remove_containers() {
+            println!("      could not remove this run's containers: {e:#}");
+        }
+    }
 }
 
 impl Suite {
@@ -547,6 +562,17 @@ impl Suite {
         self.node.take().expect("a running node").crash()
     }
 
+    /// Removes the containers the run's nodes left (devstack::containers),
+    /// once, its node stopped: none on a hosted run, which starts no node.
+    fn remove_containers(&mut self) -> Result<Option<devstack::containers::Removed>> {
+        if self.tools.is_none() || self.containers_removed {
+            return Ok(None);
+        }
+        assert!(self.node.is_none(), "the run's node is stopped before its containers go");
+        self.containers_removed = true;
+        devstack::containers::remove(&self.project).map(Some)
+    }
+
     /// Registers the fragment's push webhook with the fake (the dashboard
     /// registration the real service has), so git moves reach the cell.
     /// Hosted, nothing: the run's commits and deploys go through the API
@@ -799,6 +825,18 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
     let project = devstack::stage_project(&scratch.join("cell"))?;
+    // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
+    // of its own, which the terminal's signal does not reach, so the run
+    // kills it, then removes the containers it left
+    let leftovers = project.clone();
+    devstack::signals::on_termination(move |signal| {
+        println!("\nsignal {signal}: the run stops its node and removes its containers");
+        devstack::kill_nodes();
+        match devstack::containers::remove(&leftovers) {
+            Ok(r) => println!("      (removed {} containers of this run)", r.containers),
+            Err(e) => println!("      could not remove this run's containers: {e:#}"),
+        }
+    })?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
@@ -855,6 +893,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         project,
         agents_project,
         shape: Shape::Plain,
+        containers_removed: false,
     };
     if let Some(shard) = s.shard {
         println!("shard {shard}: {}", lanes::SHARDS[shard.k as usize - 1].join(", "));
@@ -897,6 +936,14 @@ fn finish(s: &mut Suite) -> Result<()> {
             s.fail("the node stops at the end of the run", format!("{e:#}"));
         }
         println!("      (the node stopped in {:.1?})", t0.elapsed());
+    }
+    // its computers' containers and their sidecars, whatever left them
+    // (wrangler's teardown removes the containers alone; a crash, neither)
+    let t0 = Instant::now();
+    match s.remove_containers() {
+        Ok(Some(r)) => println!("      (removed {} containers of this run in {:.1?})", r.containers, t0.elapsed()),
+        Ok(None) => {}
+        Err(e) => s.fail("the run removes the containers its nodes left", format!("{e:#}")),
     }
     let t0 = Instant::now();
     s.chrome.close();
