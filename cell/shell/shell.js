@@ -1188,11 +1188,15 @@ async function skillsFragment() {
 // (2026-10-03) has none: it is made once, as setup makes it, as the shell
 // loads. Their agents' computers install it at their next skills read (each
 // looks every minute while its owner has none). Silent: a failure is tried
-// again at the next load, and the shell waits on it BACKFILL_WAIT_MS at most.
+// again at the next load, and the shell waits on it BACKFILL_WAIT_MS at most;
+// made later than that, open settings are drawn again to list it.
 const BACKFILL_WAIT_MS = 5_000;
 async function backfillSkills() {
   if (skillsFragmentOf() || !state.fragments.some((f) => f.kind === "agent" && own(f))) return;
-  await Promise.race([skillsFragment().catch(() => {}), new Promise((r) => setTimeout(r, BACKFILL_WAIT_MS))]);
+  const made = skillsFragment().then(() => true, () => false);
+  const inTime = await Promise.race([made, new Promise((r) => setTimeout(() => r(null), BACKFILL_WAIT_MS))]);
+  // made past the wait: the settings that rendered without it list it now
+  if (inTime === null) made.then((ok) => { if (ok && location.pathname === SETTINGS) openSettings(false); });
 }
 function skillNames(list) {
   const value = el("span", "settings-value");

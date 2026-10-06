@@ -826,7 +826,10 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
-    let manifest = shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[])?;
+    // listed as it is made; its template's first commit lands a moment later
+    let manifest_of = || shell(api, session, "GET", &format!("/api/f/{name}/manifest"), None, &[]);
+    s.eventually(wait, || manifest_of().is_ok_and(|m| m.body["template"] == "skills"));
+    let manifest = manifest_of()?;
     let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
     s.ok(
         "the shell, loaded, makes them one from the blessed template, silently, and their settings list it",
