@@ -35,7 +35,7 @@ fn engine(agents: &[Agent]) -> Engine {
 fn answered(e: &mut Engine, mut s: Step, now: u64) -> Step {
     let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
     for turn in claims {
-        let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours }, now);
+        let more = e.step(Input::Claimed { turn, answer: ClaimAnswer::Ours { seq: None } }, now);
         s.dirty |= more.dirty;
         s.effects.extend(more.effects);
     }
@@ -660,11 +660,12 @@ enum Answer {
     Conflict,
 }
 
-/// The platform's channels: each one's records in order, and posts by id.
+/// The platform's channels: each one's records in order, and posts by id
+/// (with the seq of the record each one made).
 #[derive(Debug, Default)]
 struct Journal {
     records: BTreeMap<(String, String), Vec<Record>>,
-    ids: HashMap<(String, String), (String, Value)>,
+    ids: HashMap<(String, String), (String, Value, u64)>,
 }
 
 impl Journal {
@@ -678,14 +679,31 @@ impl Journal {
     fn post(&mut self, fragment: &str, channel: &str, principal: &str, id: &str, body: &Value) -> Answer {
         let key = (fragment.to_string(), id.to_string());
         match self.ids.get(&key) {
-            Some((c, b)) if c == channel && b == body => Answer::Replayed,
+            Some((c, b, _)) if c == channel && b == body => Answer::Replayed,
             Some(_) => Answer::Conflict,
             None => {
-                self.append(fragment, channel, principal, body.clone());
-                self.ids.insert(key, (channel.to_string(), body.clone()));
+                let seq = self.append(fragment, channel, principal, body.clone());
+                self.ids.insert(key, (channel.to_string(), body.clone(), seq));
                 Answer::Appended
             }
         }
+    }
+
+    /// The seq of the record a post made (the platform's answer names it).
+    fn seq_of(&self, fragment: &str, id: &str) -> Option<u64> {
+        self.ids.get(&(fragment.to_string(), id.to_string())).map(|(_, _, seq)| *seq)
+    }
+
+    /// The note a turn claimed at `claim` (a seq on `work`) carries, read
+    /// from the journal as the driver reads it (driver.rs, `note_for`): the
+    /// cut turn it tells of, and its text.
+    fn note(&self, agent: &str, claim: Option<u64>) -> Option<(String, String)> {
+        let work = self.channel(CHAT, records::WORK);
+        let before = &work[..usize::try_from(claim? - 1).expect("a seq")];
+        let crate::note::Before::Cut(cut) = crate::note::previous(before, agent, true) else { return None };
+        let chat = self.channel(CHAT, records::CHAT);
+        let asked = chat.iter().find(|r| r.seq == cut.cause.seq).and_then(crate::note::asked);
+        Some((cut.turn.clone(), crate::note::text(&cut, asked.as_deref(), &crate::note::replies(chat, agent, &cut.turn))))
     }
 
     fn channel(&self, fragment: &str, channel: &str) -> &[Record] {
@@ -735,6 +753,10 @@ struct World {
     runs: Vec<(u64, String)>,
     /// At each run, the turn's `turn.start` on `work` as it stood then.
     claims_at_run: Vec<(u64, String, Option<Value>)>,
+    /// At each run, the note it was handed (P5), as the driver reads it from
+    /// the journal before the claim the engine names: the cut turn it tells
+    /// of, and its text.
+    notes: Vec<(String, Option<(String, String)>)>,
     held: BTreeMap<String, Held>,
     /// Each message told to a turn as its answer, in order.
     tells: Vec<Told>,
@@ -759,6 +781,7 @@ impl World {
             lane: VecDeque::new(),
             runs: Vec::new(),
             claims_at_run: Vec::new(),
+            notes: Vec::new(),
             held: BTreeMap::new(),
             tells: Vec::new(),
             conflicts_on_chat: Vec::new(),
@@ -860,6 +883,8 @@ impl World {
                     let claim = self.journal.work(&ts.turn, "turn.start").into_iter().next();
                     self.runs.push((self.lives, ts.turn.clone()));
                     self.claims_at_run.push((self.lives, ts.turn.clone(), claim));
+                    assert!(ts.note.is_none(), "the engine names the claim; the driver reads the note");
+                    self.notes.push((ts.turn.clone(), self.journal.note(&ts.agent.identity, ts.claim_seq)));
                     self.held.insert(ts.turn.clone(), Held::default());
                 }
                 Effect::Runtime(Command::Stop { turn }) => {
@@ -934,8 +959,12 @@ impl World {
     /// The lane's next post, answered; false when it holds none.
     fn answer_one(&mut self) -> bool {
         let Some(e) = self.lane.pop_front() else { return false };
+        let seq = match &e {
+            Effect::Claim { fragment, id, .. } => Some((fragment.clone(), id.clone())),
+            _ => None,
+        };
         let answer = match self.land(&e) {
-            Answer::Appended | Answer::Replayed => ClaimAnswer::Ours,
+            Answer::Appended | Answer::Replayed => ClaimAnswer::Ours { seq: seq.and_then(|(f, id)| self.journal.seq_of(&f, &id)) },
             Answer::Conflict => ClaimAnswer::Theirs,
         };
         self.tell(&e, answer);
@@ -1062,6 +1091,18 @@ impl World {
         self.journal.work(turn, "turn.end")
     }
 
+    /// The note `turn` was handed at its run (it ran once).
+    fn note_of(&self, turn: &str) -> Option<String> {
+        let at: Vec<&Option<(String, String)>> = self.notes.iter().filter(|(t, _)| t == turn).map(|(_, n)| n).collect();
+        assert_eq!(at.len(), 1, "{turn} ran once");
+        at[0].as_ref().map(|(_, text)| text.clone())
+    }
+
+    /// A step of a turn the runtime holds, as the runtime reports it.
+    fn did(&mut self, turn: &str, tool: &str, args: &str) {
+        self.step(Input::Runtime(Event::Step { turn: turn.into(), step: ToolStep { tool: tool.into(), args: args.into(), ok: true, excerpt: String::new(), text: String::new() } }));
+    }
+
     /// The turns whose `turn.start` the lane holds, in order.
     fn pending_starts(&self) -> Vec<String> {
         self.lane
@@ -1129,6 +1170,18 @@ impl World {
             let own = self.turn_of(t.seq);
             if self.runs.contains(&(t.life, own.clone())) {
                 return Err(format!("Tell: life {} told message {} to {} and ran it as {own} too", t.life, t.seq, t.turn));
+            }
+        }
+        // P5: a cut turn is told of once at most, by a turn after it, and only
+        // a turn the journal ended as lost is told of
+        let mut told_of: BTreeSet<&str> = BTreeSet::new();
+        for (turn, note) in &self.notes {
+            let Some((cut, _)) = note else { continue };
+            if cut == turn || !told_of.insert(cut.as_str()) {
+                return Err(format!("P5: {turn} was told of {cut}, already told or itself: {:?}", self.notes.iter().filter(|(_, n)| n.is_some()).collect::<Vec<_>>()));
+            }
+            if !self.ends(cut).iter().any(|e| e["error"] == crate::engine::LOST) {
+                return Err(format!("P5: {turn} was told of {cut}, which did not end as lost: {:?}", self.ends(cut)));
             }
         }
         Ok(())
@@ -1459,6 +1512,71 @@ impl Rng {
         assert!(n > 0, "a choice among some");
         self.next() % n
     }
+}
+
+/// Goal (P5): the first turn the agent runs in the chat after one of its
+/// turns there ended as lost carries a note, built from the journal alone:
+/// what the cut turn was asked, the steps it recorded, what it had replied,
+/// and that a restart cut it. The turn after carries none (said once), also
+/// after a rollback that reads the noted turn's message again; and the note
+/// is the same whatever state the next life wakes with: the one the crash
+/// left (the cut turn running), one from before the cut turn was said, or
+/// none.
+#[test]
+fn the_turn_after_a_lost_one_carries_the_note_once() {
+    let mut notes: Vec<String> = Vec::new();
+    for wake in ["latest", "before", "none"] {
+        let mut w = World::new(&["juniper"]);
+        w.start(None);
+        let one = w.say("id:paul", "one");
+        w.answer_all();
+        w.end(&one, Outcome::Idle);
+        w.answer_all();
+        let before = w.latest();
+        let cut = w.say("id:paul", "do the risky thing");
+        w.answer_all();
+        assert_eq!(w.note_of(&cut), None, "{wake}: the turn before it was answered");
+        w.did(&cut, "terminal", "ls /tmp");
+        w.step(Input::Runtime(Event::Reply { turn: cut.clone(), part: 1, text: "Checking first.".into() }));
+        w.did(&cut, "terminal", "rm -rf /tmp/x");
+        w.answer_all();
+        let state = match wake {
+            "latest" => w.latest(),
+            "before" => before,
+            _ => None,
+        };
+        w.crash(false);
+        w.start(state);
+        w.answer_all();
+        assert_eq!(w.ends(&cut).len(), 1, "{wake}: the cut turn ended once");
+        assert_eq!(w.ends(&cut)[0]["error"], LOST, "{wake}");
+        let kept = w.latest();
+        let next = w.say("id:paul", "good morning");
+        w.answer_all();
+        let note = w.note_of(&next).unwrap_or_else(|| panic!("{wake}: the turn after the lost one carries its note"));
+        for said in ["cut short", "computer restarted", "Check what it already did", "“do the risky thing”", "terminal ls /tmp (ok); terminal rm -rf /tmp/x (ok)", "It had replied: “Checking first.”"] {
+            assert!(note.contains(said), "{wake}: {said:?} in {note}");
+        }
+        w.end(&next, Outcome::Idle);
+        w.answer_all();
+        let after = w.say("id:paul", "and after that");
+        w.answer_all();
+        assert_eq!(w.note_of(&after), None, "{wake}: said once");
+        w.end(&after, Outcome::Idle);
+        w.answer_all();
+        // a rollback to before the noted turn's message: read again, it is
+        // another life's claim and runs nothing; the next turn is told nothing
+        w.crash(false);
+        w.start(kept);
+        w.answer_all();
+        let last = w.say("id:paul", "once more");
+        w.answer_all();
+        assert_eq!(w.runs_of(&next), 1, "{wake}: the noted turn ran once");
+        assert_eq!(w.note_of(&last), None, "{wake}: said once, after a rollback too");
+        w.check().unwrap();
+        notes.push(note);
+    }
+    assert!(notes.windows(2).all(|p| p[0] == p[1]), "the journal's note, whatever state woke: {notes:#?}");
 }
 
 /// Seeds the simulation runs, events in each, and messages said in each.

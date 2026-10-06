@@ -67,6 +67,10 @@ const ORG: &str = "fragment-e2e";
 pub const POLL_S: u32 = 2;
 /// Blobs no branch names are kept this long here (7 days in production).
 pub const BLOB_GRACE_S: u32 = 4;
+/// How long a deleted fragment's cleanup may take (`Suite::ended_cleaned`):
+/// at `MEMBERS_MAX` members, its alarm tells the lists a batch a pass (a
+/// few seconds here; on a preview, each list a Principal made on the spot).
+const ENDED_CLEANUP_IN: Duration = Duration::from_secs(120);
 /// The pending sign-ins this fleet keeps: small, so the signin lane fills
 /// the table and proves the oldest goes first in a few hundred requests.
 pub const SIGNINS_PENDING_MAX: u64 = 200;
@@ -285,9 +289,10 @@ impl Suite {
         self.asked.push(name.to_string());
         if self.selected(name) {
             // what it needs first: by name it would be skipped all the same
-            let why = match needs::unmet(needs, self.rung) {
-                Some((need, missing)) => format!("{missing} ({})", need.name()),
-                None => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
+            let why = match (needs::unmet(needs, self.rung), &self.preview) {
+                (Some((need, missing)), _) => format!("{missing} ({})", need.name()),
+                (None, Some(preview)) => format!("{why}: run it by name, cargo xtask e2e --hosted --config <deploy config> --branch {} --only {name}", preview.branch),
+                (None, None) => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
             };
             match &mut self.plan {
                 Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip: Some(why) }),
@@ -660,6 +665,27 @@ impl Suite {
         }
     }
 
+    /// Waits until the object behind the fragment name `name` has no
+    /// ended life left to clean up (the `ended` lever; cell ended.rs: a
+    /// delete answers first, and its alarm tells the members' lists and
+    /// deletes the app's database and the blobs after): whether it got
+    /// there, and what the lever last answered.
+    #[track_caller]
+    pub fn ended_cleaned(&self, api: &Api, name: &str) -> (bool, String) {
+        let mut last = String::new();
+        let cleaned = self.eventually(ENDED_CLEANUP_IN, || match api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "ended" }))) {
+            Ok(r) => {
+                last = r.to_string();
+                r.status == 200 && r.body["ended"].as_array().is_some_and(Vec::is_empty)
+            }
+            Err(e) => {
+                last = format!("{e:#}");
+                false
+            }
+        });
+        (cleaned, last)
+    }
+
     /// Runs the CLI with its own HOME against the node.
     pub fn cli(&self, api: &Api, home: &Path, args: &[&str]) -> Output {
         self.cli_command(api, home, args).output().expect("run the fragment CLI")
@@ -846,7 +872,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let (rung, shared) = match rehearse {
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some() };
+            // its computers answer through the scripted model: no real agent
+            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };

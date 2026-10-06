@@ -440,7 +440,7 @@ impl Loop {
                 // fails the command closed.
                 let (Some(option), Some(f)) = (option, self.inflight.get(&turn)) else { return };
                 let message_id = format!("{turn}-a{seq}");
-                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[] };
+                let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: &by, user_name: "owner", text: "", media: &[], context: None };
                 let buffer = format!("a-{turn}-{seq}");
                 let frame = wire::prompt_answer(&m, &buffer, &prompt, &option);
                 let _ = self.send(frame.clone());
@@ -457,7 +457,7 @@ impl Loop {
         let Some(f) = self.inflight.get_mut(turn) else { return };
         f.asking = false;
         let message_id = format!("{turn}-t{seq}");
-        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[] };
+        let m = wire::Inbound { chat: &f.chat, chat_name: &f.start.chat_name, profile: &f.profile, message_id: &message_id, user_id: by, user_name: by_name, text, media: &[], context: None };
         let buffer = format!("t-{turn}-{seq}");
         let frame = wire::inbound(&m, &buffer);
         crate::ev!("relay.told", { "turn": turn, "seq": seq });
@@ -492,7 +492,11 @@ impl Loop {
                 hosted.push((url, f.media_type.clone()));
             }
         }
-        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted };
+        // a turn after a cut one is told so, as read-only context beside
+        // the message (TurnStart::note); Hermes' own session was closed at
+        // boot (hermes-boot, `close_cut_turns`), so the message is a turn of
+        // its own, never folded into the cut one's
+        let m = wire::Inbound { chat: &chat, chat_name: &ts.chat_name, profile: &profile, message_id: &ts.turn, user_id: &ts.asker, user_name: &ts.asker_name, text: &ts.text, media: &hosted, context: ts.note.as_deref() };
         let frame = wire::inbound(&m, &ts.turn);
         self.next_order += 1;
         let turn = ts.turn.clone();

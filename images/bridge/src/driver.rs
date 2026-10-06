@@ -13,8 +13,9 @@
 //!   id; a claim is sent only while the computer is not held
 //!   (`/run/computer/hold`, a sleep's mark before its save), and its answer
 //!   goes back to the engine;
-//! - the runtime's commands (a turn's attachments downloaded first) and
-//!   events;
+//! - the runtime's commands (a turn's attachments downloaded first, and its
+//!   note read from its chat's journal: what a restart cut of the agent's
+//!   turn before it, note.rs) and events;
 //! - the keepalive socket, held while the engine says so (decision 39).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -34,9 +35,10 @@ use crate::api::{self, Api, ApiError};
 use crate::engine::{self, ChatView, ClaimAnswer, Effect, Engine, Input, Settings, State};
 use crate::limits;
 use crate::net::Backoff;
+use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
-use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo};
+use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo, TurnStart};
 
 /// What the bridge is given.
 #[derive(Debug, Clone)]
@@ -243,6 +245,12 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     if !restore_gate(&cfg, stop.clone()).await {
         return Ok(());
     }
+    // its state's directory at once, and so `/data`, which on a first start
+    // the image makes (docs/computers.md, "Data and the restore gate"): a
+    // computer that has run no turn yet still has a `/data` to save, so its
+    // sleep saves rather than failing (and keeping it awake). Past the gate,
+    // never before: a restore swaps `/data` into place.
+    std::fs::create_dir_all(&cfg.state_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.state_dir.display())))?;
     let api = Api::new(&cfg.api).map_err(BridgeError::Runtime)?;
     std::fs::create_dir_all(&cfg.media_dir).map_err(|e| BridgeError::Disk(format!("{}: {e}", cfg.media_dir.display())))?;
     // its answer to the platform's holds, for its whole life (none claims yet)
@@ -935,9 +943,9 @@ async fn claim(api: &Api, fragment: &str, agent: &str, id: &str, body: &Value, c
             api.post(agent, fragment, records::WORK, id, body).await
         };
         match answered {
-            Ok(replayed) => {
-                crate::ev!("claimed", { "fragment": fragment, "id": id, "replayed": replayed, "attempt": attempt });
-                return ClaimAnswer::Ours;
+            Ok(posted) => {
+                crate::ev!("claimed", { "fragment": fragment, "id": id, "replayed": posted.replayed, "seq": posted.seq, "attempt": attempt });
+                return ClaimAnswer::Ours { seq: posted.seq };
             }
             Err(e) if e.status() == Some(409) => {
                 crate::ev!("claim.taken", { "fragment": fragment, "id": id, "why": "another life's claim holds the id" });
@@ -986,8 +994,8 @@ async fn post(api: &Api, fragment: &str, agent: &str, channel: &str, id: &str, m
             Err(e) => Err(e),
         };
         match result {
-            Ok(replayed) => {
-                crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": replayed, "attempt": attempt });
+            Ok(posted) => {
+                crate::ev!("posted", { "fragment": fragment, "channel": channel, "id": id, "replayed": posted.replayed, "attempt": attempt });
                 return true;
             }
             Err(e) if e.retryable() && attempt < limits::POST_TRIES_MAX => {
@@ -1039,8 +1047,9 @@ async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> 
 
 // ---- the runtime's commands ----
 
-/// Commands to the runtime in order; a turn's attachments are downloaded
-/// before it is handed (so a Stop never overtakes its Start).
+/// Commands to the runtime in order; a turn's attachments are downloaded,
+/// and its note read from its chat's journal, before it is handed (so a Stop
+/// never overtakes its Start).
 struct RuntimeLane {
     tx: mpsc::UnboundedSender<Command>,
 }
@@ -1052,7 +1061,16 @@ impl RuntimeLane {
             // bounded by the engine: ends when it drops its sender
             while let Some(mut c) = rx.recv().await {
                 if let Command::Start(ts) = &mut c {
-                    ts.files = download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir).await;
+                    let note = async {
+                        let read = tokio::time::timeout(Duration::from_millis(limits::NOTE_READ_MS_MAX), note_for(&api, ts)).await;
+                        read.unwrap_or_else(|_| {
+                            crate::ev!("note.unread", { "turn": ts.turn, "why": "the journal answered too slowly" });
+                            None
+                        })
+                    };
+                    let (files, note) = tokio::join!(download(&api, &ts.agent.fragment, &ts.fragment, &ts.attachments, &media_dir), note);
+                    ts.files = files;
+                    ts.note = note;
                 }
                 if to_runtime.send(c).await.is_err() {
                     return;
@@ -1095,6 +1113,73 @@ async fn download(api: &Api, agent: &str, fragment: &str, refs: &[AttachmentRef]
         out.push(LocalFile { path, media_type: r.media_type.clone(), name: r.name.clone(), size: r.size });
     }
     out
+}
+
+// ---- the note a turn after a cut one carries (note.rs) ----
+
+/// Records of `fragment`'s `channel` with a seq below `before`, oldest
+/// first: read back a page (`NOTE_PAGE_RECORDS`) at a time until `enough`
+/// says the records read answer, the channel's first record is read, or
+/// `NOTE_SCAN_RECORDS_MAX` are. With whether they reach back to its start.
+async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before: u64, enough: impl Fn(&[Record]) -> bool) -> Result<(Vec<Record>, bool), ApiError> {
+    let mut got: Vec<Record> = Vec::new();
+    // the newest seq not read yet
+    let mut upto = before.saturating_sub(1);
+    // bounded by NOTE_SCAN_RECORDS_MAX: each pass reads a page further back
+    loop {
+        if upto == 0 {
+            return Ok((got, true));
+        }
+        if enough(&got) || got.len() >= limits::NOTE_SCAN_RECORDS_MAX {
+            return Ok((got, false));
+        }
+        let after = upto.saturating_sub(u64::from(limits::NOTE_PAGE_RECORDS));
+        let page = api.records(agent, fragment, channel, after, limits::NOTE_PAGE_RECORDS).await?;
+        let mut older: Vec<Record> = page.records.into_iter().filter(|r| r.seq > after && r.seq <= upto).collect();
+        older.append(&mut got);
+        got = older;
+        upto = after;
+    }
+}
+
+/// The note a turn carries (note.rs), from its chat's journal alone: `work`
+/// back from the turn's claim to the agent's turn before it there; when a
+/// restart cut that turn, the record it answered and what it had replied
+/// (`chat` back from its tail to that turn's cause, or its start). `None`
+/// when nothing was cut, or the journal did not answer: a turn is never held
+/// back for its note.
+async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "error": e.to_string() });
+    let (work, from_start) = read_back(api, agent, chat, records::WORK, claim, |rs| note::previous(rs, me, false) != note::Before::Unread).await.map_err(unread).ok()?;
+    let cut = match note::previous(&work, me, from_start) {
+        note::Before::Cut(c) => c,
+        note::Before::Kept => return None,
+        note::Before::Unread => {
+            crate::ev!("note.unread", { "turn": ts.turn, "why": "the agent's turn before is further back than a note reads", "read": work.len() });
+            return None;
+        }
+    };
+    // the cut turn's replies, from the chat's tail back to its cause (or,
+    // for a routine, to its start: a reply comes after its turn's claim);
+    // what it asked and said are the note's detail, so one that does not
+    // read leaves the note without it
+    let in_chat = cut.cause.fragment == chat && cut.cause.channel == records::CHAT;
+    let reached = |r: &Record| r.at < cut.started_at || (in_chat && r.seq <= cut.cause.seq);
+    let said = async {
+        let tail = api.channels(agent, chat).await?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq);
+        read_back(api, agent, chat, records::CHAT, tail + 1, |rs| rs.first().is_some_and(reached)).await
+    };
+    let said: Vec<Record> = said.await.map_err(unread).map(|(rs, _)| rs).unwrap_or_default();
+    let mut cause = said.iter().find(|r| in_chat && r.seq == cut.cause.seq).cloned();
+    if cause.is_none() {
+        cause = api.records(agent, &cut.cause.fragment, &cut.cause.channel, cut.cause.seq.saturating_sub(1), 1).await.map_err(unread).ok().and_then(|p| p.records.into_iter().find(|r| r.seq == cut.cause.seq));
+    }
+    let asked = cause.as_ref().and_then(note::asked);
+    let text = note::text(&cut, asked.as_deref(), &note::replies(&said, me, &cut.turn));
+    crate::ev!("note", { "turn": ts.turn, "cut": cut.turn, "steps": cut.steps_total, "bytes": text.len() });
+    Some(text)
 }
 
 // ---- the hold ----

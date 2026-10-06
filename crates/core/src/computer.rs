@@ -56,6 +56,24 @@ pub fn default_computer_of(owner: &str) -> String {
     format!("computer:{}", &hex::encode(digest)[..24])
 }
 
+/// The computers a socket of `by` on a fragment pre-wakes (decision 39):
+/// each one the fragment's wake subscriptions (`(principal, computer)`)
+/// name, but none that `by`'s own name. A computer's agents never pre-wake
+/// their own computer, as what they post never wakes it: its guest opens
+/// their sockets as it boots and again after one drops, also while it goes
+/// to sleep, and a wake then would start it again from that sleep's save.
+/// Each once, in the order first named.
+pub fn prewoken<'a>(subs: &[(&'a str, &'a str)], by: &str) -> Vec<&'a str> {
+    let own: Vec<&str> = subs.iter().filter(|(principal, _)| *principal == by).map(|(_, computer)| *computer).collect();
+    let mut out: Vec<&str> = Vec::with_capacity(subs.len());
+    for (_, computer) in subs {
+        if !own.contains(computer) && !out.contains(computer) {
+            out.push(computer);
+        }
+    }
+    out
+}
+
 /// With nothing open, how long a record or a closed socket holds a
 /// computer awake (decision 39).
 pub const IDLE_MS: i64 = 20 * 60_000;
@@ -977,6 +995,24 @@ pub fn left_out(answer: &str) -> Result<Vec<String>, String> {
     Ok(patterns)
 }
 
+/// What the DO keeps of a guest's word on a hold it has not answered.
+pub const UNHELD_MAX_BYTES: usize = 1024;
+
+/// What a guest says of a hold it has not answered (`/run/computer/unheld`,
+/// docs/computers.md, "The hold"), as the Computer DO logs it once the
+/// hold's wait runs out: its text, trimmed, its control characters but
+/// newlines as spaces, at most `UNHELD_MAX_BYTES` (cut at a character);
+/// `None` for none. Only a log line: nothing is decided by it.
+pub fn unheld(text: &str) -> Option<String> {
+    let clean: String = text.trim().chars().map(|c| if c.is_control() && c != '\n' { ' ' } else { c }).collect();
+    let mut end = clean.len().min(UNHELD_MAX_BYTES);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = clean[..end].trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
+}
+
 /// A save of `/data`, as the Computer DO keeps it: the `DirectoryBackup`
 /// records it was taken as (the authority on what a wake restores, handed
 /// back to restore and to delete them), and what the platform knows of it.
@@ -1269,6 +1305,21 @@ mod tests {
         assert_eq!(a, default_computer_of("id:aaaa"));
         assert_ne!(a, default_computer_of("id:aaab"));
         assert!(a.starts_with("computer:") && a.len() == "computer:".len() + 24 && a[9..].bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    /// Goal: a person's page pre-wakes every computer that follows the
+    /// fragment, each once; a computer's own agent's socket (its guest
+    /// following the fragment, as it boots or after a drop, also while it
+    /// goes to sleep) pre-wakes none of its own, only other computers'.
+    #[test]
+    fn a_page_prewakes_the_computers_but_an_agent_never_its_own() {
+        let subs = [("id:juniper", "computer:a"), ("id:juniper", "computer:a"), ("id:maple", "computer:a"), ("id:oak", "computer:b")];
+        assert_eq!(prewoken(&subs, "id:paul"), ["computer:a", "computer:b"], "a person's page");
+        assert_eq!(prewoken(&subs, "anon:3f"), ["computer:a", "computer:b"], "a visitor's page");
+        assert_eq!(prewoken(&subs, "id:juniper"), ["computer:b"], "an agent of computer a");
+        assert_eq!(prewoken(&subs, "id:maple"), ["computer:b"], "another agent of the same computer");
+        assert_eq!(prewoken(&subs, "id:oak"), ["computer:a"], "an agent of computer b");
+        assert!(prewoken(&[], "id:paul").is_empty(), "no computer follows it");
     }
 
     fn started(l: &mut Lifecycle, at: i64) -> u64 {
@@ -2192,6 +2243,20 @@ mod tests {
         for bad in ["!keep.db", "a b", "$(rm -rf /)", "*.db;rm", "é", too_long.as_str(), too_many.as_str(), too_big.as_str()] {
             assert!(left_out(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A guest's word on a hold it has not answered, as logged: none for
+    /// nothing said, its text trimmed, its control characters spaces, and
+    /// never past its bound, cut at a character.
+    #[test]
+    fn a_guest_says_why_it_has_not_answered_within_a_bound() {
+        assert_eq!(unheld(""), None);
+        assert_eq!(unheld(" \n\t"), None);
+        assert_eq!(unheld("copy refused: copying /data/a.db: file is not a database\n"), Some("copy refused: copying /data/a.db: file is not a database".into()));
+        assert_eq!(unheld("a\u{1b}[31mb\nc"), Some("a [31mb\nc".into()));
+        let long = format!("{}é{}", "x".repeat(UNHELD_MAX_BYTES - 1), "y".repeat(100));
+        let cut = unheld(&long).unwrap();
+        assert!(cut.len() <= UNHELD_MAX_BYTES && cut.chars().all(|c| c == 'x'), "{} bytes", cut.len());
     }
 
     #[test]

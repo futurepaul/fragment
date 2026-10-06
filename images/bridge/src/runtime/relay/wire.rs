@@ -312,6 +312,15 @@ pub struct Inbound<'a> {
     pub text: &'a str,
     /// Re-hosted attachments: `(url, media type)`.
     pub media: &'a [(String, String)],
+    /// What the turn is told before its message, read-only: the platform's
+    /// note after a cut turn (crate::note). Carried as the inbound's
+    /// `context` (the contract's channel context, "reference only: it never
+    /// triggers the agent"), which Hermes renders before the message as
+    /// `[Recent channel messages]\n…\n\n[New message]\n[name] text`
+    /// (`gateway/relay/ws_transport.py`, `_render_relay_context`;
+    /// `gateway/run_inbound.py`, `_prefix_inbound_sender_context`): never
+    /// the person's words, so never attributed to them.
+    pub context: Option<&'a str>,
 }
 
 /// A delivery, buffered until the gateway acks it: a group message, so
@@ -351,6 +360,10 @@ fn event(m: &Inbound, buffer_id: &str, text: &str, prompt_response: Option<Value
     if !m.media.is_empty() {
         event["media_urls"] = json!(m.media.iter().map(|(u, _)| u).collect::<Vec<_>>());
         event["media"] = json!(m.media.iter().map(|(u, t)| json!({ "url": u, "mime": t })).collect::<Vec<_>>());
+    }
+    // one item with no source: Hermes renders it as the text alone
+    if let Some(note) = m.context.filter(|n| !n.trim().is_empty()) {
+        event["context"] = json!([{ "text": note }]);
     }
     if let Some(pr) = prompt_response {
         event["prompt_response"] = pr;
@@ -517,7 +530,7 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk.paul/juniper.paul", chat_name: "talk", profile: "juniper-paul", message_id: "12", user_id: "id:bob", user_name: "bob", text: "/new please", media: &media };
+        let m = Inbound { chat: "talk.paul/juniper.paul", chat_name: "talk", profile: "juniper-paul", message_id: "12", user_id: "id:bob", user_name: "bob", text: "/new please", media: &media, context: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");
@@ -525,6 +538,10 @@ mod tests {
         assert_eq!(i["event"]["source"]["chat_type"], "group");
         assert_eq!(i["event"]["text"], "\u{200b}/new please", "a leading slash is kept from reading as a command");
         assert_eq!(i["event"]["media"][0]["mime"], "image/png");
+        assert!(i["event"].get("context").is_none(), "no note, no context");
+        // a note is the inbound's read-only context, never its text
+        let noted: Value = serde_json::from_str(inbound(&Inbound { text: "good morning", context: Some("Your previous turn…"), ..m.clone() }, "b5").trim_end()).unwrap();
+        assert_eq!((noted["event"]["text"].clone(), noted["event"]["context"].clone()), (json!("good morning"), json!([{ "text": "Your previous turn…" }])));
         let a: Value = serde_json::from_str(prompt_answer(&Inbound { media: &[], ..m.clone() }, "a1", "ab.12", "once").trim_end()).unwrap();
         assert_eq!(a["event"]["prompt_response"], json!({ "prompt_id": "ab.12", "option_id": "once" }));
         assert_eq!(a["event"]["text"], "/once");

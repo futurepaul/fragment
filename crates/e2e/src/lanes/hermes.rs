@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use sha2::{Digest, Sha256};
 
-use super::computers::{agent_replies, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
+use super::computers::{agent_replies, newest_save, phase, routine_app, told, turn_of, work_of, AGENT_JSON, CHAT_JSON, QUEUE_DRAIN, ROUTINE_JSON};
 use super::jobs::records;
 use crate::api::{Api, Call, Socket};
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS};
@@ -478,6 +478,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // terminal, acting for its owner
     let run = |s: &Suite, n: u32, cmd: &str| -> Result<Option<String>> {
         let r = say(n, &format!("run: {cmd}"))?;
+        // a post the chat refused (its id another check's, say) runs
+        // nothing: said at once, not after a whole turn's wait
+        if r.status != 200 {
+            return Ok(Some(format!("the post h{n} was refused: {r}")));
+        }
         let turn = turn_for(&r);
         s.eventually(TURN, || ended(&turn).is_some());
         Ok(reply_of(&turn))
@@ -578,8 +583,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
     // in our Hermes image"): Hermes' user runs anything as root with sudo,
     // here offline (a package it builds, through apt; a program into
-    // /usr/local/bin)
-    let installed = run(s, 90, INSTALL)?;
+    // /usr/local/bin). Its ids are past the managed skills' asks (h80 to
+    // h99), which a fresh image's slower install reaches, and the screen's
+    // stop (h120).
+    let installed = run(s, 130, INSTALL)?;
     s.ok(
         "Hermes installs software as root with passwordless sudo, a package through apt and a program into /usr/local/bin, and runs both",
         said(&installed, "hello-from-apt hello-from-usr-local"),
@@ -592,6 +599,12 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.eventually(TURN, || work_of(&records(api, &owner, &chat_name, "work"), &lost).iter().any(|r| r["body"]["kind"] == "turn.prompt"));
     std::thread::sleep(QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    // its desktop has drawn (its screen, above), and the hold is answered
+    // still (the hosted hold, 2026-10-06: the desktop's Mesa shader cache,
+    // named `*.db`, failed the image's copy, so every hold after it went
+    // unanswered)
+    let newest = newest_save(api, &id);
+    s.ok("its sleep's save, its desktop used, is held: the image answered the hold", newest["held"] == true, &newest);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.ok("woken again", r.body["phase"] == "awake", &r);
     let closed = s.eventually(WAKE, || {
@@ -615,7 +628,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // what it wrote in its home came back with /data; the install may or
     // may not have (docs/computers.md, "Root in our Hermes image")
-    let after = run(s, 91, HOME_AFTER)?;
+    let after = run(s, 131, HOME_AFTER)?;
     s.ok(
         "after the sleep and the wake, what it wrote in its home beside the install is kept",
         said(&after, "kept-in-its-home"),

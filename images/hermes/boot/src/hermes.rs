@@ -350,13 +350,82 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // HERMES_AUTO_CONTINUE_FRESHNESS: one second, so no message after a
     // restart is wrapped in Hermes' recovery notes (the boot's clean-exit
     // receipt already discards the turns a restart cut short, which the
-    // bridge ends: docs/chat-records.md).
+    // bridge ends: docs/chat-records.md; the boot closes them in their
+    // sessions, CLOSE_CUT_TURNS, and the bridge tells the next turn what was
+    // cut instead, from the journal).
     format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
 }
 
 /// A profile's directory, under the Hermes home.
 pub fn profile_dir(home: &Path, agent_fragment: &str) -> PathBuf {
     home.join("profiles").join(wire::profile(agent_fragment))
+}
+
+/// Closes each turn a restart cut, in Hermes' own sessions, before the
+/// gateway starts (docs/durable-computers.md, P5), run by Hermes' Python as
+/// the hermes user with each `state.db` to look in as its arguments.
+///
+/// Why: Hermes persists a turn's message as the turn starts and the rest as
+/// it goes, so a turn the container's end cut leaves its session's tail open
+/// (its message, or its tool calls, with no answer). v0.21.5 then joins the
+/// next message to the open request (two user messages in a row are one:
+/// `agent/agent_runtime_helpers.py`, `_merge_consecutive_users`; and
+/// `get_messages_as_conversation(repair_alternation=True)` as the gateway
+/// loads a transcript), and its model redoes the cut request (F10: seen on
+/// the real image, `[paul] do the risky thing\n\n[paul] good morning`). The
+/// bridge has already ended that turn as lost (P1), and tells the next turn
+/// what was cut, from the journal.
+///
+/// How, through Hermes' own code and nothing else: the row Hermes itself
+/// writes when a turn ends without an answer, its failed-turn boundary
+/// (`agent/turn_failure_copy.py`: an assistant row, `display_kind`
+/// `failed_turn`, its copy chosen by `failed_turn_notice` from the turn's
+/// rows: "Some actions may already have run" when a tool call is among
+/// them). Hermes writes it for a turn that fails in its process
+/// (`agent/conversation_loop.py`, `_close_durable_failed_turn`;
+/// `gateway/run_turn.py`, `_hmwa_close_failed_turn`, keyed on the durable
+/// tail); a process that was killed never does, and neither its clean-exit
+/// path (it only discards turn markers) nor its unclean one (it resumes the
+/// turn under its old message id, the auto-continue kept off above) closes
+/// it. No Relay frame does either: an inbound's fields (text, media,
+/// context, reply, prompt response) never change how the session's tail is
+/// read. So the boot writes the same row for the turns a restart cut:
+/// every gateway session of the relay platform (`SessionDB.
+/// list_gateway_sessions`, the newest session per chat) whose last message
+/// is a user row, a tool result or a tool call, appended with
+/// `SessionDB.append_message`. At boot every such tail is a cut turn: the
+/// gateway that ran it is gone, and the bridge ended it. Idempotent: a
+/// closed tail is an assistant row. Prints `{"sessions": n, "closed": n}`.
+pub const CLOSE_CUT_TURNS: &str = r#"import json, sys
+from pathlib import Path
+from hermes_state import SessionDB
+from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, failed_turn_notice
+sessions = closed = 0
+for p in sys.argv[1:]:
+    db = SessionDB(Path(p))
+    try:
+        for s in db.list_gateway_sessions(platform="relay"):
+            sessions += 1
+            rows = [m for m in db.get_messages_as_conversation(s["id"]) if m.get("role") in ("user", "assistant", "tool")]
+            if not rows or (rows[-1]["role"] == "assistant" and not rows[-1].get("tool_calls")):
+                continue
+            asked = max((i for i, m in enumerate(rows) if m["role"] == "user"), default=0)
+            db.append_message(s["id"], "assistant", failed_turn_notice(rows[asked:]), display_kind=FAILED_TURN_DISPLAY_KIND)
+            closed += 1
+    finally:
+        db.close()
+print(json.dumps({"sessions": sessions, "closed": closed}))
+"#;
+
+/// What `CLOSE_CUT_TURNS` printed: the sessions it looked at and those it
+/// closed (its last line), or why that is not its answer.
+pub fn cut_turns_closed(out: &str) -> Result<(u64, u64), String> {
+    let line = out.lines().rev().find(|l| !l.trim().is_empty()).ok_or("it printed nothing")?;
+    let v: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("{line:?}: {e}"))?;
+    match (v["sessions"].as_u64(), v["closed"].as_u64()) {
+        (Some(sessions), Some(closed)) if closed <= sessions => Ok((sessions, closed)),
+        _ => Err(format!("not its answer: {line}")),
+    }
 }
 
 /// The gateway's control socket (Hermes' `gateway/control_socket.py`):
@@ -411,6 +480,26 @@ pub fn lean_plugins(plugins_root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The closer's answer is its last line, and nothing else is: a line
+    /// Hermes logged before it is passed over, a missing or impossible count
+    /// is no answer. (Run against the real Hermes in the bridge's
+    /// tests/docker.rs.)
+    #[test]
+    fn the_closers_answer() {
+        assert_eq!(cut_turns_closed("{\"sessions\": 2, \"closed\": 1}\n"), Ok((2, 1)));
+        assert_eq!(cut_turns_closed("a warning Hermes logged\n{\"sessions\": 0, \"closed\": 0}\n\n"), Ok((0, 0)));
+        for bad in ["", "\n", "Traceback (most recent call last):", "{\"sessions\": 1}", "{\"sessions\": 1, \"closed\": 2}", "{\"sessions\": -1, \"closed\": 0}"] {
+            assert!(cut_turns_closed(bad).is_err(), "{bad:?}");
+        }
+        // only Hermes' own session code writes: its boundary row, through its API
+        for uses in ["from hermes_state import SessionDB", "list_gateway_sessions(platform=\"relay\")", "failed_turn_notice(", "display_kind=FAILED_TURN_DISPLAY_KIND", "db.append_message("] {
+            assert!(CLOSE_CUT_TURNS.contains(uses), "{uses}");
+        }
+        for never in ["sqlite3", "execute(", "DELETE", "UPDATE", "INSERT"] {
+            assert!(!CLOSE_CUT_TURNS.contains(never), "no SQL of ours: {never}");
+        }
+    }
 
     fn agent() -> Agent {
         Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] }

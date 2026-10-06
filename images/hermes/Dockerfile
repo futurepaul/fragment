@@ -116,6 +116,18 @@ RUN sed -i \
 # gateway services, which would start a second gateway (S3b, cut b).
 RUN printf '#!/bin/sh\n# hermes-boot runs the one gateway itself (images/hermes).\nexit 0\n' > /etc/cont-init.d/02-reconcile-profiles
 
+# Hermes' tool progress, each line a step (docs/hermes-relay.md): its
+# sender (gateway/run_turn_runner.py, `send_progress_messages`) waits out
+# its 1.5 s edit interval for a line, then goes back to its queue, and sends
+# that line only with a newer one. So a tool call within 1.5 s of the last
+# progress line that is its turn's last (a skill read, then a quick model
+# call to the terminal) never shows, and its step is never recorded. Patched
+# to send once the interval is out (the debt ledger, "The Hermes image
+# patches Hermes' progress sender"); the build fails if upstream's loop
+# changed. Its .pyc goes, so the bytecode step below compiles the patch.
+RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).read(); old = '                        await asyncio.sleep(remaining)\n                        continue\n'; assert s.count(old) == 1, 'upstream progress sender changed: ' + p; open(p, 'w').write(s.replace(old, '                        await asyncio.sleep(remaining)\n'))" /opt/hermes/gateway/run_turn_runner.py \
+ && rm -f /opt/hermes/gateway/__pycache__/run_turn_runner.*.pyc
+
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
 # A few vendored files are not Python 3 (compileall exits 1 for them); the

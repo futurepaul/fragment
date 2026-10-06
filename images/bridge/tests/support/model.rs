@@ -3,19 +3,20 @@
 //!
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran`, after
-//!   `sleep 2`: a turn this model answers at once, in about 0.1 s, ends
-//!   before Hermes sends its tool progress, so it would show no step; a
-//!   real model's turn takes seconds. `use the terminal slowly`: `sleep 8`
-//!   first), and one saying `risky` with one
-//!   Hermes flags (`rm -rf …`); once a tool result is in the transcript, the
-//!   answer names it;
+//!   yet, is answered with a `terminal` tool call (`echo tool-ran` after
+//!   `sleep 2`; `use the terminal slowly`: after `sleep 8`; `use the
+//!   terminal twice`: `echo first-ran`, then that one), and one saying
+//!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
+//!   the transcript, the answer names it;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
 //!   a `computer_use` capture, and `write: <path>` a `write_file` of one
 //!   line there (each through Hermes' `tool_call` bridge when it defers the
 //!   tool); their answers quote what the tool said;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
-//!   asked.
+//!   asked;
+//! - of a message with channel context before it (`[Recent channel
+//!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
+//!   turn), only the message after `[New message]` is acted on.
 //!
 //! It records each request's `model` and `x-fragment-agent` (a screenshot's
 //! description comes as the route's `vision`: Hermes' auxiliary vision).
@@ -80,9 +81,29 @@ fn text_of(content: &Value) -> String {
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
+    // Hermes renders an inbound's read-only context before the message it
+    // comes with (`[Recent channel messages]\n…\n\n[New message]\n[name]
+    // text`): the context is reference (the platform's note on a cut turn),
+    // the message what it answers. A message joined after a cut request
+    // (`[paul] do the risky thing\n\n[paul] good morning`) has no marker,
+    // and is answered whole.
+    let last_user = match last_user.rsplit_once("[New message]\n") {
+        Some((_, message)) => message.to_string(),
+        None => last_user,
+    };
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
+    // `use the terminal twice`: a quick command, then, at once, one that
+    // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
+    // interval of the first's, as a real model's quick second call does),
+    // then the answer
+    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
+    if last_user.contains("use the terminal twice") && has_terminal && results < 2 {
+        let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
+        let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
+        return (String::new(), Some(call));
+    }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
@@ -110,6 +131,9 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
+        // Hermes sends a tool's progress line (its step) only if its turn
+        // runs on past its 0.3 s progress poll (docs/technical-debt-ledger.md,
+        // "A quick tool's step can be lost in Hermes")
         Some("sleep 2 && echo tool-ran")
     } else {
         None
@@ -226,4 +250,11 @@ fn answers_are_the_transcripts() {
     assert_eq!(t, "scripted: the tool said: {\"path\": \"/h/notes.txt\"}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no write_file among my tools", None));
+    // a note on a cut risky turn is context: the message after it is answered
+    let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: [paul] good morning", None));
+    // joined to the cut request, it is answered whole: the request is redone
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] do the risky thing\n\n[paul] good morning" }], "tools": tools }));
+    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("rm -rf")));
 }

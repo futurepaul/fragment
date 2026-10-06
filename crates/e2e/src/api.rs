@@ -4,7 +4,7 @@
 //! names over https (`Target::Hosted`).
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fragment_nip98::Keys;
@@ -24,9 +24,36 @@ pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
 }
 
+/// The wall clock as the node's logs stamp their lines (UTC, to the
+/// millisecond), so a call that failed can be found in them.
+pub fn clock() -> String {
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_millis();
+    let s = (ms / 1000) % 86_400;
+    format!("{:02}:{:02}:{:02}.{:03}Z", s / 3600, (s / 60) % 60, s % 60, ms % 1000)
+}
+
+/// How long workerd keeps an idle keep-alive connection: it leaves kj's
+/// `HttpServerSettings::pipelineTimeout` at its default, and closes a
+/// connection 5 s after its last answer (measured under `wrangler dev`).
+const SERVER_KEEP_ALIVE: Duration = Duration::from_secs(5);
+/// How long the run's client keeps an idle connection to use again: under
+/// the server's. A request written onto a connection as the server closes
+/// it gets no answer ("connection closed before message completed", or a
+/// reset), and the client does not send a POST again: the hermes lane's
+/// skills polls, 5 s apart, lost one now and then (2026-10-05). Under the
+/// server's, the pool never hands out a connection the server may be
+/// closing.
+const POOL_IDLE: Duration = Duration::from_secs(4);
+const _: () = assert!(POOL_IDLE.as_millis() < SERVER_KEEP_ALIVE.as_millis(), "the client drops an idle connection before the server does");
+
 fn client() -> reqwest::blocking::Client {
+    client_with(POOL_IDLE)
+}
+
+fn client_with(pool_idle: Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
+        .pool_idle_timeout(pool_idle)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("http client")
@@ -90,9 +117,9 @@ impl Reply {
 }
 
 /// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
-const HOST_PREFIX: &str = "__Host-";
+pub(crate) const HOST_PREFIX: &str = "__Host-";
 /// The cookies the cell names `__Host-` over https, at a host's root.
-const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
+pub(crate) const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
 
 /// A `Cookie` header as a browser on https sends it: each of the cell's
 /// host cookies under its `__Host-` name, the rest as they are.
@@ -364,10 +391,14 @@ impl Api {
         for (k, v) in c.extra {
             req = req.header(k, v);
         }
-        let resp = req.send().with_context(|| format!("{} {}", c.method, c.url))?;
+        // when it went and how long it waited, so a failure tells a refused
+        // or dropped connection (at once) from a request that hung
+        let (sent, t0) = (clock(), Instant::now());
+        let failed = || format!("{} {} (sent {sent}, failed after {:.1?})", c.method, c.url, t0.elapsed());
+        let resp = req.send().with_context(failed)?;
         let status = resp.status().as_u16();
         let headers = resp.headers().clone();
-        let bytes = resp.bytes()?.to_vec();
+        let bytes = resp.bytes().with_context(failed)?.to_vec();
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let body = serde_json::from_str(&text).unwrap_or(Value::Null);
         Ok(Reply { status, body, text, bytes, headers })
@@ -733,16 +764,89 @@ impl Socket {
     }
 
     pub fn until(&mut self, kind: &str, limit: usize) -> Result<Value> {
+        self.until_where(kind, limit, |_| true)
+    }
+
+    /// The first frame of `kind` that `wanted` holds for, within `limit`
+    /// frames: one of another turn's (its draft cleared after its reply)
+    /// may still arrive first.
+    pub fn until_where(&mut self, kind: &str, limit: usize, wanted: impl Fn(&Value) -> bool) -> Result<Value> {
         for _ in 0..limit {
             let v = self.next()?;
-            if v["type"] == kind {
+            if v["type"] == kind && wanted(&v) {
                 return Ok(v);
             }
         }
-        anyhow::bail!("no {kind} frame in {limit} frames")
+        anyhow::bail!("no {kind} frame that was wanted in {limit} frames")
     }
 
     pub fn close(mut self) {
         let _ = self.0.close(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The run's client against a keep-alive server of the test's own that
+    //! counts its connections: a connection idle past the client's limit is
+    //! never used again, so the client never writes onto one the server may
+    //! be closing (workerd's, 5 s after its last answer).
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A server that keeps every connection open, answering each request on
+    /// it, and counts the connections it accepts.
+    fn keep_alive_server() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/", listener.local_addr().expect("its address"));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            // bounded by the test's process: it ends with it
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                counted.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut out = stream.try_clone().expect("clone the stream");
+                    let mut lines = BufReader::new(stream);
+                    let mut line = String::new();
+                    // one answer per request head, until the client hangs up
+                    loop {
+                        line.clear();
+                        match lines.read_line(&mut line) {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) if line == "\r\n" => {
+                                if out.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+        (url, accepted)
+    }
+
+    /// Valid: a request soon after another goes on the same connection.
+    /// The property: one after the client's idle limit goes on a new one,
+    /// though the server kept the old one open.
+    #[test]
+    fn a_connection_idle_past_the_limit_is_never_used_again() {
+        let (url, accepted) = keep_alive_server();
+        let limit = Duration::from_millis(200);
+        let http = super::client_with(limit);
+        let get = || http.get(&url).send().and_then(|r| r.bytes()).expect("the server answers");
+        get();
+        std::thread::sleep(Duration::from_millis(20));
+        get();
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "used again within the limit");
+        std::thread::sleep(limit + Duration::from_millis(150));
+        get();
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "a new connection past the limit");
     }
 }

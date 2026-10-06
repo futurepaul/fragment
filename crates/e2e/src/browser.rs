@@ -112,6 +112,17 @@ pub struct Page {
 /// ends with the lease. Its pages open with `Browser::open_in`.
 pub struct BrowserContext(String);
 
+/// A cookie as a response from `url` sets it: over https (a preview), one
+/// of the cell's host cookies under its `__Host-` name, Secure at the
+/// host's root, as the cell itself names it there (api.rs `https_cookies`).
+fn cookie(url: &str, name: &str, value: &str) -> Value {
+    let https = url.starts_with("https://");
+    match https && crate::api::HOST_COOKIES.contains(&name) {
+        true => json!({ "name": format!("{}{name}", crate::api::HOST_PREFIX), "value": value, "url": url, "path": "/", "secure": true, "httpOnly": true, "sameSite": "Lax" }),
+        false => json!({ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }),
+    }
+}
+
 pub(crate) fn chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CHROME_BIN") {
         return Some(PathBuf::from(p));
@@ -362,7 +373,7 @@ impl Browser {
 
     /// A cookie the browser holds for `url`, as if a response had set it.
     pub fn set_cookie(&mut self, url: &str, name: &str, value: &str) -> Result<()> {
-        let mut params = json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }] });
+        let mut params = json!({ "cookies": [cookie(url, name, value)] });
         if let Some(context) = &self.context {
             params["browserContextId"] = json!(context);
         }
@@ -372,7 +383,7 @@ impl Browser {
 
     /// `set_cookie` in another of the lease's contexts (a second person's browser).
     pub fn set_cookie_in(&mut self, context: &BrowserContext, url: &str, name: &str, value: &str) -> Result<()> {
-        let params = json!({ "cookies": [{ "name": name, "value": value, "url": url, "httpOnly": true, "sameSite": "Lax" }], "browserContextId": context.0 });
+        let params = json!({ "cookies": [cookie(url, name, value)], "browserContextId": context.0 });
         self.send("Storage.setCookies", params, None)?;
         Ok(())
     }
@@ -525,5 +536,22 @@ impl Drop for Browser {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.profile);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Over https a host cookie is set as the cell sets it there (`__Host-`,
+    /// Secure, the host's root); over http, and any other cookie, as named.
+    #[test]
+    fn a_cookie_is_set_as_its_host_names_it() {
+        let c = cookie("https://e2e.finite.place/", "fragment_session", "s");
+        assert_eq!((c["name"].as_str(), c["secure"].as_bool(), c["path"].as_str()), (Some("__Host-fragment_session"), Some(true), Some("/")));
+        let c = cookie("http://127.0.0.1:8790/", "fragment_session", "s");
+        assert_eq!((c["name"].as_str(), c.get("secure")), (Some("fragment_session"), None));
+        let c = cookie("https://e2e.finite.place/", "theme", "dark");
+        assert_eq!((c["name"].as_str(), c.get("secure")), (Some("theme"), None));
     }
 }

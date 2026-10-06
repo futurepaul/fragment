@@ -61,6 +61,35 @@ async fn a_reply() {
     bridge.stop().await;
 }
 
+/// Goal: a first start makes the bridge's state directory, and so `/data`,
+/// at once, though it has read nothing of the platform yet and run no turn,
+/// so a sleep then has a `/data` to save (the platform's save fails on a
+/// `/data` that is not there, and a sleep that fails to save keeps its
+/// container); behind the restore gate, nothing is made until the restore
+/// is done. Method: a bridge with no agents whose platform does not answer,
+/// and one whose restore is pending until the test opens the gate.
+#[tokio::test]
+async fn a_first_start_makes_its_data() {
+    let fake = Fake::start("127.0.0.1:0", &[]).await;
+    fake.with(|w| w.down = true);
+    let dir = support::dir("first-start-data");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    support::until(WAIT, "its state's directory, made at start", || dir.join("bridge").is_dir()).await;
+    bridge.stop().await;
+    fake.with(|w| w.down = false);
+
+    let dir = support::dir("first-start-data-gated");
+    let mut cfg = support::config(&fake.url(), &dir, support::settings());
+    cfg.restore_pending = true;
+    let restored = cfg.restored.clone();
+    let bridge = support::start(cfg, support::script());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!dir.join("bridge").exists(), "nothing is made before the restore is done");
+    std::fs::write(&restored, b"").expect("the restore gate opens");
+    support::until(WAIT, "its state's directory, made past the gate", || dir.join("bridge").is_dir()).await;
+    bridge.stop().await;
+}
+
 /// Goal: a reply streams as drafts, then posts as a record with the same
 /// turn, after which its draft is stopped.
 #[tokio::test]
@@ -235,7 +264,12 @@ async fn a_question_cut_by_a_crash_is_lost_and_its_answer_is_a_turn() {
         fake.with(|w| {
             assert_eq!(ends_of(w, &chat, &turn), vec![json!({ "kind": "turn.end", "turn": turn, "outcome": "error", "error": "lost when the computer restarted" })], "{wakes}: one end, as lost");
             let r = replies(w, &chat);
-            assert_eq!(r, vec![json!({ "text": "What should I call it?", "turn": turn }), json!({ "text": "echo: [paul] Fernando", "turn": answer })], "{wakes}: the question, then the answer's own reply");
+            assert_eq!(r.len(), 2, "{wakes}: the question, then the answer's own reply: {r:?}");
+            assert_eq!(r[0], json!({ "text": "What should I call it?", "turn": turn }), "{wakes}");
+            // the answer's turn is the first after the cut one: told of it (P5)
+            let text = r[1]["text"].as_str().unwrap_or("");
+            assert_eq!(r[1]["turn"], json!(answer), "{wakes}");
+            assert!(text.starts_with("echo: [paul] Fernando\n\n(told: Your previous turn in this chat was cut short") && text.contains("It was answering: “name my plant, ask-me”") && text.contains("It had replied: “What should I call it?”"), "{wakes}: {text}");
             assert_eq!(ends_of(w, &chat, &answer), vec![json!({ "kind": "turn.end", "turn": answer, "outcome": "idle" })], "{wakes}");
         });
         bridge.stop().await;
@@ -738,6 +772,59 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
         });
         bridge.stop().await;
     }
+}
+
+/// Goal (P5, rung 2): the first turn after one a crash cut is told what was
+/// cut, from the chat's journal alone: that a restart cut it, what it was
+/// asked, and the step it had recorded; the turn after that is told nothing.
+/// The note is the same whether the next life wakes with the state the
+/// crash left (the turn running), one from before the cut turn, or none.
+/// The scripted agent echoes what it is told, so the stub's lanes see it.
+#[tokio::test]
+async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
+    let mut told: Vec<String> = Vec::new();
+    for wakes in ["during", "before", "none"] {
+        let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let dir = support::dir(&format!("told-{wakes}"));
+        let cfg = support::config(&fake.url(), &dir, support::settings());
+        let runs = support::Runs::default();
+        let pace = Duration::from_millis(100);
+
+        let bridge = support::start_killable(cfg.clone(), support::counting(support::script_paced(pace), &runs));
+        following(&fake, 2).await;
+        let one = said_and_ended(&fake, &chat, "one").await;
+        let before = support::save_state(&dir);
+        let slow = fake.say(&chat, &person("paul"), json!({ "text": "a slow tool please" }));
+        let cut = turn_of("juniper", &chat, seq(&slow));
+        fake.until(WAIT, "the cut turn's step, then a draft", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == cut.as_str()) && w.drafts.iter().any(|d| d.2 == cut)).await;
+        bridge.kill().await;
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        match wakes {
+            "before" => support::restore_state(&dir, &before),
+            "during" => {}
+            _ => support::lose_state(&dir),
+        }
+
+        let bridge = support::start_killable(cfg, support::counting(support::script_paced(pace), &runs));
+        let next = said_and_ended(&fake, &chat, "good morning").await;
+        let after = said_and_ended(&fake, &chat, "and after").await;
+        assert_eq!(runs.all(), vec![one, cut.clone(), next.clone(), after.clone()], "{wakes}: each ran once");
+        let note = fake.with(|w| {
+            assert_eq!(ends_of(w, &chat, &cut)[0]["error"], "lost when the computer restarted", "{wakes}");
+            let text = |turn: &str| replies(w, &chat).into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string)).unwrap_or_default();
+            let next = text(&next);
+            let note = next.strip_prefix("echo: [paul] good morning\n\n(told: ").and_then(|n| n.strip_suffix(')')).unwrap_or_else(|| panic!("{wakes}: the turn after the cut one is told of it: {next:?}")).to_string();
+            for said in ["Your previous turn in this chat was cut short: your computer restarted before it finished.", "Check what it already did before you do any of it again", "It was answering: “a slow tool please”", "Its steps, as recorded: search {\"q\":\"a slow tool please\"} (ok)"] {
+                assert!(note.contains(said), "{wakes}: {said:?} in {note}");
+            }
+            assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");
+            note
+        });
+        told.push(note);
+        bridge.stop().await;
+    }
+    assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note, whatever state woke: {told:#?}");
 }
 
 /// Goal (I2): a turn whose run ended, but whose end a crash kept from the

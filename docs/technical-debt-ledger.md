@@ -660,6 +660,58 @@ fragment.club until cutover (decisions 34–35).
   their like) to Relay connectors other than Slack's, and the relay
   runtime maps them, proven by the real-Hermes lane's step assertions.
 
+## A quick tool's step can be lost in Hermes
+
+- **Observed:** the Docker rung's `the_hermes_image`, twice, warm.
+  Hermes v0.21.5's progress sender (`gateway/run_turn_runner.py`,
+  `TurnRunner.send_progress_messages`) takes a tool's progress line from
+  its queue every 0.3 s; when the turn's cleanup cancels it, it edits a
+  progress message it already sent but never sends a first one. A turn
+  that ends before the sender's next poll after its tool starts sends no
+  progress line at all, as a message or in a draft (its one draft is the
+  answer's), so the relay runtime has no step to record; a probe of that
+  code in the image lost 21 of 48 lines whose turns ended within 0.35 s
+  of their tool's start. The scripted model answers at once and `echo` is
+  quick: the failing turns took about 350 ms, and a passing one sent its
+  line 65 ms before its answer. So the rung's terminal command sleeps 2 s
+  first (`images/bridge/tests/support/model.rs`). The e2e's `hermes` lane
+  runs `run: echo tool-ran` through the Workers AI fake and has the same
+  race, so far unseen.
+- **Risk:** a real turn whose tool and next model call take under 0.3 s
+  together shows its answer with no step. Rare with a real model, whose
+  next call alone is slower.
+- **First proof:** a Hermes turn with a tool call in its session and no
+  `turn.step` on work.
+- **Delete when:** Hermes sends what its progress queue holds when its
+  sender is cancelled (or the entry above goes), proven by the Docker
+  rung with an instant command.
+
+## The Hermes image patches Hermes' progress sender
+
+- **Observed:** the hosted `agent-smoke` (2026-10-06): asked to list
+  fragments with the CLI, 2 runs of 3 recorded only the skill read's step
+  though the reply named the fragments a terminal call listed. Hermes
+  v0.21.5's progress sender (`gateway/run_turn_runner.py`,
+  `TurnRunner.send_progress_messages`) edits at most every 1.5 s: a line
+  that comes sooner waits out the interval, then the sender goes back to
+  its queue and sends that line only with a newer one. A tool call within
+  1.5 s of the last progress line that is its turn's last (a skill read,
+  then a quick model call to the terminal) is never sent, and the next
+  text segment's new-message marker clears it. A probe of that code in
+  the image (the sender driven with a scripted queue) lost the line in
+  each such order and sent it once the patch removes the loop's
+  `continue` after the wait; the Docker rung's `use the terminal twice`
+  turn proves the patched image. The image applies it with Python before
+  its bytecode step (`images/hermes/Dockerfile`), and the build fails if
+  the loop no longer reads as it did.
+- **Risk:** a Hermes release changes the loop: the build fails (loudly).
+  Edits stay at most one per 1.5 s; the patch only stops a held line
+  from waiting for a newer one.
+- **First proof:** the first Hermes upgrade after v0.21.5.
+- **Delete when:** upstream sends a held progress line once its edit
+  interval passes, proven by the Docker rung's `use the terminal twice`
+  turn on an unpatched image.
+
 ## The screen's Take over is the image's, not Hermes'
 
 - **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen
@@ -821,7 +873,7 @@ fragment.club until cutover (decisions 34–35).
   before its tip (skipping a deploy's first step), or code.storage merges
   with the source's tree.
 
-## An open card keeps its computer awake, and any other restart under it still cuts its turn
+## An open card keeps its computer awake, and any other restart under it still loses its card
 
 - **Observed:** 2026-10-05, Paul on p5 missed an approval card's hour and
   his agent stopped answering: the idle sleep under the card cut its
@@ -829,18 +881,47 @@ fragment.club until cutover (decisions 34–35).
   asking its approval again. The bridge now holds the keepalive while a
   turn waits on its card (images/bridge/src/engine.rs, `finish`;
   docs/bridge.md, "A card keeps its computer awake"), the P6 stopgap
-  Paul agreed (docs/durable-computers.md).
+  Paul agreed (docs/durable-computers.md). The fold itself is closed by
+  P5 (2026-10-06: the boot closes a cut turn in Hermes' session, and the
+  next turn is told what was cut; `a_turn_cut_by_a_restart_is_closed_and_told`
+  in images/bridge/tests/docker.rs).
 - **Risk:** an unanswered card costs its life awake (an hour by default;
   a runtime may ask up to `PROMPT_TTL_MS_MAX`, a day). A restart for any
   other reason while a card is open (an owner's sleep, a crash, a deploy,
-  an image pinned) still cuts the turn, and Hermes still meets the next
-  message with the cut request (F9 and F10 of
+  an image pinned) still cuts the turn and closes its card `expired`
+  before its `expiresAt`: the owner's answer has no turn to go to (F9 of
   docs/explorations/pi-durable.md).
-- **First proof:** a chat where an agent's reply after a computer's wake
-  asks again what a turn before the wake asked; or a computer's awake
-  time dominated by turns waiting on cards.
-- **Delete when:** P5 and P6 land: a cut turn no longer leaves its
-  request for Hermes to fold the next message into (the next turn is told
-  what was cut), and a card outlives its turn, so the keepalive can be
-  let go while a card waits again, proven on the real-Hermes lane by a
-  sleep under a card whose next message is answered.
+- **First proof:** a computer's awake time dominated by turns waiting on
+  cards; or an owner who answers a card after a restart and sees nothing
+  happen.
+- **Delete when:** P6 lands: a card outlives its turn (a late answer
+  starts a new turn, told what was cut), so the keepalive can be let go
+  while a card waits again, proven on the real-Hermes lane by a sleep
+  under a card whose answer, after the wake, is acted on once.
+
+## A running browser's databases under Hermes' home are saved hot
+
+- **Observed:** 2026-10-06, the hosted hold (docs/durable-computers.md,
+  "The hold is answered once the desktop has drawn"). A Chromium the
+  agent runs with its default profile keeps it under Hermes' home
+  (`/data/hermes/.config/chromium`; since the image pins an agent's
+  `HOME` to its profile's, `/data/hermes/profiles/<profile>/home/.config/chromium`:
+  docs/computers.md, "Hermes' container guesses"), not the work, and holds its SQLite
+  databases there in SQLite's exclusive locking mode while it runs, so no
+  copy of one moment can be had. Our image keeps such a database hot
+  (images/hermes/boot/src/held.rs, `copy_all`; its `held` event's
+  `locked`) and copies and answers the rest, rather than answering
+  nothing and leaving every database hot, as it did before.
+- **Risk:** a save taken while that browser writes one may carry it torn:
+  the browser then opens a damaged cache or history; and a wake that
+  restores the save from its backup (not a snapshot) runs the image's
+  check, which `quick_check`s every SQLite database under `/data` but the
+  work, and would find that save unusable and fall back to the one
+  before.
+- **First proof:** a `held` event whose `locked` names a database Hermes
+  keeps (not a browser's); or a `restore.checked` with code 3 naming a
+  browser's database, or a rollback after one.
+- **Delete when:** every browser the agent runs keeps its profile in its
+  work (`/data/work/<profile>`, as the desktop's browser already does: the
+  seam's rule, docs/computers.md), so nothing under Hermes' home is held
+  locked by one, and `locked` is empty on the real-Hermes lanes.

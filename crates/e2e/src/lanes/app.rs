@@ -122,6 +122,8 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     ship(s, &again, TODO_APP, TODO_JSON);
     let r = api.op(&owner, &name, "add_todo", "again", json!({ "text": "again" }))?;
     s.ok("made again under the same name, its app writes, starting from nothing", r.status == 200 && count(api, &owner, &name) == 1, &r);
+    let (cleaned, last) = s.ended_cleaned(api, &name);
+    s.ok("the ended life's app database is deleted after, the new life's untouched", cleaned && count(api, &owner, &name) == 1, last);
     Ok(())
 }
 

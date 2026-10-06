@@ -75,13 +75,15 @@ use crate::js;
 use crate::routed::{Credential, Mode, Routed, Signed};
 
 /// How long a create in progress holds its name.
-const CLAIM_TTL_MS: i64 = 120_000;
+pub(crate) const CLAIM_TTL_MS: i64 = 120_000;
 /// The alarm fires no sooner than this after it is armed …
 const ALARM_SOON_MS: i64 = 50;
 /// … or than this after it failed.
 const ALARM_RETRY_MS: i64 = 30_000;
 
-const SCHEMA: &str = "
+/// A life's tables: a delete drops them all and makes them again empty
+/// (ended.rs), keeping only the ended lives' own (`ended::SCHEMA`).
+pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS members (
   principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL,
@@ -206,6 +208,7 @@ impl DurableObject for FragmentCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
+        sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
         crate::plane::migrate_code(&sql);
         crate::members::migrate(&sql);
         let cfg = Config::from_env(&env);
@@ -1207,28 +1210,15 @@ impl FragmentCell {
         })
     }
 
+    /// Ends the fragment's life at once and answers once one round of its
+    /// members' lists has been told, its owner's first: the alarm tells
+    /// the rest and deletes the app's database and the blobs (ended.rs).
     async fn delete(&self, caller: &Caller) -> CellResult<Response> {
         let name = self.name()?;
         self.require(caller, false, Role::Owner)?;
-        let members: Vec<String> =
-            self.rows("SELECT principal FROM members", vec![])?.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect();
-        for m in &members {
-            self.index_change(m, None)?;
-        }
-        self.flush_index().await;
-        for ws in self.state.get_websockets() {
-            let _ = ws.close(Some(4004), Some("the fragment was deleted"));
-        }
-        // a name made again must not meet this life's app database: its own
-        // facet name (`app_facet`) already keeps them apart, and the delete
-        // finishes before the fragment's storage goes
-        let facet = self.app_facet()?;
-        if let Err(e) = js::delete_app_facet(&self.raw, &facet).await {
-            worker::console_warn!("{name}: deleting the app facet {facet}: {}", e.message);
-        }
-        self.delete_blobs().await?;
-        self.state.storage().delete_all().await?;
-        self.sql().exec(SCHEMA, None)?;
+        let ended = self.end_life()?;
+        self.tell_ended(Some(&ended.owner)).await;
+        self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))
     }
 
@@ -1294,13 +1284,17 @@ impl FragmentCell {
         json_response(&Events { events })
     }
 
-    /// The alarm runs the index, search, joined and delivery outboxes, due schedules,
-    /// queued runs, and the pass: the poll backstop, which also checks
+    /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
+    /// life was made since; then the life's index, search, joined and
+    /// delivery outboxes, due schedules, queued runs, and the pass: the
+    /// poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
     /// interval while the fragment is busy (`arm`). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
+        self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
-            return Ok(());
+            // what an ended life still has to clean, if anything
+            return self.schedule().await;
         }
         self.flush_index().await;
         self.flush_search().await;
@@ -1357,8 +1351,14 @@ impl FragmentCell {
     /// than `min_ms` from now. A busy fragment's next pass comes within the
     /// poll interval: a pass further off is brought in (plane.rs `busy`).
     async fn arm(&self, also: Option<i64>, min_ms: i64) -> CellResult<()> {
+        let ended = self.ended_due_at()?;
         let [created_at, poll_at] = self.metas([MetaKey::CreatedAt, MetaKey::PollAt])?;
         if created_at.is_none() {
+            // no life: an ended one's cleanup is all that comes due
+            if let Some(at) = ended {
+                let at = at.max(js::now_ms() + min_ms);
+                self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
+            }
             return Ok(());
         }
         let soon = js::now_ms() + self.cfg.poll_interval_ms;
@@ -1368,7 +1368,7 @@ impl FragmentCell {
             self.set_meta(MetaKey::PollAt, &poll_at.to_string())?;
         }
         let outbox = self.rows("SELECT MIN(next_at) AS at FROM index_outbox", vec![])?.first().and_then(|r| r["at"].as_i64());
-        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, also];
+        let due = [outbox, self.search_due_at()?, self.joined_due_at()?, self.runs_due_at()?, self.pending_due_at()?, self.outbox_due_at()?, self.meter_due_at()?, self.card_due_at()?, ended, also];
 
         let at = due.into_iter().flatten().fold(poll_at, i64::min).max(js::now_ms() + min_ms);
         self.state.storage().set_alarm(ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(at as f64)))).await?;
