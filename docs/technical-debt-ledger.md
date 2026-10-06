@@ -686,6 +686,32 @@ fragment.club until cutover (decisions 34–35).
   sender is cancelled (or the entry above goes), proven by the Docker
   rung with an instant command.
 
+## The Hermes image patches Hermes' progress sender
+
+- **Observed:** the hosted `agent-smoke` (2026-10-06): asked to list
+  fragments with the CLI, 2 runs of 3 recorded only the skill read's step
+  though the reply named the fragments a terminal call listed. Hermes
+  v0.21.5's progress sender (`gateway/run_turn_runner.py`,
+  `TurnRunner.send_progress_messages`) edits at most every 1.5 s: a line
+  that comes sooner waits out the interval, then the sender goes back to
+  its queue and sends that line only with a newer one. A tool call within
+  1.5 s of the last progress line that is its turn's last (a skill read,
+  then a quick model call to the terminal) is never sent, and the next
+  text segment's new-message marker clears it. A probe of that code in
+  the image (the sender driven with a scripted queue) lost the line in
+  each such order and sent it once the patch removes the loop's
+  `continue` after the wait; the Docker rung's `use the terminal twice`
+  turn proves the patched image. The image applies it with Python before
+  its bytecode step (`images/hermes/Dockerfile`), and the build fails if
+  the loop no longer reads as it did.
+- **Risk:** a Hermes release changes the loop: the build fails (loudly).
+  Edits stay at most one per 1.5 s; the patch only stops a held line
+  from waiting for a newer one.
+- **First proof:** the first Hermes upgrade after v0.21.5.
+- **Delete when:** upstream sends a held progress line once its edit
+  interval passes, proven by the Docker rung's `use the terminal twice`
+  turn on an unpatched image.
+
 ## The screen's Take over is the image's, not Hermes'
 
 - **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen

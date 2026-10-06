@@ -279,6 +279,10 @@ get_chat_info`.
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.
+  Hermes edits it at most every 1.5 s, and upstream held a line that came
+  sooner until a newer one, so a turn's last quick tool call showed no
+  step; our image patches its sender to send the line once the interval
+  is out (images/hermes/Dockerfile; the debt ledger).
 - One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
   segment at every tool boundary with a `send` answering the message, so
   the model's text beside a tool call ("Let me check that.") arrives as

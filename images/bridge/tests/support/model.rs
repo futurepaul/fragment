@@ -4,7 +4,8 @@
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
 //!   yet, is answered with a `terminal` tool call (`echo tool-ran` after
-//!   `sleep 2`; `use the terminal slowly`: after `sleep 8`), and one saying
+//!   `sleep 2`; `use the terminal slowly`: after `sleep 8`; `use the
+//!   terminal twice`: `echo first-ran`, then that one), and one saying
 //!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
 //!   the transcript, the answer names it;
 //! - `browse: <url>` is a `browser_navigate` call, and `look at your screen`
@@ -89,6 +90,16 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
+    // `use the terminal twice`: a quick command, then, at once, one that
+    // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
+    // interval of the first's, as a real model's quick second call does),
+    // then the answer
+    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
+    if last_user.contains("use the terminal twice") && has_terminal && results < 2 {
+        let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
+        let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
+        return (String::new(), Some(call));
+    }
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
