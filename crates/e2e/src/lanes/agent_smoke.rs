@@ -21,7 +21,9 @@
 //!    takes Take over, and shows the browser opened again;
 //! 5. a command Hermes' smart approvals asks about is a card its owner
 //!    answers, and the next message is answered;
-//! 6. asleep, a message wakes it, its wake restored the sleep's save, and
+//! 6. asleep at its owner's first ask (nothing of its own, its guest's
+//!    sockets included, starts it again), a message wakes it, its wake
+//!    restored the sleep's save, and
 //!    what it made before the sleep is still in `/data/work`;
 //! 7. its paid calls stay within what the run lent it, and the run says
 //!    what it cost;
@@ -198,16 +200,19 @@ fn view(api: &Api, owner: &Keys, id: &str) -> Value {
 }
 
 /// The owner's sleep, asked until it is asleep (a record a turn posted
-/// last may wake it again): the last answer, and whether it slept.
-fn sleep(api: &Api, owner: &Keys, id: &str) -> (bool, Value) {
+/// last may wake it again): whether it slept, the last answer, and each
+/// answer's phase in order.
+fn sleep(api: &Api, owner: &Keys, id: &str) -> (bool, Value, Vec<String>) {
     std::thread::sleep(QUEUE_DRAIN);
     let mut last = Value::Null;
+    let mut answers = vec![];
     let slept = within(SLEEP, || {
         let r = api.signed(owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({}))).ok()?;
         last = r.body;
+        answers.push(last["phase"].as_str().unwrap_or("none").to_string());
         (last["phase"] == "asleep").then_some(())
     });
-    (slept.is_some(), last)
+    (slept.is_some(), last, answers)
 }
 
 /// The app `name`, once it is its owner's in their list and live.
@@ -607,9 +612,17 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
 
     // ---- 6. asleep, a message wakes it, and its work is still there
     let rollbacks = view(api, &keys, &id)["rollbacks"].clone();
-    let (slept, last) = sleep(api, &keys, &id);
+    let (slept, last, answers) = sleep(api, &keys, &id);
     let slept_s = now_s();
+    println!("      (its owner's sleeps answered: {})", answers.join(", "));
     s.ok("its owner puts it to sleep (its /data saved)", slept, &last);
+    // its guest's own sockets (opened as it boots, and again when one
+    // drops, also during the sleep's save) pre-wake no computer it runs on
+    s.ok(
+        "its owner's first sleep answers asleep: nothing of its own starts it again from that sleep's save",
+        answers.first().is_some_and(|p| p == "asleep"),
+        json!({ "answers": answers, "last": last }),
+    );
     let t6 = Instant::now();
     let back = c.say(
         "smoke-7",
@@ -651,7 +664,8 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(&format!("its paid calls (model calls and AI steps, from its ledger) stayed within the {PAID_CALLS} the run lent it"), used as u64 <= PAID_CALLS, json!({ "used": used, "byStep": by_step, "totals": totals }));
 
     // ---- 8. asleep at the end; the sweep deletes its e2e- fragments
-    let (slept, last) = sleep(api, &keys, &id);
+    let (slept, last, answers) = sleep(api, &keys, &id);
+    println!("      (its owner's sleeps answered: {})", answers.join(", "));
     s.ok("it sleeps at the end", slept, &last);
     let turns = json!({ "person": Api::email_of(&keys), "computer": id, "chat": chat_name, "app": app_name, "paidCalls": used, "charged": charged, "turns": *c.turns.borrow() });
     std::fs::write(evidence.join("turns.json"), serde_json::to_vec_pretty(&turns)?)?;

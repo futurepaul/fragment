@@ -309,23 +309,30 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// The computers this fragment's channels wake.
-    pub(crate) fn woken_computers(&self) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT DISTINCT url FROM subs WHERE url LIKE 'computer:%'", vec![])?;
-        Ok(rows.iter().filter_map(|r| r["url"].as_str()).map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
+    /// The computers `principal`'s socket on this fragment pre-wakes: those
+    /// its channels wake, but none that `principal`'s own wake subscriptions
+    /// name (`fragment_core::computer::prewoken`; at most `SUBS_MAX` rows).
+    pub(crate) fn woken_computers(&self, principal: &str) -> CellResult<Vec<String>> {
+        let rows = self.rows("SELECT principal, url FROM subs WHERE url LIKE 'computer:%' ORDER BY id", vec![])?;
+        let subs: Vec<(&str, &str)> = rows.iter().filter_map(|r| Some((r["principal"].as_str()?, r["url"].as_str()?))).collect();
+        Ok(fragment_core::computer::prewoken(&subs, principal).into_iter().map(|u| format!("computer:{}", u.trim_start_matches("computer:"))).collect())
     }
 
-    /// A page opened this fragment: the computers its channels wake may
-    /// hear from it soon, so each starts now (decision 39), at most every
-    /// `PREWAKE_EVERY_MS`. Each wake runs on its own, so the page's socket
-    /// never waits for a start; a failed pre-wake costs only the wait.
-    pub(crate) fn prewake(&self) {
+    /// A page opened this fragment (`principal`'s socket): the computers its
+    /// channels wake may hear from it soon, so each starts now (decision 39),
+    /// at most every `PREWAKE_EVERY_MS`. Each wake runs on its own, so the
+    /// page's socket never waits for a start; a failed pre-wake costs only
+    /// the wait. An agent's own socket (its guest following this fragment,
+    /// opened as it boots and again after one drops) pre-wakes no computer
+    /// it runs on: one opened as that computer goes to sleep would start it
+    /// again at once.
+    pub(crate) fn prewake(&self, principal: &str) {
         let now = crate::js::now_ms();
         let due = self.meta(MetaKey::PrewakeAt).ok().flatten().and_then(|v| v.parse::<i64>().ok()).is_none_or(|at| now >= at);
         if !due {
             return;
         }
-        let Ok(computers) = self.woken_computers() else { return };
+        let Ok(computers) = self.woken_computers(principal) else { return };
         if computers.is_empty() {
             return;
         }
