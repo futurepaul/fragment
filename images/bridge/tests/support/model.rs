@@ -16,7 +16,8 @@
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked.
 //!
-//! It records each request's `model` and `x-fragment-agent`.
+//! It records each request's `model` and `x-fragment-agent` (a screenshot's
+//! description comes as the route's `vision`: Hermes' auxiliary vision).
 
 #![allow(dead_code)]
 
@@ -134,7 +135,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     if path.ends_with("/models") {
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }] }));
+        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);

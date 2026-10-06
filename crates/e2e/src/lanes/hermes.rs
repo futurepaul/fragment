@@ -618,6 +618,43 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "reply": reply_of(&slow), "work": work_of(&records(api, &owner, &chat_name, "work"), &slow) }),
     );
 
+    // its eyes (Paul, 2026-10-05): Maple is on the medium tier, whose
+    // GLM-5.3 reads no images; its computer_use screenshot goes to the
+    // route's `vision` (the deployment's vision model, GLM-5.3 Flash), as
+    // Maple, metered to its owner, and its answer is what that model saw
+    let calls_before = s.ai.calls().len();
+    let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g2", "body": { "text": "look at your screen" } })))?;
+    let looked = turn_of(&maple_name, &grove_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let grove_ended = |turn: &str| work_of(&records(api, &owner, &grove_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
+    s.eventually(TURN, || grove_ended(&looked).is_some());
+    let calls: Vec<fragment_fakes::workers_ai::AiCall> = s.ai.calls().into_iter().skip(calls_before).collect();
+    let maple_opaque = hex::encode(&Sha256::digest(maple_id.as_bytes())[..8]);
+    let shown = |c: &fragment_fakes::workers_ai::AiCall| c.body["messages"].to_string().contains("\"image_url\"");
+    let seen: Vec<Value> = calls.iter().map(|c| json!({ "model": c.model, "agent": c.metadata["agent_id"], "image": shown(c) })).collect();
+    let looks: Vec<&fragment_fakes::workers_ai::AiCall> = calls.iter().filter(|c| shown(c)).collect();
+    s.ok(
+        "a medium-tier agent's computer_use screenshot goes to the route's vision model (GLM-5.3 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
+        !looks.is_empty()
+            && looks.iter().all(|c| c.model == fragment_core::models::VISION_MODEL_DEFAULT && c.metadata["agent_id"] == maple_opaque.as_str())
+            && calls.iter().any(|c| c.model == fragment_core::models::MEDIUM_MODEL && c.metadata["agent_id"] == maple_opaque.as_str())
+            && calls.iter().filter(|c| c.model == fragment_core::models::MEDIUM_MODEL).all(|c| !shown(c)),
+        json!(seen),
+    );
+    s.ok(
+        "and its answer is what the vision model saw of its screen",
+        maple_reply(&looked).is_some_and(|t| t.contains("the screen: I see an image, a ")),
+        json!({ "reply": maple_reply(&looked), "work": work_of(&records(api, &owner, &grove_name, "work"), &looked) }),
+    );
+    let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
+        .into_iter()
+        .filter(|e| e["entry"]["reserve"]["agent"] == maple_id.as_str() && e["entry"]["reserve"]["worst"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+        .collect();
+    s.ok(
+        "each vision call is metered to the agent's owner, as the agent, settled at the vision model's price",
+        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::end_of(e) == "settled" && e["entry"]["end"]["usage"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT),
+        json!(vision_entries),
+    );
+
     // added to the lead's chat while awake: @mentioned it answers there, the
     // lead does not (its view of the chat is read again on the join)
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;

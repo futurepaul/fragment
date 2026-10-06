@@ -789,6 +789,21 @@ async fn the_hermes_desktop() {
     let captured = fake.with(|w| reply(w, &turn)).unwrap_or_default();
     eprintln!("desktop: the capture's reply: {}", captured.chars().take(600).collect::<String>());
     assert!(tools.contains(&"computer_use") || listed.is_some(), "computer_use is the agent's, directly or through tool_search: {tools:?}");
+    // the screenshot is described by the route's vision model (the profile's
+    // `auxiliary.vision`), as the agent, its image in the call
+    let looked: Vec<(String, Option<String>, bool)> = model
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.body["messages"].to_string().contains("\"image_url\""))
+        .map(|c| (c.model.clone(), c.agent.clone(), c.path.ends_with("/v1/chat/completions") && c.body["messages"].to_string().contains("data:image/")))
+        .collect();
+    eprintln!("desktop: the calls shown an image (model, agent, a data: image on /v1/chat/completions): {looked:?}");
+    assert!(
+        !looked.is_empty() && looked.iter().all(|(m, a, ok)| m == "vision" && a.as_deref() == Some("juniper.paul") && *ok),
+        "the capture's screenshot goes to the route's vision model, as the agent: {looked:?}"
+    );
     assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
 
     // its browser, on its desktop
