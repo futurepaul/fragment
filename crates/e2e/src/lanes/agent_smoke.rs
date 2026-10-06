@@ -659,12 +659,13 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
     let browsed = c.say("smoke-4", browsing)?;
     let end = c.finish(&browsed, WORK);
     let steps = c.of_kind(&browsed, "turn.step");
-    // Hermes names a browser step by what it does (`Browsing <url>`), its
-    // other tools by name (`browser_click`, `computer_use`)
-    let browser = |st: &&Value| st["tool"].as_str().map(str::to_ascii_lowercase).is_some_and(|t| t.contains("brows") || t.contains("computer"));
+    // Hermes names a browser step by what it does (`Browsing <url>`); an
+    // agent may open one from its terminal too (`chromium <url>`), and its
+    // computer_use steps name no URL: whichever it chose, a step names the
+    // page, and the screen's checks below are what it shows
     s.ok(
-        "asked to open a browser at example.com, its turn ran a browser or computer_use step naming example.com (model-dependent)",
-        steps.iter().filter(browser).any(|st| st["args"].as_str().is_some_and(|a| a.contains("example.com"))),
+        "asked to open a browser at example.com, its turn ran a step that opens it: Hermes' browser, or a command in its terminal (model-dependent)",
+        end.is_some() && steps.iter().any(|st| st["args"].as_str().is_some_and(|a| a.contains("example.com"))),
         c.why(&browsed, end.is_some(), "end its turn", WORK),
     );
     // Chromium on Containers had no /dev/shm (Paul on p5, 2026-10-05): the
