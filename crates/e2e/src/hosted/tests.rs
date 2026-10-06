@@ -28,7 +28,7 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, summary: None });
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, summary: None, attempt: 1 });
     let only = parse(&strings(&["--only", "agents,addon"])).unwrap();
     assert_eq!((only.only, only.hosted), (Some(strings(&["agents", "addon"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
@@ -40,8 +40,10 @@ fn a_local_run_reads_as_before() {
 }
 
 /// A local run takes one shard of the table's split, as CI runs it, and
-/// a file for its summary; a shard is never beside `--only`, `--except`,
-/// a rehearsal, a hosted run, or a split the table does not have.
+/// a file for its summary with the CI run's attempt it records (1 unless
+/// given); a shard is never beside `--only`, `--except`, a rehearsal, a
+/// hosted run, or a split the table does not have, and an attempt is a
+/// summary's, from 1 to ATTEMPTS_MAX.
 #[test]
 fn a_local_run_takes_one_shard_and_a_summary_file() {
     let n = crate::lanes::SHARDS.len();
@@ -50,6 +52,10 @@ fn a_local_run_takes_one_shard_and_a_summary_file() {
     assert_eq!(args.summary.as_deref(), Some(Path::new("target/e2e-summary/shard-2.json")));
     assert_eq!((args.only, args.except, args.hosted, args.rehearse), (None, vec![], None, None));
     assert_eq!(parse(&strings(&["--summary", "s.json"])).unwrap().summary.as_deref(), Some(Path::new("s.json")), "a whole run writes one too");
+    assert_eq!(args.attempt, 1, "a run outside CI is its first attempt");
+    let rerun = parse(&strings(&["--shard", &format!("2/{n}"), "--summary", "s.json", "--attempt", "2"])).unwrap();
+    assert_eq!((rerun.attempt, rerun.shard), (2, Some(Shard { k: 2, n: n as u32 })));
+    assert_eq!(parse(&strings(&["--attempt", &ATTEMPTS_MAX.to_string(), "--summary", "s.json"])).unwrap().attempt, ATTEMPTS_MAX);
     let split = format!("1/{n}");
     for bad in [
         strings(&["--shard", &split, "--only", "auth"]),
@@ -61,6 +67,13 @@ fn a_local_run_takes_one_shard_and_a_summary_file() {
         strings(&["--shard", "0/4"]),
         strings(&["--shard"]),
         strings(&["--summary", "a.json", "--summary", "b.json"]),
+        strings(&["--attempt", "2"]),
+        strings(&["--summary", "s.json", "--attempt", "0"]),
+        strings(&["--summary", "s.json", "--attempt", &(ATTEMPTS_MAX + 1).to_string()]),
+        strings(&["--summary", "s.json", "--attempt", "two"]),
+        strings(&["--summary", "s.json", "--attempt", "1", "--attempt", "2"]),
+        strings(&["--summary", "s.json", "--attempt"]),
+        strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--attempt", "2"]),
         strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--shard", &split]),
         strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--summary", "s.json"]),
     ] {

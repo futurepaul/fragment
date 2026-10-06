@@ -8,7 +8,12 @@
 # The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS), each
 # on a runner of its own with its own build and node; the `e2e` job checks
 # from their summaries that together they ran every section exactly once
-# and every check passed (`cargo xtask e2e-summary`). A manual run
+# and every check passed (`cargo xtask e2e-summary`). A re-run of a failed
+# shard ("re-run failed jobs") leaves the attempt before's summary beside
+# its own, so each is named for its attempt (`github.run_attempt`) and the
+# check counts each shard's newest (crates/devstack/src/summary.rs): the
+# choice cannot be download-artifact's, which keeps one artifact per name,
+# the highest id, and a run's ids do not follow time. A manual run
 # (workflow_dispatch) also runs the suite whole, in one job, to compare.
 #
 # Caches are restored on every run and saved only from master's pushes
@@ -157,17 +162,19 @@ jobs:
         with:
           path: target/tools
           key: ${{ steps.node.outputs.cache-primary-key }}
-      # the aggregate below runs this build's xtask, so it builds nothing
+      # the aggregate below runs this build's xtask, so it builds nothing (a
+      # re-run of shard 1 uploads another; either is this commit's build)
       - if: matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: e2e-xtask
           path: target/debug/xtask
           retention-days: 1
-      # one shard's sections on a fresh node, and their summary; the run's
+      # one shard's sections on a fresh node, and their summary, named and
+      # marked for this attempt (a re-run's sits beside the first's); the run's
       # scratch (each node boot's log, the lanes' screenshots) is kept when
       # a check fails, and uploaded below
-      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4 --summary target/e2e-summary/shard-${{ matrix.shard }}.json
+      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4 --summary target/e2e-summary/shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json --attempt ${{ github.run_attempt }}
         env:
           CHROME_BIN: /usr/bin/google-chrome
       # after the run, from any shard that shot a preview card: miniflare
@@ -181,20 +188,20 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-summary-${{ matrix.shard }}
+          name: e2e-summary-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: target/e2e-summary/
           retention-days: 7
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-scratch-${{ matrix.shard }}
+          name: e2e-scratch-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
           path: target/e2e/
           retention-days: 7
 
-  # the check named `e2e`: the shards together ran every section exactly
-  # once, their counts add up, and every check passed. It runs whatever the
-  # shards did (unless the run was cancelled), so a red shard makes it
-  # red, never skipped.
+  # the check named `e2e`: the shards together (each shard's newest attempt)
+  # ran every section exactly once, their counts add up, and every check
+  # passed. It runs whatever the shards did (unless the run was cancelled),
+  # so a red shard makes it red, never skipped.
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}
@@ -205,6 +212,8 @@ jobs:
         with:
           name: e2e-xtask
           path: bin
+      # every attempt's summaries, flat: their file names differ by shard and
+      # attempt, so none overwrites another
       - uses: actions/download-artifact@v4
         with:
           pattern: e2e-summary-*
@@ -254,7 +263,7 @@ jobs:
           path: target/cache
           key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
       - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
-      - run: cargo xtask e2e --summary target/e2e-summary/whole.json
+      - run: cargo xtask e2e --summary target/e2e-summary/whole.json --attempt ${{ github.run_attempt }}
         env:
           CHROME_BIN: /usr/bin/google-chrome
       - if: always()

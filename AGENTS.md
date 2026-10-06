@@ -128,15 +128,21 @@ prebuilt bundle is in the debt ledger).
   The node's test levers (`/api/test/*`) take a secret made per run.
   A wait that runs out its limit prints `(a wait ran out its …s at
   <file>:<line>)`: one that does so on a passing run costs every run.
-- `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
-  shards CI runs, each on its own runner with its own build and node
-  (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
-  one, a host test checks; rebalance it from the summaries' `ms`).
-  `--summary` writes the run's summary (any local run takes it), and
-  `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them:
-  every section ran exactly once across the shards, the counts add up,
-  and every check passed, printed as one run. CI splits each shard's run
-  in two, `--build-only` then `--no-build`, so the cache saves between
+- `cargo xtask e2e --shard <k>/4 [--summary <file> [--attempt <n>]]`:
+  one of the four shards CI runs, each on its own runner with its own
+  build and node (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every
+  section in exactly one, a host test checks; rebalance it from the
+  summaries' `ms`).
+  `--summary` writes the run's summary (any local run takes it), marked
+  with `--attempt` (CI's `github.run_attempt`; 1 unless given), and
+  `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them,
+  from every attempt, counting each shard's newest (a re-run of a failed
+  shard leaves the attempt before's summary beside its own, and
+  download-artifact's choice between them is the highest id, not the
+  newest): every section ran exactly once across the shards, the counts
+  add up, and every check passed, printed as one run. CI splits each
+  shard's run in two, `--build-only` then `--no-build`, so the cache
+  saves between
   (the build also builds the computer images ahead of the node, beside
   the Rust; the cell and the agent build in parallel once worker-build
   has its tools: `xtask/src/build.rs`).

@@ -167,6 +167,8 @@ pub struct Suite {
     shard: Option<Shard>,
     /// Where the run writes its summary as it ends (`--summary`).
     summary: Option<PathBuf>,
+    /// The CI run's attempt its summary records (`--attempt`; 1 unless given).
+    attempt: u32,
     /// Each section the run accounted for (ran, or skipped whole), with
     /// its checks: what the summary reports (lanes/mod.rs `run` counts them).
     accounted: Vec<summary::Section>,
@@ -779,7 +781,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args = hosted::parse(&args)?;
     match args.hosted {
-        None => local(args.only, args.except, LocalRun { rehearse: args.rehearse, shard: args.shard, summary: args.summary }),
+        None => local(args.only, args.except, LocalRun { rehearse: args.rehearse, shard: args.shard, summary: args.summary, attempt: args.attempt }),
         Some(hosted) => hosted::run(args.only, args.except, hosted),
     }
 }
@@ -804,6 +806,7 @@ struct LocalRun {
     rehearse: Option<u64>,
     shard: Option<Shard>,
     summary: Option<PathBuf>,
+    attempt: u32,
 }
 
 /// The local run: a fresh `wrangler dev` node and the fakes. A rehearsal
@@ -814,7 +817,7 @@ struct LocalRun {
 /// what it needs, as on a preview; it ends with the sweep. A shard runs the
 /// sections the table gives it, in the lanes' order.
 fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> Result<()> {
-    let LocalRun { rehearse, shard, summary } = settings;
+    let LocalRun { rehearse, shard, summary, attempt } = settings;
     let root = devstack::repo_root();
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
@@ -856,6 +859,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         except,
         shard,
         summary,
+        attempt,
         accounted: vec![],
         outside: summary::Counts::default(),
         rung,
@@ -988,6 +992,7 @@ fn write_summary(s: &Suite, path: &Path) -> Result<()> {
     }
     let summary = summary::Summary {
         shard: s.shard,
+        attempt: s.attempt,
         suite,
         sections: s.accounted.clone(),
         outside: s.outside,

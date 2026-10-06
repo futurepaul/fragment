@@ -11,14 +11,28 @@
 //! once, by exactly one shard, and each shard's totals are the sum of its
 //! sections' checks and those outside any section. A shard that never
 //! wrote its summary (it crashed, or was cancelled) fails the check.
+//!
+//! A re-run (GitHub's "re-run failed jobs") leaves the first attempt's
+//! summaries beside the new ones, so each summary says which attempt wrote
+//! it, and of one shard's only the newest counts: a re-run that passes
+//! turns the check green, and one that fails keeps it red. The choice is
+//! made here, not by download-artifact: that keeps one artifact per name,
+//! the highest id, and a run's ids do not follow time (run 37394854864:
+//! attempt 2's `e2e-summary-2` had the lower id, so attempt 1's red
+//! summary was read, and the re-run could never turn the check green).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 /// The most shards a run is split into: a bound for the check's loops.
 pub const SHARDS_MAX: u32 = 64;
+/// The most attempts of one run: GitHub re-runs a run at most 50 times,
+/// so its attempts are 1 to 51.
+pub const ATTEMPTS_MAX: u32 = 64;
+/// The most summaries one check reads: each shard's, from each attempt.
+pub const SUMMARIES_MAX: usize = SHARDS_MAX as usize * ATTEMPTS_MAX as usize;
 /// The most sections a suite has: a bound, far above the e2e's ~50.
 pub const SECTIONS_MAX: usize = 1024;
 
@@ -94,6 +108,9 @@ pub struct Section {
 pub struct Summary {
     /// The shard this run was (`None`: the whole suite).
     pub shard: Option<Shard>,
+    /// The CI run's attempt that wrote it (GitHub's `run_attempt`, from 1;
+    /// a run outside CI is its first): of one shard's, the newest counts.
+    pub attempt: u32,
     /// Every section the lanes asked for, in their order: the suite as
     /// this commit has it, whatever the run selected.
     pub suite: Vec<String>,
@@ -116,8 +133,10 @@ pub enum SummaryError {
     /// The whole suite's summary beside others: one run is either whole,
     /// or shards.
     Mixed,
-    /// A shard of a split other than the rest's (`n`), or two of one.
-    ShardTwice(Shard),
+    /// A summary's attempt outside 1..=ATTEMPTS_MAX.
+    AttemptInvalid { shard: Option<Shard>, attempt: u32 },
+    /// Two summaries of one shard (or of the whole suite) from one attempt.
+    ShardTwice { shard: Option<Shard>, attempt: u32 },
     /// Shards disagree on how many there are.
     ShardCounts { first: u32, other: u32 },
     /// A shard of the split wrote no summary.
@@ -152,7 +171,8 @@ impl fmt::Display for SummaryError {
         match self {
             SummaryError::None => write!(f, "no summary: no shard finished"),
             SummaryError::Mixed => write!(f, "a whole suite's summary beside others: a run is whole, or shards"),
-            SummaryError::ShardTwice(s) => write!(f, "shard {s} reported twice"),
+            SummaryError::AttemptInvalid { shard, attempt } => write!(f, "{} names attempt {attempt}: a run's attempts are 1 to {ATTEMPTS_MAX}", shown(shard)),
+            SummaryError::ShardTwice { shard, attempt } => write!(f, "{} reported twice by attempt {attempt}", shown(shard)),
             SummaryError::ShardCounts { first, other } => write!(f, "shards of {first} and of {other} in one run"),
             SummaryError::ShardMissing(s) => write!(f, "shard {s} wrote no summary (it failed before its end, or was cancelled)"),
             SummaryError::SuitesDiffer(s) => write!(f, "{}'s suite is not the others' (summaries of two commits?)", shown(s)),
@@ -175,6 +195,12 @@ impl std::error::Error for SummaryError {}
 pub struct Combined {
     /// How many shards (1: the whole suite in one run).
     pub shards: u32,
+    /// The summaries that count, each shard's newest attempt's, in the
+    /// order given.
+    pub counted: Vec<Summary>,
+    /// The older attempts a shard's newer one set aside, as (shard,
+    /// attempt), in the order given.
+    pub set_aside: Vec<(Option<Shard>, u32)>,
     /// The suite's sections in its order, each with its shard.
     pub sections: Vec<(Section, Option<Shard>)>,
     pub totals: Counts,
@@ -203,8 +229,45 @@ fn consistent(s: &Summary) -> Result<(), SummaryError> {
     Ok(())
 }
 
+/// Each shard's newest summary, and the older attempts it set aside.
+struct Newest<'a> {
+    counted: Vec<&'a Summary>,
+    set_aside: Vec<(Option<Shard>, u32)>,
+}
+
+/// Of a run's summaries, each shard's (and the whole suite's) newest
+/// attempt's, in the order given, and the older attempts it set aside:
+/// a re-run's summary replaces its shard's from the attempt before, whether
+/// either passed. Two of one shard from one attempt are an error.
+fn newest(summaries: &[Summary]) -> Result<Newest<'_>, SummaryError> {
+    let mut seen = BTreeSet::new();
+    let mut newest: BTreeMap<Option<Shard>, usize> = BTreeMap::new();
+    // bounded: at most SUMMARIES_MAX summaries (combine asserts it)
+    for (i, s) in summaries.iter().enumerate() {
+        if !(1..=ATTEMPTS_MAX).contains(&s.attempt) {
+            return Err(SummaryError::AttemptInvalid { shard: s.shard, attempt: s.attempt });
+        }
+        if !seen.insert((s.shard, s.attempt)) {
+            return Err(SummaryError::ShardTwice { shard: s.shard, attempt: s.attempt });
+        }
+        if newest.get(&s.shard).is_none_or(|&j| summaries[j].attempt < s.attempt) {
+            newest.insert(s.shard, i);
+        }
+    }
+    let kept: BTreeSet<usize> = newest.into_values().collect();
+    let (mut counted, mut set_aside) = (Vec::with_capacity(kept.len()), Vec::new());
+    for (i, s) in summaries.iter().enumerate() {
+        match kept.contains(&i) {
+            true => counted.push(s),
+            false => set_aside.push((s.shard, s.attempt)),
+        }
+    }
+    assert_eq!(counted.len() + set_aside.len(), summaries.len(), "each summary counts or is set aside");
+    Ok(Newest { counted, set_aside })
+}
+
 /// The shards present, checked: one whole suite, or shards 1..=n each once.
-fn split(summaries: &[Summary]) -> Result<u32, SummaryError> {
+fn split(summaries: &[&Summary]) -> Result<u32, SummaryError> {
     let first = summaries.first().ok_or(SummaryError::None)?;
     let Some(first_shard) = first.shard else {
         return match summaries.len() {
@@ -221,9 +284,7 @@ fn split(summaries: &[Summary]) -> Result<u32, SummaryError> {
         }
         assert!((1..=n).contains(&shard.k), "a shard parsed is within its split: {shard}");
         let slot = &mut seen[(shard.k - 1) as usize];
-        if *slot {
-            return Err(SummaryError::ShardTwice(shard));
-        }
+        assert!(!*slot, "newest leaves each shard once: {shard}");
         *slot = true;
     }
     match seen.iter().position(|present| !present) {
@@ -232,19 +293,22 @@ fn split(summaries: &[Summary]) -> Result<u32, SummaryError> {
     }
 }
 
-/// The summaries of one run's shards (or the one summary of a whole run),
-/// combined: an error unless they make the suite exactly once.
+/// The summaries of one run, from any of its attempts: each shard's, or
+/// the whole suite's. Each shard's newest attempt counts, and an error
+/// unless the summaries that count make the suite exactly once.
 pub fn combine(summaries: &[Summary]) -> Result<Combined, SummaryError> {
-    let shards = split(summaries)?;
-    let suite = &summaries[0].suite;
+    assert!(summaries.len() <= SUMMARIES_MAX, "the caller reads at most {SUMMARIES_MAX} summaries, not {}", summaries.len());
+    let Newest { counted, set_aside } = newest(summaries)?;
+    let shards = split(&counted)?;
+    let suite = &counted[0].suite;
     let mut unique = std::collections::BTreeSet::new();
     if !suite.iter().all(|name| unique.insert(name.as_str())) {
-        return Err(SummaryError::SuiteMalformed(summaries[0].shard));
+        return Err(SummaryError::SuiteMalformed(counted[0].shard));
     }
     let mut by_section: BTreeMap<&str, (Section, Option<Shard>)> = BTreeMap::new();
     let (mut totals, mut failures) = (Counts::default(), Vec::new());
-    // bounded: at most SHARDS_MAX summaries, each of at most SECTIONS_MAX sections
-    for s in summaries {
+    // bounded: at most SHARDS_MAX summaries count, each of at most SECTIONS_MAX sections
+    for s in &counted {
         consistent(s)?;
         if &s.suite != suite {
             return Err(SummaryError::SuitesDiffer(s.shard));
@@ -269,17 +333,19 @@ pub fn combine(summaries: &[Summary]) -> Result<Combined, SummaryError> {
         }
     }
     assert!(by_section.is_empty(), "every section accounted for is one of the suite's");
-    let outside = summaries.iter().fold(Counts::default(), |sum, s| sum + s.outside);
-    let counted = sections.iter().fold(outside, |sum, (s, _)| sum + s.counts);
-    assert_eq!(counted, totals, "the sections and the checks outside them make the totals");
-    Ok(Combined { shards, sections, totals, failures })
+    let outside = counted.iter().fold(Counts::default(), |sum, s| sum + s.outside);
+    let sum = sections.iter().fold(outside, |sum, (s, _)| sum + s.counts);
+    assert_eq!(sum, totals, "the sections and the checks outside them make the totals");
+    let counted = counted.into_iter().cloned().collect();
+    Ok(Combined { shards, counted, set_aside, sections, totals, failures })
 }
 
 #[cfg(test)]
 mod tests {
     //! The check against summaries made here: two shards that together
-    //! ran a suite of three sections pass; each way a set of summaries can
-    //! fail to be that run is its own error.
+    //! ran a suite of three sections pass; a re-run's newest attempt
+    //! counts for its shard; each way a set of summaries can fail to be
+    //! that run is its own error.
     use super::*;
 
     const SKIPPED_WHOLE: Counts = Counts { passed: 0, failed: 0, skipped: 1 };
@@ -292,6 +358,7 @@ mod tests {
         let totals = sections.iter().fold(Counts::default(), |sum, s| sum + s.counts);
         Summary {
             shard: shard.map(|(k, n)| Shard { k, n }),
+            attempt: 1,
             suite: ["auth", "agents", "hermes"].map(String::from).to_vec(),
             sections,
             outside: Counts::default(),
@@ -329,6 +396,61 @@ mod tests {
         assert_eq!((combined.totals.failed, combined.failures), (1, vec![("auth: a check".to_string(), Some(Shard { k: 1, n: 2 }))]));
     }
 
+    /// Shard 1's first attempt, red: auth's one check failed.
+    fn red_first_attempt() -> Summary {
+        let mut red = summary(Some((1, 2)), vec![Section { name: "auth".into(), ran: true, counts: Counts { passed: 8, failed: 1, skipped: 0 }, ms: 10 }]);
+        red.failures = vec!["auth: a flake".into()];
+        red
+    }
+
+    fn attempt(mut s: Summary, attempt: u32) -> Summary {
+        s.attempt = attempt;
+        s
+    }
+
+    /// CI's re-run of a failed shard: its first attempt's red summary stays
+    /// beside the re-run's green one, in either order, and the re-run's
+    /// counts; the other shard's first attempt counts as it is.
+    #[test]
+    fn a_rerun_shards_newest_attempt_counts() {
+        let rerun = attempt(two_shards().remove(1), 2);
+        for summaries in [vec![red_first_attempt(), two_shards().remove(0), rerun.clone()], vec![rerun.clone(), two_shards().remove(0), red_first_attempt()]] {
+            let combined = combine(&summaries).unwrap();
+            assert_eq!(combined.totals, Counts { passed: 29, failed: 0, skipped: 1 });
+            assert!(combined.failures.is_empty(), "{:?}", combined.failures);
+            assert_eq!(combined.set_aside, [(Some(Shard { k: 1, n: 2 }), 1)]);
+            let mut counted: Vec<_> = combined.counted.iter().map(|s| (s.shard.unwrap().k, s.attempt)).collect();
+            counted.sort();
+            assert_eq!(counted, [(1, 2), (2, 1)]);
+        }
+        // the newest counts whether it passed: a re-run that fails keeps the check red
+        let green_then_red = [attempt(two_shards().remove(1), 1), two_shards().remove(0), attempt(red_first_attempt(), 2)];
+        let combined = combine(&green_then_red).unwrap();
+        assert_eq!((combined.totals.failed, combined.failures), (1, vec![("auth: a flake".to_string(), Some(Shard { k: 1, n: 2 }))]));
+        // three attempts: the third counts, the two before are set aside
+        let thrice = [red_first_attempt(), attempt(red_first_attempt(), 3), two_shards().remove(0), attempt(red_first_attempt(), 2)];
+        let combined = combine(&thrice).unwrap();
+        assert_eq!((combined.totals.failed, combined.set_aside.len()), (1, 2));
+        // a whole run re-run is the same choice
+        let whole = summary(None, vec![section("auth", 9), section("agents", 20), hermes()]);
+        let combined = combine(&[attempt(whole.clone(), 2), whole]).unwrap();
+        assert_eq!((combined.shards, combined.counted[0].attempt, combined.set_aside), (1, 2, vec![(None, 1)]));
+    }
+
+    /// Attempts are no substitute for a shard: one that no attempt reported
+    /// still fails the check, however many attempts the others made.
+    #[test]
+    fn a_missing_shard_still_fails_beside_attempts() {
+        let shard_2 = two_shards().remove(0);
+        let only_shard_2 = [shard_2.clone(), attempt(shard_2.clone(), 2), attempt(shard_2, 3)];
+        assert_eq!(combine(&only_shard_2), Err(SummaryError::ShardMissing(Shard { k: 1, n: 2 })));
+        // and a set-aside attempt never fills a section the newest left out
+        let mut emptied = attempt(two_shards().remove(1), 2);
+        emptied.sections.clear();
+        emptied.totals = Counts::default();
+        assert_eq!(combine(&[two_shards().remove(1), two_shards().remove(0), emptied]), Err(SummaryError::SectionMissing("auth".into())));
+    }
+
     #[test]
     fn each_way_summaries_fail_to_make_one_run_is_its_own_error() {
         let shard = |k, n| Shard { k, n };
@@ -338,7 +460,15 @@ mod tests {
         cases.push((missing, SummaryError::ShardMissing(shard(1, 2))));
         let mut twice = two_shards();
         twice.push(twice[0].clone());
-        cases.push((twice, SummaryError::ShardTwice(shard(2, 2))));
+        cases.push((twice, SummaryError::ShardTwice { shard: Some(shard(2, 2)), attempt: 1 }));
+        let mut whole_twice = vec![summary(None, vec![section("auth", 9), section("agents", 20), hermes()])];
+        whole_twice.push(whole_twice[0].clone());
+        cases.push((whole_twice, SummaryError::ShardTwice { shard: None, attempt: 1 }));
+        for bad in [0, ATTEMPTS_MAX + 1] {
+            let mut attempts = two_shards();
+            attempts[1].attempt = bad;
+            cases.push((attempts, SummaryError::AttemptInvalid { shard: Some(shard(1, 2)), attempt: bad }));
+        }
         let mut counts = two_shards();
         counts[1].shard = Some(shard(1, 3));
         cases.push((counts, SummaryError::ShardCounts { first: 2, other: 3 }));

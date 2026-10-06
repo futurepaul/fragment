@@ -38,7 +38,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use crate::api::{self, Api, Call, Preview, Reply};
-use devstack::summary::Shard;
+use devstack::summary::{Shard, ATTEMPTS_MAX};
 use crate::needs::{Need, Offers, Rung};
 use crate::{browser, Fake, Planned, Shape, Suite};
 
@@ -50,7 +50,7 @@ pub const MAX_PAID_CALLS_MAX: u64 = 400;
 const SWEEP_PAGES_MAX: usize = 100;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
-                    [--summary <file>]
+                    [--summary <file> [--attempt <n>]]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--offers computers,models]
                     [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep]";
 
@@ -70,6 +70,10 @@ pub struct Args {
     /// Where a local run writes its summary as it ends (`--summary`),
     /// which `cargo xtask e2e-summary` combines with its other shards'.
     pub summary: Option<PathBuf>,
+    /// The CI run's attempt the summary records (`--attempt`, GitHub's
+    /// `run_attempt`; 1 unless given): of a shard's summaries from a
+    /// run's attempts, `cargo xtask e2e-summary` counts the newest.
+    pub attempt: u32,
 }
 
 /// A hosted run's settings.
@@ -103,7 +107,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let (mut only, mut except) = (None, vec![]);
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
     let (mut dry_run, mut sweep, mut rehearse) = (false, false, false);
-    let (mut shard, mut summary) = (None, None);
+    let (mut shard, mut summary, mut attempt) = (None, None, None);
     let mut it = args.iter();
     // bounded: each pass takes one argument at least
     while let Some(arg) = it.next() {
@@ -113,6 +117,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
             "--except" if only.is_none() && except.is_empty() && shard.is_none() => except = list(&value()?),
             "--shard" if only.is_none() && except.is_empty() && shard.is_none() => shard = Some(parse_shard(&value()?)?),
             "--summary" if summary.is_none() => summary = Some(PathBuf::from(value()?)),
+            "--attempt" if attempt.is_none() => attempt = Some(parse_attempt(&value()?)?),
             "--hosted" => hosted = true,
             "--zone" => zone = Some(value()?),
             "--branch" => branch = Some(value()?),
@@ -128,6 +133,10 @@ pub fn parse(args: &[String]) -> Result<Args> {
     if only.as_ref().is_some_and(Vec::is_empty) {
         bail!("--only names at least one section");
     }
+    if attempt.is_some() && summary.is_none() {
+        bail!("--attempt is the attempt a summary records: with --summary");
+    }
+    let attempt = attempt.unwrap_or(1);
     let max_paid_calls_or_default = || -> Result<u64> {
         let n = max_paid_calls.unwrap_or(MAX_PAID_CALLS_DEFAULT);
         anyhow::ensure!(n <= MAX_PAID_CALLS_MAX, "--max-paid-calls is at most {MAX_PAID_CALLS_MAX}: a hosted run spends test cents");
@@ -146,7 +155,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
             true => Some(max_paid_calls_or_default()?),
             false => None,
         };
-        return Ok(Args { only, except, hosted: None, rehearse, shard, summary });
+        return Ok(Args { only, except, hosted: None, rehearse, shard, summary, attempt });
     }
     if rehearse {
         bail!("--rehearse is the hosted lane on the local node: not with --hosted");
@@ -183,7 +192,16 @@ pub fn parse(args: &[String]) -> Result<Args> {
     }
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
-    Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None, summary: None })
+    Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None, summary: None, attempt })
+}
+
+/// `--attempt n`: the CI run's attempt, 1 <= n <= ATTEMPTS_MAX (GitHub re-runs a
+/// run at most 50 times).
+fn parse_attempt(text: &str) -> Result<u32> {
+    match text.parse::<u32>() {
+        Ok(n) if (1..=ATTEMPTS_MAX).contains(&n) => Ok(n),
+        _ => bail!("--attempt is a run attempt, 1 to {ATTEMPTS_MAX}, not {text:?}"),
+    }
 }
 
 /// `--shard k/n`: shard `k` of the table's split, whose size `n` must be
@@ -229,6 +247,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         except,
         shard: None,
         summary: None,
+        attempt: 1,
         accounted: vec![],
         outside: Default::default(),
         rung: Rung::Hosted(offers(hosted)),

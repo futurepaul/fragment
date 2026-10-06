@@ -80,7 +80,8 @@ cargo xtask e2e            # the full suite against a fresh wrangler dev node (-
 cargo xtask e2e --shard 2/4 --summary target/e2e-summary/2.json
                            # one of CI's four shards (crates/e2e/src/lanes/mod.rs, SHARDS)
 cargo xtask e2e-summary target/e2e-summary
-                           # CI's `e2e` check: the shards ran every section once, and all passed
+                           # CI's `e2e` check: the shards (each one's newest --attempt) ran every
+                           # section once, and all passed
 ```
 
 The e2e stages its own copy of the cell, so it runs alongside
