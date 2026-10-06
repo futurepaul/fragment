@@ -90,9 +90,9 @@ impl Reply {
 }
 
 /// The prefix browsers hold an https host's own cookies under (auth.rs `cookie_name`).
-const HOST_PREFIX: &str = "__Host-";
+pub(crate) const HOST_PREFIX: &str = "__Host-";
 /// The cookies the cell names `__Host-` over https, at a host's root.
-const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
+pub(crate) const HOST_COOKIES: [&str; 5] = ["fragment_session", "fragment_site", "fragment_frame", "fragment_login", "fragment_computer"];
 
 /// A `Cookie` header as a browser on https sends it: each of the cell's
 /// host cookies under its `__Host-` name, the rest as they are.

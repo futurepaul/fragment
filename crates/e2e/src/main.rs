@@ -270,9 +270,10 @@ impl Suite {
         self.asked.push(name.to_string());
         if self.selected(name) {
             // what it needs first: by name it would be skipped all the same
-            let why = match needs::unmet(needs, self.rung) {
-                Some((need, missing)) => format!("{missing} ({})", need.name()),
-                None => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
+            let why = match (needs::unmet(needs, self.rung), &self.preview) {
+                (Some((need, missing)), _) => format!("{missing} ({})", need.name()),
+                (None, Some(preview)) => format!("{why}: run it by name, cargo xtask e2e --hosted --config <deploy config> --branch {} --only {name}", preview.branch),
+                (None, None) => format!("{why}: run it by name, cargo xtask e2e --only {name}"),
             };
             match &mut self.plan {
                 Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip: Some(why) }),
@@ -808,7 +809,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let (rung, shared) = match rehearse {
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some() };
+            // its computers answer through the scripted model: no real agent
+            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
