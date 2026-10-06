@@ -3,7 +3,11 @@
 //! makes the calls and meters them on the payer's ledger.
 //!
 //! A call names a tier, never a model: the tier picks the model and caps
-//! what one call may write. What the platform sends is the client's
+//! what one call may write. The route takes one name besides the tiers,
+//! `vision` (`Named`): the deployment's vision model (`vision_model`), for
+//! an agent runtime's calls about an image (Hermes' auxiliary vision, which
+//! reads its `computer_use` screenshots). It is no tier: an agent, a job's
+//! step or a manifest names none but the tiers. What the platform sends is the client's
 //! OpenAI-shaped chat completion with only these changes (`bound`): no
 //! `model` (the tier's is the call's), `max_tokens` at most the tier's cap,
 //! GLM's `reasoning_effort` clamped (GLM takes a missing or unknown one as
@@ -20,11 +24,34 @@
 use fragment_proto::Tier;
 use serde_json::{json, Value};
 
-use crate::price::Usage;
+use crate::price::{PriceBook, Usage};
 
 /// The tiers' models (decision 23), as Workers AI's catalog names them.
 pub const CHEAP_MODEL: &str = "@cf/zai-org/glm-5.3-flash";
 pub const MEDIUM_MODEL: &str = "@cf/zai-org/glm-5.3";
+/// The route's name for the deployment's vision model.
+pub const VISION: &str = "vision";
+/// The vision model unless the deployment names another
+/// (`FRAGMENT_VISION_MODEL`; Paul, 2026-10-05): GLM-5.3 Flash, the cheap
+/// tier's own, "Vision: Yes" in Workers AI's catalog
+/// (developers.cloudflare.com/workers-ai/models/glm-5.3-flash/, read
+/// 2026-10-05), already priced. GLM-5.3, the medium tier's, takes no
+/// images. DeepSeek Flash's vision build (`deepseek-flash`) is only on
+/// DeepSeek's own API: Workers AI's DeepSeek-V4-Flash-0731 has no vision,
+/// and reaching DeepSeek's would take our own key (decision 23: no BYOK).
+pub const VISION_MODEL_DEFAULT: &str = CHEAP_MODEL;
+/// The largest image Hermes sends for its vision call after a size
+/// refusal: it shrinks one to this many bytes of base64 data URL and tries
+/// again once (its `tools/vision_tools.py`, `_RESIZE_TARGET_BYTES`, which
+/// its config does not set).
+pub const IMAGE_DATA_URL_MAX_BYTES: usize = 5 * 1024 * 1024;
+/// A call's request: an image of `IMAGE_DATA_URL_MAX_BYTES` and a MiB for
+/// the rest of it (Hermes' prompt about a screenshot carries the screen's
+/// element list), so the call Hermes retries after a 413 fits. GLM's
+/// million-token window is about 4 MB of text; an agent's window sends a
+/// few hundred KiB.
+pub const MODEL_BODY_MAX_BYTES: usize = IMAGE_DATA_URL_MAX_BYTES + 1024 * 1024;
+const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits Hermes' shrunk image, and stays near it");
 /// The most one call may write, reasoning included. An agent asks for 4096
 /// (agent/src/model.rs); a job's text step may ask for more, up to this.
 /// It bounds the worst case each call reserves: GLM-5.3's is $0.11 of
@@ -39,11 +66,27 @@ pub const EFFORTS: [&str; 2] = ["low", "high"];
 /// at its reservation (its usage cannot be trusted).
 pub const SSE_LINE_MAX: usize = 1024 * 1024;
 
-/// A tier's model and the most one of its calls writes.
+/// A call's model and the most one call of it writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TierModel {
+pub struct Capped {
     pub model: &'static str,
     pub max_tokens: u32,
+}
+
+/// What a call to the route names as its `model`: a tier, or `vision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Named {
+    Tier(Tier),
+    Vision,
+}
+
+impl Named {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Named::Tier(t) => t.as_str(),
+            Named::Vision => VISION,
+        }
+    }
 }
 
 /// Why a model call is refused before anything is reserved or sent.
@@ -79,21 +122,52 @@ impl Refusal {
 }
 
 /// The model `tier` runs, and its cap; `high` is refused.
-pub fn model_of(tier: Tier) -> Result<TierModel, Refusal> {
+pub fn model_of(tier: Tier) -> Result<Capped, Refusal> {
     match tier {
-        Tier::Cheap => Ok(TierModel { model: CHEAP_MODEL, max_tokens: MAX_TOKENS }),
-        Tier::Medium => Ok(TierModel { model: MEDIUM_MODEL, max_tokens: MAX_TOKENS }),
+        Tier::Cheap => Ok(Capped { model: CHEAP_MODEL, max_tokens: MAX_TOKENS }),
+        Tier::Medium => Ok(Capped { model: MEDIUM_MODEL, max_tokens: MAX_TOKENS }),
         Tier::High => Err(Refusal::HighOff),
     }
 }
 
 /// The tier a tier's name names (`model` in a body, an agent's setting, a
-/// job's step); `None` is the default tier.
+/// job's step); `None` is the default tier. `vision` is none.
 pub fn tier_named(name: Option<&str>) -> Result<Tier, Refusal> {
     match name {
         None => Ok(fragment_proto::DEFAULT_TIER),
         Some(n) => Tier::parse(n).ok_or(Refusal::UnknownTier),
     }
+}
+
+/// What a call to the model route names: `vision`, or a tier
+/// (`tier_named`).
+pub fn route_named(name: Option<&str>) -> Result<Named, Refusal> {
+    match name {
+        Some(VISION) => Ok(Named::Vision),
+        other => tier_named(other).map(Named::Tier),
+    }
+}
+
+/// The model a route call runs, and its cap: its tier's, or the
+/// deployment's vision model (`vision_model`'s) at the tiers' cap.
+pub fn capped(named: Named, vision_model: &'static str) -> Result<Capped, Refusal> {
+    match named {
+        Named::Tier(t) => model_of(t),
+        Named::Vision => Ok(Capped { model: vision_model, max_tokens: MAX_TOKENS }),
+    }
+}
+
+/// The deployment's vision model: the one it names (`FRAGMENT_VISION_MODEL`)
+/// or `VISION_MODEL_DEFAULT`. It must be one the price book prices: a
+/// ledger refuses to reserve a call it cannot price, so a deployment that
+/// names another is refused before it serves a call, saying why.
+pub fn vision_model(named: Option<&str>, book: &PriceBook) -> Result<String, String> {
+    let model = named.map(str::trim).unwrap_or(VISION_MODEL_DEFAULT);
+    if book.models.iter().any(|m| m.model == model) {
+        return Ok(model.to_string());
+    }
+    let priced: Vec<&str> = book.models.iter().map(|m| m.model.as_str()).collect();
+    Err(format!("the vision model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price) or name one of those", priced.join(", ")))
 }
 
 /// The request the platform sends for one call, and what it may cost.
@@ -124,9 +198,9 @@ fn tokens(v: Option<&Value>) -> Result<Option<u64>, Refusal> {
     }
 }
 
-/// `body`, an OpenAI-shaped chat completion, bounded for `tier`.
-pub fn bound(tier: Tier, body: Value, stream: bool) -> Result<Bounded, Refusal> {
-    let t = model_of(tier)?;
+/// `body`, an OpenAI-shaped chat completion, bounded for its model `t`
+/// (`model_of` a tier, or `capped`).
+pub fn bound(t: Capped, body: Value, stream: bool) -> Result<Bounded, Refusal> {
     let Value::Object(mut input) = body else { return Err(Refusal::NotAnObject) };
     match input.get("messages") {
         Some(Value::Array(m)) if !m.is_empty() => {}
@@ -289,6 +363,74 @@ impl Stream {
 mod tests {
     use super::*;
 
+    fn tier(t: Tier) -> Capped {
+        model_of(t).unwrap()
+    }
+
+    /// Goal: the route's `vision` runs the deployment's vision model, at
+    /// the tiers' cap, and is no tier (an agent, a job's step and a
+    /// manifest name only tiers). Method: the route's names, the tiers'
+    /// names, and a call bounded on it.
+    #[test]
+    fn vision_is_the_routes_and_no_tier() {
+        assert_eq!(route_named(Some("vision")), Ok(Named::Vision));
+        assert_eq!(route_named(Some("medium")), Ok(Named::Tier(Tier::Medium)));
+        assert_eq!(route_named(None), Ok(Named::Tier(fragment_proto::DEFAULT_TIER)), "none named: the default tier");
+        assert_eq!(route_named(Some("Vision")), Err(Refusal::UnknownTier));
+        assert_eq!(route_named(Some(CHEAP_MODEL)), Err(Refusal::UnknownTier), "a model id is never a name");
+        assert_eq!(route_named(Some("high")).and_then(|n| capped(n, CHEAP_MODEL)), Err(Refusal::HighOff));
+        assert_eq!(tier_named(Some("vision")), Err(Refusal::UnknownTier), "vision is no tier");
+        assert_eq!(Tier::parse("vision"), None);
+        assert_eq!((Named::Vision.as_str(), Named::Tier(Tier::Cheap).as_str()), ("vision", "cheap"));
+        let v = capped(Named::Vision, "@cf/example/seeing").unwrap();
+        assert_eq!(v, Capped { model: "@cf/example/seeing", max_tokens: MAX_TOKENS });
+        assert_eq!(capped(Named::Tier(Tier::Medium), "@cf/example/seeing").unwrap().model, MEDIUM_MODEL, "a tier's call is the tier's");
+        // an image part reaches the model as it came
+        let image = json!([{ "type": "text", "text": "what is on the screen?" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }]);
+        let b = bound(v, json!({ "model": "vision", "messages": [{ "role": "user", "content": image }] }), false).unwrap();
+        assert_eq!((b.model, b.input["messages"][0]["content"].clone(), b.input.get("model")), ("@cf/example/seeing", image, None));
+    }
+
+    /// Goal: the deployment's vision model is GLM-5.3 Flash unless it names
+    /// another, and one the price book does not price is refused (a ledger
+    /// would refuse every call's reservation). Method: the default, a priced
+    /// model named, and unpriced ones.
+    #[test]
+    fn the_vision_model_is_one_the_book_prices() {
+        let book = PriceBook::defaults();
+        assert_eq!(vision_model(None, &book).as_deref(), Ok(CHEAP_MODEL));
+        assert_eq!(VISION_MODEL_DEFAULT, "@cf/zai-org/glm-5.3-flash");
+        assert_eq!(vision_model(Some(MEDIUM_MODEL), &book).as_deref(), Ok(MEDIUM_MODEL));
+        assert_eq!(vision_model(Some(" @cf/zai-org/glm-5.3-flash "), &book).as_deref(), Ok(CHEAP_MODEL));
+        let unpriced = vision_model(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"), &book).unwrap_err();
+        assert!(unpriced.contains("not in the price book") && unpriced.contains(CHEAP_MODEL), "{unpriced}");
+        assert!(vision_model(Some(""), &book).is_err());
+        // priced at Flash's prices: no new row, so no new book version
+        let flash = book.models.iter().find(|m| m.model == VISION_MODEL_DEFAULT).unwrap();
+        assert_eq!((flash.price.input, flash.price.cached_input, flash.price.output), (150_000, 30_000, 500_000));
+        assert_eq!(book.version, 1);
+        let mut other = book.clone();
+        other.models.retain(|m| m.model != CHEAP_MODEL);
+        assert!(vision_model(None, &other).is_err(), "the default too, were it unpriced");
+    }
+
+    /// Goal: Hermes' vision call fits the route at the size Hermes shrinks
+    /// an image to after a 413 (its `_RESIZE_TARGET_BYTES`), so its one
+    /// retry is answered. Method: the body of such a call, with a long
+    /// prompt about a screen, against the cap.
+    #[test]
+    fn hermes_shrunk_image_fits_a_call() {
+        let url = format!("data:image/jpeg;base64,{}", "A".repeat(IMAGE_DATA_URL_MAX_BYTES - "data:image/jpeg;base64,".len()));
+        assert_eq!(url.len(), IMAGE_DATA_URL_MAX_BYTES);
+        let prompt = "  [12] AXButton 'Save' (100, 200, 80, 24)\n".repeat(2_000);
+        let body = json!({
+            "model": "vision", "max_tokens": 4096, "temperature": 0.1,
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": prompt }, { "type": "image_url", "image_url": { "url": url } }] }],
+        });
+        let bytes = serde_json::to_vec(&body).unwrap().len();
+        assert!(bytes > 5 * 1024 * 1024 && bytes <= MODEL_BODY_MAX_BYTES, "{bytes} bytes against {MODEL_BODY_MAX_BYTES}");
+    }
+
     /// Goal: a tier picks its model; `high` and model ids are refused.
     /// Method: every tier name, and names that are not.
     #[test]
@@ -317,7 +459,7 @@ mod tests {
             "model": "medium", "messages": [{ "role": "user", "content": "hi" }], "tools": [{ "type": "function" }],
             "max_tokens": 100_000, "max_completion_tokens": 50_000, "reasoning_effort": "medium", "stream_options": { "x": 1 },
         });
-        let b = bound(Tier::Medium, body, false).unwrap();
+        let b = bound(tier(Tier::Medium), body, false).unwrap();
         assert_eq!((b.model, b.max_tokens, b.stream), (MEDIUM_MODEL, MAX_TOKENS, false));
         assert_eq!(
             b.input,
@@ -327,34 +469,34 @@ mod tests {
             }),
             "no model, the cap, the effort clamped, no stream options when not streaming"
         );
-        let b = bound(Tier::Cheap, json!({ "messages": [{}], "max_tokens": 64, "reasoning_effort": "high" }), true).unwrap();
+        let b = bound(tier(Tier::Cheap), json!({ "messages": [{}], "max_tokens": 64, "reasoning_effort": "high" }), true).unwrap();
         assert_eq!((b.model, b.max_tokens), (CHEAP_MODEL, 64), "what it asked for, under the cap");
         assert_eq!(b.input["reasoning_effort"], "high");
         assert_eq!((b.input["stream"].clone(), b.input["stream_options"].clone()), (json!(true), json!({ "include_usage": true })));
-        let b = bound(Tier::Cheap, json!({ "messages": [{}], "max_completion_tokens": 32 }), false).unwrap();
+        let b = bound(tier(Tier::Cheap), json!({ "messages": [{}], "max_completion_tokens": 32 }), false).unwrap();
         assert_eq!((b.max_tokens, b.input.get("max_completion_tokens")), (32, None), "either name, sent as max_tokens");
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": [{}] }), false).unwrap().max_tokens, MAX_TOKENS, "none asked: the cap");
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": [{}] }), false).unwrap().max_tokens, MAX_TOKENS, "none asked: the cap");
     }
 
     #[test]
     fn a_request_out_of_shape_is_refused() {
         let msgs = || json!([{ "role": "user", "content": "hi" }]);
-        assert_eq!(bound(Tier::High, json!({ "messages": msgs() }), false), Err(Refusal::HighOff));
-        assert_eq!(bound(Tier::Cheap, json!([1]), false), Err(Refusal::NotAnObject));
-        assert_eq!(bound(Tier::Cheap, json!({}), false), Err(Refusal::NoMessages));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": [] }), false), Err(Refusal::NoMessages));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": "hi" }), false), Err(Refusal::NoMessages));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": msgs(), "max_tokens": 0 }), false), Err(Refusal::MaxTokens));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": msgs(), "max_tokens": "9" }), false), Err(Refusal::MaxTokens));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": msgs(), "max_completion_tokens": -1 }), false), Err(Refusal::MaxTokens));
-        assert_eq!(bound(Tier::Cheap, json!({ "messages": msgs(), "stream": "yes" }), false), Err(Refusal::Stream));
+        assert_eq!(model_of(Tier::High).and_then(|t| bound(t, json!({ "messages": msgs() }), false)), Err(Refusal::HighOff));
+        assert_eq!(bound(tier(Tier::Cheap), json!([1]), false), Err(Refusal::NotAnObject));
+        assert_eq!(bound(tier(Tier::Cheap), json!({}), false), Err(Refusal::NoMessages));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": [] }), false), Err(Refusal::NoMessages));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": "hi" }), false), Err(Refusal::NoMessages));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "max_tokens": 0 }), false), Err(Refusal::MaxTokens));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "max_tokens": "9" }), false), Err(Refusal::MaxTokens));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "max_completion_tokens": -1 }), false), Err(Refusal::MaxTokens));
+        assert_eq!(bound(tier(Tier::Cheap), json!({ "messages": msgs(), "stream": "yes" }), false), Err(Refusal::Stream));
     }
 
     /// Goal: the worst case is an upper bound: a byte a token in, the cap
     /// out. Method: priced at the defaults, it is above what the call costs.
     #[test]
     fn the_worst_case_bounds_the_call() {
-        let b = bound(Tier::Cheap, json!({ "messages": [{ "role": "user", "content": "hello there" }], "max_tokens": 1000 }), false).unwrap();
+        let b = bound(tier(Tier::Cheap), json!({ "messages": [{ "role": "user", "content": "hello there" }], "max_tokens": 1000 }), false).unwrap();
         let worst = b.worst(80);
         assert_eq!(worst, Usage::Tokens { model: CHEAP_MODEL.into(), input: 80, cached_input: 0, cache_write: 0, output: 1000 });
         let book = crate::price::PriceBook::defaults();

@@ -874,21 +874,27 @@ both on Workers AI through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the
 payer's and the agent's identities). `high` (Opus) is refused, 400,
 saying why, until Cloudflare raises Unified Billing's Opus limit; a model
-id is never a tier.
+id is never a tier. `vision` names the deployment's vision model (its
+config's `vision_model`, GLM-5.3 Flash unless named, one the price book
+prices), for a runtime's calls about an image (Hermes' screenshots:
+docs/computers.md, Models); it is metered as a tier's call, and is no
+tier an agent or a job's step may name.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
 
 What the model is sent is the body bounded: no `model` (the tier's),
-`max_tokens` at most 16384, `reasoning_effort` clamped (above), usage
-asked for when it streams, and none of the client's headers. The payer
-is the agent's owner (decision 36); `fragment`, one the agent is a
+its images as they came, `max_tokens` at most 16384, `reasoning_effort`
+clamped (above), usage asked for when it streams, and none of the
+client's headers. The payer is the agent's owner (decision 36); `fragment`, one the agent is a
 member of (403 otherwise), is where the turn is: when its owner pays,
 the call counts in its month and is under its cap for anyone but the
 owner (or the owner's agent acting for them); when another person owns
 it, that owner's ledger is asked first whether it is still open
-(decision 26). Each call reserves its worst case (the body's bytes as
+(decision 26). A request is at most 6 MiB (413 past it, nothing
+reserved): a screenshot Hermes shrinks to 5 MiB of base64 after a 413
+fits. Each call reserves its worst case (the body's bytes as
 tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
 then settles from its last, cumulative usage, input less what was cached
 (Workers AI puts a per-chunk delta on every chunk and the whole call's

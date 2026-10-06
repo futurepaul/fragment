@@ -70,6 +70,11 @@ struct Deployment {
     /// The AI Gateway the model route calls through (its id, named: never
     /// `default`, which makes one that logs). Without it, models are off.
     ai_gateway: Option<String>,
+    /// The model the route's `vision` runs (`FRAGMENT_VISION_MODEL`): a
+    /// runtime's calls about an image, Hermes' screenshots among them.
+    /// GLM-5.3 Flash unless named; one the price book does not price is
+    /// refused (`fragment_core::models::vision_model`).
+    vision_model: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
     /// Computers (docs/computers.md): the images they run, and the one a
@@ -427,10 +432,13 @@ pub(crate) fn secrets_of(config: &Path) -> Result<SecretsOf> {
 }
 
 /// What the cell would refuse at its first request, refused before a
-/// deploy: the provider catalog, a default image it has, and its store
-/// secrets' names.
+/// deploy: the provider catalog, a default image it has, its store
+/// secrets' names, and a vision model the price book prices.
 fn checked(d: Deployment) -> Result<Deployment> {
     check_names(&bound(&d)?)?;
+    if let Some(m) = &d.vision_model {
+        fragment_core::models::vision_model(Some(m), &fragment_core::price::PriceBook::defaults()).map_err(|e| anyhow::anyhow!("vision_model: {e}"))?;
+    }
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
@@ -649,6 +657,9 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
     if let Some(p) = &d.default_plan {
         v.insert("FRAGMENT_DEFAULT_PLAN".into(), json!(p));
     }
+    if let Some(m) = &d.vision_model {
+        v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
+    }
     if let Some(computers) = &d.computers {
         v.insert("FRAGMENT_COMPUTER_IMAGE".into(), json!(computers.default_image));
         if let Some(ms) = computers.unsaved_max_ms {
@@ -745,6 +756,7 @@ mod tests {
             workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
             operators: vec![],
             ai_gateway: None,
+            vision_model: None,
             default_plan: None,
             computers: None,
             providers: vec![],
@@ -1056,5 +1068,35 @@ mod tests {
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
+    }
+
+    /// The vision model is one the price book prices, refused before a
+    /// deploy otherwise (the cell would refuse it at its first request);
+    /// named, it is the cell's `FRAGMENT_VISION_MODEL`, and unnamed the
+    /// cell's default (GLM-5.3 Flash).
+    #[test]
+    fn a_vision_model_the_book_does_not_price_is_refused() {
+        let with = |m: Option<&str>| {
+            let mut d = deployment(None, None);
+            d.vision_model = m.map(str::to_string);
+            d
+        };
+        let refused = checked(with(Some("@cf/deepseek-ai/deepseek-v4-flash-0731"))).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("vision_model: the vision model \"@cf/deepseek-ai/deepseek-v4-flash-0731\" is not in the price book"), "{refused}");
+        assert!(checked(with(Some("@cf/zai-org/glm-5.3-flash"))).is_ok());
+        assert!(checked(with(None)).is_ok());
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let rendered = |v: &Value, test: &str| {
+            let d = load(&config_file(test, v)).unwrap();
+            let n = names(&d, Some("p5")).unwrap();
+            worker_configs(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap().1["vars"].clone()
+        };
+        assert!(rendered(&v, "vision-none").get("FRAGMENT_VISION_MODEL").is_none(), "unnamed: the cell's default");
+        v["vision_model"] = json!("@cf/zai-org/glm-5.3-flash");
+        assert_eq!(rendered(&v, "vision-named")["FRAGMENT_VISION_MODEL"], "@cf/zai-org/glm-5.3-flash");
+        v["vision_model"] = json!("@cf/meta/llama-4-scout-17b-16e-instruct");
+        let refused = load(&config_file("vision-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("is not in the price book"), "{refused}");
     }
 }
