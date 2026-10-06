@@ -646,12 +646,23 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     );
     let (calls, before) = (s.ai.calls().len(), aig().len());
     let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
-    let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
-    s.ok(
-        "one past the route's cap is refused, 413, nothing reserved or sent",
-        r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
-        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
-    );
+    let sent = api.signed(hand, "POST", route, Some(&look(&over)));
+    let untouched = s.ai.calls().len() == calls && aig().len() == before;
+    match sent {
+        Ok(r) => s.ok(
+            "one past the route's cap is refused, 413, nothing reserved or sent",
+            r.status == 413 && untouched,
+            json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
+        ),
+        // celld answers the 413 from the declared length at once and closes
+        // the connection on the body it never read, so this client's upload
+        // breaks before it reads the answer (docs/self-host.md, found 31)
+        Err(e) if s.on_celld() => {
+            s.skip("one past the route's cap is refused, 413", "celld closes the connection under the upload it refused, so this client never reads its 413 (docs/self-host.md, found 31)");
+            s.ok("one past the route's cap reserves nothing and sends nothing", untouched, format!("{e:#}"));
+        }
+        Err(e) => return Err(e),
+    }
     Ok(())
 }
 

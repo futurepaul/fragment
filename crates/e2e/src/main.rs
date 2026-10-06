@@ -396,6 +396,11 @@ impl Suite {
         std::env::var("FRAGMENT_E2E_MODELS").as_deref() == Ok("openai")
     }
 
+    /// Whether the node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+    pub fn on_celld(&self) -> bool {
+        matches!(self.rung, needs::Rung::Celld { .. })
+    }
+
     /// Whether a job's sleep outlives a crash of the node: celld's
     /// Workflows keep it (each instance a cell, its sleep an alarm); local
     /// workerd's hold it as a timer in the process.
