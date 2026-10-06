@@ -617,9 +617,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
     } else {
         // a real runtime called its model to answer at all: each call went
-        // through the intercept, reserved and settled on its owner's ledger
+        // through the intercept, reserved and settled on its owner's ledger.
+        // Hermes may make one more after its reply (on the e2e preview,
+        // 2026-10-06, one 55 s after the answer's), which settles only when
+        // that call ends: the wait covers a model call, not just the ledger.
         let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| end_of(e) == "settled");
-        s.eventually(Duration::from_secs(20), || settled(&entries(api, &owner_id, "aig:")));
+        s.eventually(Duration::from_secs(150), || settled(&entries(api, &owner_id, "aig:")));
         let aig = entries(api, &owner_id, "aig:");
         s.ok(
             "its answer's model calls went through the computer's intercept, each metered to the agent's owner and settled from its usage",
