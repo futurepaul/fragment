@@ -109,7 +109,9 @@ RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchec
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
 
 # What the boot reads instead of finding it each time: the lean plugin list,
-# Hermes' revision, the browser's path; the platform skill every profile
+# Hermes' revision; the image's Chromium, /opt/fragment/bin/chromium
+# (Playwright's, always with the flags a container needs, which Hermes adds
+# only where it sees Docker: boot/src/hermes.rs); the platform skill every profile
 # has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
 # and the files the gateway loads, read ahead on the second CPU while /data
 # is restored (S3b, cut h).

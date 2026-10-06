@@ -594,14 +594,27 @@ settings and state):
   for the screen's first viewer (about a second on the lower rung, and
   about 300 MiB more while it runs), or by Hermes at an agent's first
   `computer_use` or browser call (`bot_desktop.auto_start`), never at
-  boot. On that desktop an agent operates: Hermes' `computer_use` (its
-  backend, cua-driver 0.28.3, is in the image, pinned, and named by
+  boot. The screen's page follows the desktop: a stream that ends (the
+  desktop stopped or restarted, its viewers' streams ending with it) is
+  opened again on its own, from 1 s backing off to 10 s, while the page's
+  control socket stays open, and the bridge starts the desktop for it at
+  once; Take over is kept. On that desktop an agent operates: Hermes'
+  `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
   `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
   bridge and the agent calls it through `tool_call`), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
   with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Events: `agents.changed`,
+  `/data` at the first call). Its browser, and the desktop's Browser icon a
+  person uses after Take over, are the image's Chromium
+  (`/opt/fragment/bin/chromium`, named to Hermes by
+  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
+  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
+  where it sees Docker's marker (`/.dockerenv`), and Containers gives a
+  container neither that marker nor a `/dev/shm` (Docker mounts one in
+  every container), so there Chromium died as it started (p5,
+  2026-10-05); the lower rung runs the desktop as Containers does
+  (`--ipc=none`, no marker). Events: `agents.changed`,
   `profile.written`, `agents.served` (the gateway's answer and its
   `ms`), `agents.ready` (the whole change's `ms`).
 

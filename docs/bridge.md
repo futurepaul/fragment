@@ -104,7 +104,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down, at most once a minute while it stays down |
+| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
 
 ## State, and what it never does twice
 

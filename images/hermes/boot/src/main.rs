@@ -16,7 +16,7 @@
 //! hermes-boot screen-start (the bridge's, when a viewer finds the screen
 //!                          down) the first agent's desktop
 //! hermes-boot build-info   (at image build) the lean plugin list, Hermes'
-//!                          revision, the browser's path, the platform skill
+//!                          revision, the image's Chromium, the platform skill
 //! ```
 
 mod agents;
@@ -337,7 +337,9 @@ fn pre_init() -> ! {
     ev!("boot.pre_init");
     let _ = std::fs::remove_dir_all(RUN);
     std::fs::create_dir_all(RUN).unwrap_or_else(|e| fail(&format!("{RUN}: {e}")));
-    // The browser's path, found at build: stage2 skips its own search.
+    // The image's Chromium (hermes::CHROMIUM), written at build: stage2
+    // skips its own search, and Hermes starts it for its browser and its
+    // desktop's Browser icon alike.
     if let Ok(p) = std::fs::read_to_string(format!("{OPT}/browser-path")) {
         if !p.trim().is_empty() && env("AGENT_BROWSER_EXECUTABLE_PATH").is_none() {
             std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", p.trim());
@@ -479,19 +481,26 @@ fn build_info() -> ! {
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
     let rev = std::fs::read("/etc/hermes/image-provenance.json").ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v["revision"].as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into());
     std::fs::write(format!("{OPT}/image-rev"), &rev).unwrap_or_else(|e| fail(&e.to_string()));
-    let browser = find_browser(Path::new("/opt/hermes/.playwright"));
-    std::fs::write(format!("{OPT}/browser-path"), browser.as_ref().map(|p| p.display().to_string()).unwrap_or_default()).unwrap_or_else(|e| fail(&e.to_string()));
+    // the image's Chromium (hermes::CHROMIUM): Playwright's two browsers,
+    // with the flags a container needs, whatever the runtime
+    let playwright = Path::new("/opt/hermes/.playwright");
+    let full = find_browser(playwright, |name, dir| name == "chrome" && dir.starts_with("chrome-linux")).unwrap_or_else(|| fail("no Chromium under /opt/hermes/.playwright"));
+    let shell = find_browser(playwright, |name, _| matches!(name, "chrome-headless-shell" | "headless_shell")).unwrap_or_else(|| fail("no headless shell under /opt/hermes/.playwright"));
+    std::fs::write(hermes::CHROMIUM, hermes::chromium_script(&full, &shell)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
+    std::fs::set_permissions(hermes::CHROMIUM, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| fail(&format!("{}: {e}", hermes::CHROMIUM)));
+    std::fs::write(format!("{OPT}/browser-path"), hermes::CHROMIUM).unwrap_or_else(|e| fail(&e.to_string()));
     let cli = Command::new(FRAGMENT_CLI).arg("skill").output().unwrap_or_else(|e| fail(&format!("{FRAGMENT_CLI} skill: {e}")));
     if !cli.status.success() {
         fail(&format!("{FRAGMENT_CLI} skill: {}", String::from_utf8_lossy(&cli.stderr)));
     }
     let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
     skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
-    println!("{} plugins disabled; Hermes {rev}; browser {:?}; the platform skill, {} bytes", plugins.len(), browser, skill.len());
+    println!("{} plugins disabled; Hermes {rev}; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
 
-fn find_browser(root: &Path) -> Option<PathBuf> {
+/// The first executable under `root` whose name and directory's name `is`.
+fn find_browser(root: &Path, is: impl Fn(&str, &str) -> bool) -> Option<PathBuf> {
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0;
     // bounded: 100 000 entries of Playwright's tree
@@ -506,8 +515,12 @@ fn find_browser(root: &Path) -> Option<PathBuf> {
             let Ok(meta) = e.metadata() else { continue };
             if meta.is_dir() {
                 stack.push(p);
-            } else if meta.permissions().mode() & 0o111 != 0 && matches!(p.file_name().and_then(|n| n.to_str()), Some("chrome-headless-shell" | "headless_shell")) {
-                return Some(p);
+            } else if meta.permissions().mode() & 0o111 != 0 {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let dir = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if is(name, dir) {
+                    return Some(p);
+                }
             }
         }
     }

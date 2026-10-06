@@ -98,10 +98,14 @@ pub fn hermes(s: &mut Suite, api: &Api) -> Result<()> {
 /// desktop starts for the screen's first viewer, its RFB stream and its
 /// control socket pass through the computer's port, each server's first
 /// word included, and in a frame of the platform's page (as the shell's
-/// "Its computer's screen" opens it) the page connects and takes over.
-/// That input then reaches the screen is the lower rung's
-/// (`images/bridge/tests/docker.rs`, `the_hermes_desktop`).
-fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str) -> Result<()> {
+/// "Its computer's screen" opens it) the page connects and takes over; and
+/// it follows the desktop: stopped under it, the page opens its stream
+/// again on its own, the desktop started for it, Take over kept (p5,
+/// 2026-10-05: the agent's browser showed only once the viewer was
+/// reopened). That input then reaches the screen, and the browser shows on
+/// it, is the lower rung's (`images/bridge/tests/docker.rs`,
+/// `the_hermes_desktop`).
+fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str, stop_desktop: &dyn Fn(&Suite) -> Result<String>) -> Result<()> {
     let ticket = || -> Result<String> {
         let r = api.signed(owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({})))?;
         anyhow::ensure!(r.status == 200, "a ticket: {r}");
@@ -146,6 +150,17 @@ fn screen(s: &mut Suite, api: &Api, owner: &fragment_nip98::Keys, id: &str) -> R
     chrome.eval_in_frame(&shell, &computer, "document.getElementById('control').click(), true")?;
     let taken = super::isolation::frame_says(s, &mut chrome, &shell, &computer, "You have the screen", Duration::from_secs(20));
     s.ok("and Take over gives the person the screen", taken, said(&mut chrome));
+
+    let stopped = stop_desktop(s)?;
+    let connects = "Number(document.getElementById('screen')?.dataset.connects ?? 0)";
+    let back = format!("{connects} >= 2 && document.getElementById('status')?.textContent === 'You have the screen' && !document.getElementById('control').disabled");
+    let followed = s.eventually(wait, || chrome.eval_in_frame(&shell, &computer, &back).ok() == Some(json!(true)));
+    let streams = chrome.eval_in_frame(&shell, &computer, connects).unwrap_or_default();
+    s.ok(
+        "the desktop stopped under the page, the page opens its stream again on its own: the desktop started for it, the person still holding the screen",
+        followed,
+        json!({ "agent": stopped, "status": said(&mut chrome), "streams": streams }),
+    );
     Ok(())
 }
 
@@ -193,12 +208,19 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     });
     println!("      (Hermes following its chat {:.1?} after the wake)", t0.elapsed());
     s.ok("Hermes' bridge follows the chat as the agent", subscribed, "");
-    screen(s, api, &owner, &id)?;
 
     let say = |n: u32, text: &str| api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": format!("h{n}"), "body": { "text": text } })));
     let turn_for = |r: &crate::api::Reply| turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
     let reply_of = |turn: &str| agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
     let ended = |turn: &str| work_of(&records(api, &owner, &chat_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
+    // the agent stops its desktop from its terminal, as Hermes' own command does
+    let stop_desktop = |s: &Suite| -> Result<String> {
+        let r = say(90, "run: hermes computer-use screen stop")?;
+        let turn = turn_for(&r);
+        s.eventually(TURN, || ended(&turn).is_some());
+        Ok(reply_of(&turn).unwrap_or_default())
+    };
+    screen(s, api, &owner, &id, &stop_desktop)?;
 
     // a reply, streamed: a page sees its draft live, then the reply
     let mut page = Socket::open(api, &chat_name, "__live", Some(&owner), None)?;
