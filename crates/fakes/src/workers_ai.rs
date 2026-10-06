@@ -19,11 +19,12 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
-//! Replies are scripted (text, tool calls, nothing, or reasoning alone) and
-//! answered in order before falling back to an echo of the last message,
-//! or, for a real agent runtime (`transcripts`), to `transcript_reply`: a
-//! pure function of the transcript (lesson 13), which an agent's own
-//! auxiliary calls (titles, its approval guardian) cannot put out of order.
+//! Replies are scripted (text, tool calls, text beside tool calls, nothing,
+//! or reasoning alone) and answered in order before falling back to an echo
+//! of the last message, or, for a real agent runtime (`transcripts`), to
+//! `transcript_reply`: a pure function of the transcript (lesson 13), which
+//! an agent's own auxiliary calls (titles, its approval guardian) cannot put
+//! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
 //! report (`set_usage`), and a stream cut before its usage (`break_next`).
@@ -45,10 +46,28 @@ pub enum Reply {
     Text(String),
     /// Tool calls: (name, arguments).
     Tools(Vec<(String, Value)>),
+    /// Text and tool calls in one answer, as a model narrates its call
+    /// ("Let me check that." beside a `terminal` call): streamed, the
+    /// text's deltas, then the calls'.
+    Narrated(String, Vec<(String, Value)>),
     /// No text and no tool call.
     Empty,
     /// Reasoning, and nothing else.
     Thinking(String),
+}
+
+/// The text a `narrate:` answer says beside its call (`transcript_reply`).
+pub const NARRATION: &str = "Let me check that.";
+
+/// A transcript's answer after a tool's result waits this long, as a
+/// model's next call does: a runtime's tool progress is out before its
+/// answer (Hermes sends its progress at most every 0.3 s, and drops what
+/// it has not sent when the turn ends).
+pub const FOLLOW_UP_MS: u64 = 1_000;
+
+/// A tool's result came since the transcript's last user message.
+fn follows_a_tool(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|m| m.iter().rev().take_while(|m| m["role"] != "user").any(|m| m["role"] == "tool"))
 }
 
 /// The characters one token of an answer stands for.
@@ -115,6 +134,8 @@ fn text_of(content: &Value) -> String {
 ///   each, and merges two user messages a restart left side by side into
 ///   one), else the first (a runtime appends its own notes after it, which
 ///   may quote an earlier command);
+/// - `narrate: <command>`, likewise: the same call, with `NARRATION` as its
+///   text in the same answer (`Reply::Narrated`);
 /// - a user message with an image: `scripted: I see an image`;
 /// - otherwise `scripted: <the message's first line> [<user messages in
 ///   the transcript>]`, so a restored conversation shows in its count.
@@ -138,6 +159,9 @@ pub fn transcript_reply(body: &Value) -> Reply {
     let newest = lines.iter().rev().find_map(|l| named(l)).or_else(|| lines.first().map(|l| l.to_string())).unwrap_or_default();
     if let (Some(command), true) = (newest.strip_prefix("run: ").map(str::trim), has_terminal) {
         return Reply::Tools(vec![("terminal".into(), json!({ "command": command }))]);
+    }
+    if let (Some(command), true) = (newest.strip_prefix("narrate: ").map(str::trim), has_terminal) {
+        return Reply::Narrated(NARRATION.into(), vec![("terminal".into(), json!({ "command": command }))]);
     }
     if last.as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url")) {
         return Reply::Text("scripted: I see an image".into());
@@ -189,54 +213,69 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
     *ids += 1;
     let id = format!("fake{ids:08x}");
     let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
-    let mut parts: Vec<(Value, u64)> = Vec::new();
+    let mut parts: Vec<Value> = Vec::new();
     let mut cut = false;
+    // text, in pieces, so a client's draft grows
+    let text_parts = |text: &str, parts: &mut Vec<Value>, budget: &mut Option<usize>| -> bool {
+        let (text, was_cut) = within(text, budget);
+        let chars: Vec<char> = text.chars().collect();
+        for piece in chars.chunks(chars.len().div_ceil(pieces.max(1)).max(1)) {
+            parts.push(json!({ "content": piece.iter().collect::<String>() }));
+        }
+        if chars.is_empty() {
+            parts.push(json!({ "content": "" }));
+        }
+        was_cut
+    };
+    // tool calls, each's arguments in pieces
+    let call_parts = |calls: &[(String, Value)], parts: &mut Vec<Value>, budget: &mut Option<usize>, ids: &mut u64, mut cut: bool| -> bool {
+        for (i, (name, args)) in calls.iter().enumerate() {
+            if cut {
+                break;
+            }
+            *ids += 1;
+            let (args, was_cut) = within(&args.to_string(), budget);
+            cut = was_cut;
+            let chars: Vec<char> = args.chars().collect();
+            let mut pieces: Vec<String> = chars.chunks(ARGS_PIECE_CHARS).map(|c| c.iter().collect()).collect();
+            if pieces.is_empty() {
+                pieces.push(String::new());
+            }
+            for (n, piece) in pieces.iter().enumerate() {
+                let call = match n {
+                    0 => json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": piece } }),
+                    _ => json!({ "index": i, "id": null, "function": { "arguments": piece } }),
+                };
+                parts.push(json!({ "tool_calls": [call] }));
+            }
+        }
+        cut
+    };
     let finish = match reply {
         Reply::Text(text) => {
-            let (text, was_cut) = within(text, &mut budget);
-            cut = was_cut;
-            // in pieces, so a client's draft grows
-            let chars: Vec<char> = text.chars().collect();
-            for piece in chars.chunks(chars.len().div_ceil(pieces.max(1)).max(1)) {
-                parts.push((json!({ "content": piece.iter().collect::<String>() }), 0));
-            }
-            if chars.is_empty() {
-                parts.push((json!({ "content": "" }), 0));
-            }
+            cut = text_parts(text, &mut parts, &mut budget);
             "stop"
         }
         Reply::Empty => "stop",
         Reply::Thinking(text) => {
-            parts.push((json!({ "reasoning_content": text }), 0));
+            parts.push(json!({ "reasoning_content": text }));
             "stop"
         }
         Reply::Tools(calls) => {
-            for (i, (name, args)) in calls.iter().enumerate() {
-                if cut {
-                    break;
-                }
-                *ids += 1;
-                let (args, was_cut) = within(&args.to_string(), &mut budget);
-                cut = was_cut;
-                let chars: Vec<char> = args.chars().collect();
-                let mut pieces: Vec<String> = chars.chunks(ARGS_PIECE_CHARS).map(|c| c.iter().collect()).collect();
-                if pieces.is_empty() {
-                    pieces.push(String::new());
-                }
-                for (n, piece) in pieces.iter().enumerate() {
-                    let call = match n {
-                        0 => json!({ "index": i, "id": format!("call_{ids}"), "type": "function", "function": { "name": name, "arguments": piece } }),
-                        _ => json!({ "index": i, "id": null, "function": { "arguments": piece } }),
-                    };
-                    parts.push((json!({ "tool_calls": [call] }), 0));
-                }
-            }
+            cut = call_parts(calls, &mut parts, &mut budget, ids, false);
+            "tool_calls"
+        }
+        // the text's deltas first, then the calls', as a model streams a
+        // narrated call
+        Reply::Narrated(text, calls) => {
+            cut = text_parts(text, &mut parts, &mut budget);
+            cut = call_parts(calls, &mut parts, &mut budget, ids, cut);
             "tool_calls"
         }
     };
     // the completion's tokens, spread over its chunks as deltas
     let n = parts.len().max(1) as u64;
-    for (i, (delta, _)) in parts.iter().enumerate() {
+    for (i, delta) in parts.iter().enumerate() {
         let share = used.completion / n + u64::from((i as u64) < used.completion % n);
         out += &chunk(&id, model, delta.clone(), None, delta_usage(0, share));
     }
@@ -320,13 +359,18 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let scripted = s.script.pop_front();
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
+    if s.transcripts && scripted.is_none() && follows_a_tool(&body) {
+        s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
+    }
     let broken = s.breaks.pop_front().unwrap_or(false);
     let unscripted = |s: &State| if s.transcripts { transcript_reply(&body) } else { Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))) };
     if body["stream"] == true {
         let reply = scripted.unwrap_or_else(|| unscripted(s));
+        let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
         let written = match &reply {
             Reply::Text(t) | Reply::Thinking(t) => t.chars().count(),
-            Reply::Tools(calls) => calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum(),
+            Reply::Tools(calls) => called(calls),
+            Reply::Narrated(t, calls) => t.chars().count() + called(calls),
             Reply::Empty => 0,
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
@@ -339,14 +383,14 @@ fn answer(s: &mut State, req: &Request) -> Response {
         _ if s.transcripts => transcript_reply(&body),
         _ => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
     };
+    let tool_calls = |calls: &[(String, Value)]| -> Vec<Value> {
+        calls.iter().enumerate().map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } })).collect()
+    };
     let (message, finish, written) = match reply {
-        Reply::Tools(calls) => {
-            let calls: Vec<Value> = calls
-                .iter()
-                .enumerate()
-                .map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } }))
-                .collect();
-            (json!({ "role": "assistant", "content": null, "tool_calls": calls }), "tool_calls", 16)
+        Reply::Tools(calls) => (json!({ "role": "assistant", "content": null, "tool_calls": tool_calls(&calls) }), "tool_calls", 16),
+        Reply::Narrated(text, calls) => {
+            let n = text.chars().count() + 16;
+            (json!({ "role": "assistant", "content": text, "tool_calls": tool_calls(&calls) }), "tool_calls", n)
         }
         Reply::Text(text) => {
             let n = text.chars().count();
@@ -471,6 +515,57 @@ mod tests {
         assert!(text.ends_with("data: [DONE]\n\n"));
         let broken = stream("m", &Reply::Text("hi".into()), &mut 0, used, None, true, 1);
         assert!(!broken.contains("\"response\"") && !broken.contains("[DONE]"), "a broken stream ends before its usage");
+    }
+
+    /// Goal: a narrated call is one answer carrying text and a tool call,
+    /// streamed as a model streams one: the text's deltas, then the call's,
+    /// ending `tool_calls`; unstreamed, one message with both. Method: the
+    /// stream's deltas in order; the unstreamed answer through the server;
+    /// and a budget that cuts the text, so no call follows.
+    #[test]
+    fn a_narrated_call_streams_its_text_then_its_call() {
+        let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
+        let asked = json!({ "messages": [{ "role": "user", "content": "[paul] narrate: echo narrated-ran" }], "tools": tools });
+        let reply = transcript_reply(&asked);
+        assert!(matches!(&reply, Reply::Narrated(t, c) if t == NARRATION && *c == vec![("terminal".to_string(), json!({ "command": "echo narrated-ran" }))]), "{reply:?}");
+        // without a terminal tool, `narrate:` is only words
+        assert!(matches!(transcript_reply(&json!({ "messages": [{ "role": "user", "content": "narrate: ls" }] })), Reply::Text(t) if t == "scripted: narrate: ls [1]"));
+        // its answer after the tool's result waits as a model's next call
+        // does; an answer to a person's message does not
+        let ran = json!({ "messages": [{ "role": "user", "content": "narrate: echo x" }, { "role": "assistant", "content": NARRATION, "tool_calls": [] }, { "role": "tool", "content": "x" }] });
+        assert!(follows_a_tool(&ran) && !follows_a_tool(&asked));
+        let again = json!({ "messages": [{ "role": "tool", "content": "x" }, { "role": "user", "content": "hi" }] });
+        assert!(!follows_a_tool(&again), "a tool's result before the newest message is an earlier turn's");
+
+        let used = Used { prompt: 10, cached: 0, completion: 9 };
+        let text = stream("m", &reply, &mut 0, used, None, false, 3);
+        let deltas: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str::<Value>(d).unwrap()).filter_map(|l| l["choices"][0]["delta"].as_object().cloned().map(Value::Object)).collect();
+        let kinds: Vec<&str> = deltas.iter().filter_map(|d| if d["tool_calls"].is_array() { Some("call") } else if d["content"].as_str().is_some_and(|c| !c.is_empty()) { Some("text") } else { None }).collect();
+        assert_eq!(kinds, ["text", "text", "text", "call"], "the text's pieces, then the call: {deltas:?}");
+        let said: String = deltas.iter().filter_map(|d| d["content"].as_str()).collect();
+        assert_eq!(said, NARRATION);
+        let call = deltas.iter().find(|d| d["tool_calls"].is_array()).unwrap();
+        assert_eq!(call["tool_calls"][0]["function"]["name"], "terminal");
+        assert_eq!(serde_json::from_str::<Value>(call["tool_calls"][0]["function"]["arguments"].as_str().unwrap()).unwrap(), json!({ "command": "echo narrated-ran" }));
+        assert!(text.contains("\"finish_reason\":\"tool_calls\""), "{text}");
+
+        // a budget that cuts the text: no call, and it ends `length`
+        let short = stream("m", &reply, &mut 0, used, Some(4), false, 1);
+        assert!(!short.contains("tool_calls\":[") && short.contains("\"finish_reason\":\"length\""), "{short}");
+
+        // unstreamed, one message carries both
+        let ai = WorkersAi::start(0).unwrap();
+        ai.transcripts(true);
+        let body = serde_json::to_vec(&asked).unwrap();
+        let mut socket = std::net::TcpStream::connect(ai.url.trim_start_matches("http://")).unwrap();
+        let head = format!("POST /run/m HTTP/1.1\r\nhost: fake\r\ncontent-length: {}\r\n\r\n", body.len());
+        std::io::Write::write_all(&mut socket, &[head.as_bytes(), &body].concat()).unwrap();
+        let mut answer = String::new();
+        std::io::Read::read_to_string(&mut socket, &mut answer).unwrap();
+        let r: Value = serde_json::from_str(answer.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let message = &r["choices"][0]["message"];
+        assert_eq!((message["content"].clone(), r["choices"][0]["finish_reason"].clone()), (json!(NARRATION), json!("tool_calls")), "{r}");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "terminal", "{r}");
     }
 
     /// Goal: the image model answers as its catalog says, a JPEG the cell

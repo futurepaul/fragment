@@ -264,6 +264,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
 
+    // a model's text beside its tool call (Paul on p5, 2026-10-05: one
+    // message got two replies, the model's narration of its call, then the
+    // answer): the turn's one reply is its answer, the call a step on work,
+    // and the narration never a message of its own
+    let r = say(20, "narrate: echo narrated-ran")?;
+    let narrated = turn_for(&r);
+    s.eventually(TURN, || ended(&narrated).is_some());
+    let replies: Vec<String> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == narrated.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
+    let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &narrated).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
+    s.ok(
+        "a model's narration beside its tool call is no reply of its own: the turn's one reply is its answer, the call one step on work",
+        replies.len() == 1
+            && replies[0].contains("the tool ran: ")
+            && replies[0].contains("narrated-ran")
+            && !replies.iter().any(|t| t.contains(fragment_fakes::workers_ai::NARRATION))
+            && steps.len() == 1
+            && steps[0]["body"]["tool"] == "terminal"
+            && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo narrated-ran"))
+            && ended(&narrated) == Some(json!("idle")),
+        json!({ "replies": replies, "steps": steps, "ended": ended(&narrated) }),
+    );
+
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
     let r = say(3, "run: rm -rf /tmp/fragment-risky && echo tool-ran")?;
     let risky = turn_for(&r);
