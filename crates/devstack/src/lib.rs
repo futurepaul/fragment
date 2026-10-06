@@ -22,6 +22,8 @@ pub mod celld;
 pub mod codestore;
 pub mod node;
 mod node_release;
+pub mod openbao;
+mod openbao_release;
 pub mod rendering;
 pub mod sandcastle;
 pub mod store;
@@ -325,7 +327,7 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
 
 /// Where a local node's secrets are, for the bindings the cell reads them
 /// through (cell/src/keys.rs: `await env.<BINDING>.get()`, either way).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Secrets {
     /// wrangler's local Secrets Store in the node's state directory, bound
     /// by name as a deploy binds the account's (`wrangler dev`).
@@ -335,6 +337,10 @@ pub enum Secrets {
     /// bindings' names in `.dev.vars`: a runtime with no Secrets Store
     /// (celld).
     Shim,
+    /// The same stand-ins, backed by OpenBao (openbao.rs): each secret
+    /// seeded under its store name, and the cell given a token that reads
+    /// them (`FRAGMENT_SECRETS_TOKEN`), and nothing else, in `.dev.vars`.
+    OpenBao(openbao::Target),
 }
 
 /// What a local deployment is configured with. The cell reads its
@@ -343,8 +349,9 @@ pub enum Secrets {
 /// from wrangler's local store in its state directory, which `configure`
 /// seeds with these values, under the names `store::Bound::conventional`
 /// gives them, and binds as a deploy does; on celld from the cell's
-/// stand-ins for them (`Secrets::Shim`). A dev or test deployment points
-/// code.storage at the fake in `crates/fakes`.
+/// stand-ins for them (`Secrets::Shim`, or OpenBao behind them:
+/// `Secrets::OpenBao`). A dev or test deployment points code.storage at
+/// the fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -545,22 +552,36 @@ impl Fleet {
         vars
     }
 
+    /// The shim's variables backed by OpenBao (`Secrets::OpenBao`) for
+    /// `bindings`: `FRAGMENT_SECRETS`, naming them and where OpenBao is,
+    /// and the cell's token (renewed, or made when it has lapsed). No
+    /// value is a variable.
+    fn openbao_vars(target: &openbao::Target, bindings: &[(String, &str)]) -> Result<Vec<(String, String)>> {
+        let token = target.cell_token().map_err(|e| anyhow::anyhow!("the cell's OpenBao token: {e}"))?;
+        Ok(vec![("FRAGMENT_SECRETS".to_string(), target.shim_config(bindings).to_string()), (openbao::TOKEN_VAR.to_string(), token)])
+    }
+
     /// Renders the deployment for a node on `project`: its settings into
     /// the project's `.dev.vars`, and its secrets where `secrets` says:
     /// into wrangler's local store in the project's state directory
     /// (`store::seed_local`, which skips values it holds already), their
-    /// bindings into its local config (`local_config`); or, for the shim,
-    /// into `.dev.vars` too. Clear the state first (`clear_state`), not
-    /// after.
+    /// bindings into its local config (`local_config`); for the shim, into
+    /// `.dev.vars` too; or into OpenBao (`openbao::Target::seed`, which
+    /// writes only what changed), the cell's token into `.dev.vars`. Clear
+    /// the state first (`clear_state`), not after.
     pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
         let bound = self.bound();
-        let shim = match self.secrets {
+        let shim = match &self.secrets {
             Secrets::Store => {
                 store::seed_local(tools, &state_dir(project), &self.values(&bound)).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
                 write_local_config(project, &bound.cell(), self.containers)?;
                 vec![]
             }
             Secrets::Shim => self.shim_vars(&bound, &bound.cell()),
+            Secrets::OpenBao(target) => {
+                target.seed(&self.values(&bound)).map_err(|e| anyhow::anyhow!("seed OpenBao: {e}"))?;
+                Self::openbao_vars(target, &bound.cell())?
+            }
         };
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
@@ -671,15 +692,18 @@ pub struct AgentFleet {
 impl AgentFleet {
     /// Renders the fleet into the project's `.dev.vars`, and its bindings
     /// (`bound.agent()`, the platform fleet's names: `fleet`'s) as `fleet`
-    /// keeps its own: into its local config, or the shim's variables.
+    /// keeps its own: into its local config, or the shim's variables
+    /// (backed by `.dev.vars`, or by OpenBao, which `fleet` seeded first).
     pub fn configure(&self, project: &Path, fleet: &Fleet) -> Result<()> {
         let bound = fleet.bound();
-        let shim = match fleet.secrets {
+        let shim = match &fleet.secrets {
             Secrets::Store => {
                 write_local_config(project, &bound.agent(), true)?;
                 vec![]
             }
             Secrets::Shim => fleet.shim_vars(&bound, &bound.agent()),
+            // the platform's fleet seeded them; the same token reads them
+            Secrets::OpenBao(target) => Fleet::openbao_vars(target, &bound.agent())?,
         };
         let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
         if self.test_hooks {

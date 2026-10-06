@@ -249,6 +249,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         tools: None,
         node: None,
         celld: None,
+        openbao: None,
         renderer: None,
         nodes: vec![],
         node_images: serde_json::Value::Null,

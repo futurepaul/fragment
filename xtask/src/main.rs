@@ -19,7 +19,10 @@
 //!                    moves the cell and its fakes (`dev_ports`). --lan serves
 //!                    it to the home network as an intranet (on celld; lan.rs,
 //!                    docs/self-host-lan.md): https://<zone> through a TLS
-//!                    front door, DNS for the zone, a private CA, Dex
+//!                    front door, DNS for the zone, a private CA, Dex. On
+//!                    celld the cell's secrets are its variables, or OpenBao's
+//!                    (FRAGMENT_SECRETS_BACKEND=openbao, the LAN's default:
+//!                    `dev_openbao`)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -95,6 +98,10 @@ const DEV_AUTHKIT_OFFSET: u16 = 5;
 const DEV_AI_OFFSET: u16 = 6;
 /// The OpenID Connect fake (`FRAGMENT_SIGNIN=oidc`).
 const DEV_OIDC_OFFSET: u16 = 8;
+/// OpenBao, on loopback, when the cell's secrets are its
+/// (`FRAGMENT_SECRETS_BACKEND=openbao`, the LAN's default): the highest
+/// port the stack takes above its own (the LAN's Dex is at 10).
+const DEV_OPENBAO_OFFSET: u16 = 12;
 /// The WorkOS fake's environment in dev, and its OAuth application.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
@@ -111,8 +118,8 @@ fn dev_port() -> Result<u16> {
     match std::env::var("FRAGMENT_DEV_PORT") {
         Err(_) => Ok(DEV_PORT),
         Ok(p) => match p.parse::<u16>() {
-            Ok(port) if (1024..=u16::MAX - DEV_OIDC_OFFSET).contains(&port) => Ok(port),
-            _ => bail!("FRAGMENT_DEV_PORT is a port from 1024 to {}, not {p:?}", u16::MAX - DEV_OIDC_OFFSET),
+            Ok(port) if (1024..=u16::MAX - DEV_OPENBAO_OFFSET).contains(&port) => Ok(port),
+            _ => bail!("FRAGMENT_DEV_PORT is a port from 1024 to {}, not {p:?}", u16::MAX - DEV_OPENBAO_OFFSET),
         },
     }
 }
@@ -185,6 +192,9 @@ fn dev(args: &[String]) -> Result<()> {
         None => dev_signin(port, &read, authkit)?,
     };
     let (model_upstream, nodes) = self_host(&read)?;
+    // the cell's own secrets: wrangler's local store, or on celld the shim's
+    // variables or OpenBao behind it (docs/self-host.md, seam 12)
+    let openbao = dev_openbao(celld, lan.as_ref(), port, clean)?;
     // computers run on the nodes when there are some, else in local Docker;
     // with neither, the stack runs without computers, and says so
     // (celld runs no containers of its own: its computers are a node's)
@@ -228,8 +238,13 @@ fn dev(args: &[String]) -> Result<()> {
         containers: docker,
         byoc: byoc()?,
         browser_url: None,
-        // celld has no Secrets Store: the cell's shim stands in (seam 12)
-        secrets: if celld { devstack::Secrets::Shim } else { devstack::Secrets::Store },
+        // celld has no Secrets Store: the cell's shim stands in (seam 12),
+        // backed by its variables or by OpenBao
+        secrets: match (celld, &openbao) {
+            (false, _) => devstack::Secrets::Store,
+            (true, None) => devstack::Secrets::Shim,
+            (true, Some((bao, _))) => devstack::Secrets::OpenBao(bao.target()),
+        },
     };
     // preview cards: wrangler's workerd has Browser Rendering's local mode;
     // on celld, which has no `browser` binding, the renderer shoots them
@@ -244,6 +259,8 @@ fn dev(args: &[String]) -> Result<()> {
     // the same host secret
     devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{port}"), agent_url: format!("http://127.0.0.1:{port}"), test_hooks: false }
         .configure(&devstack::agent_dir(), &fleet)?;
+    // the cell's token, renewed while the stack runs (each start renews it too)
+    let _renewer = openbao.as_ref().map(|(bao, _)| devstack::openbao::Renewer::start(bao.target(), devstack::openbao::RENEW_EVERY));
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         port,
@@ -287,6 +304,17 @@ fn dev(args: &[String]) -> Result<()> {
     }
     println!("  agents:       {base}/api/agents (beside it; signed)");
     println!("  code.storage: {} ({})", store.url, store.label);
+    match &openbao {
+        Some((bao, took)) => println!(
+            "  secrets:      OpenBao {} at {} on loopback (ready in {took:.1?}; its state {}, log {})",
+            devstack::openbao::OPENBAO_VERSION,
+            bao.target().addr,
+            bao.layout().dir.display(),
+            bao.layout().log().display()
+        ),
+        None if celld => println!("  secrets:      the cell's variables (.dev.vars; FRAGMENT_SECRETS_BACKEND=openbao for OpenBao)"),
+        None => println!("  secrets:      wrangler's local Secrets Store"),
+    }
     match std::env::var("FRAGMENT_MODEL_URL") {
         Ok(u) => println!("  models:       {u} (a self-hosted model server)"),
         Err(_) => println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url),
@@ -321,6 +349,42 @@ fn dev(args: &[String]) -> Result<()> {
         m.stop()?;
     }
     Ok(())
+}
+
+/// The dev stack's OpenBao (docs/self-host.md, seam 12), when the cell's
+/// secrets are its: `FRAGMENT_SECRETS_BACKEND` is `vars` (the shim's
+/// variables, celld's default) or `openbao` (the LAN's default), and on
+/// wrangler, which has a Secrets Store of its own, unset. The pinned
+/// OpenBao (or `FRAGMENT_OPENBAO_TARBALL`'s), its state beside the LAN's
+/// (`FRAGMENT_LAN_STATE/openbao`, kept by `--clean`) or in
+/// `target/devstack/openbao` (cleared by `--clean`; every secret is seeded
+/// again), on loopback above the cell's port. With it, how long it took.
+fn dev_openbao(celld: bool, lan: Option<&lan::Lan>, port: u16, clean: bool) -> Result<Option<(devstack::openbao::OpenBao, std::time::Duration)>> {
+    let var = std::env::var("FRAGMENT_SECRETS_BACKEND").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    if !celld {
+        if let Some(v) = var {
+            bail!("FRAGMENT_SECRETS_BACKEND={v} is celld's: wrangler dev has a Secrets Store of its own (drop it, or add --runtime celld)");
+        }
+        return Ok(None);
+    }
+    match var.as_deref().unwrap_or(if lan.is_some() { "openbao" } else { "vars" }) {
+        "vars" => return Ok(None),
+        "openbao" => {}
+        other => bail!("FRAGMENT_SECRETS_BACKEND is vars or openbao, not {other:?}"),
+    }
+    let dir = match lan {
+        Some(l) => l.settings.state.join("openbao"),
+        None => {
+            let dir = devstack::repo_root().join("target/devstack/openbao");
+            if clean && dir.exists() {
+                std::fs::remove_dir_all(&dir).with_context(|| format!("clear {}", dir.display()))?;
+            }
+            dir
+        }
+    };
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir, port: port + DEV_OPENBAO_OFFSET, audit: false };
+    Ok(Some(devstack::openbao::OpenBao::start(&bin, opts)?))
 }
 
 /// The dev stack's renderer on celld (docs/self-host.md, seam 7): the

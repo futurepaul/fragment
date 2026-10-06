@@ -30,8 +30,8 @@ pub const CELLD_ENTRY: &str = "celld.mjs";
 /// The project's config as celld runs it: `wrangler.celld.jsonc`, beside
 /// its own (so its paths and `.dev.vars` resolve the same), less what
 /// celld refuses, and from its own entry when it has one (`CELLD_ENTRY`).
-/// Its secrets are the shim's (`crate::Secrets::Shim`): celld has no
-/// Secrets Store, so it binds none.
+/// Its secrets are the shim's (`crate::Secrets::Shim`, or OpenBao behind
+/// it): celld has no Secrets Store, so it binds none.
 pub fn celld_config(project: &Path) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
