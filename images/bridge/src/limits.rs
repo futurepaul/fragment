@@ -81,8 +81,9 @@ pub const ATTACHMENTS_MAX: usize = 8;
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
-/// otherwise. An hour: the person may be away from the chat, and the
-/// computer sleeps after 20 idle minutes anyway (decision 42).
+/// otherwise. An hour: the person may be away from the chat. An open card
+/// holds the computer awake, so this is also how long one unanswered card
+/// keeps it awake (docs/durable-computers.md, P6 for now).
 pub const PROMPT_TTL_MS_DEFAULT: u64 = 60 * 60 * 1000;
 /// A runtime's own prompt lifetime is honored within these bounds.
 pub const PROMPT_TTL_MS_MIN: u64 = 10 * 1000;
@@ -106,6 +107,12 @@ pub const HTTP_TIMEOUT_MS: u64 = 15_000;
 /// The bridge looks at the platform's hold this often, to answer it (the
 /// platform waits 20 s for the answer: docs/computers.md).
 pub const HOLD_POLL_MS: u64 = 100;
+/// An answer to the hold (what the save may leave out) is at most this
+/// long: the platform reads it whole, and refuses a longer one.
+pub const HELD_ANSWER_MAX_BYTES: usize = 2048;
+/// Patterns an answer names at most, each at most this long.
+pub const HELD_PATTERNS_MAX: usize = 16;
+pub const HELD_PATTERN_MAX_BYTES: usize = 128;
 /// A WebSocket's connect and its first frame are given this long.
 pub const WS_OPEN_TIMEOUT_MS: u64 = 10_000;
 /// A `__live` socket pings this often, and is given up on after twice that

@@ -11,7 +11,9 @@
 //!   repo-scoped ones; scopes are checked per route.
 //! - Commit packs are NDJSON (`{"metadata": …}` first), with decoded chunks
 //!   capped at 4 MiB, every upsert's stream ending in `eof: true`, and
-//!   expected-parent CAS (409 `precondition_failed`).
+//!   expected-parent CAS (409 `precondition_failed`). A pack that would
+//!   change nothing is refused (412 `precondition_failed`, "no changes to
+//!   commit"), as the real service refuses it: no empty commit.
 //! - Each commit has its own tree. Merges are git's: nothing when the
 //!   target holds the source, a fast-forward when they can, and otherwise
 //!   a three-way merge from the merge base, a file whole (409
@@ -21,11 +23,15 @@
 //!   walks first parents.
 //! - Every branch move delivers a signed push webhook
 //!   (`X-Pierre-Signature`) to the URLs registered for that repo.
+//! - A call can be a round trip away (`set_latency`): the real service
+//!   answers a preview in about 100 ms, long enough for a fragment's alarm
+//!   to run beside the request that armed it.
 //!
 //! Test levers are methods on [`CodeStorage`]; none is an HTTP route.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -169,6 +175,8 @@ struct Inner {
     token_ttl_s: i64,
     url: String,
     state: Mutex<State>,
+    /// How long every call waits before it is served (`set_latency`).
+    latency_ms: AtomicU64,
 }
 
 /// A push webhook to deliver once the state lock is released (the cell's
@@ -225,6 +233,19 @@ fn problem(status: u16, detail: &str) -> Response {
 /// A commit pack code.storage refuses as malformed, in its shape.
 fn invalid(message: &str) -> Response {
     Response::json(400, &json!({ "commit": null, "result": { "success": false, "status": "invalid", "message": message } }))
+}
+
+/// A commit pack that would change nothing, refused as code.storage
+/// refuses it (its answer, read from a preview, 2026-10-05).
+fn nothing_to_commit() -> Response {
+    Response::json(
+        412,
+        &json!({
+            "commit": null,
+            "result": { "target_branch": "", "branch": "", "old_sha": "", "new_sha": "", "success": false,
+                        "status": "precondition_failed", "message": "no changes to commit" },
+        }),
+    )
 }
 
 fn cas_failed(branch: &str, current: &str) -> Response {
@@ -315,6 +336,18 @@ impl Repo {
             }
         }
         if conflicts.is_empty() { Ok(merged) } else { Err(conflicts) }
+    }
+
+    /// Whether `changes` on `branch`'s tip leave its files as they are.
+    fn changes_nothing(&self, branch: &str, changes: &[OwnedChange]) -> bool {
+        let tree = self.branches.get(branch).and_then(|b| self.commits.get(b)).map(|c| &c.tree);
+        changes.iter().all(|(path, bytes)| {
+            let at = tree.and_then(|t| t.get(path));
+            match bytes {
+                None => at.is_none(),
+                Some(b) => at.is_some_and(|e| e.blob == blob_sha(b)),
+            }
+        })
     }
 
     /// The same files, by bytes (a restore that would change nothing).
@@ -430,6 +463,11 @@ impl Inner {
     /// service queues them: a caller may see its push announced while it is
     /// still reading the answer, or after.
     fn handle(self: &Arc<Self>, req: &Request) -> Response {
+        // served as it arrives at a service that far away
+        let latency = self.latency_ms.load(Ordering::Relaxed);
+        if latency > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(latency));
+        }
         let mut deliveries = Vec::new();
         let resp = {
             let mut st = self.state.lock().expect("fake state lock");
@@ -681,6 +719,9 @@ impl Inner {
             if exp != current {
                 return cas_failed(branch, &current);
             }
+        }
+        if st.repos[url].changes_nothing(branch, &changes) {
+            return nothing_to_commit();
         }
         let author = meta["author"]["name"].as_str().unwrap_or("unknown");
         let message = meta["commit_message"].as_str().unwrap_or("");
@@ -1017,6 +1058,7 @@ impl CodeStorage {
             token_ttl_s: opts.token_ttl_s,
             url: url.clone(),
             state: Mutex::new(state),
+            latency_ms: AtomicU64::new(0),
         });
         let handler_inner = Arc::clone(&inner);
         let server = Server::serve(listener, Arc::new(move |req: &Request| handler_inner.handle(req)))?;
@@ -1148,6 +1190,12 @@ impl CodeStorage {
             let url = st.url_of(repo).expect("arm_race on a known repo");
             st.race.insert(url, changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect());
         });
+    }
+
+    /// Every call waits this long before it is served, as a call to the
+    /// real service travels (zero: at once, the default).
+    pub fn set_latency(&self, latency: std::time::Duration) {
+        self.inner.latency_ms.store(latency.as_millis() as u64, Ordering::Relaxed);
     }
 
     /// File reads answer 503 until this is cleared.
@@ -1325,6 +1373,27 @@ mod tests {
         let new = cs.token("r", &["git:read"]);
         assert_ne!(new, old);
         assert_eq!(get(&format!("{}/api/repos/r/branch?name=main", cs.url), &new).0, 200);
+    }
+
+    /// Goal: a commit pack that changes nothing is refused as the real
+    /// service refuses it (412, "no changes to commit"), never an empty
+    /// commit. Method: packs on a seeded repo that write the bytes already
+    /// there, delete what is absent, and then change a file.
+    #[test]
+    fn a_pack_that_changes_nothing_is_refused() {
+        use fragment_core::codestorage::{commit_pack, FileChange};
+        let cs = CodeStorage::start(Options::default()).unwrap();
+        cs.seed_repo("r", &[("a", b"1")]);
+        let head = cs.branch("r", "main").unwrap();
+        let post = |changes: &[FileChange]| {
+            let pack = commit_pack("main", Some(&head), "m", ("t", "t@e2e.test"), changes);
+            http::post(&format!("{}/api/repos/r/commit-pack", cs.url), &[("content-type", "application/x-ndjson")], pack.as_bytes()).unwrap()
+        };
+        assert_eq!(post(&[FileChange::Upsert { path: "a", bytes: b"1" }]), 412, "the same bytes");
+        assert_eq!(post(&[FileChange::Delete { path: "nope" }]), 412, "a file that is not there");
+        assert_eq!(cs.branch("r", "main").as_deref(), Some(head.as_str()), "no commit was made");
+        assert_eq!(post(&[FileChange::Upsert { path: "a", bytes: b"1" }, FileChange::Upsert { path: "b", bytes: b"2" }]), 201, "one file changed");
+        assert_ne!(cs.branch("r", "main").as_deref(), Some(head.as_str()));
     }
 
     /// Goal: the fake signs a webhook as code.storage does, so the cell's

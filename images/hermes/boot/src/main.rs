@@ -6,8 +6,9 @@
 //!                          restore gate, then exec s6's /init with `main`
 //! hermes-boot main         /init's main program: config, profiles from the
 //!                          computer's agents and their repos, the bridge,
-//!                          the gateway, Litestream; then, until SIGTERM, the
-//!                          agents followed as they change (agents.rs)
+//!                          the gateway, its answer to the hold; then, until
+//!                          SIGTERM, the agents followed as they change
+//!                          (agents.rs)
 //! hermes-boot stamped <name> <input> -- <cmd…>
 //!                          a setup step, skipped when this image already ran
 //!                          it on this exact input
@@ -19,6 +20,7 @@
 //! ```
 
 mod agents;
+mod held;
 mod hermes;
 mod skills;
 mod sync;
@@ -75,9 +77,6 @@ const AGENTS_EVERY_MS: u64 = 3_000;
 /// The gateway's answer to a control verb is waited for this long (its
 /// rescan waits up to 5 s on its own loop before answering `pending`).
 const CONTROL_WAIT_MS: u64 = 8_000;
-/// Litestream is given this long to stop before it is started again.
-const LITESTREAM_STOP_MS: u64 = 2_000;
-const LITESTREAM: &str = "/usr/local/bin/litestream";
 /// Under `RUN`: the bridge's ready file (the agents whose profiles are
 /// written: its `ready.rs`), the screen's socket (a link to the first
 /// agent's display), and that agent's name (what `screen-start` starts).
@@ -109,8 +108,226 @@ fn main() {
         Some("readahead") => readahead(),
         Some("screen-start") => screen_start(),
         Some("build-info") => build_info(),
-        _ => fail("hermes-boot pre-init | main | stamped | readahead | screen-start | build-info"),
+        Some("copy") => copy(&args[2..]),
+        Some("check-restore") => check_restore(),
+        Some("quick-check") => quick_check(&args[2..]),
+        Some("sqlite-report") => sqlite_report(&args[2..]),
+        _ => fail("hermes-boot pre-init | main | stamped | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
     }
+}
+
+// ---- the hold's copies (held.rs) ----
+
+/// The exit that says what a start restored is unusable (the platform's
+/// check, docs/computers.md: it then starts from the save before).
+const UNUSABLE: i32 = 3;
+
+/// `copy <staging> <db>…`, as the hermes user, under a hold: each database
+/// copied by SQLite's online backup, then the manifest. Prints what it
+/// copied (`{copies, bytes}`).
+fn copy(args: &[String]) -> ! {
+    let Some((staging, dbs)) = args.split_first() else { fail("copy <staging> <db>…") };
+    let dbs: Vec<PathBuf> = dbs.iter().map(PathBuf::from).collect();
+    match held::copy_all(&dbs, Path::new(staging)) {
+        Ok(m) => {
+            println!("{}", serde_json::json!({ "copies": m.copies.len(), "bytes": m.copies.iter().map(|c| c.bytes).sum::<u64>() }));
+            std::process::exit(0);
+        }
+        Err(e) => {
+            println!("{e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `check-restore`, the image's `/usr/local/bin/computer-check`: run by the
+/// platform as root after it restores `/data`, before the gate opens. The
+/// last hold's copies go back in place, then every database is checked as
+/// the hermes user. Exits 0 when all is whole, `UNUSABLE` when the save is
+/// not, 1 when the check itself failed.
+fn check_restore() -> ! {
+    let t = Instant::now();
+    let put = match held::put_back(Path::new(held::DATA), Path::new(held::STAGING)) {
+        Ok(put) => put,
+        Err(e @ held::HeldError::Manifest(_)) => {
+            println!("{e}");
+            std::process::exit(UNUSABLE);
+        }
+        Err(e) => {
+            println!("{e}");
+            std::process::exit(1);
+        }
+    };
+    let dbs = held::databases(Path::new(held::DATA), &[Path::new(held::STAGING), Path::new(hermes::WORK)]).unwrap_or_else(|e| {
+        println!("{e}");
+        std::process::exit(1)
+    });
+    let code = if dbs.is_empty() {
+        0
+    } else {
+        // as the hermes user: opening a database makes its -wal and -shm as the opener's
+        let status = Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "quick-check"]).args(&dbs).status();
+        match status {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                println!("quick-check: {e}");
+                1
+            }
+        }
+    };
+    ev!("restore.checked", { "putBack": put.len(), "databases": dbs.len(), "code": code, "ms": t.elapsed().as_millis() as u64 });
+    std::process::exit(code);
+}
+
+/// `quick-check <db>…`: `PRAGMA quick_check` on each; `UNUSABLE` and why
+/// for the first that fails.
+fn quick_check(args: &[String]) -> ! {
+    let dbs: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
+    match held::quick_check(&dbs) {
+        Ok(()) => std::process::exit(0),
+        Err(e) => {
+            println!("{e}");
+            std::process::exit(UNUSABLE);
+        }
+    }
+}
+
+/// `sqlite-report <root>`: every SQLite file under `root` (by its first
+/// bytes), each with its `quick_check`, one JSON line each (the Docker
+/// rung's measure of what a save tore).
+fn sqlite_report(args: &[String]) -> ! {
+    let Some(root) = args.first() else { fail("sqlite-report <root>") };
+    let files = held::sqlite_files(Path::new(root)).unwrap_or_else(|e| fail(&e.to_string()));
+    for f in files {
+        let checked = held::quick_check(std::slice::from_ref(&f));
+        println!("{}", serde_json::json!({ "path": f.display().to_string(), "ok": checked.is_ok(), "why": checked.err().map(|e| e.to_string()) }));
+    }
+    std::process::exit(0);
+}
+
+/// What pauses while the platform holds the computer: no new round of the
+/// repo sync, the skills install or the agents' reads starts (`paused`),
+/// and the hold's answer waits, a bounded while, for those under way
+/// (`busy`).
+#[derive(Default)]
+struct Quiet {
+    paused: std::sync::atomic::AtomicBool,
+    busy: std::sync::atomic::AtomicUsize,
+}
+
+impl Quiet {
+    fn paused(&self) -> bool {
+        self.paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// One round under way, counted while it lives.
+struct Busy(std::sync::Arc<Quiet>);
+
+impl Busy {
+    fn new(quiet: &std::sync::Arc<Quiet>) -> Busy {
+        quiet.busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Busy(quiet.clone())
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let before = self.0.busy.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        assert!(before > 0, "a round is counted once");
+    }
+}
+
+/// The hold is looked at this often.
+const HOLD_POLL_MS: u64 = 100;
+/// Rounds under way are waited for this long at most: none writes a
+/// database, so the copy goes on after it.
+const QUIET_WAIT_MS: u64 = 8_000;
+/// A copy is given this long (the platform waits 20 s for the answer).
+const COPY_MS_MAX: u64 = 15_000;
+/// A copy that failed is tried again no sooner (within the same hold).
+const COPY_RETRY_MS: u64 = 5_000;
+
+/// The image's answer to the platform's hold (held.rs): once its bridge
+/// claims nothing (`BRIDGE_HELD`) and the rounds under way are done, each
+/// database under `/data` is copied by SQLite's online backup into the
+/// staging, as the hermes user, and `held` names the live files as what
+/// the save leaves out. A copy that fails answers nothing: the platform
+/// then saves the guest whole, not held. Once the hold goes (the save is
+/// done, or the sleep called off) the copies go too. Looked at every
+/// `HOLD_POLL_MS`, for the boot's life.
+async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
+    let mut since: Option<Instant> = None;
+    let mut failed_at: Option<Instant> = None;
+    // bounded by the boot's life: one look per HOLD_POLL_MS
+    loop {
+        tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)).await;
+        if !Path::new(held::HOLD).exists() {
+            if since.take().is_some() {
+                quiet.paused.store(false, std::sync::atomic::Ordering::SeqCst);
+                failed_at = None;
+                if let Err(e) = held::clear_staging(Path::new(held::STAGING)) {
+                    ev!("held.staging_failed", { "error": e.to_string() });
+                }
+            }
+            continue;
+        }
+        let first = *since.get_or_insert_with(Instant::now);
+        quiet.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+        // answered: the platform clears the answer before it holds again
+        if Path::new(held::HELD).exists() || failed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(COPY_RETRY_MS)) {
+            continue;
+        }
+        let rounds_done = quiet.busy.load(std::sync::atomic::Ordering::SeqCst) == 0 || first.elapsed() > Duration::from_millis(QUIET_WAIT_MS);
+        if !(Path::new(held::BRIDGE_HELD).exists() && rounds_done) {
+            continue;
+        }
+        let t = Instant::now();
+        match copy_databases(ids).await {
+            Ok((manifest, unnamed)) => match write_answer(&manifest) {
+                Ok(()) => ev!("held", {
+                    "copied": manifest.copies.len(),
+                    "bytes": manifest.copies.iter().map(|c| c.bytes).sum::<u64>(),
+                    "unnamed": unnamed,
+                    "ms": t.elapsed().as_millis() as u64,
+                    "sinceHoldMs": first.elapsed().as_millis() as u64
+                }),
+                Err(e) => {
+                    failed_at = Some(Instant::now());
+                    ev!("held.failed", { "error": e.to_string() });
+                }
+            },
+            Err(why) => {
+                failed_at = Some(Instant::now());
+                ev!("held.refused", { "why": why, "ms": t.elapsed().as_millis() as u64 });
+            }
+        }
+    }
+}
+
+/// Every database under `/data` the answer can name, copied into a
+/// staging made anew, as the hermes user: the copies' manifest, and the
+/// databases left hot (named by no pattern the platform takes).
+async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<String>), String> {
+    let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
+    let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
+    let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
+    held::make_staging(staging, ids).map_err(|e| e.to_string())?;
+    let run = tokio::process::Command::new("/command/s6-setuidgid").args(["hermes", &format!("{OPT}/bin/hermes-boot"), "copy"]).arg(staging).args(&dbs).kill_on_drop(true).output();
+    let out = tokio::time::timeout(Duration::from_millis(COPY_MS_MAX), run).await.map_err(|_| format!("no copy within {COPY_MS_MAX} ms"))?.map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stdout).trim().chars().take(300).collect());
+    }
+    let manifest = held::read_manifest(data, staging).map_err(|e| e.to_string())?.ok_or("the copy wrote no manifest")?;
+    assert_eq!(manifest.copies.len(), dbs.len(), "a manifest names every copy");
+    Ok((manifest, unnamed.iter().map(|p| p.display().to_string()).collect()))
+}
+
+/// `held`, whole: exactly what was copied, which the save leaves out.
+fn write_answer(manifest: &held::Manifest) -> std::io::Result<()> {
+    let tmp = format!("{}.tmp", held::HELD);
+    std::fs::write(&tmp, held::answer(Path::new(held::DATA), &manifest.copies))?;
+    std::fs::rename(&tmp, held::HELD)
 }
 
 // ---- pre-init: before s6, before the restore ----
@@ -160,6 +377,15 @@ fn pre_init() -> ! {
             std::thread::sleep(Duration::from_millis(20));
         }
         ev!("boot.gate_open", { "waitedMs": gate.elapsed().as_millis() as u64 });
+    }
+    // What the last hold copied goes back before anything opens a database
+    // (the gateway waits for go): after a restore the platform's check has
+    // done it already; from a snapshot it is done here, so both wakes leave
+    // the same /data.
+    match held::put_back(Path::new(held::DATA), Path::new(held::STAGING)) {
+        Ok(put) if put.is_empty() => {}
+        Ok(put) => ev!("boot.put_back", { "databases": put.len() }),
+        Err(e) => ev!("boot.put_back_failed", { "error": e.to_string() }),
     }
     ev!("boot.init", { "ms": t0.elapsed().as_millis() as u64 });
     let err = Command::new("/init").args(["/command/with-contenv", &format!("{OPT}/bin/hermes-boot"), "main"]).exec();
@@ -364,6 +590,37 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
     write_whole(&dir.join(".env"), &hermes::profile_env(a), ids);
 }
 
+/// An agent's work directory (`/data/work/<profile>`, the hermes user's:
+/// its terminal's cwd) and its desktop browser's profile in it, linked from
+/// where Hermes keeps one in the profile, so what its tools write is the
+/// work the computer saves on its own (step 2 of docs/durable-computers.md).
+/// A browser profile that is a directory already stays where it is:
+/// nothing is moved.
+fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
+    let work = hermes::work_dir(&a.fragment);
+    let browser = work.join("browser-profile");
+    if let Err(e) = std::fs::create_dir_all(&browser) {
+        ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() });
+        return;
+    }
+    chown(&work, ids);
+    chown(&browser, ids);
+    let link = profile.join(hermes::BROWSER_PROFILE);
+    if let Some(parent) = link.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        chown(parent, ids);
+    }
+    match std::fs::symlink_metadata(&link) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match std::os::unix::fs::symlink(&browser, &link) {
+            Ok(()) => chown(&link, ids),
+            Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+        },
+        Ok(m) if m.file_type().is_symlink() => {}
+        Ok(_) => ev!("profile.browser_kept", { "agent": a.fragment, "why": "its browser profile is a directory of the profile's already" }),
+        Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": e.to_string() }),
+    }
+}
+
 /// One agent's profile: its directories, its config, its repo pulled. At a
 /// boot for each agent, and while awake for each one assigned since
 /// (`follow_agents`); Hermes reads it at the agent's first turn either way.
@@ -380,6 +637,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         chown(&dir.join(sub), ids);
     }
     chown(&dir, ids);
+    work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
     let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
@@ -421,7 +679,7 @@ async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u3
 /// The bridge, which runs the agents the ready file names (its `ready.rs`)
 /// and shows the screen's socket, whichever agents come and go: nothing
 /// it is started with changes with them.
-fn spawn_bridge() -> Option<Child> {
+fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
     let mut c = Command::new(format!("{OPT}/bin/fragment-bridge"));
     c.arg("run")
         .env("BRIDGE_RUNTIME", "relay")
@@ -429,7 +687,11 @@ fn spawn_bridge() -> Option<Child> {
         .env("BRIDGE_RELAY_SECRET_FILE", format!("{RUN}/relay.secret"))
         .env("GATEWAY_RELAY_ID", GATEWAY_ID)
         .env("BRIDGE_STATE_DIR", "/data/bridge")
-        .env("BRIDGE_PROMPT_TTL_MS", (hermes::APPROVAL_TIMEOUT_S * 1000).to_string())
+        // its answer to a hold is this image's to wait for: the platform's
+        // `held` comes once Hermes' databases are copied too (held.rs)
+        .env("BRIDGE_HELD", held::BRIDGE_HELD)
+        // a card lives as long as Hermes waits on its approval
+        .env("BRIDGE_PROMPT_TTL_MS", (approval_timeout_s * 1000).to_string())
         .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
@@ -558,11 +820,17 @@ fn managed_dir() {
 type SkillsFound = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
 
 /// One install of the managed skills, in the background (skills.rs), as the
-/// computer's first agent of its owner: none while it has no such agent.
-fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound) -> Option<tokio::task::JoinHandle<()>> {
+/// computer's first agent of its owner: none while it has no such agent,
+/// or while the platform holds the computer (`quiet`).
+fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, quiet: &std::sync::Arc<Quiet>) -> Option<tokio::task::JoinHandle<()>> {
+    if quiet.paused() {
+        return None;
+    }
     let reader = skills::reader(agents, owner)?.clone();
     let (api, owner, found) = (api.clone(), owner.to_string(), found.clone());
+    let busy = Busy::new(quiet);
     Some(tokio::spawn(async move {
+        let _busy = busy;
         let t = Instant::now();
         let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST)).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
@@ -651,30 +919,6 @@ for p in sys.argv[1:]:
     }
 }
 
-/// Litestream over `dbs` (those that exist: Hermes makes a profile's as
-/// it first runs it), off the wake path.
-fn start_litestream(dbs: &[(String, PathBuf)], storage: &str) -> Option<Child> {
-    if dbs.is_empty() {
-        return None;
-    }
-    let cfg = format!("{RUN}/litestream.yml");
-    std::fs::write(&cfg, hermes::litestream_config(dbs, storage)).ok()?;
-    ev!("litestream.started", { "dbs": dbs.len() });
-    Command::new(LITESTREAM).args(["replicate", "-config", &cfg]).spawn().ok()
-}
-
-/// Stops Litestream (SIGTERM, its last sync), at most `LITESTREAM_STOP_MS`.
-async fn stop_litestream(mut child: Child) {
-    signal(child.id(), libc::SIGTERM);
-    let t = Instant::now();
-    // bounded by LITESTREAM_STOP_MS
-    while matches!(child.try_wait(), Ok(None)) && t.elapsed() < Duration::from_millis(LITESTREAM_STOP_MS) {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 async fn boot_main() {
     let t0 = Instant::now();
     ev!("boot.main");
@@ -703,7 +947,9 @@ async fn boot_main() {
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
-    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
+    // HERMES_BOOT_APPROVAL_TIMEOUT_S: a test's shorter approval (and card)
+    let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
+    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
@@ -721,15 +967,13 @@ async fn boot_main() {
     end_previous_life(&agents, &home);
     point_screen(agents.first(), &home);
     write_ready(&agents);
-    let mut bridge = spawn_bridge();
+    let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
+    // its answer to the platform's holds, for its whole life
+    let quiet = std::sync::Arc::new(Quiet::default());
+    tokio::spawn(answer_holds(quiet.clone(), ids));
     ev!("boot.ready", { "ms": t0.elapsed().as_millis() as u64 });
 
-    // Litestream streams the databases that exist, and starts again when
-    // that set changes (an agent's first turn makes its profile's).
-    let storage = env("FRAGMENT_STORAGE").filter(|_| Path::new(LITESTREAM).exists());
-    let mut litestream: Option<Child> = None;
-    let mut streamed: Option<Vec<(String, PathBuf)>> = None;
     let mut restarts = 0u32;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("a SIGTERM handler");
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -746,7 +990,7 @@ async fn boot_main() {
     let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
     let owner = computer.owner.clone();
     let skills_found = SkillsFound::default();
-    let mut skills_task = spawn_skills(&api, &agents, &owner, &skills_found);
+    let mut skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
     let mut last_skills = Instant::now();
     let own = move |p: &Path| chown(p, ids);
     // bounded by the computer's life: one tick or one signal per pass
@@ -759,7 +1003,7 @@ async fn boot_main() {
         }
         if !alive(gateway) {
             ev!("boot.gateway_exited");
-            stop(gateway, bridge.as_mut(), litestream.as_mut()).await;
+            stop(gateway, bridge.as_mut()).await;
             std::process::exit(1);
         }
         if let Some(b) = bridge.as_mut() {
@@ -767,10 +1011,10 @@ async fn boot_main() {
                 restarts += 1;
                 ev!("boot.bridge_exited", { "status": status.code(), "restarts": restarts });
                 if restarts > BRIDGE_RESTARTS_MAX {
-                    stop(gateway, None, litestream.as_mut()).await;
+                    stop(gateway, None).await;
                     fail("the bridge keeps exiting");
                 }
-                bridge = spawn_bridge();
+                bridge = spawn_bridge(approval_timeout_s);
             }
         }
         // the managed skills again: the first as soon as there is an agent to
@@ -784,7 +1028,7 @@ async fn boot_main() {
             }
         };
         if skills_due {
-            skills_task = spawn_skills(&api, &agents, &owner, &skills_found);
+            skills_task = spawn_skills(&api, &agents, &owner, &skills_found, &quiet);
             last_skills = Instant::now();
         }
         // What waits on the platform (each call up to its 15 s), cut short by
@@ -792,6 +1036,11 @@ async fn boot_main() {
         // again at the next boot (a profile written whole again, a sync
         // whose commits are keyed by their content).
         let slow = async {
+            // held, nothing new starts: the next tick after the hold goes does it
+            if quiet.paused() {
+                return;
+            }
+            let _busy = Busy::new(&quiet);
             // The computer's agents may change while it runs (docs/computers.md).
             if last_agents.elapsed() >= Duration::from_millis(AGENTS_EVERY_MS) {
                 last_agents = Instant::now();
@@ -821,16 +1070,6 @@ async fn boot_main() {
                     Err(_) => {}
                 }
             }
-            if let Some(storage) = storage.as_deref().filter(|_| t0.elapsed() > Duration::from_secs(10)) {
-                let dbs: Vec<(String, PathBuf)> = hermes::litestream_dbs(&agents, &home).into_iter().filter(|(_, p)| p.exists()).collect();
-                if streamed.as_ref() != Some(&dbs) {
-                    if let Some(old) = litestream.take() {
-                        stop_litestream(old).await;
-                    }
-                    litestream = start_litestream(&dbs, storage);
-                    streamed = Some(dbs);
-                }
-            }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
                 last_sync = Instant::now();
                 for a in &agents {
@@ -853,22 +1092,21 @@ async fn boot_main() {
         }
     }
     ev!("boot.signal");
-    stop(gateway, bridge.as_mut(), litestream.as_mut()).await;
+    stop(gateway, bridge.as_mut()).await;
     std::process::exit(0);
 }
 
-/// SIGTERM to every child, then wait for them, at most `STOP_MS_MAX`.
-async fn stop(gateway: u32, bridge: Option<&mut Child>, litestream: Option<&mut Child>) {
+/// SIGTERM to the gateway and the bridge, then wait for them, at most
+/// `STOP_MS_MAX`.
+async fn stop(gateway: u32, mut bridge: Option<&mut Child>) {
     let t = Instant::now();
     signal(gateway, libc::SIGTERM);
-    let mut children: Vec<&mut Child> = Vec::new();
-    for c in [bridge, litestream].into_iter().flatten() {
-        signal(c.id(), libc::SIGTERM);
-        children.push(c);
+    if let Some(b) = bridge.as_deref_mut() {
+        signal(b.id(), libc::SIGTERM);
     }
     // bounded by STOP_MS_MAX
     while t.elapsed() < Duration::from_millis(STOP_MS_MAX) {
-        let waiting = alive(gateway) || children.iter_mut().any(|c| matches!(c.try_wait(), Ok(None)));
+        let waiting = alive(gateway) || bridge.as_deref_mut().is_some_and(|b| matches!(b.try_wait(), Ok(None)));
         if !waiting {
             break;
         }

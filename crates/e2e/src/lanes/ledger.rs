@@ -565,6 +565,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the high tier is refused, saying why (decision 23)", r.status == 400 && r.message().contains("high tier is off"), &r);
     let r = api.signed(&hand, "POST", route, Some(&json!({ "model": "@cf/zai-org/glm-5.3", "messages": [{ "role": "user", "content": "hi" }] })))?;
     s.ok("a model id is never a tier", r.status == 400, &r);
+    vision(s, api, wait)?;
     let r = api.signed(&owner, "POST", route, Some(&chat(false)))?;
     s.ok("a person does not call the model route (an agent does, for whom its owner pays)", r.status == 403, &r);
     let elsewhere = s.named(api, &visitor, "ledger-elsewhere")?;
@@ -581,6 +582,77 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- the meters: requests, dynamic workers and storage, once each
     s.ai.clear_script();
     meters(s, api, wait)
+}
+
+/// An image of about `bytes` as a `data:` URL: a PNG's head (1×1), then
+/// filler, as the Workers AI fake reads it.
+fn png_url(bytes: usize) -> String {
+    use base64::Engine;
+    let mut png = vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15,
+        0xc4, 0x89,
+    ];
+    let head = "data:image/png;base64,";
+    // base64 is 4 characters for every 3 bytes
+    let raw = (bytes.saturating_sub(head.len()) / 4 * 3).max(png.len());
+    png.resize(raw, 0);
+    format!("{head}{}", base64::engine::general_purpose::STANDARD.encode(&png))
+}
+
+/// The model route's `vision` (Paul, 2026-10-05): the deployment's vision
+/// model, GLM-5.3 Flash unless its config names another, for a runtime's
+/// calls about an image (Hermes' screenshots: the hermes lane drives one),
+/// metered on the payer's ledger as any call; and a call as large as
+/// Hermes' shrunk screenshot fits the route, one past its cap refused
+/// before anything is reserved or sent. Its payer is a person of its own,
+/// whose credit covers the large call's worst case (its bytes as tokens).
+fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let owner_id = owner_id.as_str();
+    let route = "/api/models/v1/chat/completions";
+    let look = |url: &str| json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is on this screen?" }, { "type": "image_url", "image_url": { "url": url } }] }] });
+    let aig = || entries(api, owner_id, "aig:");
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let small = png_url(256);
+    s.ai.set_usage(&[Used { prompt: 1_200, cached: 0, completion: 40 }]);
+    let r = api.signed(hand, "POST", route, Some(&look(&small)))?;
+    let call = s.ai.calls().get(calls).cloned();
+    let shown = call.as_ref().is_some_and(|c| c.model == FLASH && c.body.get("model").is_none() && c.body["messages"][0]["content"][1]["image_url"]["url"] == small.as_str());
+    let priced = charge(&tokens(FLASH, 1_200, 0, 40));
+    let settled = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "settled" && e["entry"]["end"]["charge"] == priced));
+    s.ok(
+        "`vision` runs the deployment's vision model (GLM-5.3 Flash by default), the image as it was sent, and is settled on its payer's ledger",
+        r.status == 200 && shown && settled,
+        json!({ "status": r.status, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig().len() - before }),
+    );
+    let r = api.signed(hand, "POST", route, Some(&json!({ "model": "medium", "messages": look(&small)["messages"] })))?;
+    s.ok("an image sent to the medium tier is the model's refusal (GLM-5.3 reads none), passed through", r.status == 400 && r.text.contains("takes no image input"), &r);
+
+    // Hermes shrinks a screenshot a call refused as too large to 5 MiB of
+    // data URL and tries once more: that call fits
+    let calls = s.ai.calls().len();
+    let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
+    let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
+    let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
+    s.ok(
+        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
+        r.status == 200 && sent == Some(shrunk.len()),
+        json!({ "status": r.status, "sent": sent, "message": r.message() }),
+    );
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    let over = png_url(fragment_core::models::MODEL_BODY_MAX_BYTES + 1024);
+    let r = api.signed(hand, "POST", route, Some(&look(&over)))?;
+    s.ok(
+        "one past the route's cap is refused, 413, nothing reserved or sent",
+        r.status == 413 && s.ai.calls().len() == calls && aig().len() == before,
+        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls }),
+    );
+    Ok(())
 }
 
 /// A fragment's meters reach its owner's ledger through the queue, each

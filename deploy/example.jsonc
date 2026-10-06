@@ -44,6 +44,11 @@
   // Unified Billing, zero data retention on and its logs off. Without it,
   // models and images are off.
   // "ai_gateway": "fragment",
+  // The model a runtime's calls about an image run on (the model route's
+  // `vision`: Hermes' computer_use screenshots, whatever an agent's tier).
+  // GLM-5.3 Flash unless named here; it must be one the price book prices
+  // (fragment_core::price), or the deploy is refused.
+  // "vision_model": "@cf/zai-org/glm-5.3-flash",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
   // npubs that grant credit, set plans, seats and overdrafts, and release

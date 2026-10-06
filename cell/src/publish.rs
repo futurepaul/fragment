@@ -54,7 +54,15 @@ impl FragmentCell {
     /// Commits the template a fragment was made from (`template_pending`)
     /// and deploys it. Keyed by the fragment's incarnation, so the alarm
     /// can retry one that failed without committing twice.
+    ///
+    /// One at a time: the create seeds, and the alarm it arms meanwhile
+    /// (its index flush) seeds too. On code.storage, a round trip away, the
+    /// two met: the second commit, changing nothing, was refused (412), and
+    /// when that was the create's, it answered before its template was
+    /// live (a skills fragment listing none of the release). Under the
+    /// lock the second finds the template landed, and does nothing.
     pub(crate) async fn seed(&self) -> CellResult<()> {
+        let _seeding = self.seeding.lock().await;
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);

@@ -138,8 +138,9 @@ async fn tool_steps() {
 }
 
 /// Goal (decision 42): an approval is a card for the agent's owner; while
-/// it waits the keepalive is dropped; the owner's answer resumes the turn,
-/// a second answer is ignored, and someone else's never counts.
+/// it waits the keepalive is held (an idle sleep would cut its turn); the
+/// owner's answer resumes the turn, a second answer is ignored, and someone
+/// else's never counts.
 #[tokio::test]
 async fn an_approval_answered() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -154,7 +155,8 @@ async fn an_approval_answered() {
     assert_eq!(prompt["asks"], "id:paul");
     assert_eq!(prompt["options"].as_array().map(Vec::len), Some(2));
     let id = prompt["prompt"].as_str().unwrap().to_string();
-    fake.until(WAIT, "the keepalive dropped while it waits", |w| w.keepalive_open == 0).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
 
     fake.say(&chat, &person("skyler"), json!({ "kind": "prompt_response", "prompt": id, "option": "deny" }));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -168,7 +170,7 @@ async fn an_approval_answered() {
         assert_eq!(closed.len(), 1);
         assert_eq!((closed[0]["outcome"].as_str(), closed[0]["option"].as_str(), closed[0]["by"].as_str()), (Some("answered"), Some("once"), Some("id:paul")));
     });
-    fake.until(WAIT, "held, dropped while waiting, held again, dropped", |w| w.keepalive_log == [true, false, true, false]).await;
+    fake.until(WAIT, "held through the card, dropped at the turn's end", |w| w.keepalive_log == [true, false]).await;
     bridge.stop().await;
 }
 
@@ -424,7 +426,7 @@ async fn agents_the_image_makes_ready() {
     let mut cfg = support::config(&fake.url(), &dir, support::settings());
     cfg.agents_file = Some(file.clone());
     // a pace that makes `slow` take five seconds: a turn that runs through the change
-    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script") } });
+    let script = Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(250), scratch: std::env::temp_dir().join("bridge-test-script"), data: std::env::temp_dir().join("bridge-test-data") } });
     let bridge = support::start(cfg, script);
     following(&fake, 2).await;
     let slow = fake.say(&talk, &person("paul"), json!({ "text": "slow, while maple arrives" }));

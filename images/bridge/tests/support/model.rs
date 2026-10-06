@@ -3,8 +3,11 @@
 //!
 //! - the answer is `scripted: <the last user message's text>`;
 //! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran`; `use the
-//!   terminal slowly`: `sleep 8` first), and one saying `risky` with one
+//!   yet, is answered with a `terminal` tool call (`echo tool-ran`, after
+//!   `sleep 2`: a turn this model answers at once, in about 0.1 s, ends
+//!   before Hermes sends its tool progress, so it would show no step; a
+//!   real model's turn takes seconds. `use the terminal slowly`: `sleep 8`
+//!   first), and one saying `risky` with one
 //!   Hermes flags (`rm -rf …`); once a tool result is in the transcript, the
 //!   answer names it;
 //! - `browse: <url>` is a `browser_navigate` call, and `look at your screen`
@@ -13,7 +16,8 @@
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked.
 //!
-//! It records each request's `model` and `x-fragment-agent`.
+//! It records each request's `model` and `x-fragment-agent` (a screenshot's
+//! description comes as the route's `vision`: Hermes' auxiliary vision).
 
 #![allow(dead_code)]
 
@@ -100,7 +104,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     } else if last_user.contains("use the terminal slowly") {
         Some("sleep 8 && echo tool-ran")
     } else if last_user.contains("use the terminal") {
-        Some("echo tool-ran")
+        Some("sleep 2 && echo tool-ran")
     } else {
         None
     };
@@ -131,7 +135,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
     if path.ends_with("/models") {
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }] }));
+        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);

@@ -230,12 +230,14 @@ speaking Cloudflare's APIs) returns once this product works.
     "temporarily unavailable" start (spike S3b).
 
     The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. The
-    Hermes image uses it for Litestream, streaming Hermes' SQLite
-    continuously. Litestream is for disaster recovery only: it restores
-    about 3 s per database, so it stays off the wake path. The agent's
-    self is in its fragment. CI runs a restore drill into an empty
-    computer.
+    R2 prefix through an intercept, so the guest holds no credential. It
+    stays the image's, for whatever it keeps outside `/data`. The agent's
+    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
+    it with Litestream, for disaster recovery, until step 1 of
+    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
+    Its replicas were never read, no restore drill existed, and a restore
+    would have put a `state.db` of seconds ago into a `/data` of the last
+    save. The saves themselves now carry Hermes' databases whole.)
 
     *The design of record is now docs/durable-computers.md (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
@@ -253,8 +255,10 @@ speaking Cloudflare's APIs) returns once this product works.
     answers `held`), three saves are kept, a wake falls back to the save
     before one that will not restore, and a sleep whose save fails keeps
     its container for at most `computers.unsaved_max_ms` (30 minutes by
-    default, Paul's to confirm). Litestream is still in the image, and its
-    replicas are never read (P4: the debt ledger).
+    default, Paul's to confirm). Litestream is cut from the image (P4).
+    Step 2, the seam:
+    `/data/work` (the tools') is saved as a record of its own beside the
+    rest of `/data` (the guest's own state), restored together.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The
@@ -327,6 +331,22 @@ speaking Cloudflare's APIs) returns once this product works.
     Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no
     sharding. Ask Cloudflare with the production account's limits
     request.
+
+    Status, 2026-10-05 (branch `claude/vision-model`; Paul: "yes, vision
+    model for computer_use. deepseek flash is apparently pretty good"):
+    the model route takes `vision` beside the tiers, the deployment's
+    vision model (`vision_model` in its config, `FRAGMENT_VISION_MODEL`;
+    one the price book does not price is refused), GLM-5.3 Flash by
+    default. Workers AI's catalog marks it "Vision: Yes"; GLM-5.3 reads no
+    images. Our Hermes image sends every agent's image calls there,
+    whatever its tier (its `computer_use` screenshots, and images people
+    attach), metered to the agent's owner as any call (docs/computers.md,
+    Models). It is no tier: agents and jobs cannot pick it. DeepSeek
+    Flash's vision build (`deepseek-flash`, DeepSeek-V4.1-Flash) is only on
+    DeepSeek's own API: Workers AI's DeepSeek-V4-Flash-0731 has no vision,
+    Unified Billing offers DeepSeek V4 Pro alone, and AI Gateway's DeepSeek
+    provider takes our own key, which this decision declines. Paul may
+    revisit that.
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;
@@ -511,7 +531,11 @@ speaking Cloudflare's APIs) returns once this product works.
     wins. While a turn waits on an approval, the bridge drops its busy
     flag, so the computer can sleep instead of billing for hours. An
     answer that arrives after a sleep resumes the turn, or the card says
-    it expired.
+    it expired. *Amended 2026-10-05 (docs/durable-computers.md, P6 for
+    now):* an open card holds the busy flag until it is answered or
+    expires, at most its life (an hour). A sleep under it cut the turn,
+    and Hermes met the next message with the cut command asked again
+    (docs/bridge.md, "A card keeps its computer awake").
 43. **Computers reach the internet.** Browsing is the point, so
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing

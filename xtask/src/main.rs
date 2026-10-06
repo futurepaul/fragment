@@ -199,8 +199,13 @@ fn dev(args: &[String]) -> Result<()> {
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
+    // Ctrl-C stops the node, and xtask outlives it to remove the containers
+    // it left (wrangler's teardown removes its computers, not their sidecars)
+    devstack::signals::outlive_interrupt()?;
     let status = node.wait()?;
     println!("wrangler dev exited: {status}");
+    let removed = devstack::containers::remove(&devstack::cell_dir())?;
+    println!("removed {} containers the dev node left", removed.containers);
     Ok(())
 }
 

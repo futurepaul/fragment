@@ -176,6 +176,10 @@ pub struct FragmentCell {
     pub(crate) plane: futures_util::lock::Mutex<()>,
     /// Serializes `sync_agent`: a deploy's and the alarm's would join the same agent twice.
     pub(crate) joining: futures_util::lock::Mutex<()>,
+    /// Serializes `seed`: a create's and the alarm's it arms would both
+    /// commit the template, and the second commit, changing nothing, is
+    /// refused (publish.rs).
+    pub(crate) seeding: futures_util::lock::Mutex<()>,
     pub(crate) rate: RefCell<fragment_core::ratelimit::Rate>,
     /// Whether this activation has swept its pending mutations.
     pub(crate) swept: Cell<bool>,
@@ -214,6 +218,7 @@ impl DurableObject for FragmentCell {
             cfg,
             plane: futures_util::lock::Mutex::new(()),
             joining: futures_util::lock::Mutex::new(()),
+            seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
             settling: RefCell::default(),

@@ -50,8 +50,11 @@
 //!   next message in the chat as its answer (`Tell`), never as a turn
 //!   behind it. It is a running turn of this life: a restart ends it as
 //!   lost, and that message, read by the next life, is a turn of its own.
-//! - The computer is kept awake while a turn waits to run or runs, and not
-//!   while every open turn waits on a person.
+//! - The computer is kept awake while a turn waits to run, runs, or waits
+//!   on its card (at most the card's life), so a card expires with its
+//!   runtime there and its turn ends as the runtime ends it, never cut by an
+//!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
+//!   one left Hermes to meet the next message with the cut request).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -106,7 +109,8 @@ pub enum Phase {
     /// Its claim was answered as this life's, and the runtime has it (a
     /// restart ends it: one life per turn).
     Running,
-    /// Waiting on a prompt's answer: the computer may sleep.
+    /// Waiting on a prompt's answer, or its expiry: the computer is kept
+    /// awake for it.
     Waiting,
     /// Over (run and ended, or ended without running: refused, stopped
     /// while it waited, or another life's), and its last records are owed
@@ -402,7 +406,9 @@ impl Engine {
     }
 
     fn finish(&mut self) -> Step {
-        let busy = self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running));
+        // a turn waiting on its card holds the computer too, until the card
+        // is answered or expires: an idle sleep would cut it
+        let busy = self.state.turns.values().any(|t| matches!(t.phase, Phase::Queued | Phase::Running | Phase::Waiting));
         if busy != self.keepalive {
             self.keepalive = busy;
             self.out.push(Effect::Keepalive(busy));

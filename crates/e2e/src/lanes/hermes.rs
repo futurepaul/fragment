@@ -46,6 +46,14 @@ const PNG: &[u8] = &[
     0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00,
     0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
+/// An install for the session, offline: a package Hermes builds and
+/// installs through apt as root, a program it puts in /usr/local/bin as
+/// root, a file in its home; then both programs run, on one line (the
+/// scripted model quotes a tool's first line).
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo kept-in-its-home > /data/hermes/fragment-kept.txt && echo "$(fragment-hello) $(fragment-hi)""#;
+/// After a sleep and a wake: the file in its home. Nothing is said of the
+/// install: a wake from a snapshot keeps it, a start from the image does not.
+const HOME_AFTER: &str = "cat /data/hermes/fragment-kept.txt";
 /// A fragment someone shares with the agent's owner, whose `notes` its
 /// editors post to.
 const NOTES_JSON: &[u8] = br#"{ "channels": { "notes": { "read": "viewer", "post": "editor" } } }"#;
@@ -263,6 +271,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         json!(steps),
     );
     s.ok("and its answer names the tool's result", reply_of(&tooled).is_some_and(|t| t.contains("the tool ran: ") && t.contains("tool-ran")), json!(reply_of(&tooled)));
+
+    // a model's text beside its tool call (Paul on p5, 2026-10-05: one
+    // message got two replies, the model's narration of its call, then the
+    // answer): the turn's one reply is its answer, the call a step on work,
+    // and the narration never a message of its own
+    let r = say(20, "narrate: echo narrated-ran")?;
+    let narrated = turn_for(&r);
+    s.eventually(TURN, || ended(&narrated).is_some());
+    let replies: Vec<String> = agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == narrated.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
+    let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &narrated).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
+    s.ok(
+        "a model's narration beside its tool call is no reply of its own: the turn's one reply is its answer, the call one step on work",
+        replies.len() == 1
+            && replies[0].contains("the tool ran: ")
+            && replies[0].contains("narrated-ran")
+            && !replies.iter().any(|t| t.contains(fragment_fakes::workers_ai::NARRATION))
+            && steps.len() == 1
+            && steps[0]["body"]["tool"] == "terminal"
+            && steps[0]["body"]["args"].as_str().is_some_and(|a| a.contains("echo narrated-ran"))
+            && ended(&narrated) == Some(json!("idle")),
+        json!({ "replies": replies, "steps": steps, "ended": ended(&narrated) }),
+    );
 
     // an approval: Hermes flags `rm -rf`, its guardian escalates, the owner answers
     let r = say(3, "run: rm -rf /tmp/fragment-risky && echo tool-ran")?;
@@ -518,6 +548,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent its owner holds at viewer edits nothing", status_of(&held).as_deref() == Some("403"), json!(reply_of(&held)));
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": null })))?;
 
+    // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
+    // in our Hermes image"): Hermes' user runs anything as root with sudo,
+    // here offline (a package it builds, through apt; a program into
+    // /usr/local/bin)
+    let installed = run(s, 90, INSTALL)?;
+    s.ok(
+        "Hermes installs software as root with passwordless sudo, a package through apt and a program into /usr/local/bin, and runs both",
+        said(&installed, "hello-from-apt hello-from-usr-local"),
+        json!({ "reply": installed }),
+    );
+
     // a restart mid-turn: a turn waiting on its card when the computer sleeps
     let r = say(10, "run: rm -rf /tmp/fragment-restart && echo tool-ran")?;
     let lost = turn_for(&r);
@@ -544,6 +585,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "after a sleep and a wake, Hermes answers with the conversation it had before (its /data restored)",
         reply_of(&remembered).is_some_and(|t| t.contains("do you remember") && said_count(&t).is_some_and(|n| n > 1)),
         json!({ "reply": reply_of(&remembered), "model_saw": model_saw(s, "do you remember", 4) }),
+    );
+    // what it wrote in its home came back with /data; the install may or
+    // may not have (docs/computers.md, "Root in our Hermes image")
+    let after = run(s, 91, HOME_AFTER)?;
+    s.ok(
+        "after the sleep and the wake, what it wrote in its home beside the install is kept",
+        said(&after, "kept-in-its-home"),
+        json!({ "reply": after }),
     );
 
     // an upgrade, then a rollback, by pin
@@ -616,6 +665,43 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "nothing restarted: the lead's turn ran on, and ends idle with its whole answer",
         s.eventually(TURN, || ended(&slow) == Some(json!("idle"))) && reply_of(&slow).is_some_and(|t| t.contains("slow-ran")) && phase(api, &owner, &id) == "awake",
         json!({ "reply": reply_of(&slow), "work": work_of(&records(api, &owner, &chat_name, "work"), &slow) }),
+    );
+
+    // its eyes (Paul, 2026-10-05): Maple is on the medium tier, whose
+    // GLM-5.3 reads no images; its computer_use screenshot goes to the
+    // route's `vision` (the deployment's vision model, GLM-5.3 Flash), as
+    // Maple, metered to its owner, and its answer is what that model saw
+    let calls_before = s.ai.calls().len();
+    let r = api.signed(&owner, "POST", &format!("/api/f/{grove_name}/channels/chat"), Some(&json!({ "id": "g2", "body": { "text": "look at your screen" } })))?;
+    let looked = turn_of(&maple_name, &grove_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+    let grove_ended = |turn: &str| work_of(&records(api, &owner, &grove_name, "work"), turn).into_iter().find(|r| r["body"]["kind"] == "turn.end").map(|r| r["body"]["outcome"].clone());
+    s.eventually(TURN, || grove_ended(&looked).is_some());
+    let calls: Vec<fragment_fakes::workers_ai::AiCall> = s.ai.calls().into_iter().skip(calls_before).collect();
+    let maple_opaque = hex::encode(&Sha256::digest(maple_id.as_bytes())[..8]);
+    let shown = |c: &fragment_fakes::workers_ai::AiCall| c.body["messages"].to_string().contains("\"image_url\"");
+    let seen: Vec<Value> = calls.iter().map(|c| json!({ "model": c.model, "agent": c.metadata["agent_id"], "image": shown(c) })).collect();
+    let looks: Vec<&fragment_fakes::workers_ai::AiCall> = calls.iter().filter(|c| shown(c)).collect();
+    s.ok(
+        "a medium-tier agent's computer_use screenshot goes to the route's vision model (GLM-5.3 Flash), as that agent, its main calls on GLM-5.3 and none of them shown an image",
+        !looks.is_empty()
+            && looks.iter().all(|c| c.model == fragment_core::models::VISION_MODEL_DEFAULT && c.metadata["agent_id"] == maple_opaque.as_str())
+            && calls.iter().any(|c| c.model == fragment_core::models::MEDIUM_MODEL && c.metadata["agent_id"] == maple_opaque.as_str())
+            && calls.iter().filter(|c| c.model == fragment_core::models::MEDIUM_MODEL).all(|c| !shown(c)),
+        json!(seen),
+    );
+    s.ok(
+        "and its answer is what the vision model saw of its screen",
+        maple_reply(&looked).is_some_and(|t| t.contains("the screen: I see an image, a ")),
+        json!({ "reply": maple_reply(&looked), "work": work_of(&records(api, &owner, &grove_name, "work"), &looked) }),
+    );
+    let vision_entries: Vec<Value> = super::ledger::entries(api, &owner_id, "aig:")
+        .into_iter()
+        .filter(|e| e["entry"]["reserve"]["agent"] == maple_id.as_str() && e["entry"]["reserve"]["worst"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT)
+        .collect();
+    s.ok(
+        "each vision call is metered to the agent's owner, as the agent, settled at the vision model's price",
+        vision_entries.len() >= looks.len() && !looks.is_empty() && vision_entries.iter().all(|e| super::ledger::end_of(e) == "settled" && e["entry"]["end"]["usage"]["model"] == fragment_core::models::VISION_MODEL_DEFAULT),
+        json!(vision_entries),
     );
 
     // added to the lead's chat while awake: @mentioned it answers there, the

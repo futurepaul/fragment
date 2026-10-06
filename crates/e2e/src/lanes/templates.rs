@@ -83,6 +83,8 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an editor commits files to main", wrote.status == 200 && wrote.body["commit"].is_string(), &wrote);
     let again = files(&editor, write)?;
     s.ok("the same key commits nothing twice", again.status == 200 && again.body["commit"] == wrote.body["commit"], &again);
+    let same = files(&editor, json!({ "files": [{ "path": "site/extra.txt", "text": "extra" }], "message": "the bytes main holds" }))?;
+    s.ok("a write of what main holds commits nothing: it answers main's tip", same.status == 200 && same.body["commit"] == wrote.body["commit"], &same);
     let st = api.status(&owner, &blank)?;
     s.ok("main moves at once, live stays", st.body["pins"]["main"] == wrote.body["commit"] && st.body["pins"]["live"] != st.body["pins"]["main"], &st);
     s.ok("the site still serves live", !page(api).contains("made through the api"), page(api));
@@ -138,6 +140,11 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     skills(s, api, &owner)
 }
 
+/// A call to code.storage from a preview takes about this long (a skills
+/// create's, 2026-10-05): the local fake answers that create this slowly,
+/// so its seed and the alarm's meet as they do there.
+const CODE_STORAGE_LATENCY_MS: u64 = 100;
+
 /// The managed skills (decision 17): a fragment on the blessed `skills`
 /// template lists and reads the release's managed set as its files
 /// (decision 40: no copy to drift), beneath files of its own at the same
@@ -145,7 +152,16 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     use fragment_templates::blessed;
     let label = s.name("tskills");
-    let r = api.create_with(owner, json!({ "name": label, "template": "skills" }))?;
+    // code.storage as far as a preview has it: the create's calls take
+    // long enough for the alarm it arms to run beside it, as they do there
+    if !s.hosted() {
+        s.fake.set_latency(std::time::Duration::from_millis(CODE_STORAGE_LATENCY_MS));
+    }
+    let r = api.create_with(owner, json!({ "name": label, "template": "skills" }));
+    if !s.hosted() {
+        s.fake.set_latency(std::time::Duration::ZERO);
+    }
+    let r = r?;
     let name = r.body["name"].as_str().unwrap_or("").to_string();
     s.ok("a skills fragment is made from the blessed skills template", r.status == 200 && !name.is_empty(), &r);
     let view = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
@@ -164,6 +180,16 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
         &format!("its files are the release's managed set ({} files), each at its version, beside its own manifest", want.len()),
         r.status == 200 && !want.is_empty() && release == want && rows.iter().any(|f| f["path"] == "fragment.json" && f["release"].is_null()),
         format!("{} release rows, {} wanted; {}", release.len(), want.len(), &r.text[..r.text.len().min(300)]),
+    );
+    // the create's seed and the alarm's (the create arms it) take turns:
+    // side by side, the second commit changes nothing and is refused (412
+    // on code.storage), and when it was the create's, the create answered
+    // before its template was live, listing none of the release
+    let (landed, failed) = (super::addon::events(api, owner, &name, "template"), super::addon::events(api, owner, &name, "template.failed"));
+    s.ok(
+        "its template lands once, in the create: no second seed beside it, none that failed",
+        landed == 1 && failed == 0,
+        format!("{landed} template, {failed} template.failed events: {}", api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=20"), None).map(|r| r.text).unwrap_or_default()),
     );
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(

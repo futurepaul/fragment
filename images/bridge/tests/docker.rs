@@ -22,6 +22,11 @@ use serde_json::json;
 use support::fake::{person, Fake};
 use support::model::Model;
 
+/// An install for the session, offline (as the e2e's hermes lane has it):
+/// a package Hermes builds and installs through apt as root, and a program
+/// it puts in /usr/local/bin as root; then both run, on one line.
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo "$(fragment-hello) $(fragment-hi)""#;
+
 fn docker() -> String {
     std::env::var("DOCKER").unwrap_or_else(|_| if std::path::Path::new("/usr/local/bin/docker").exists() { "/usr/local/bin/docker".into() } else { "docker".into() })
 }
@@ -103,6 +108,20 @@ impl Container {
     fn exec_out(&self, cmd: &[&str]) -> String {
         let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
         String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// `cmd`'s exit code and what it printed.
+    fn exec_code(&self, cmd: &[&str]) -> (i32, String) {
+        let out = Command::new(docker()).arg("exec").arg(&self.id).args(cmd).output().expect("docker runs");
+        (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    }
+
+    /// A container of `tag` that runs nothing but a sleep: a disk to restore
+    /// into and check, as a fresh start's is before its gate opens.
+    fn idle(tag: &str) -> Container {
+        let out = Command::new(docker()).args(["run", "-d", "--platform", "linux/amd64", "--entrypoint", "/bin/sleep", tag, "infinity"]).output().expect("docker runs");
+        assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
+        Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
     }
 
     fn logs(&self) -> String {
@@ -249,6 +268,9 @@ async fn the_hermes_image() {
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
     assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper-paul/SOUL.md"]), "the agent's repo is in its profile");
+    // the seam (step 2 of docs/durable-computers.md): its work is its own
+    assert!(c.exec(&["test", "-d", "/data/work/juniper-paul/browser-profile"]), "its work directory, with its browser's profile");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile", "Hermes' browser profile is a link into its work");
     assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper-paul/SOUL.md"]));
     // What Hermes writes in its profile is committed back to the agent's
     // fragment, as the agent.
@@ -347,7 +369,8 @@ async fn the_hermes_image() {
     let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t4).unwrap());
     eprintln!("hermes: approval card options {}", card["options"]);
     assert_eq!(card["asks"], "id:paul");
-    fake.until(30_000, "the keepalive dropped while it waits", |w| w.keepalive_open == 0).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fake.with(|w| w.keepalive_open), 1, "the card holds the computer awake");
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "once" }));
     fake.until(120_000, "the approved turn's answer", |w| answered(w, &t4).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("the tool ran"))).await;
     fake.with(|w| assert_eq!(w.bodies(&chat, "work", "turn.prompt.closed").into_iter().find(|p| p["turn"] == t4).unwrap()["outcome"], "answered"));
@@ -404,11 +427,250 @@ async fn the_hermes_image() {
         assert!(cli.iter().any(|r| r.2.as_deref() == Some("juniper.paul") && r.1 == "for=id%3Apaul" && !r.3), "as juniper, for paul, unsigned: {cli:?}");
     });
 
+    // Root for the session (docs/computers.md, "Root in our Hermes image"):
+    // its terminal installs, offline, a package it builds through apt and a
+    // program into /usr/local/bin, both with passwordless sudo, and runs
+    // them.
+    let install = fake.say(&chat, &person("paul"), json!({ "text": format!("run: {INSTALL}") }));
+    let ti = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", install["seq"].as_u64().unwrap());
+    fake.until(120_000, "the install's answer", |w| answered(w, &ti).is_some()).await;
+    fake.with(|w| {
+        let reply = answered(w, &ti).unwrap();
+        assert!(reply["text"].as_str().unwrap_or("").contains("hello-from-apt hello-from-usr-local"), "installed as root, and run: {reply}");
+    });
+    assert!(c.exec(&["dpkg", "-s", "fragment-hello"]), "installed as a package, through apt");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /usr/local/bin/fragment-hi"]), "the system's directories stay root's: an install goes through sudo");
+    // Hermes' file tools (write_file, patch) may write where its terminal
+    // works, its home and /tmp, and nowhere else (HERMES_WRITE_SAFE_ROOT),
+    // as Hermes' own check decides
+    let denied = |path: &str| {
+        let check = format!("from agent.file_safety import is_write_denied; import sys; sys.exit(1 if is_write_denied({path:?}) else 0)");
+        !c.exec(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", &check])
+    };
+    assert!(!denied("/data/work/juniper-paul/notes.txt"), "its file tools write its work directory");
+    assert!(!denied("/data/hermes/profiles/juniper-paul/notes.txt") && !denied("/tmp/notes.txt"), "and its home and /tmp");
+    assert!(denied("/usr/local/bin/notes"), "and not the system's directories");
+
     let (took, code) = c.sigterm();
     eprintln!("hermes: SIGTERM to exit: {} ms (code {code})", took.as_millis());
     if took >= Duration::from_secs(5) {
         panic!("SIGTERM took {took:?}; the container said:\n{}", c.logs());
     }
+}
+
+// ---- saves under the hold (docs/computers.md, "The hold"; rung 3 of
+// docs/explorations/pi-durable.md) ----
+
+/// The platform's hold of `/data`, as the Computer DO makes it, in a
+/// running container: its answer (`held`, within 20 s) and what it names
+/// as left out.
+fn hold(c: &Container) -> Option<Vec<String>> {
+    assert!(c.exec(&["sh", "-c", "rm -f /run/computer/held && mkdir -p /run/computer && touch /run/computer/hold"]), "the hold");
+    let t = Instant::now();
+    // bounded by the DO's 20 s
+    while t.elapsed() < Duration::from_secs(20) {
+        if c.exec(&["test", "-e", "/run/computer/held"]) {
+            return Some(c.exec_out(&["cat", "/run/computer/held"]).lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+fn unhold(c: &Container) {
+    assert!(c.exec(&["rm", "-f", "/run/computer/hold", "/run/computer/held"]), "the hold let go");
+}
+
+/// One save, as the Computer DO takes it: `/data` read out whole as a tar
+/// (the DirectoryBackup's archive, on this rung), leaving out what `left_out`
+/// names (anchored patterns, `/` being `/data`, as gitignore reads them).
+/// Its bytes.
+fn save_data(c: &Container, left_out: &[String], to: &std::path::Path) -> u64 {
+    let mut args = vec!["exec".to_string(), c.id.clone(), "tar".into(), "-C".into(), "/data".into(), "-cf".into(), "-".into(), "--anchored".into()];
+    for p in left_out {
+        assert!(p.starts_with('/'), "our image names exactly what it copied: {p}");
+        args.push(format!("--exclude=.{p}"));
+    }
+    args.push(".".into());
+    let out = Command::new(docker()).args(&args).output().expect("docker runs");
+    // 1: a file changed as it was read, which a hot save is
+    assert!(out.status.success() || out.status.code() == Some(1), "tar: {}", String::from_utf8_lossy(&out.stderr));
+    std::fs::write(to, &out.stdout).expect("the save written");
+    out.stdout.len() as u64
+}
+
+/// A save restored into a fresh container of `tag`, as a wake from the
+/// image and the save does, before its gate: the image's check (its exit
+/// code and what it said), then every SQLite file under `/data` with its
+/// `quick_check`, as the hermes user.
+fn restore_and_check(tag: &str, save: &std::path::Path) -> (i32, String, Vec<serde_json::Value>) {
+    let c = Container::idle(tag);
+    assert!(c.exec(&["mkdir", "/data"]), "the restore's target");
+    let tar = std::fs::File::open(save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    let report = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/fragment/bin/hermes-boot", "sqlite-report", "/data"]);
+    let files = report.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    (code, said, files)
+}
+
+/// The Hermes image, running against the fake API and the scripted model,
+/// its agent answering in its chat.
+async fn hermes_running() -> (Fake, Model, String, Container) {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    (fake, model, chat, c)
+}
+
+/// A turn whose tool writes a SQLite database of its own for about six
+/// seconds (a commit every few ms), while Hermes writes its own.
+const WRITING: &str = "run: python3 -c \"import sqlite3,time;c=sqlite3.connect('tool.db');c.execute('pragma journal_mode=wal');c.execute('create table if not exists t(x)');[(c.execute('insert into t values(randomblob(8000))'),c.commit(),time.sleep(0.01)) for _ in range(500)];print('wrote')\"";
+
+/// Whether a reported file is one of Hermes' own databases (its home's
+/// `*.db`), or another SQLite file.
+fn hermes_db(file: &serde_json::Value) -> bool {
+    file["path"].as_str().is_some_and(|p| p.starts_with("/data/hermes/") && p.ends_with(".db"))
+}
+
+/// Goal (I8, F4): a save taken under the hold while turns write opens:
+/// every one of Hermes' databases in it passes `quick_check`, whatever was
+/// writing as it was taken. Method: saves taken many times during turns
+/// whose tool writes a database of its own (and Hermes its own), half under
+/// the hold (the databases copied by SQLite's online backup, their live
+/// files left out) and half hot (no hold: `/data` as it is, the platform's
+/// save before the hold), each restored into a fresh container, checked by
+/// the image's own check as the platform runs it, then every SQLite file
+/// found checked. Asserts the held saves are whole; reports the hot ones'
+/// tear rate, and any other SQLite file's (a measure, not an assertion).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_save_taken_while_it_writes_opens() {
+    const ROUNDS: u32 = 12;
+    let (fake, _model, chat, c) = hermes_running().await;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("saves");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut saves = vec![];
+    for round in 0..ROUNDS {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
+        let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
+        // Hermes asks its owner before a script runs from `-c` ("script
+        // execution via -e/-c flag"): allowed for the session, once
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        if let Some(card) = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t)) {
+            fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": card["prompt"], "option": "session" }));
+            tokio::time::sleep(Duration::from_millis(1_000)).await;
+        }
+        // the tool writing for about six seconds: the save is taken in its midst
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let held = round % 2 == 0;
+        let t0 = Instant::now();
+        let left_out = if held { hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs())) } else { vec![] };
+        let answered_ms = t0.elapsed().as_millis();
+        let path = dir.join(format!("save-{round}.tar"));
+        let bytes = save_data(&c, &left_out, &path);
+        let saved_ms = t0.elapsed().as_millis();
+        if held {
+            unhold(&c);
+        }
+        eprintln!("save {round}: {} {bytes} bytes, answered in {answered_ms} ms, saved in {saved_ms} ms", if held { "held" } else { "hot" });
+        saves.push((held, path));
+        fake.until(120_000, "the writing turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    }
+    // the seam: the tool wrote in its agent's work directory, not in Hermes' home
+    assert!(c.exec(&["test", "-f", "/data/work/juniper-paul/tool.db"]), "the tool's database is the agent's work: {}", c.exec_out(&["sh", "-c", "find /data -name tool.db"]));
+    let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
+    for (held, path) in &saves {
+        let t = Instant::now();
+        let (code, said, files) = restore_and_check(&hermes_tag(), path);
+        let torn: Vec<&serde_json::Value> = files.iter().filter(|f| f["ok"] != true).collect();
+        eprintln!("{}: check {code} in {} ms ({}); {} SQLite files, torn: {torn:?}", path.display(), t.elapsed().as_millis(), said.trim(), files.len());
+        let ours = files.iter().filter(|f| hermes_db(f)).count();
+        let ours_torn = torn.iter().filter(|f| hermes_db(f)).count();
+        assert!(ours > 0, "a save holds Hermes' databases: {files:?}");
+        if *held {
+            assert_eq!(code, 0, "the image's check of a held save passes: {said}");
+            (held_dbs, held_torn) = (held_dbs + ours, held_torn + ours_torn);
+        } else {
+            (hot_dbs, hot_torn) = (hot_dbs + ours, hot_torn + ours_torn);
+        }
+        others += files.len() - ours;
+        other_torn += torn.len() - ours_torn;
+    }
+    eprintln!("tear rate: Hermes' databases held {held_torn}/{held_dbs}, hot {hot_torn}/{hot_dbs}; other SQLite files {other_torn}/{others}");
+    assert_eq!(held_torn, 0, "a held save's databases are whole");
+}
+
+/// Goal (P2): once the guest says `held`, no file its save keeps changes:
+/// the bridge claims nothing, the sync, the skills and the agents' reads
+/// start no round, and the copy is done before the answer. Hermes' gateway
+/// is not paused (P2: it cannot be asked), so the hold comes between turns,
+/// and what Hermes writes on its own while idle (its kanban dispatcher opens
+/// its board's database on a timer, making its `-wal` and `-shm`) is in the
+/// files its answer names, which the save leaves out (their copies kept).
+/// Method: an idle Hermes held, a listing of the files under `/data` (each
+/// path, size and time) but those the answer names, then another five
+/// seconds later. Then a message said while it is held is not claimed
+/// until the hold goes (its bridge records it, unclaimed: its state file
+/// is rewritten, whole).
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn held_nothing_under_data_changes() {
+    let (fake, _model, chat, c) = hermes_running().await;
+    let files = |leave: &[String]| -> Vec<String> {
+        let listed = c.exec_out(&["sh", "-c", "find /data -type f -printf '%p %s %T@\\n' | sort"]);
+        listed.lines().filter(|l| !leave.iter().any(|p| l.starts_with(&format!("/data{p} ")))).map(str::to_string).collect()
+    };
+    // between turns: once Hermes' start-up writes are done (its lazy
+    // packages; its kanban dispatcher makes its board's database some
+    // seconds after the gateway starts), two windows of three seconds with
+    // no file but a database's journal changed
+    let journals = |l: &String| [".db-wal ", ".db-shm ", ".db-journal "].iter().any(|s| l.contains(s));
+    let settled = |all: Vec<String>| all.into_iter().filter(|l| !journals(l)).collect::<Vec<_>>();
+    let quiet = Instant::now();
+    // bounded: two minutes
+    while !c.exec(&["test", "-f", "/data/hermes/kanban.db"]) {
+        assert!(quiet.elapsed() < Duration::from_secs(120), "Hermes never made its kanban board's database");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let mut last = settled(files(&[]));
+    let mut still = 0;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let now = settled(files(&[]));
+        still = if now == last { still + 1 } else { 0 };
+        if still >= 2 {
+            break;
+        }
+        last = now;
+    }
+    eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
+    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper-paul/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
+    let before = files(&left_out);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let after = files(&left_out);
+    let changed: Vec<_> = before.iter().zip(after.iter()).filter(|(a, b)| a != b).collect();
+    assert!(before == after, "a file the save keeps changed while held ({} before, {} after): {changed:?}", before.len(), after.len());
+    // a message as it is held: recorded, never claimed while held
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "said while held" }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    fake.with(|w| assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["turn"] != t), "held, the message is not claimed"));
+    unhold(&c);
+    fake.until(120_000, "the message answered once the hold goes", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!c.exec(&["test", "-e", "/data/held-copies"]), "the copies go with the hold");
 }
 
 /// What the agent's desktop looks like from inside the container, as the
@@ -557,6 +819,21 @@ async fn the_hermes_desktop() {
     let captured = fake.with(|w| reply(w, &turn)).unwrap_or_default();
     eprintln!("desktop: the capture's reply: {}", captured.chars().take(600).collect::<String>());
     assert!(tools.contains(&"computer_use") || listed.is_some(), "computer_use is the agent's, directly or through tool_search: {tools:?}");
+    // the screenshot is described by the route's vision model (the profile's
+    // `auxiliary.vision`), as the agent, its image in the call
+    let looked: Vec<(String, Option<String>, bool)> = model
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.body["messages"].to_string().contains("\"image_url\""))
+        .map(|c| (c.model.clone(), c.agent.clone(), c.path.ends_with("/v1/chat/completions") && c.body["messages"].to_string().contains("data:image/")))
+        .collect();
+    eprintln!("desktop: the calls shown an image (model, agent, a data: image on /v1/chat/completions): {looked:?}");
+    assert!(
+        !looked.is_empty() && looked.iter().all(|(m, a, ok)| m == "vision" && a.as_deref() == Some("juniper.paul") && *ok),
+        "the capture's screenshot goes to the route's vision model, as the agent: {looked:?}"
+    );
     assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
 
     // its browser, on its desktop
@@ -598,4 +875,188 @@ async fn the_hermes_desktop() {
         "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
         fake.with(|w| reply(w, &turn))
     );
+}
+
+// ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
+// 1hr window and now it's not responding to chats") ----
+
+/// Hermes' approval timeout in the expiry tests, and with it the card's life
+/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`: the image gives the bridge the same).
+const APPROVAL_S: u64 = 20;
+
+/// What the chat and its `work` hold, and the container's last lines: a
+/// failure's detail.
+fn told(fake: &Fake, chat: &str, c: &Container) -> String {
+    let records = fake.with(|w| format!("chat: {:?}\nwork: {:?}", w.records(chat, "chat").iter().map(|r| r["body"].clone()).collect::<Vec<_>>(), w.records(chat, "work").iter().map(|r| r["body"].clone()).collect::<Vec<_>>()));
+    let logs = c.logs();
+    let _ = std::fs::write(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("expired-{}.log", &c.id[..12.min(c.id.len())])), &logs);
+    format!("the fake holds\n{records}\nthe container said:\n{}", logs.lines().rev().take(80).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
+}
+
+/// Waits up to `ms` for `cond`, failing with what the chat and the
+/// container say.
+async fn within(fake: &Fake, chat: &str, c: &Container, ms: u64, what: &str, cond: impl Fn(&support::fake::World) -> bool) {
+    if tokio::time::timeout(Duration::from_millis(ms), fake.until(ms + 60_000, what, &cond)).await.is_err() {
+        panic!("waited {ms} ms for {what}; {}", told(fake, chat, c));
+    }
+}
+
+/// A chat with Hermes on the line: the image with a short approval, its
+/// agent's first reply given.
+struct Expiry {
+    fake: Fake,
+    model: Model,
+    chat: String,
+}
+
+impl Expiry {
+    async fn start() -> (Expiry, Container) {
+        build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+        let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+        let model = Model::start("0.0.0.0:0").await;
+        let chat = fake.chat("talk", &["juniper"]);
+        let x = Expiry { fake, model, chat };
+        let c = x.container(&[]);
+        within(&x.fake, &x.chat, &c, 120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+        let first = x.say("hello");
+        within(&x.fake, &x.chat, &c, 180_000, "Hermes' first reply", |w| !x.ends(w, &first).is_empty()).await;
+        (x, c)
+    }
+
+    fn container(&self, extra: &[(&str, &str)]) -> Container {
+        let approval = APPROVAL_S.to_string();
+        let mut env = vec![("HERMES_BOOT_APPROVAL_TIMEOUT_S", approval.as_str())];
+        env.extend_from_slice(extra);
+        Container::run(&hermes_tag(), self.fake.addr.port(), self.model.addr.port(), &env)
+    }
+
+    /// Paul says `text`: its turn.
+    fn say(&self, text: &str) -> String {
+        let said = self.fake.say(&self.chat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id("juniper.paul", &self.chat, "chat", said["seq"].as_u64().unwrap())
+    }
+
+    fn ends(&self, w: &support::fake::World, turn: &str) -> Vec<serde_json::Value> {
+        w.bodies(&self.chat, "work", "turn.end").into_iter().filter(|e| e["turn"] == turn).collect()
+    }
+
+    fn cards(&self, w: &support::fake::World, turn: &str) -> Vec<serde_json::Value> {
+        w.bodies(&self.chat, "work", "turn.prompt").into_iter().filter(|p| p["turn"] == turn).collect()
+    }
+
+    fn closed(&self, w: &support::fake::World, turn: &str) -> Vec<serde_json::Value> {
+        w.bodies(&self.chat, "work", "turn.prompt.closed").into_iter().filter(|p| p["turn"] == turn).collect()
+    }
+
+    fn reply(&self, w: &support::fake::World, turn: &str) -> Option<serde_json::Value> {
+        w.bodies(&self.chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)
+    }
+
+    /// The model's calls since `from`: each one's last few messages (role,
+    /// and the start of its text or its tool calls).
+    fn model_saw(&self, from: usize) -> Vec<Vec<String>> {
+        let calls = self.model.calls.lock().unwrap();
+        calls[from.min(calls.len())..]
+            .iter()
+            .filter(|c| c.path.ends_with("/chat/completions"))
+            .map(|c| {
+                let messages = c.body["messages"].as_array().cloned().unwrap_or_default();
+                messages[messages.len().saturating_sub(5)..].iter().map(|m| format!("{}: {} {}", m["role"], m["content"].to_string().chars().take(140).collect::<String>(), m["tool_calls"].to_string().chars().take(140).collect::<String>())).collect()
+            })
+            .collect()
+    }
+}
+
+
+/// Goal (Paul on p5, 2026-10-05: "the agent asked me for permission for
+/// something but I missed the 1hr window and now it's not responding to
+/// chats"), with real Hermes: an approval card nobody answers is closed
+/// `expired` once its `expiresAt` passes, its turn ends once, as Hermes ends
+/// it (its approval times out with the card: the command is not run), and
+/// the chat's next message is claimed and answered, not met by the card's
+/// command asked again; and a message said while a card is open waits
+/// behind its turn, then is answered the same way.
+///
+/// Method: the image with a 20 s approval (`HERMES_BOOT_APPROVAL_TIMEOUT_S`;
+/// the bridge's card lives as long), the scripted model asking for a
+/// command Hermes flags, and the Computer DO's idle rule in a test's time
+/// (crates/core/src/computer.rs, `IDLE_MS`: a computer with no keepalive
+/// open sleeps 20 minutes after its last record; here, at once): if the
+/// bridge lets its keepalive go under the card, the computer is put to sleep
+/// as the DO does it (the hold, a save of `/data`, SIGTERM) and woken from
+/// that save by the next message, after the card's `expiresAt`; otherwise it
+/// stays awake through the expiry. On master it is let go (decision 42),
+/// and the woken Hermes folds the next message into the cut request (its
+/// model is given `[paul] do the risky thing\n\n[paul] good morning`), so
+/// the next message asks the cut command's approval again.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_expired_approval_ends_its_turn() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+
+    // 1. a card nobody answers; then the next message
+    let risky = x.say("do the risky thing");
+    within(fake, chat, &c, 120_000, "the approval card", |w| !x.cards(w, &risky).is_empty()).await;
+    let asked = fake.with(|w| x.cards(w, &risky)[0].clone());
+    let expires_at = asked["expiresAt"].as_u64().unwrap();
+    assert!(expires_at.saturating_sub(fragment_bridge::log::now_ms()) <= APPROVAL_S * 1000 + 2_000, "the card lives as long as Hermes waits: {asked}");
+    // the DO's idle rule: what the keepalive does while the card waits
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let let_go = fake.with(|w| w.keepalive_open == 0);
+    let calls_before = x.model.calls.lock().unwrap().len();
+    let (c, next) = if let_go {
+        let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("expired");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let save = dir.join("asleep.tar");
+        save_data(&c, &left_out, &save);
+        let (took, _) = c.sigterm();
+        eprintln!("expired: the keepalive let go under the card; held, saved and stopped ({} ms to exit)", took.as_millis());
+        let _ = told(fake, chat, &c);
+        drop(c);
+        fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+        // bounded: the card's life
+        while fragment_bridge::log::now_ms() < expires_at + 3_000 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        // the next message wakes it from the save
+        let next = x.say("good morning");
+        let c = x.container(&[("RESTORE_PENDING", "1")]);
+        let tar = std::fs::File::open(&save).expect("the save");
+        let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+        assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+        let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+        assert_eq!(code, 0, "the save checks: {said}");
+        assert!(c.exec(&["touch", "/run/computer/restored"]));
+        (c, next)
+    } else {
+        within(fake, chat, &c, APPROVAL_S * 1000 + 60_000, "the card expired, awake, and its turn's end", |w| x.closed(w, &risky).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky).is_empty()).await;
+        fake.with(|w| eprintln!("expired, awake: its end {:?}, its reply {:?}", x.ends(w, &risky), x.reply(w, &risky)));
+        (c, x.say("good morning"))
+    };
+    within(fake, chat, &c, 240_000, "the next message's turn to end", |w| !x.ends(w, &next).is_empty()).await;
+    let saw = x.model_saw(calls_before);
+    fake.with(|w| {
+        let asked_again = x.cards(w, &next);
+        assert!(asked_again.is_empty(), "the next message asks nothing again (the keepalive let go under the card: {let_go}); the model saw {saw:#?}; it asked {asked_again:?}");
+        assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "the next message is answered: {:?}; the model saw {saw:#?}", x.reply(w, &next));
+        assert_eq!((x.ends(w, &risky).len(), x.closed(w, &risky).len()), (1, 1), "the card's turn ends once, its card closed once");
+        assert_eq!(x.closed(w, &risky)[0]["outcome"], "expired");
+        assert_eq!(x.ends(w, &risky)[0]["outcome"], "idle", "Hermes ended it, its approval timed out with the card");
+    });
+    assert!(!let_go, "the card holds the computer awake");
+
+    // 2. a message while a card is open waits behind it, then is answered
+    let risky2 = x.say("do the risky thing once more");
+    within(fake, chat, &c, 120_000, "the second card", |w| !x.cards(w, &risky2).is_empty()).await;
+    let meanwhile = x.say("hello while you wait");
+    within(fake, chat, &c, APPROVAL_S * 1000 + 90_000, "the second card expired, and its turn's end", |w| x.closed(w, &risky2).iter().any(|p| p["outcome"] == "expired") && !x.ends(w, &risky2).is_empty()).await;
+    within(fake, chat, &c, 120_000, "the message said while it waited answered", |w| x.reply(w, &meanwhile).is_some() && !x.ends(w, &meanwhile).is_empty()).await;
+    fake.with(|w| {
+        assert_eq!((x.ends(w, &risky2).len(), x.closed(w, &risky2).len()), (1, 1), "each once");
+        assert!(x.cards(w, &meanwhile).is_empty(), "it asks nothing again: {:?}", x.cards(w, &meanwhile));
+        assert!(x.reply(w, &meanwhile).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("hello while you wait")), "{:?}", x.reply(w, &meanwhile));
+    });
 }

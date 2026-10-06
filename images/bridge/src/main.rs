@@ -60,9 +60,19 @@ fn runtime() -> Box<dyn Runtime> {
             };
             Box::new(Relay { config })
         }
-        "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")) } }),
+        "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
         other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
     }
+}
+
+/// `BRIDGE_HELD_LEAVE_OUT`: what the save may leave out (whitespace
+/// between), each a pattern the platform takes.
+fn left_out() -> Vec<String> {
+    let patterns: Vec<String> = env("BRIDGE_HELD_LEAVE_OUT").map(|v| v.split_whitespace().map(str::to_string).collect()).unwrap_or_default();
+    if patterns.len() > limits::HELD_PATTERNS_MAX || !patterns.iter().all(|p| driver::left_out_ok(p)) {
+        fail(&format!("BRIDGE_HELD_LEAVE_OUT is at most {} patterns of letters, digits and ._-/*?[]", limits::HELD_PATTERNS_MAX));
+    }
+    patterns
 }
 
 fn screen_config() -> Option<screen::ScreenConfig> {
@@ -117,6 +127,7 @@ async fn main() {
                 restored: PathBuf::from(env_or("BRIDGE_RESTORED", "/run/computer/restored")),
                 hold: PathBuf::from(env_or("BRIDGE_HOLD", "/run/computer/hold")),
                 held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
+                left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
                 agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
             };
