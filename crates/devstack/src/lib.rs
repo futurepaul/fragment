@@ -12,12 +12,15 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod containers;
 pub mod node;
 mod node_release;
+pub mod signals;
 pub mod store;
 pub mod summary;
 
@@ -28,7 +31,8 @@ pub const READY_TIMEOUT: Duration = Duration::from_secs(900);
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The wrangler the repo pins (package.json; the pinned Node's `npm ci`
-/// installs it).
+/// installs it). Moving it re-checks what containers.rs leans on in it
+/// and its workerd (docs/technical-debt-ledger.md).
 pub const WRANGLER_VERSION: &str = "4.145.0";
 /// Names another wrangler entry script (a `bin/wrangler.js`), run on the
 /// pinned Node all the same.
@@ -169,11 +173,15 @@ pub fn local_config(project: &Path) -> PathBuf {
 }
 
 /// The project's config as a local node runs it (`local_config`): less the
-/// remote-only bindings, and its secrets bound by name (`secrets`, each a
+/// remote-only bindings, its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's.
+/// binds them in the account's, and its computer images built from
+/// Dockerfiles of its own (`containers::scope_images`), so that no other
+/// stack's teardown removes its computers.
 fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
     let mut config = read_config(project)?;
+    absolute_images(&mut config, project)?;
+    containers::scope_images(&mut config, project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
@@ -543,6 +551,33 @@ pub fn state_dir(project: &Path) -> PathBuf {
     project.join(".wrangler/state")
 }
 
+/// The nodes this process started in process groups of their own and has
+/// not dropped, which a terminal's Ctrl-C does not reach (it signals the
+/// terminal's group), and whether the process is ending (`kill_nodes`).
+struct Live {
+    ending: bool,
+    groups: Vec<u32>,
+}
+
+/// Nodes one process runs at once (the e2e runs one; `xtask dev` none in
+/// a group of its own).
+const LIVE_NODES_MAX: usize = 8;
+
+static LIVE: Mutex<Live> = Mutex::new(Live { ending: false, groups: Vec::new() });
+
+/// SIGKILLs every node this process started in a group of its own and
+/// still runs, and refuses to start another: the process is ending (a
+/// signal; `signals::on_termination`), and a node started now would make
+/// containers after they were removed. The killed nodes' `Node`s are
+/// dropped with the process.
+pub fn kill_nodes() {
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    live.ending = true;
+    for group in live.groups.drain(..) {
+        let _ = Command::new("kill").args(["-KILL", "--", &format!("-{group}")]).stderr(Stdio::null()).status();
+    }
+}
+
 /// One `wrangler dev` process, which runs workerd as its child: in a
 /// process group of its own (`NodeOptions::own_group`), so a crash kills
 /// both, or in the terminal's.
@@ -581,7 +616,18 @@ impl Node {
             cmd.process_group(0);
         }
         let t0 = Instant::now();
-        let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
+        let child = {
+            // held across the spawn: `kill_nodes` either finds this node's
+            // group or has already refused it
+            let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+            anyhow::ensure!(!live.ending, "this process is ending (a signal): no node starts");
+            let child = cmd.stdout(out.try_clone()?).stderr(out).stdin(Stdio::null()).spawn()?;
+            if opts.own_group {
+                assert!(live.groups.len() < LIVE_NODES_MAX, "a process runs at most {LIVE_NODES_MAX} nodes at once");
+                live.groups.push(child.id());
+            }
+            child
+        };
         let mut node = Node { child, own_group: opts.own_group, base: format!("http://127.0.0.1:{}", opts.port), port: opts.port, log: log.clone(), reaped: false };
         loop {
             let text = fs::read(&log).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
@@ -667,6 +713,9 @@ impl Drop for Node {
     /// after it exits, while workerd may still hold the group.
     fn drop(&mut self) {
         self.kill();
+        if self.own_group {
+            LIVE.lock().unwrap_or_else(PoisonError::into_inner).groups.retain(|g| *g != self.child.id());
+        }
     }
 }
 

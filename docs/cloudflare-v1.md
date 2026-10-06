@@ -331,6 +331,22 @@ speaking Cloudflare's APIs) returns once this product works.
     Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no
     sharding. Ask Cloudflare with the production account's limits
     request.
+
+    Status, 2026-10-05 (branch `claude/vision-model`; Paul: "yes, vision
+    model for computer_use. deepseek flash is apparently pretty good"):
+    the model route takes `vision` beside the tiers, the deployment's
+    vision model (`vision_model` in its config, `FRAGMENT_VISION_MODEL`;
+    one the price book does not price is refused), GLM-5.3 Flash by
+    default. Workers AI's catalog marks it "Vision: Yes"; GLM-5.3 reads no
+    images. Our Hermes image sends every agent's image calls there,
+    whatever its tier (its `computer_use` screenshots, and images people
+    attach), metered to the agent's owner as any call (docs/computers.md,
+    Models). It is no tier: agents and jobs cannot pick it. DeepSeek
+    Flash's vision build (`deepseek-flash`, DeepSeek-V4.1-Flash) is only on
+    DeepSeek's own API: Workers AI's DeepSeek-V4-Flash-0731 has no vision,
+    Unified Billing offers DeepSeek V4 Pro alone, and AI Gateway's DeepSeek
+    provider takes our own key, which this decision declines. Paul may
+    revisit that.
 24. **Every per-person cost is metered** in integer micro-dollars into
     a per-person usage ledger:
     - AI;
@@ -515,7 +531,11 @@ speaking Cloudflare's APIs) returns once this product works.
     wins. While a turn waits on an approval, the bridge drops its busy
     flag, so the computer can sleep instead of billing for hours. An
     answer that arrives after a sleep resumes the turn, or the card says
-    it expired.
+    it expired. *Amended 2026-10-05 (docs/durable-computers.md, P6 for
+    now):* an open card holds the busy flag until it is answered or
+    expires, at most its life (an hour). A sleep under it cut the turn,
+    and Hermes met the next message with the cut command asked again
+    (docs/bridge.md, "A card keeps its computer awake").
 43. **Computers reach the internet.** Browsing is the point, so
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing

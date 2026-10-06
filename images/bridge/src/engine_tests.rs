@@ -263,7 +263,7 @@ fn stop_is_the_askers() {
 }
 
 /// Goal: a prompt is a card for the agent's owner; while it waits the
-/// computer may sleep; the owner's answer (the first) resumes the turn.
+/// computer is kept awake; the owner's answer (the first) resumes the turn.
 /// Invalid: someone else's answer, an unknown option, a second answer.
 #[test]
 fn an_approval_answered() {
@@ -278,7 +278,8 @@ fn an_approval_answered() {
     assert_eq!(body["kind"], "turn.prompt");
     assert_eq!(body["asks"], "id:paul");
     assert_eq!(body["expiresAt"], T0 + 10 + 60_000);
-    assert_eq!(keepalive(&p), Some(false), "waiting on a person: the computer may sleep");
+    assert_eq!(keepalive(&p), None, "an open card keeps the computer awake");
+    assert!(e.keepalive());
     // a repeat of the same prompt asks nothing
     assert_eq!(ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "ab12.0011".into(), text: "again".into(), options, ttl_ms: None }, T0 + 11).effects, vec![]);
 
@@ -289,7 +290,7 @@ fn an_approval_answered() {
     let yes = said(&mut e, &a, &v, 4, "id:paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "once" }), T0 + 22);
     assert_eq!(commands(&yes), vec![Command::Answer { turn: turn.clone(), prompt: "ab12.0011".into(), option: Some("once".into()), seq: 4, by: "id:paul".into() }]);
     assert_eq!(posts(&yes)[0].1, json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "ab12.0011", "outcome": "answered", "option": "once", "by": "id:paul" }));
-    assert_eq!(keepalive(&yes), Some(true), "busy again");
+    assert_eq!(keepalive(&yes), None, "still awake, running again");
     let second = said(&mut e, &a, &v, 5, "id:paul", json!({ "kind": "prompt_response", "prompt": "ab12.0011", "option": "deny" }), T0 + 23);
     assert!(commands(&second).is_empty(), "the first answer won");
 }
@@ -314,6 +315,43 @@ fn an_approval_expires() {
     let bad = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "has space".into(), text: "?".into(), options: vec![], ttl_ms: None }, T0 + 41_000);
     assert!(posts(&bad).is_empty());
     assert_eq!(commands(&bad).len(), 1);
+}
+
+/// Goal (Paul on p5, 2026-10-05: a card missed, then no answers): an open
+/// card keeps its computer awake its whole life, so it expires with its
+/// runtime still there (an idle sleep under it cut its turn, and Hermes
+/// then met the next message with the cut request asked again). At its
+/// expiry the card is closed `expired` and the runtime told; the turn ends
+/// as the runtime ends it; the message said meanwhile, which waited behind
+/// it, is claimed and run; only then is the computer let go.
+#[test]
+fn an_open_card_keeps_its_computer_awake_until_it_expires() {
+    let a = agent("juniper");
+    let v = view(&[&a]);
+    let mut e = engine(std::slice::from_ref(&a));
+    let turn = started(&said(&mut e, &a, &v, 1, "id:paul", json!({ "text": "risky" }), T0)).expect("started").turn;
+    let options = vec![PromptOption { id: "once".into(), label: "Allow".into(), style: None }];
+    let p = ev(&mut e, Event::Prompt { turn: turn.clone(), prompt: "p1".into(), text: "ok?".into(), options, ttl_ms: None }, T0 + 10);
+    assert_eq!(posts(&p)[0].1["expiresAt"], T0 + 10 + 60_000);
+    assert_eq!(keepalive(&p), None, "the card holds the computer: no let-go");
+    assert!(e.keepalive(), "held while the card is open");
+    let hello = said(&mut e, &a, &v, 2, "id:paul", json!({ "text": "hello?" }), T0 + 20_000);
+    assert!(started(&hello).is_none(), "a message meanwhile waits behind the card's turn");
+    let quiet = e.step(Input::Tick, T0 + 10 + 59_999);
+    assert!(quiet.effects.is_empty() && e.keepalive(), "held to the card's last moment");
+    let x = e.step(Input::Tick, T0 + 10 + 60_000);
+    assert_eq!(posts(&x), vec![(records::work_id(&turn, "pc:p1"), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "p1", "outcome": "expired" }))]);
+    assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new() }]);
+    assert_eq!((e.state().turns[&turn].phase, keepalive(&x), e.keepalive()), (Phase::Running, None, true), "running again, as its runtime goes on without the answer");
+    // the runtime ends it (Hermes: its approval timed out with the card, the
+    // command BLOCKED, then its reply): the message that waited is run
+    let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 61_000);
+    assert_eq!(posts(&end).iter().filter(|(id, _)| id == &records::work_id(&turn, "end")).count(), 1, "the card's turn ends once");
+    let next = started(&end).expect("the message that waited is claimed and run");
+    assert_eq!(next.text, "hello?");
+    assert_eq!(keepalive(&end), None, "awake for it");
+    let done = ev(&mut e, Event::End { turn: next.turn.clone(), outcome: Outcome::Idle }, T0 + 62_000);
+    assert_eq!(keepalive(&done), Some(false), "nothing open: let go");
 }
 
 /// Goal: a restart keeps every admission: a turn the runtime held is ended

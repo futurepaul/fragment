@@ -43,6 +43,10 @@ impl Tier {
     }
 }
 
+/// The model route's name for the deployment's vision model
+/// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it.
+pub const VISION_MODEL: &str = "vision";
+
 fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
@@ -51,9 +55,19 @@ fn q(s: &str) -> String {
 /// card and its command expire together.
 pub const APPROVAL_TIMEOUT_S: u64 = fragment_bridge::limits::PROMPT_TTL_MS_DEFAULT / 1000;
 
+/// The approval timeout a boot uses, in seconds: `setting`
+/// (`HERMES_BOOT_APPROVAL_TIMEOUT_S`, a test's) within the bounds the
+/// bridge holds a prompt's life to, else `APPROVAL_TIMEOUT_S`. The bridge
+/// is given the same (`BRIDGE_PROMPT_TTL_MS`), so a card and its command
+/// still expire together.
+pub fn approval_timeout_s(setting: Option<&str>) -> u64 {
+    use fragment_bridge::limits::{PROMPT_TTL_MS_MAX, PROMPT_TTL_MS_MIN};
+    setting.and_then(|v| v.trim().parse::<u64>().ok()).map_or(APPROVAL_TIMEOUT_S, |s| s.clamp(PROMPT_TTL_MS_MIN / 1000, PROMPT_TTL_MS_MAX / 1000))
+}
+
 /// The managed overlay: how every profile streams, shows progress, asks for
-/// approvals, and what it never runs.
-pub fn managed_config(disabled_plugins: &[String]) -> String {
+/// approvals (waiting `approval_timeout_s` on each), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -73,7 +87,7 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
     // Approvals default to Hermes' `smart` mode (decision 16); a card waits as long as
     // the bridge's prompt does. Slash confirmations stay off: a person's leading `/`
     // never reaches Hermes as a command.
-    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {APPROVAL_TIMEOUT_S}\n  destructive_slash_confirm: false\n"));
+    y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
     // The first agent's desktop starts for the screen's first viewer (the
@@ -96,7 +110,8 @@ pub fn managed_config(disabled_plugins: &[String]) -> String {
 
 /// An agent's profile config: its model, through the model intercept, as
 /// that agent (`x-fragment-agent` on every call, the main model's and the
-/// auxiliary ones'); and what its terminal is given: who it is
+/// auxiliary ones'), and its vision model (the route's `vision`); and what
+/// its terminal is given: who it is
 /// (`PROFILE_ENV`) and every credential's environment variable the
 /// deployment may give it (`credential_env`, the guest view's: Hermes reads
 /// the list once per gateway, so it names them all, held now or not, and
@@ -123,6 +138,20 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // agent's own wins, and a managed one over the platform's.
     let dirs: Vec<String> = crate::skills::EXTERNAL_DIRS.iter().map(|d| q(d)).collect();
     y.push_str(&format!("skills:\n  external_dirs: [{}]\n", dirs.join(", ")));
+    // Its eyes: Hermes' auxiliary vision (each computer_use screenshot, and
+    // an image a person attaches, described in words for the main model) on
+    // the route's `vision`, the deployment's vision model, whatever the
+    // agent's tier (the medium tier's GLM-5.3 reads no images). Named
+    // outright, Hermes routes every capture through it (its
+    // `tools/computer_use/vision_routing.py`, step 1) and sends it, as every
+    // call to a custom endpoint, with `model.default_headers`: the agent's
+    // `x-fragment-agent`, so the intercept meters it to the agent's owner.
+    // Always OpenAI's shape, the high tier's agents' too.
+    y.push_str(&format!(
+        "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
+        q(&format!("{base}/v1")),
+        q(VISION_MODEL)
+    ));
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
     // the screen shows it. Left unset, Hermes picks Browser Use mode (one
@@ -368,7 +397,7 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()]);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
@@ -381,6 +410,12 @@ mod tests {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
         assert!(m.contains(&format!("timeout: {APPROVAL_TIMEOUT_S}")));
+        // a test's shorter approval, held within the bridge's bounds
+        assert_eq!(approval_timeout_s(None), APPROVAL_TIMEOUT_S);
+        assert_eq!(approval_timeout_s(Some("20")), 20);
+        assert_eq!(approval_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
+        assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
+        assert!(managed_config(&[], 20).contains("timeout: 20\n"));
         let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
         let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -388,6 +423,12 @@ mod tests {
         assert!(p.contains("x-fragment-agent: \"juniper.paul\""), "every model call names its agent");
         let h = profile_config(&agent(), Tier::High, "http://model.fragment.internal", &[], creds);
         assert!(h.contains("provider: \"anthropic\"") && h.contains("/anthropic\""), "{h}");
+        // its eyes: the route's vision model, OpenAI's shape, whatever its tier
+        let vision = "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: \"http://model.fragment.internal/v1\"\n    model: \"vision\"\n    api_key: \"fragment-model\"\n";
+        for (tier, config) in [("medium", &p), ("high", &h), ("cheap", &profile_config(&agent(), Tier::Cheap, "http://model.fragment.internal", &[], creds))] {
+            assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
+        }
+        assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");

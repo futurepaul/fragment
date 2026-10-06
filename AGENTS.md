@@ -111,7 +111,15 @@ prebuilt bundle is in the debt ledger).
   earlier). A section that errors or panics is one FAIL and the sections
   after it still run. The node runs from a staged copy of the cell in the
   run's own scratch (`target/e2e/<run>/cell`), so the e2e and `cargo
-  xtask dev` can run at once. That scratch holds each node boot's log
+  xtask dev` can run at once, as can runs in several worktrees: a node's
+  computer images are its project's own (each its Dockerfile plus a
+  `dev.fragment.project` label, written under `<project>/.wrangler/images/`),
+  so another node's teardown, which removes containers by image, never
+  removes its computers; and a run removes the containers its nodes left
+  (each computer's and its `-proxy` sidecar, named for the computers in
+  its state, never another's) when it ends, fails, panics, or gets Ctrl-C,
+  SIGTERM or SIGHUP, after killing its node (`crates/devstack/src/
+  containers.rs`; `xtask dev` does so when wrangler exits). That scratch holds each node boot's log
   (`node-<port>-<boot>.log`, wrangler's debug logs on) and is removed when
   every check passes, kept when one fails (`FRAGMENT_E2E_KEEP=1` keeps it
   anyway). Each section declares what it needs (`crates/e2e/src/needs.rs`:

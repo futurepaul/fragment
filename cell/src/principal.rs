@@ -7,7 +7,7 @@
 //! platform's page reads this one cell and wakes no fragment.
 //! Which keys an identity holds is the registry's (registry.rs).
 //!
-//! Two things here are the person's own, not a fragment's:
+//! Three things here are the person's own, not a fragment's:
 //!
 //! - **Archived**, a flag on their row (`PUT /api/fragments/{name}/archived`):
 //!   their view of the fragment, which no fragment's change touches. It
@@ -22,9 +22,20 @@
 //!   them all; a search reads only entries of rows that name a role. At most
 //!   `SEARCH_ENTRIES_PER_FRAGMENT_MAX` a fragment and `SEARCH_ENTRIES_MAX` in
 //!   all are kept, the oldest going first.
+//! - **Watching** (`GET /api/fragments/watch`; Paul on p5, 2026-10-05: an
+//!   app his agent made did not show in his sidebar until he reloaded):
+//!   the person's open shells, and any CLI, hold a socket here, hibernated
+//!   (the router decided whose list it is). Each change this list applies
+//!   (a row's, newer than the one it holds: a fragment made, shared with
+//!   them, changed, left or deleted; or their archiving) is told to every
+//!   one as `{type: "changed"}`, naming nothing: each page reads the list
+//!   again with its own credential, so a socket that outlives its session
+//!   learns only that something changed. A socket closed or lost misses
+//!   nothing a page needs: it reads the list again as it reconnects. At
+//!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 
 use fragment_core::search::{self, Query};
-use fragment_proto::{limits, valid_channel_name, Archived, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Sharing};
+use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Sharing};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
@@ -47,6 +58,13 @@ CREATE TRIGGER IF NOT EXISTS search_entries_dropped AFTER DELETE ON search_entri
   INSERT INTO search_text (search_text, rowid, text) VALUES ('delete', old.id, old.text);
 END;
 ";
+
+/// The tag of the sockets that watch this list (`/watch`).
+const WATCH_TAG: &str = "watch";
+/// A watching socket's first frame, as it opens.
+const HELLO: &str = r#"{"type":"hello"}"#;
+/// What a watching socket is told of a change: no more.
+const CHANGED: &str = r#"{"type":"changed"}"#;
 
 /// The columns `/list` and a search read of a row.
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
@@ -159,6 +177,21 @@ impl DurableObject for PrincipalCell {
             Err(e) => e.response(),
         }
     }
+
+    // A watching socket says nothing the list reads.
+    async fn websocket_message(&self, _ws: WebSocket, _message: WebSocketIncomingMessage) -> Result<()> {
+        Ok(())
+    }
+
+    async fn websocket_close(&self, ws: WebSocket, code: usize, reason: String, _clean: bool) -> Result<()> {
+        let code = if code == 1005 || code == 1006 { 1000 } else { code as u16 };
+        let _ = ws.close(Some(code), Some(reason));
+        Ok(())
+    }
+
+    async fn websocket_error(&self, _ws: WebSocket, _error: Error) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl PrincipalCell {
@@ -186,7 +219,11 @@ impl PrincipalCell {
         match (req.method(), req.path().as_str()) {
             (Method::Post, "/index") => {
                 let c: IndexChange = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                Ok(Response::from_json(&json!({ "ok": true, "applied": self.index(c)? }))?)
+                let applied = self.index(c)?;
+                if applied {
+                    self.tell();
+                }
+                Ok(Response::from_json(&json!({ "ok": true, "applied": applied }))?)
             }
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
@@ -196,7 +233,9 @@ impl PrincipalCell {
             }
             (Method::Put, "/archived") => {
                 let s: SetArchived = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-                Ok(Response::from_json(&self.archive(s)?)?)
+                let archived = self.archive(s)?;
+                self.tell();
+                Ok(Response::from_json(&archived)?)
             }
             (Method::Post, "/search/entries") => {
                 let b: SearchBatch = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -207,7 +246,36 @@ impl PrincipalCell {
                 let q = q.ok_or_else(|| CellError::invalid("name what to look for: ?q="))?;
                 Ok(Response::from_json(&self.search(&q)?)?)
             }
-            (m, p) => Err(CellError::new(fragment_proto::ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
+            (Method::Get, "/watch") => self.watch(&req),
+            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
+        }
+    }
+
+    /// A socket that watches this list (the router decided whose it is):
+    /// hibernated, told of each change (`tell`), at most
+    /// `LIST_WATCHERS_MAX` at once.
+    fn watch(&self, req: &Request) -> CellResult<Response> {
+        if !req.headers().get("upgrade")?.is_some_and(|u| u.eq_ignore_ascii_case("websocket")) {
+            return Err(CellError::invalid("a list is watched over a WebSocket; send Upgrade: websocket"));
+        }
+        let open = self.state.get_websockets_with_tag(WATCH_TAG).len();
+        if open >= limits::LIST_WATCHERS_MAX {
+            return Err(CellError::new(ErrorCode::RateLimited, format!("{open} pages watch this list, the most it tells; close one")));
+        }
+        let pair = WebSocketPair::new()?;
+        self.state.accept_websocket_with_tags(&pair.server, &[WATCH_TAG]);
+        pair.server.send_with_str(HELLO)?;
+        Ok(Response::from_websocket(pair.client)?)
+    }
+
+    /// Tells every watching socket that the list changed. One that fails
+    /// (closing as it is told) is its page's to reconnect, which reads the
+    /// list again then.
+    fn tell(&self) {
+        let watching = self.state.get_websockets_with_tag(WATCH_TAG);
+        assert!(watching.len() <= limits::LIST_WATCHERS_MAX, "a list holds at most its watchers");
+        for ws in watching {
+            let _ = ws.send_with_str(CHANGED);
         }
     }
 
@@ -273,7 +341,7 @@ impl PrincipalCell {
             vec![SqlStorageValue::Integer(i64::from(s.archived)), s.fragment.as_str().into()],
         )?;
         let Some(row) = changed.first() else {
-            return Err(CellError::new(fragment_proto::ErrorCode::NotFound, format!("no fragment {} of yours", s.fragment)));
+            return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {} of yours", s.fragment)));
         };
         assert_eq!(changed.len(), 1, "a fragment is one row");
         assert_eq!(row["archived"].as_i64(), Some(i64::from(s.archived)), "the row says what was set");

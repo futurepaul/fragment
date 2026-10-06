@@ -269,8 +269,9 @@ docs/durable-computers.md. A computer keeps its newest three saves of
     unassigned signs nothing from that moment (the intercept refuses it),
     and its placeholders are refused, whatever the guest still runs.
   - `GET /api/computer/keepalive` (a WebSocket): while it is open the
-    computer stays awake. Hold it while busy; drop it while waiting on a
-    person (decision 42).
+    computer stays awake. Hold it while busy, and while a turn waits on
+    its card, until the card is answered or expires (decision 42 as
+    amended; docs/bridge.md, "A card keeps its computer awake").
 - A subscription with `{channel, wake: true}` (in place of `url`), sent
   as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record; the agent must be a member who may read
@@ -337,10 +338,37 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   its configured context length. Anthropic's shape
   (`/anthropic/v1/messages`) comes with the high tier, which is off
   (decision 23).
+- `model` may also be `vision`: the deployment's vision model (its
+  config's `vision_model`, the cell's `FRAGMENT_VISION_MODEL`), GLM-5.3
+  Flash unless it names another (Paul, 2026-10-05). Workers AI's catalog
+  marks GLM-5.3 Flash "Vision: Yes"; GLM-5.3, the medium tier's, reads no
+  images. The vision model must be one the price book prices, or the
+  deploy is refused (and the cell, at its first request); GLM-5.3 Flash
+  is the cheap tier's own row, so no new book version. `vision` is
+  bounded, reserved and settled as a tier's call is, at its model's
+  price, to the agent's owner. It is no tier: an agent's `agent.json`,
+  a job's step and a manifest name only tiers.
+- Our Hermes image's profiles send their image calls to `vision`
+  (`auxiliary.vision`: provider `custom`, model `vision`, through the
+  intercept), whatever the agent's tier. Hermes describes each
+  `computer_use` screenshot with it and hands the main model the words
+  (named outright, Hermes routes every capture so: its
+  `tools/computer_use/vision_routing.py`), and an image a person attaches
+  too. Before, a capture went to the agent's own tier's model, which on
+  the medium tier reads no images. DeepSeek Flash's vision build is only
+  on DeepSeek's own API (decision 23, its status).
+- A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
+  Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
+  sends it whole; one refused as too large (413) it shrinks to 5 MiB of
+  base64 and sends once more (its `_RESIZE_TARGET_BYTES`, which its config
+  does not set), which fits. A call reserves its bytes as input tokens,
+  so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
+  GLM-5.3 Flash's price, the fee and the margin) until it settles at what
+  the model counted; a payer with less is refused it (402).
 - A call without `x-fragment-agent` is refused (401: no one to bill).
   Our Hermes image sets it on every call of an agent's profile (its
   `model.default_headers`), the main model's and the auxiliary ones'
-  (titles, the smart-approval guardian).
+  (titles, the smart-approval guardian, vision).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -605,7 +633,8 @@ settings and state):
   once; Take over is kept. On that desktop an agent operates: Hermes'
   `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
   `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
-  bridge and the agent calls it through `tool_call`), and its built-in
+  bridge and the agent calls it through `tool_call`; each screenshot is
+  described by the route's vision model: Models), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
   with no backend named, Hermes would fetch the Browser Use CLI into
@@ -711,6 +740,37 @@ and how a runtime finds them, is the image's.
   the interception CA appended at boot is its too. The image holds no
   secret of it. The google-workspace skill prefers it.
 
+### Root in our Hermes image
+
+Paul, 2026-10-05: "hermes needs to be able to install binaries (not
+persisted)".
+
+- **Passwordless sudo.** Hermes runs as its unprivileged user, as
+  upstream runs it, and its user may run anything as root with `sudo`
+  (no password, so Hermes' terminal runs `sudo` as written, never asking
+  for one). The system's directories stay root's, as on a CI runner, so
+  `sudo apt-get install`, `sudo install … /usr/local/bin/` and `sudo npm
+  install -g` are how an agent installs software. The computer is one
+  person's VM with no secret in it (decisions 13, 43), and one person's
+  agents are not fenced from each other (decision 44), so root inside it
+  opens nothing of anyone else's.
+- **How long an install lasts.** `/data` is the only place a computer
+  keeps; an install outside it lasts until the computer's next start from
+  its image (a crash, or an image update), and a wake from a snapshot
+  keeps it.
+- **Hermes' own settings.** Its file tools (`write_file`, `patch`) may
+  write its home, its agents' work directories (`/data/work`, where its
+  terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
+  only them, not the terminal: defense in depth, as Hermes says), for the
+  scratch an install is made from; they run as its user, so `/usr/local`
+  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  Hermes' own optional backends (providers, platforms, speech), which a
+  computer configures none of.
+- **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
+  intercept catches (decision 43); the image keeps apt's lists as of its
+  build, and a `.deb` on disk installs offline. An intranet computer
+  needs an apt mirror (and PyPI's and npm's) named in the image.
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
@@ -760,7 +820,16 @@ and how a runtime finds them, is the image's.
   computer's `uses`), never records, which a second run replays.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
-  first's turn runs included.
+  first's turn runs included, and an install as root (a `.deb` through
+  apt and a program into `/usr/local/bin`, offline), its home intact
+  after a sleep and a wake; and that agent (on the medium tier) looking
+  at its screen: its `computer_use` screenshot goes to the route's
+  `vision` as that agent, settled on its owner's ledger at GLM-5.3
+  Flash's price, and its answer is what the vision model saw. The
+  Workers AI fake reads images only on a model the catalog marks
+  "Vision: Yes" (GLM-5.3 Flash) and answers 400 for one sent to another,
+  as the ledger lane checks with `vision` itself and a call of Hermes'
+  shrunk-screenshot size.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API, with the

@@ -692,7 +692,7 @@ async fn profiles(api: &Api, agents: &[Agent], home: &Path, ids: Option<(u32, u3
 /// The bridge, which runs the agents the ready file names (its `ready.rs`)
 /// and shows the screen's socket, whichever agents come and go: nothing
 /// it is started with changes with them.
-fn spawn_bridge() -> Option<Child> {
+fn spawn_bridge(approval_timeout_s: u64) -> Option<Child> {
     let mut c = Command::new(format!("{OPT}/bin/fragment-bridge"));
     c.arg("run")
         .env("BRIDGE_RUNTIME", "relay")
@@ -703,7 +703,8 @@ fn spawn_bridge() -> Option<Child> {
         // its answer to a hold is this image's to wait for: the platform's
         // `held` comes once Hermes' databases are copied too (held.rs)
         .env("BRIDGE_HELD", held::BRIDGE_HELD)
-        .env("BRIDGE_PROMPT_TTL_MS", (hermes::APPROVAL_TIMEOUT_S * 1000).to_string())
+        // a card lives as long as Hermes waits on its approval
+        .env("BRIDGE_PROMPT_TTL_MS", (approval_timeout_s * 1000).to_string())
         .env("BRIDGE_AGENTS_FILE", format!("{RUN}/{READY_FILE}"))
         .env("BRIDGE_SCREEN_LISTEN", "0.0.0.0:6080")
         .env("BRIDGE_SCREEN_DIR", format!("{OPT}/screen"))
@@ -959,7 +960,9 @@ async fn boot_main() {
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
-    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
+    // HERMES_BOOT_APPROVAL_TIMEOUT_S: a test's shorter approval (and card)
+    let approval_timeout_s = hermes::approval_timeout_s(env("HERMES_BOOT_APPROVAL_TIMEOUT_S").as_deref());
+    std::fs::write("/etc/hermes/config.yaml", hermes::managed_config(&lean, approval_timeout_s)).unwrap_or_else(|e| fail(&format!("/etc/hermes/config.yaml: {e}")));
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
@@ -977,7 +980,7 @@ async fn boot_main() {
     end_previous_life(&agents, &home);
     point_screen(agents.first(), &home);
     write_ready(&agents);
-    let mut bridge = spawn_bridge();
+    let mut bridge = spawn_bridge(approval_timeout_s);
     let Some(gateway) = start_gateway(&home) else { fail("no gateway") };
     // its answer to the platform's holds, for its whole life
     let quiet = std::sync::Arc::new(Quiet::default());
@@ -1024,7 +1027,7 @@ async fn boot_main() {
                     stop(gateway, None).await;
                     fail("the bridge keeps exiting");
                 }
-                bridge = spawn_bridge();
+                bridge = spawn_bridge(approval_timeout_s);
             }
         }
         // the managed skills again: the first as soon as there is an agent to

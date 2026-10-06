@@ -108,6 +108,10 @@ pub mod limits {
     /// fragment asks the registry again, at the socket's next frame: a
     /// sign-out, an ended session, or a revoked key holds within this.
     pub const LIVE_IDENTITY_MS: i64 = 60_000;
+    /// Sockets watching one person's list at once (`GET
+    /// /api/fragments/watch`: their shell's tabs, and any CLI), each told
+    /// of every change to it; past this one more is refused (429).
+    pub const LIST_WATCHERS_MAX: usize = 16;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;

@@ -194,6 +194,8 @@ messages in flight.
   later steps; independent of everything above.
 - **P6, approvals outlive a restart:** for now, an open approval card
   holds the keepalive until it is answered or expires (decision 42
-  changes); later, a late answer starts a new turn.
+  changes; built 2026-10-05, after Paul's missed card on p5:
+  docs/bridge.md, "A card keeps its computer awake"); later, a late
+  answer starts a new turn.
 - **A backlog's age:** chat messages have no age limit after a long
   outage (routines have an hour). Decide before production.
