@@ -303,6 +303,13 @@ pub fn merge_conflicted(body: &[u8]) -> bool {
     serde_json::from_slice::<Value>(body).is_ok_and(|v| v["conflict_type"] == "merge_conflict" || v["code"] == "merge_conflict")
 }
 
+/// A commit pack's 412 that says it would change nothing: the branch's
+/// tip holds its files already (a retry of a pack that landed, or a
+/// write of what is there). The service makes no empty commit.
+pub fn nothing_to_commit(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|v| v["result"]["status"] == "precondition_failed" && v["result"]["message"] == "no changes to commit")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +419,12 @@ mod tests {
         assert!(merge_conflicted(br#"{"type":"about:blank","title":"Conflict","status":409,"code":"merge_conflict"}"#));
         assert!(!merge_conflicted(br#"{"result":{"status":"precondition_failed"}}"#), "a stale expected sha is not a conflict");
         assert!(!merge_conflicted(b"not json"));
+
+        // the service's answer, read from a preview (2026-10-05)
+        let unchanged = br#"{"commit":null,"result":{"target_branch":"","branch":"","old_sha":"","new_sha":"","success":false,"status":"precondition_failed","message":"no changes to commit"}}"#;
+        assert!(nothing_to_commit(unchanged));
+        assert!(!nothing_to_commit(br#"{"result":{"status":"precondition_failed","message":"expected branch head did not match current tip"}}"#), "a stale expected sha is no such answer");
+        assert!(!nothing_to_commit(b"not json"));
 
         let line = restore_commit("live", &base, &live, "deploy x", ("a", "a@x"));
         assert!(line.ends_with('\n') && line.lines().count() == 1, "{line:?}");
