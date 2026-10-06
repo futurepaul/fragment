@@ -10,9 +10,10 @@
 //!   first), and one saying `risky` with one
 //!   Hermes flags (`rm -rf …`); once a tool result is in the transcript, the
 //!   answer names it;
-//! - `browse: <url>` is a `browser_navigate` call, and `look at your screen`
-//!   a `computer_use` capture (through Hermes' `tool_call` bridge when it
-//!   defers the tool); their answers quote what the tool said;
+//! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
+//!   a `computer_use` capture, and `write: <path>` a `write_file` of one
+//!   line there (each through Hermes' `tool_call` bridge when it defers the
+//!   tool); their answers quote what the tool said;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked.
 //!
@@ -64,6 +65,9 @@ impl Model {
     }
 }
 
+/// What `write: <path>` has Hermes' write_file put there.
+pub const WRITTEN: &str = "written by the agent\n";
+
 fn text_of(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
@@ -86,8 +90,10 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
     let look = last_user.contains("look at your screen");
+    // `write: <path>`: Hermes' write_file puts `WRITTEN` there
+    let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     if let Some(result) = tool_result {
-        if run.is_some() || browse.is_some() || look {
+        if run.is_some() || browse.is_some() || look || write.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -117,6 +123,16 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // tool_search's description, invoked through tool_call
     let deferred = |name: &str| offered("tool_call") && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains(name))));
     let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
+    if let Some(path) = write {
+        let args = json!({ "path": path, "content": WRITTEN });
+        return if offered("write_file") {
+            (String::new(), Some(call("write_file", args)))
+        } else if deferred("write_file") {
+            (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "write_file", "arguments": args }] }))))
+        } else {
+            ("scripted: no write_file among my tools".into(), None)
+        };
+    }
     match (browse, look) {
         (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
         (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
@@ -199,4 +215,15 @@ fn answers_are_the_transcripts() {
     assert!(call["function"]["name"] == "tool_call" && call["function"]["arguments"].as_str().unwrap().contains("\"computer_use\""), "{call}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no computer_use among my tools", None));
+    // write_file, directly or behind tool_search, and the answer quotes it
+    let files = json!([{ "type": "function", "function": { "name": "write_file" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": files }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "path": "~/notes.txt", "content": WRITTEN }).to_string());
+    let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… write_file: Write content …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": bridged }));
+    assert!(call.is_some_and(|c| c["function"]["name"] == "tool_call" && c["function"]["arguments"].as_str().unwrap().contains("\"write_file\"")));
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"path\": \"/h/notes.txt\"}" }], "tools": files }));
+    assert_eq!(t, "scripted: the tool said: {\"path\": \"/h/notes.txt\"}");
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: no write_file among my tools", None));
 }

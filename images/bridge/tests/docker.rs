@@ -77,14 +77,16 @@ impl Drop for Container {
 
 /// Where the container runs: Docker as it is, or as Cloudflare Containers
 /// runs an image, where Docker's defaults differ.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Runtime {
     Docker,
     /// No `/dev/shm` (`--ipc=none`; Docker mounts a 64 MB one in every
     /// container, Containers none), and no `/.dockerenv`, Docker's marker,
-    /// which Hermes reads as "in a container" to start Chromium with
+    /// which Hermes reads as "in a container": to start Chromium with
     /// `--no-sandbox --disable-dev-shm-usage` (p5, 2026-10-05: the agent's
-    /// browser died for want of `/dev/shm`).
+    /// browser died for want of `/dev/shm`), and for the rest of its
+    /// container guesses (docs/computers.md). Without it Hermes takes this
+    /// for a host.
     Hosted,
 }
 
@@ -988,6 +990,81 @@ async fn the_hermes_desktop() {
         "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
         fake.with(|w| reply(w, &turn))
     );
+}
+
+// ---- what Hermes would decide by guessing it runs in a container (its
+// `is_container()`: Docker's marker `/.dockerenv`, which Containers has
+// not; images/hermes/boot/src/hermes.rs, `RUNTIME_ENV`) ----
+
+/// What one runtime shows of an agent's home.
+#[derive(Debug)]
+struct Homes {
+    /// Whether Hermes takes the runtime for a container.
+    container: bool,
+    /// The agent's terminal's `HOME`.
+    terminal: String,
+    /// Where Hermes' write_file put `~/fragment-home.txt`, as it said.
+    written: String,
+    /// The modes of Hermes' home and its directories (`<mode> <path>`).
+    modes: String,
+}
+
+/// The value after `name=` in what a tool said, up to a space or a quote.
+fn said(text: &str, name: &str) -> String {
+    let pat = format!("{name}=");
+    text.split_once(&pat).map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default()
+}
+
+/// The Hermes image on `runtime`: juniper's terminal says its `HOME`, and
+/// its write_file writes under `~`.
+async fn homes(runtime: Runtime) -> Homes {
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("home", &["juniper"]);
+    let c = Container::run_on(runtime, &hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let guess = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", "import os; os.chdir('/opt/hermes'); from hermes_platform.host.runtime import is_container; print(is_container())"]);
+    let ask = |text: &str| {
+        let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
+        fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+    };
+    let reply = |turn: &str| fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)).map(|r| r["text"].as_str().unwrap_or("").to_string());
+    let turn = ask("run: echo home=$HOME real=$HERMES_REAL_HOME path=$PATH");
+    within(&fake, &chat, &c, 240_000, "the terminal's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)).await;
+    let terminal = reply(&turn).unwrap_or_default();
+    eprintln!("home: on {runtime:?} the terminal said {terminal:?}");
+    let turn = ask("write: ~/fragment-home.txt");
+    within(&fake, &chat, &c, 240_000, "write_file's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)).await;
+    let wrote = reply(&turn).unwrap_or_default();
+    // the absolute path it wrote, of those it names
+    let written = wrote.match_indices("fragment-home.txt").filter_map(|(at, _)| wrote[..at].rsplit(['"', ' ', '\'']).next()).find(|dir| dir.starts_with('/')).map(|dir| format!("{dir}fragment-home.txt")).unwrap_or_default();
+    eprintln!("home: on {runtime:?} write_file said {wrote:?}");
+    if !written.is_empty() {
+        assert_eq!(c.exec_out(&["cat", &written]), support::model::WRITTEN, "write_file wrote where it said");
+    }
+    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/hermes/profiles/juniper-paul/cache/scratch", "/data/hermes/profiles/juniper-paul/home"];
+    let modes = c.exec_out(&["sh", "-c", &format!("stat -c '%a %n' {} 2>/dev/null", dirs.join(" "))]);
+    Homes { container: guess.trim() == "True", terminal: said(&terminal, "home"), written, modes }
+}
+
+/// Goal: an agent's home is the same on Docker and on Containers, though
+/// Hermes takes only Docker for a container: its terminal's `HOME` and its
+/// file tools' `~` are its profile's own `home` (each agent its own, as
+/// Hermes gives a container), and Hermes leaves its home's modes as the
+/// image makes them. Pinned by the image (`RUNTIME_ENV`), not guessed.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_agents_home_is_the_same_on_either_runtime() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let (docker, hosted) = tokio::join!(homes(Runtime::Docker), homes(Runtime::Hosted));
+    eprintln!("home: Docker {docker:#?}\nhome: Containers' way {hosted:#?}");
+    assert!(docker.container && !hosted.container, "Hermes takes Docker for a container and the hosted rung for none (else this proves nothing): {docker:?} {hosted:?}");
+    let home = "/data/hermes/profiles/juniper-paul/home";
+    for (on, h) in [("Docker", &docker), ("Containers' way", &hosted)] {
+        assert_eq!(h.terminal, home, "on {on}, the agent's terminal's HOME is its profile's: {h:#?}");
+        assert_eq!(h.written, format!("{home}/fragment-home.txt"), "on {on}, its file tools' `~` is the same home: {h:#?}");
+    }
+    assert_eq!(docker.modes, hosted.modes, "Hermes leaves its home's modes alike on both");
 }
 
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
