@@ -13,6 +13,10 @@
 //!   send; its reply as `draft` frames, then one `send` answering the
 //!   message; `👀` off; `✅`. An `interrupt_inbound` mid-turn stops it: `👀`
 //!   off only;
+//! - `narrate` says text beside a tool call as Hermes' stream consumer
+//!   does: drafts, then a send answering the message at the tool boundary,
+//!   and the tool's progress after it (`late`: before it); `only`, the
+//!   answer beside a housekeeping call, and nothing after;
 //! - `media` uploads a file to `/relay/media` and sends it; inbound media
 //!   is downloaded with the token and its bytes counted in the reply;
 //! - the reply echoes what it heard: `echo: [<user_name>] <text>`.
@@ -99,6 +103,9 @@ async fn dial(addr: std::net::SocketAddr, id: &str, secret: &str) -> Result<net:
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+/// What a `narrate` turn says beside its tool call.
+pub const NARRATION: &str = "Let me check that.";
 
 /// What a turn hears while it runs.
 enum Heard {
@@ -235,6 +242,30 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     gw.act(react("👀", false)).await;
     let text = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
     let mut reply = format!("echo: [{}] {text}", event["source"]["user_name"].as_str().unwrap_or("?"));
+    if text.contains("narrate") {
+        // The model's text beside a tool call, as Hermes' stream consumer
+        // delivers it: drafts, then, at the tool boundary, a send answering
+        // the turn that ends the segment; its tool progress reaches the
+        // connector after that send, or (`late`) before it. `only`: the
+        // answer said beside a housekeeping call, which Hermes sends once.
+        let words = if text.contains("only") { reply.clone() } else { NARRATION.to_string() };
+        gw.act(json!({ "op": "draft", "chat_id": chat, "draft_id": 7, "content": words, "final": false, "metadata": { "reply_to_message_id": mid } })).await;
+        let said = json!({ "op": "send", "chat_id": chat, "content": words, "reply_to": mid, "metadata": { "reply_to_message_id": mid, "notify": true } });
+        let tool = if text.contains("only") { "🧠 memory: \"saved\"" } else { "💻 terminal: `echo hi`" };
+        let progress = json!({ "op": "send", "chat_id": chat, "content": tool, "reply_to": null, "metadata": {} });
+        if text.contains("late") {
+            gw.act(progress).await;
+            gw.act(said).await;
+        } else {
+            gw.act(said).await;
+            gw.act(progress).await;
+        }
+        if text.contains("only") {
+            gw.act(react("👀", true)).await;
+            gw.act(react("✅", false)).await;
+            return;
+        }
+    }
     if text.contains("tool") {
         let sent = gw.act(json!({ "op": "send", "chat_id": chat, "content": "💻 terminal: `ls`", "reply_to": null, "metadata": {} })).await;
         let id = sent["message_id"].as_str().unwrap_or("").to_string();
