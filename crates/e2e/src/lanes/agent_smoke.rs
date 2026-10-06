@@ -14,7 +14,7 @@
 //! 2. asked to list their fragments with the CLI, its turn runs a terminal
 //!    step naming `fragment`;
 //! 3. asked for a todo app, the app is theirs and live, and an open shell
-//!    shows it (once the shell's live sidebar lands);
+//!    shows it with no reload (the live sidebar, #158);
 //! 4. asked to open a browser, its screen (a ticket, in Chrome) connects,
 //!    draws a frame that is not blank, follows the desktop while open,
 //!    takes Take over, and shows the browser opened again;
@@ -30,6 +30,7 @@
 //! text. Every wait is a real model's: generous, a positive looked for
 //! every few seconds, and one that runs out says what the model did not do.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -47,8 +48,9 @@ pub const SECTION: &str = "agent-smoke";
 
 /// The paid calls the run lends the section's person: its turns' model
 /// calls (each tool call is one, Hermes' guardian and titles one each).
-/// Measured on master: see the PR. Its ledger refuses the one past it.
-const PAID_CALLS: u64 = 50;
+/// Measured on master (2026-10-05): 49, 31 of them the browser's turn.
+/// Its ledger refuses the one past it; the run's default budget is 60.
+const PAID_CALLS: u64 = 56;
 /// A new computer's first start on a preview (the 3.8 GB image pulled to
 /// the host, Hermes booted) to its agent following its chat.
 const FIRST_START: Duration = Duration::from_secs(10 * 60);
@@ -66,10 +68,6 @@ const PAGE: Duration = Duration::from_secs(90);
 const FOLLOW: Duration = Duration::from_secs(60);
 /// One look every few seconds: each is a request to the preview.
 const POLL: Duration = Duration::from_secs(3);
-/// Whether the shell's live sidebar (branch `claude/sidebar-live`) is on
-/// master: until it is, an open shell that does not show a new app is a
-/// skip that says what it saw, never a FAIL. Its pull request sets this.
-const SIDEBAR_LIVE_LANDED: bool = false;
 
 /// The shell's agent colours and its first agent's soul (cell/shell/shell.js:
 /// `COLORS`, `colorOf`, `firstSoul`), so the agent is made as a person's is.
@@ -122,9 +120,21 @@ struct Chat<'a> {
     name: String,
     agent: String,
     identity: String,
+    /// Each step's turn as it ended (`noted`): the run's evidence.
+    turns: std::cell::RefCell<Vec<Value>>,
 }
 
 impl Chat<'_> {
+    /// The turn of step `step` as it is now, kept for the evidence file
+    /// and said in a line: its tools in order, how it ended, its paid calls.
+    fn noted(&self, step: &str, turn: &str, paid_calls: usize) {
+        let summary = self.summary(turn);
+        let tools: Vec<String> = summary["work"].as_array().into_iter().flatten().filter(|w| w["kind"] == "turn.step").filter_map(|w| w["tool"].as_str().map(str::to_string)).collect();
+        let end = summary["work"].as_array().into_iter().flatten().find(|w| w["kind"] == "turn.end").map(|w| w["outcome"].clone()).unwrap_or(Value::Null);
+        println!("      ({step}: {} steps [{}], ended {end}, {paid_calls} paid calls)", tools.len(), tools.join(", "));
+        self.turns.borrow_mut().push(json!({ "step": step, "turn": turn, "paidCalls": paid_calls, "summary": summary }));
+    }
+
     /// The owner's message `id`: the turn it starts.
     fn say(&self, id: &str, text: &str) -> Result<String> {
         let r = self.api.signed(self.owner, "POST", &format!("/api/f/{}/channels/chat", self.name), Some(&json!({ "id": id, "body": { "text": text } })))?;
@@ -235,6 +245,11 @@ const BLANK_SHARE: f64 = 0.98;
 /// browser's window over a desktop); like it in all but this, the same.
 const CHANGED: f64 = 0.10;
 const SAME: f64 = 0.25;
+/// A sample this light in every channel is a light page's (example.com's
+/// is #f0f0f2 on #fdfdff); the desktop is a dark gradient (#0d1015 most).
+const LIGHT: u8 = 200;
+/// The browser shows: light samples cover this much more than before.
+const LIGHTER: f64 = 0.10;
 
 /// A sampled frame of the screen.
 #[derive(Debug, Clone, PartialEq)]
@@ -276,6 +291,18 @@ impl Frame {
         self.dominant().1 >= BLANK_SHARE
     }
 
+    /// The share of light samples (a light page's).
+    fn light(&self) -> f64 {
+        self.px.iter().filter(|p| p.iter().all(|c| *c >= LIGHT)).count() as f64 / self.px.len().max(1) as f64
+    }
+
+    /// Whether it shows a light page (a browser's) where `desktop` showed
+    /// none: not blank, unlike it, and lighter.
+    fn shows_a_page_over(&self, desktop: Option<&Frame>) -> bool {
+        let base = desktop.map_or(0.0, Frame::light);
+        !self.blank() && desktop.is_none_or(|d| self.unlike(d) >= CHANGED) && self.light() >= base + LIGHTER
+    }
+
     /// The share of samples unlike `other`'s (a frame of another size is
     /// wholly unlike).
     fn unlike(&self, other: &Frame) -> f64 {
@@ -288,7 +315,7 @@ impl Frame {
 
     fn describe(&self) -> String {
         let (mode, share) = self.dominant();
-        format!("{}x{}, {:.0}% #{:02x}{:02x}{:02x}", self.width, self.height, share * 100.0, mode[0], mode[1], mode[2])
+        format!("{}x{}, {:.0}% #{:02x}{:02x}{:02x}, {:.0}% light", self.width, self.height, share * 100.0, mode[0], mode[1], mode[2], self.light() * 100.0)
     }
 }
 
@@ -321,6 +348,8 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     }
     anyhow::ensure!(api.signs_in_by_levers(), "a real agent's person signs in through a preview's levers");
     let started_s = now_s();
+    // its evidence: each step's turn (turns.json) and the screen's shots
+    let evidence = s.dir(SECTION);
 
     // ---- an e2e person, and their default agent as the shell makes it
     let keys = Keys::generate();
@@ -358,7 +387,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         println!("      (no agent: the section stops here)");
         return Ok(());
     }
-    let c = Chat { api, owner: &keys, name: chat_name.clone(), agent: agent_name.clone(), identity: identity.clone() };
+    let c = Chat { api, owner: &keys, name: chat_name.clone(), agent: agent_name.clone(), identity: identity.clone(), turns: Default::default() };
     let ready = || {
         let following = || {
             api.signed(&keys, "GET", &format!("/api/f/{chat_name}/subscriptions"), None)
@@ -381,9 +410,10 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let mut spent: Vec<(&str, usize)> = vec![];
     let mut calls = paid(api, &owner_id);
-    let mut count = |api: &Api, step: &'static str, spent: &mut Vec<(&str, usize)>| {
+    let mut count = |api: &Api, step: &'static str, turn: &str, spent: &mut Vec<(&str, usize)>| {
         let now = paid(api, &owner_id);
         spent.push((step, now.saturating_sub(calls)));
+        c.noted(step, turn, now.saturating_sub(calls));
         calls = now;
     };
 
@@ -396,7 +426,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let end = c.finish(&hello, REPLY);
     let started = !c.of_kind(&hello, "turn.start").is_empty();
     s.ok("its turn starts and ends idle on work", started && end.as_ref().is_some_and(|e| e["outcome"] == "idle"), c.why(&hello, end.is_some(), "end its turn", REPLY));
-    count(api, "hello", &mut spent);
+    count(api, "hello", &hello, &mut spent);
 
     // ---- 2. the agent knows its platform: the fragment CLI, in its terminal
     let listing = c.say("smoke-2", "Use the fragment CLI to list my fragments.")?;
@@ -407,7 +437,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         ran,
         c.why(&listing, end.is_some(), "end its turn", WORK),
     );
-    count(api, "list", &mut spent);
+    count(api, "list", &listing, &mut spent);
 
     // ---- 3. the agent makes an app, which an open shell shows
     let mut chrome: Option<Lease> = s.browser()?;
@@ -419,6 +449,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
             b.viewport(&page, 1280, 800, false)?;
             let up = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .row').length > 0", PAGE);
             let said = b.eval(&page, "document.body.innerText.slice(0, 300)").unwrap_or_default();
+            let _ = b.screenshot(&page, &evidence.join("0-shell.png"));
             s.ok("signed in, the shell opens with their agent's chat in its sidebar", up, said);
             up.then_some(page)
         }
@@ -447,20 +478,15 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
             let row = format!("!!document.querySelector('#apps .row[data-key=\"app:{app_name}\"]')");
             let shown = b.until(page, &row, FOLLOW);
             let apps = b.eval(page, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key ?? r.textContent)").unwrap_or_default();
-            match (shown, SIDEBAR_LIVE_LANDED) {
-                (true, _) | (false, true) => s.ok(sidebar_label, shown, format!("not shown {} after it was live; the sidebar's apps: {apps}", mins(FOLLOW))),
-                (false, false) => s.skip(
-                    sidebar_label,
-                    &format!("the shell's live sidebar (branch claude/sidebar-live) has not landed on master; seen here: not shown {} after it was live (the sidebar's apps: {apps})", mins(FOLLOW)),
-                ),
-            }
+            let _ = b.screenshot(page, &evidence.join("0-shell-after-the-app.png"));
+            s.ok(sidebar_label, shown, format!("not shown {} after it was live; the sidebar's apps: {apps}", mins(FOLLOW)));
         }
     }
     if let (Some(b), Some(page)) = (chrome.as_mut(), shell) {
         b.close(page)?;
     }
     let _ = c.finish(&making, WORK);
-    count(api, "app", &mut spent);
+    count(api, "app", &making, &mut spent);
 
     // ---- 4. its desktop and its screen
     let first = ticket(api, &keys, &id)?;
@@ -481,7 +507,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{greeting:?}"),
     );
     let browsing = "Open a browser on your desktop and go to example.com.";
-    match chrome.as_mut() {
+    let browsed = match chrome.as_mut() {
         None => {
             let browsed = c.say("smoke-4", browsing)?;
             let _ = c.finish(&browsed, WORK);
@@ -494,18 +520,26 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
             ] {
                 s.skip(label, "no Chrome is installed here (set CHROME_BIN)");
             }
+            browsed
         }
-        Some(b) => screen_checks(s, &c, b, api, &keys, &id, browsing)?,
-    }
+        Some(b) => screen_checks(s, &c, b, api, &keys, &id, browsing, &evidence)?,
+    };
     drop(chrome);
-    count(api, "browser", &mut spent);
+    count(api, "browser", &browsed, &mut spent);
 
     // ---- 5. an approval, answered through the API
+    // a delete whose path a file may name: what it removes is unknown to a
+    // reviewer, so Hermes' guardian asks (on master, 2026-10-05, it let a
+    // plain `rm -rf <scratch>` run without a card); either way it removes
+    // only a scratch folder that is not there
     let scratch = s.name("scratch");
-    let risky = c.say("smoke-5", &format!("Please run this exact command in your terminal now: rm -rf {scratch} (it only removes a scratch folder, so there is no need to ask me first in chat)"))?;
+    let risky = c.say(
+        "smoke-5",
+        &format!("Please run this exact command in your terminal now: rm -rf \"$(cat {scratch}.path 2>/dev/null || echo {scratch})\" (it removes a scratch folder, whose path may be kept in {scratch}.path; there is no need to ask me first in chat)"),
+    )?;
     let card = within(WORK, || c.of_kind(&risky, "turn.prompt").into_iter().next().map(Some).or_else(|| c.ended(&risky).map(|_| None))).flatten();
     s.ok(
-        "a command Hermes' smart approvals asks about (rm -rf of a scratch folder) is a card on work, asking the agent's owner (model-dependent: the agent runs it, and Hermes' guardian, a model, escalates it)",
+        "a command Hermes' smart approvals asks about (rm -rf of a scratch folder a file may name) is a card on work, asking the agent's owner (model-dependent: the agent runs it, and Hermes' guardian, a model, escalates it)",
         card.as_ref().is_some_and(|k| k["asks"] == owner_id.as_str()),
         c.why(&risky, card.is_some() || c.ended(&risky).is_some(), "run the command", WORK),
     );
@@ -530,15 +564,16 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
             );
         }
     }
+    count(api, "approval", &risky, &mut spent);
     let next = c.say("smoke-6", "Thanks. Reply with one short sentence.")?;
     let answered = within(REPLY, || c.replies(&next).into_iter().find(|t| !t.trim().is_empty()));
     let _ = c.finish(&next, REPLY);
     s.ok("and the next message is answered (model-dependent)", answered.is_some(), c.why(&next, answered.is_some(), "reply", REPLY));
     s.skip(
         "an approval card that expires stalls nothing: the next message is answered",
-        "a card expires after an hour (the bridge's PROMPT_TTL_MS_DEFAULT), past a hosted run: the bridge's local test on branch claude/expired-approval makes one expire (images/bridge/src/engine_tests.rs, an_open_card_keeps_its_computer_awake_until_it_expires)",
+        "a card expires after an hour (the bridge's PROMPT_TTL_MS_DEFAULT), past a hosted run: the bridge's local tests make one expire (#159: images/bridge/src/engine_tests.rs an_open_card_keeps_its_computer_awake_until_it_expires, images/bridge/tests/relay.rs an_expired_card_ends_its_turn_and_the_next_message_is_answered)",
     );
-    count(api, "approval", &mut spent);
+    count(api, "after", &next, &mut spent);
 
     // ---- 6. asleep, a message wakes it, and its work is still there
     let rollbacks = view(api, &keys, &id)["rollbacks"].clone();
@@ -574,7 +609,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
         file.status == 200 && at.is_some_and(|t| t >= started_s - 60 && t <= slept_s + 60),
         json!({ "status": file.status, "text": file.text.chars().take(80).collect::<String>(), "sectionBegan": started_s, "slept": slept_s }),
     );
-    count(api, "wake", &mut spent);
+    count(api, "wake", &back, &mut spent);
 
     // ---- 7. what it spent
     // every paid call the person made, before the first message included
@@ -588,6 +623,9 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     // ---- 8. asleep at the end; the sweep deletes its e2e- fragments
     let (slept, last) = sleep(api, &keys, &id);
     s.ok("it sleeps at the end", slept, &last);
+    let turns = json!({ "person": Api::email_of(&keys), "computer": id, "chat": chat_name, "app": app_name, "paidCalls": used, "charged": charged, "turns": *c.turns.borrow() });
+    std::fs::write(evidence.join("turns.json"), serde_json::to_vec_pretty(&turns)?)?;
+    println!("      (its turns and the screen's shots: {})", evidence.display());
     Ok(())
 }
 
@@ -595,7 +633,8 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
 /// desktop as it starts), then the agent asked to open one; the page left
 /// open follows it, one opened now draws it and takes Take over, and one
 /// opened again after it closed shows it.
-fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys: &Keys, id: &str, browsing: &str) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys: &Keys, id: &str, browsing: &str, shots: &Path) -> Result<String> {
     let (open, connected) = open_screen(chrome, api, keys, id)?;
     let before = connected.then(|| within(FOLLOW, || Frame::read(chrome, &open))).flatten();
     s.ok(
@@ -603,25 +642,29 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
         connected && before.is_some(),
         json!({ "status": status(chrome, &open), "frame": describe(&before) }),
     );
+    let _ = chrome.screenshot(&open, &shots.join("1-desktop-before.png"));
     let browsed = c.say("smoke-4", browsing)?;
     let end = c.finish(&browsed, WORK);
-    let tools: Vec<String> = c.of_kind(&browsed, "turn.step").iter().filter_map(|st| st["tool"].as_str().map(str::to_string)).collect();
+    let steps = c.of_kind(&browsed, "turn.step");
+    let browser = |st: &&Value| st["tool"].as_str().is_some_and(|t| t.contains("browser") || t.contains("computer"));
     s.ok(
-        "asked to open a browser at example.com, its turn ran a browser or computer_use step (model-dependent)",
-        tools.iter().any(|t| t.contains("browser") || t.contains("computer")),
+        "asked to open a browser at example.com, its turn ran a browser or computer_use step naming example.com (model-dependent)",
+        steps.iter().filter(browser).any(|st| st["args"].as_str().is_some_and(|a| a.contains("example.com"))),
         c.why(&browsed, end.is_some(), "end its turn", WORK),
     );
     // the page left open, with no reload: a desktop that restarted under it is followed
-    let new_frame = |f: &Frame| !f.blank() && before.as_ref().is_none_or(|b| f.unlike(b) >= CHANGED);
+    let new_frame = |f: &Frame| f.shows_a_page_over(before.as_ref());
     let followed = within(FOLLOW, || Frame::read(chrome, &open).filter(|f| new_frame(f) && chrome.eval(&open, CONNECTED).ok() == Some(Value::Bool(true))));
+    let _ = chrome.screenshot(&open, &shots.join("2-left-open-after.png"));
     s.ok(
-        "the screen left open follows the agent's desktop: with no reload it shows a frame that is not blank and unlike the desktop before (the browser)",
+        "the screen left open follows the agent's desktop: with no reload it shows the browser (a light page over the dark desktop it showed before, pixels sampled)",
         followed.is_some(),
         json!({ "status": status(chrome, &open), "before": describe(&before), "now": describe(&Frame::read(chrome, &open)) }),
     );
     // a page opened now: connected, drawn, not blank; and Take over
     let (now, connected) = open_screen(chrome, api, keys, id)?;
     let drawn = connected.then(|| within(FOLLOW, || Frame::read(chrome, &now).filter(|f| !f.blank()))).flatten();
+    let _ = chrome.screenshot(&now, &shots.join("3-opened-now.png"));
     s.ok(
         "opened now, the screen's page connects (its websockify socket) and draws a frame that is not blank (pixels sampled)",
         drawn.is_some(),
@@ -635,13 +678,14 @@ fn screen_checks(s: &mut Suite, c: &Chat, chrome: &mut Browser, api: &Api, keys:
     let (again, connected) = open_screen(chrome, api, keys, id)?;
     let same = |f: &Frame| new_frame(f) && drawn.as_ref().is_none_or(|d| f.unlike(d) <= SAME);
     let shown = connected.then(|| within(FOLLOW, || Frame::read(chrome, &again).filter(same))).flatten();
+    let _ = chrome.screenshot(&again, &shots.join("4-opened-again.png"));
     s.ok(
-        "closed and opened again, the screen shows the browser: connected, not blank, the frame it showed before it closed",
+        "closed and opened again, the screen shows the browser: connected, a light page over the desktop, the frame it showed before it closed",
         shown.is_some(),
         json!({ "status": status(chrome, &again), "before": describe(&drawn), "now": describe(&Frame::read(chrome, &again)), "desktop": describe(&before) }),
     );
     chrome.close(again)?;
-    Ok(())
+    Ok(browsed)
 }
 
 #[cfg(test)]
@@ -682,6 +726,16 @@ mod tests {
         let page = frame(page);
         assert!(!page.blank());
         assert!(page.unlike(&black) >= CHANGED);
+        // a light page over a dark desktop is the browser; the desktop alone is not
+        let mut desktop = vec![[13, 16, 21]; 1440];
+        for (i, p) in desktop.iter_mut().enumerate() {
+            *p = [13, 16, (21 + i % 90) as u8];
+        }
+        let desktop = frame(desktop);
+        assert!(!desktop.blank(), "a gradient is drawn");
+        assert!(!desktop.shows_a_page_over(Some(&desktop)), "the desktop alone shows no page");
+        assert!(page.shows_a_page_over(Some(&desktop)) && page.shows_a_page_over(None));
+        assert!(!black.shows_a_page_over(None), "black is no page");
         // lossy encoding moves a colour a little: still the same frame
         let jittered = frame(page.px.iter().map(|p| [p[0].saturating_sub(8), p[1], p[2].saturating_add(8)]).collect());
         assert!(jittered.unlike(&page) <= SAME);
