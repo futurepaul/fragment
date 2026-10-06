@@ -33,6 +33,9 @@
 //!   (`$FRAGMENT_MODEL`, the cheap tier, as the agent): the reply is the
 //!   model's answer;
 //! - a message with attachments: the reply names them;
+//! - a turn told something first (`TurnStart::note`: its agent's turn before
+//!   it in the chat was cut by a restart): the reply ends with
+//!   `\n\n(told: <the note>)`;
 //! - `@<name>` of another agent in the reply's text hands off to it, as
 //!   any reply's does (the bridge reads mentions, not this runtime).
 //!
@@ -351,6 +354,10 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if !ts.files.is_empty() {
         let names: Vec<&str> = ts.files.iter().map(|f| f.name.as_str()).collect();
         reply = format!("{reply} [got {}: {}]", ts.files.len(), names.join(", "));
+    }
+    // what it was told first (a turn after a cut one), echoed after the reply
+    if let Some(note) = &ts.note {
+        reply = format!("{reply}\n\n(told: {note})");
     }
     let drafts = if text.contains("slow") { 20 } else { 2 };
     for i in 1..=drafts {

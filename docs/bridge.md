@@ -29,7 +29,7 @@ A runtime gets commands and sends events, each naming its turn
 
 | Command | |
 |---|---|
-| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text, attachments as local files, whether it is a routine |
+| `Start(TurnStart)` | a turn: agent, chat, asker and their name, text, attachments as local files, whether it is a routine, and its `note` when the agent's turn before it in the chat was cut by a restart (below, "The turn after a cut one is told") |
 | `Stop {turn}` | the asker pressed Stop |
 | `Answer {turn, prompt, option?}` | a prompt's answer, or its expiry (`None`), once |
 | `Forget {turn}` | the bridge ended it (it went quiet 15 minutes, or its agent left) |
@@ -65,9 +65,9 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /f/{f}/__people?id=…` | | `{profiles: {id: {username}}}`: what to call a writer |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
-| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages |
+| `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; and a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each |
 | `GET /f/{f}/__live?v=2`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
-| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{replayed}`; retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
+| `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{record, replayed}` (a claim's `record.seq` is where the turn's note is read back from); retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
@@ -205,8 +205,55 @@ under each one (Paul on p5, 2026-10-05: "I missed the 1hr window and now
 it's not responding to chats"; `an_expired_approval_ends_its_turn` in
 tests/docker.rs, and its scripted twin in tests/relay.rs). A restart for
 any other reason while a card is open (an owner's sleep, a crash, a
-deploy) still cuts the turn and leaves its message so: P5 and P6 of
+deploy) still cuts the turn, which ends as lost; the next message is now
+a turn of its own, told what was cut (below), never folded into the cut
+request. The card's promise outliving a restart is P6 of
 docs/explorations/pi-durable.md, and the debt ledger.
+
+## The turn after a cut one is told
+
+A turn a restart cut ends as lost (one life per turn: "State", above),
+and is never run again. What it did before the cut may have effects (an
+email sent, a file half written), and its runtime may still hold its
+request: Hermes keeps a turn's message as its session's last until the
+turn answers, and joins the next message to it (two user messages in a
+row are one), so its model was handed `[paul] do the risky thing\n\n[paul]
+good morning` and did the risky thing again (F10 of
+docs/explorations/pi-durable.md; P5 of docs/durable-computers.md). Two
+parts close it:
+
+- **The note (every runtime).** The first turn an agent runs in a chat
+  after one of its turns there ended as lost carries a note
+  (`TurnStart::note`, `src/note.rs`): its first line says the turn before
+  was cut short by a restart and to check what it already did before
+  doing any of it again (the message below is new); then what that turn
+  was asked (its cause's text), the steps `work` recorded of it (tool,
+  arguments, ok or failed; at most 8, the rest counted), its cards and how
+  they closed, and the replies it had said (the last two). At most 4 KiB.
+  It is built from the chat's journal alone: the driver reads `work` back
+  from the turn's claim (the claim's answer names its seq) to the agent's
+  turn before it there, a refusal's passed over, and, when that turn ended
+  `lost when the computer restarted`, its cause and its replies (`chat`,
+  back from its tail to that turn's cause or start). So it is the same in
+  any life and after any rollback of `/data`, and said once: at the turn
+  after, the turn before is this one. A journal that does not answer
+  within 5 s, or an agent's turn before further back than 1000 records,
+  gives no note: a turn is never held back longer for one. Relay hands it as the inbound's
+  read-only `context` (below); the scripted agent echoes it after its
+  reply (`(told: …)`).
+- **The cut turn closed in Hermes' session (our image).** Before the
+  gateway starts, `hermes-boot` appends Hermes' own failed-turn boundary
+  (the assistant row Hermes writes itself when a turn ends without an
+  answer, `display_kind` `failed_turn`) to each relay session whose last
+  message is unanswered (a user row, a tool call, or a tool result),
+  through Hermes' session code (`hermes::CLOSE_CUT_TURNS`;
+  docs/computers.md). The next message is then a user message of its own.
+
+Proven with the real Hermes in `a_turn_cut_by_a_restart_is_closed_and_told`
+(tests/docker.rs): an owner's sleep under a card, then "good morning": no
+second call of the cut command, no card again, an answer, and the model's
+request ends with the note and the message after the boundary. Whether a
+real model, so told, checks before it redoes is a hosted run's to see.
 
 ## Hermes' Relay, as the bridge speaks it
 
@@ -223,7 +270,12 @@ get_chat_info`.
   turn id. Claimed only while Hermes is on its socket and has said
   `hello` (the bridge starts just before Hermes' gateway, so the message
   that woke the computer waits for it, unclaimed); once handed, kept until
-  Hermes acks it and handed again on each dial, within that life.
+  Hermes acks it and handed again on each dial, within that life. A
+  turn's note (above, "The turn after a cut one is told") is the
+  inbound's `context`, one item with no source, never its text: Hermes
+  renders it before the message, reference only and never as the person's
+  words:
+  `[Recent channel messages]\n<note>\n\n[New message]\n[paul] good morning`.
 - A reply streams as `draft` frames (the chat's draft), and arrives as a
   `send` answering the turn's message; tool progress is a `send`
   answering nothing whose lines grow by `edit`, each new line a step.

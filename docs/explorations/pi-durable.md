@@ -389,8 +389,9 @@ thing\n\n[paul] good morning` and asked the cut command's approval
 again: every message after a missed card met the card again, and the
 computer slept under each. An open card now holds the keepalive (P6 for
 now; docs/bridge.md, "A card keeps its computer awake"). Any other
-restart under a card (an owner's sleep, a crash, a deploy) still does
-this; F10 is the same fold, for any cut turn.
+restart under a card (an owner's sleep, a crash, a deploy) still cuts its
+turn; F10 is the same fold, for any cut turn, and P5 closed it
+(2026-10-06): the next message is answered, told what was cut.
 
 ### F10. The model is never told a turn was cut (read)
 
@@ -406,6 +407,18 @@ last, and the next message is folded into it. The model is handed the
 cut request again, as if it were new, beside the next message, and does
 it again (the scripted model does; what a real model does is a hosted
 run's to see).
+
+*Closed by P5 (2026-10-06):* Hermes v0.21.5 joins the two in
+`_merge_consecutive_users` (agent/agent_runtime_helpers.py), its
+pre-call repair, and in `get_messages_as_conversation(repair_alternation=
+True)` as the gateway loads a transcript; no Relay field changes that, and
+Hermes closes an unanswered tail only for a turn that fails in its own
+process (its failed-turn boundary, `agent/turn_failure_copy.py`). So the
+image's boot writes that same boundary, through Hermes' session code, to
+each relay session a restart left unanswered, before the gateway starts;
+and the bridge tells the next turn what was cut, from the journal (P5,
+below; docs/bridge.md). Proven with real Hermes:
+`a_turn_cut_by_a_restart_is_closed_and_told` (tests/docker.rs).
 
 ### F11. Smaller ones
 
@@ -665,6 +678,10 @@ restore procedure that is never mixed with an older `/data`, and a drill
 that runs it into an empty computer in CI.
 
 ### P5. Tell the model what was cut
+
+*Built 2026-10-06 (docs/durable-computers.md, "Built"), with the cut
+turn also closed in Hermes' session at boot, which F10 showed is what
+keeps the next message from being joined to it.*
 
 The first turn an agent starts in a chat after a turn of its own there
 was ended as lost carries a note, built from the journal alone: what was

@@ -65,6 +65,10 @@ const SKILLS_EVERY_MS: u64 = 10 * 60_000;
 const _: () = assert!(skills::ABSENT_EVERY_MS < SKILLS_EVERY_MS && skills::ABSENT_EVERY_MS >= 10_000, "no skills fragment is looked for sooner, never in a loop");
 /// SIGTERM: children are told, then the boot is gone within this.
 const STOP_MS_MAX: u64 = 2_500;
+/// Ending the previous start (`end_previous_life`: its leases cleared, its
+/// cut turns closed) is waited for at most this long before the gateway
+/// starts; it takes about half a second.
+const END_PREVIOUS_LIFE_MS_MAX: u64 = 30_000;
 /// The bridge is restarted at most this many times before the boot fails.
 const BRIDGE_RESTARTS_MAX: u32 = 10;
 /// Readahead reads at most this many files.
@@ -899,6 +903,10 @@ fn start_gateway(home: &Path) -> Option<u32> {
 ///   turn, a compression) are cleared: their holder's PID names a live
 ///   process of this start (PIDs repeat in a fresh namespace: the gateway
 ///   is PID 7 each time), so Hermes would wait out its five-minute TTL.
+/// - Each turn a restart cut is closed in its session, with Hermes' own
+///   failed-turn boundary (`hermes::CLOSE_CUT_TURNS`, docs/durable-
+///   computers.md P5): left open, Hermes would join the next message to the
+///   cut request, and its model would do it again.
 ///
 /// As the `hermes` user, so the files keep their owner.
 fn end_previous_life(agents: &[Agent], home: &Path) {
@@ -930,6 +938,19 @@ for p in sys.argv[1:]:
         Ok(o) => ev!("boot.leases_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).chars().take(300).collect::<String>() }),
         Err(e) => ev!("boot.leases_failed", { "error": e.to_string() }),
     }
+    // after the leases: a write Hermes guards with them
+    let t = Instant::now();
+    let out = Command::new("/command/s6-setuidgid").args(["hermes", "/opt/hermes/.venv/bin/python", "-c", hermes::CLOSE_CUT_TURNS]).args(&dbs).env("HOME", home).env("HERMES_HOME", home).current_dir("/").output();
+    let ms = t.elapsed().as_millis() as u64;
+    match out {
+        Ok(o) if o.status.success() => match hermes::cut_turns_closed(&String::from_utf8_lossy(&o.stdout)) {
+            Ok((sessions, closed)) => ev!("boot.cut_turns_closed", { "dbs": dbs.len(), "sessions": sessions, "closed": closed, "ms": ms }),
+            Err(why) => ev!("boot.cut_turns_failed", { "error": why, "ms": ms }),
+        },
+        // the next message would be joined to a cut request: said loudly
+        Ok(o) => ev!("boot.cut_turns_failed", { "status": o.status.code(), "error": String::from_utf8_lossy(&o.stderr).lines().rev().take(4).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>(), "ms": ms }),
+        Err(e) => ev!("boot.cut_turns_failed", { "error": e.to_string(), "ms": ms }),
+    }
 }
 
 async fn boot_main() {
@@ -957,6 +978,13 @@ async fn boot_main() {
     // What the boot runs: the agents read at its start, then as they change.
     let mut agents = computer.agents.clone();
     let mut credential_env = computer.credential_env.clone();
+    // The previous start's leftovers, ended off the boot's path (its Hermes
+    // Python takes about half a second), beside the profiles' writes, which
+    // touch no database; waited for before the gateway starts.
+    let ending = {
+        let (agents, home) = (agents.clone(), home.clone());
+        tokio::task::spawn_blocking(move || end_previous_life(&agents, &home))
+    };
 
     let lean: Vec<String> = std::fs::read_to_string(format!("{OPT}/lean-plugins.txt")).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect();
     let _ = std::fs::create_dir_all("/etc/hermes");
@@ -977,7 +1005,13 @@ async fn boot_main() {
     profiles(&api, &agents, &home, ids, &model, &credential_env).await;
     ev!("boot.configured", { "agents": agents.len(), "ms": t0.elapsed().as_millis() as u64 });
 
-    end_previous_life(&agents, &home);
+    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), ending).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => ev!("boot.end_previous_life_failed", { "error": e.to_string() }),
+        // SQLite's own waits make this a wedged database: the gateway starts
+        // anyway, as it would find it
+        Err(_) => ev!("boot.end_previous_life_failed", { "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+    }
     point_screen(agents.first(), &home);
     write_ready(&agents);
     let mut bridge = spawn_bridge(approval_timeout_s);

@@ -11,7 +11,10 @@
 //!   a `computer_use` capture (through Hermes' `tool_call` bridge when it
 //!   defers the tool); their answers quote what the tool said;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
-//!   asked.
+//!   asked;
+//! - of a message with channel context before it (`[Recent channel
+//!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
+//!   turn), only the message after `[New message]` is acted on.
 //!
 //! It records each request's `model` and `x-fragment-agent` (a screenshot's
 //! description comes as the route's `vision`: Hermes' auxiliary vision).
@@ -73,6 +76,16 @@ fn text_of(content: &Value) -> String {
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
+    // Hermes renders an inbound's read-only context before the message it
+    // comes with (`[Recent channel messages]\n…\n\n[New message]\n[name]
+    // text`): the context is reference (the platform's note on a cut turn),
+    // the message what it answers. A message joined after a cut request
+    // (`[paul] do the risky thing\n\n[paul] good morning`) has no marker,
+    // and is answered whole.
+    let last_user = match last_user.rsplit_once("[New message]\n") {
+        Some((_, message)) => message.to_string(),
+        None => last_user,
+    };
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
     let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
     let has_terminal = offered("terminal");
@@ -199,4 +212,11 @@ fn answers_are_the_transcripts() {
     assert!(call["function"]["name"] == "tool_call" && call["function"]["arguments"].as_str().unwrap().contains("\"computer_use\""), "{call}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no computer_use among my tools", None));
+    // a note on a cut risky turn is context: the message after it is answered
+    let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: [paul] good morning", None));
+    // joined to the cut request, it is answered whole: the request is redone
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] do the risky thing\n\n[paul] good morning" }], "tools": tools }));
+    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("rm -rf")));
 }

@@ -27,7 +27,10 @@
 //!   a cursor a rollback sent back reads a record again and runs nothing
 //!   twice (one life per turn, at most once).
 //! - A life's first step ends every turn its state holds that is not
-//!   queued: an earlier life claimed it, and that life is gone.
+//!   queued: an earlier life claimed it, and that life is gone. The agent's
+//!   next turn in that chat is told what was cut (P5): its note is built
+//!   from the chat's journal alone, before its claim (note.rs), so it is
+//!   said once, and the same in any life.
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -70,6 +73,13 @@ pub const STATE_VERSION: u32 = 2;
 
 /// Why a turn an earlier life claimed is ended.
 pub const LOST: &str = "lost when the computer restarted";
+
+/// Why a message is refused a turn: too many wait for its agent in its chat,
+/// or the computer holds as many turns as it may. A refused turn posts its
+/// start and its end and never runs (the note's rule passes over it:
+/// note.rs).
+pub const REFUSED_QUEUED: &str = "too many messages are waiting for this agent; send it again once it answers";
+pub const REFUSED_BUSY: &str = "this computer is too busy right now";
 
 /// What the bridge keeps across restarts (`/data/bridge/state.json`): a
 /// cache of where to read from and what it has in hand, never the
@@ -132,7 +142,10 @@ pub struct Owed {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimAnswer {
     /// Appended, or a replay of this life's own retry: this life runs it.
-    Ours,
+    /// `seq` is the claim's place on the chat's `work`, as the platform's
+    /// answer names it: the journal before it says what the turn is told of
+    /// the agent's turn before it there (note.rs).
+    Ours { seq: Option<u64> },
     /// 409: another life's claim holds the id.
     Theirs,
     /// 403 or 404: the agent may not post on the chat's `work` (it left
@@ -549,9 +562,9 @@ impl Engine {
         }
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
         let refusal = if waiting >= limits::QUEUED_PER_CHAT_MAX {
-            Some("too many messages are waiting for this agent; send it again once it answers")
+            Some(REFUSED_QUEUED)
         } else if self.state.turns.len() >= limits::TURNS_OPEN_MAX {
-            Some("this computer is too busy right now")
+            Some(REFUSED_BUSY)
         } else {
             None
         };
@@ -690,7 +703,7 @@ impl Engine {
         }
         assert!(self.state.turns.get(id).is_some_and(|t| t.phase == Phase::Queued), "a turn being claimed is held, queued: {id}");
         match answer {
-            ClaimAnswer::Ours => self.hand(id),
+            ClaimAnswer::Ours { seq } => self.hand(id, seq),
             ClaimAnswer::Theirs => {
                 // It owes its end as lost (a 409 itself when that life ended
                 // it, and let go then like any answered end).
@@ -715,8 +728,10 @@ impl Engine {
     }
 
     /// Hands a turn this life claimed to the runtime: from here a restart
-    /// ends it.
-    fn hand(&mut self, id: &str) {
+    /// ends it. Its note (what a restart cut of the agent's turn before it
+    /// in this chat) is the driver's to read from the journal before the
+    /// runtime hears of the turn, as its attachments are.
+    fn hand(&mut self, id: &str, claim_seq: Option<u64>) {
         let agent = self.state.turns[id].agent.clone();
         let a = self.agent(&agent).cloned().expect("a held turn's agent is on this computer");
         let now = self.now;
@@ -736,6 +751,8 @@ impl Engine {
             attachments: t.attachments.clone(),
             files: Vec::new(),
             routine: t.routine,
+            claim_seq,
+            note: None,
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));

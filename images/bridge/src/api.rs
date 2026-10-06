@@ -134,6 +134,16 @@ pub struct Subscription {
     pub wake: bool,
 }
 
+/// The platform's answer to a post.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Posted {
+    /// The id was posted before, with this body.
+    pub replayed: bool,
+    /// The record's place in its channel (`None` from a platform that does
+    /// not say).
+    pub seq: Option<u64>,
+}
+
 /// A page of records: `{channel, records, next}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Page {
@@ -343,11 +353,12 @@ impl Api {
         self.json(Method::GET, &format!("/api/f/{}/channels/{}?after={after}&limit={limit}", name(fragment)?, encode(channel)), Some(agent), None).await
     }
 
-    /// `POST /api/f/{name}/channels/{channel} {id, body}`: `replayed` when
-    /// the id was posted before (with this body).
-    pub async fn post(&self, agent: &str, fragment: &str, channel: &str, id: &str, body: &Value) -> Result<bool, ApiError> {
+    /// `POST /api/f/{name}/channels/{channel} {id, body}` → `{record,
+    /// replayed}`: `replayed` when the id was posted before (with this
+    /// body), and the record's seq (the first post's, for a replay).
+    pub async fn post(&self, agent: &str, fragment: &str, channel: &str, id: &str, body: &Value) -> Result<Posted, ApiError> {
         let v: Value = self.json(Method::POST, &format!("/api/f/{}/channels/{}", name(fragment)?, encode(channel)), Some(agent), Some(json!({ "id": id, "body": body }))).await?;
-        Ok(v["replayed"].as_bool().unwrap_or(false))
+        Ok(Posted { replayed: v["replayed"].as_bool().unwrap_or(false), seq: v["record"]["seq"].as_u64().filter(|s| *s > 0) })
     }
 
     /// `PUT /api/f/{name}/channels/{channel}/draft {turn, text}`.
