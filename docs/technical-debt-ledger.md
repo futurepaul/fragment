@@ -233,6 +233,39 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the viewer is small enough to ship as source (no
   bundler), or a viewer of the platform's replaces it.
 
+## Local nodes keep their computers apart through wrangler's and workerd's internals
+
+- **Observed:** 2026-10-05, several sessions running the e2e on one Mac.
+  wrangler 4.145.0, at a dev session's teardown, removes `docker ps
+  --filter ancestor=<tag>` for each image tag it built; Docker resolves
+  the filter to the image's ID, which the same source builds in every
+  worktree, so one node's stop removed other runs' computers mid-run (a
+  run's end removed another's live container, both runs on one commit).
+  It removes the containers and not the `-proxy` sidecars workerd
+  1.20260930 runs beside them, and miniflare stops workerd with SIGKILL,
+  so workerd's own cleanup (which removes both) never runs: 109 orphaned
+  sidecars were running at once. crates/devstack/src/containers.rs builds
+  each project's images from Dockerfiles of its own, labeled for it (a
+  distinct image ID, every layer cached), and removes what its nodes left
+  by the names workerd gives them, `workerd-<worker>-<class>-<id>` and
+  `…-proxy` for each object in its state's `v3/do/<worker>-<class>/`, a
+  container only when it carries the project's label.
+- **Risk:** it leans on three internals at the pinned versions: the
+  teardown's ancestor filter, workerd's container names, and miniflare's
+  state layout. A wrangler or workerd that changes the names or the layout
+  leaves the containers again (the removal finds none to remove; it
+  cannot reach another project's, whose computers carry its own label);
+  one that matches containers some other way could reach other runs'
+  computers again. A per-run image is also a new image ID per run: an
+  image config each, every layer shared.
+- **First proof:** `docker ps` lists `workerd-fragment-*` containers
+  after every run that made them has ended, or a run's computers die
+  when another worktree's node stops.
+- **Delete when:** wrangler removes a dev session's containers by its own
+  tag or label (not the image ID) and its sidecars with them, or lets
+  workerd drain at shutdown: then `scope_images`, `remove`, and their
+  calls in the e2e and `xtask dev` go. Moving the wrangler pin checks it.
+
 ## Fly's remote builders cannot push the node image
 
 - **Observed:** phase 3 slice B. `flyctl deploy` (0.3.145) builds the
