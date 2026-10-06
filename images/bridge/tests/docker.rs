@@ -75,9 +75,30 @@ impl Drop for Container {
     }
 }
 
+/// Where the container runs: Docker as it is, or as Cloudflare Containers
+/// runs an image, where Docker's defaults differ.
+#[derive(Clone, Copy, PartialEq)]
+enum Runtime {
+    Docker,
+    /// No `/dev/shm` (`--ipc=none`; Docker mounts a 64 MB one in every
+    /// container, Containers none), and no `/.dockerenv`, Docker's marker,
+    /// which Hermes reads as "in a container" to start Chromium with
+    /// `--no-sandbox --disable-dev-shm-usage` (p5, 2026-10-05: the agent's
+    /// browser died for want of `/dev/shm`).
+    Hosted,
+}
+
 impl Container {
     fn run(tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
+        Container::run_on(Runtime::Docker, tag, api, model, extra)
+    }
+
+    fn run_on(runtime: Runtime, tag: &str, api: u16, model: u16, extra: &[(&str, &str)]) -> Container {
         let mut args: Vec<String> = ["run", "-d", "--platform", "linux/amd64", "--add-host", "api.fragment.internal:host-gateway", "--add-host", "model.fragment.internal:host-gateway"].iter().map(|s| s.to_string()).collect();
+        if runtime == Runtime::Hosted {
+            // the marker goes before the image's own entrypoint runs, as PID 1
+            args.extend(["--ipc=none", "--entrypoint", "/bin/sh"].map(String::from));
+        }
         for (k, v) in [("FRAGMENT_API", format!("http://api.fragment.internal:{api}")), ("FRAGMENT_MODEL", format!("http://model.fragment.internal:{model}")), ("FRAGMENT_COMPUTER", "computer:00aa".into()), ("FRAGMENT_IMAGE", tag.into())] {
             args.push("-e".into());
             args.push(format!("{k}={v}"));
@@ -89,6 +110,9 @@ impl Container {
         // its screen's port, on a port of this host's loopback (`port`)
         args.extend(["-p".into(), "127.0.0.1::6080".into()]);
         args.push(tag.into());
+        if runtime == Runtime::Hosted {
+            args.extend(["-c", "rm -f /.dockerenv && exec /opt/fragment/bin/hermes-boot pre-init"].map(String::from));
+        }
         let out = Command::new(docker()).args(&args).output().expect("docker runs");
         assert!(out.status.success(), "docker run {tag}: {}", String::from_utf8_lossy(&out.stderr));
         Container { id: String::from_utf8_lossy(&out.stdout).trim().to_string() }
@@ -697,6 +721,69 @@ print(json.dumps({"pointer": [v[2].value, v[3].value], "windows": names}))
     serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
 }
 
+/// Where the window titled `title` is on the agent's desktop, `[x, y, w,
+/// h]`, as its X server has it (`xwininfo`, as the hermes user).
+fn window(c: &Container, profile: &str, title: &str) -> Option<[usize; 4]> {
+    let env = format!("/data/hermes/profiles/{profile}/bot-desktop/env");
+    let script = format!("set -a; . {env}; xwininfo -root -tree");
+    let tree = c.exec_out(&["/command/s6-setuidgid", "hermes", "bash", "-c", &script]);
+    // `0x200003 "Example Domain - …": ("chromium-browser" "Chromium-browser")  1004x748+10+10  +10+10`
+    let line = tree.lines().find(|l| l.contains(&format!("\"{title}")))?;
+    let mut fields = line.split_whitespace().rev();
+    let at = fields.next()?.trim_start_matches('+');
+    let size = fields.next()?;
+    let (x, y) = at.split_once('+')?;
+    let (w, rest) = size.split_once('x')?;
+    let h = rest.split('+').next()?;
+    Some([x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?])
+}
+
+/// The share of `rect`'s pixels in `frame` (`width` wide) that are
+/// example.com's background (`#eee`, or `#222` in a dark scheme): the page
+/// drawn where its window is, as a viewer sees it.
+fn page_shown(frame: &[u32], width: usize, rect: [usize; 4]) -> f64 {
+    let [x, y, w, h] = rect;
+    let (mut page, mut all) = (0usize, 0usize);
+    for row in y..y + h {
+        for col in x..(x + w).min(width) {
+            if let Some(&p) = frame.get(row * width + col) {
+                all += 1;
+                page += usize::from(p == 0x00ee_eeee || p == 0x0022_2222);
+            }
+        }
+    }
+    page as f64 / all.max(1) as f64
+}
+
+/// The command line of the browser's Chromium (its first process).
+fn chromium(c: &Container) -> String {
+    c.exec_out(&["sh", "-c", "for p in $(pgrep -f -- '/chrome(-headless-shell)? ' | head -1); do tr '\\0' ' ' < /proc/$p/cmdline; done"])
+}
+
+/// Waits until `viewer`'s frame shows the browser's page where its window
+/// is (within 30 s): where it is, `[x, y, w, h]`.
+async fn browser_shown(c: &Container, viewer: &mut support::rfb::Viewer, what: &str) -> [usize; 4] {
+    let t = Instant::now();
+    loop {
+        let at = window(c, "juniper-paul", "Example Domain");
+        let frame = viewer.frame().await.unwrap_or_else(|e| panic!("{what}: the viewer's frame: {e}"));
+        let page = at.map(|r| page_shown(&frame, viewer.width as usize, r));
+        if let (Some(rect), Some(p)) = (at, page) {
+            if p > 0.4 {
+                return rect;
+            }
+        }
+        assert!(
+            t.elapsed() < Duration::from_secs(30),
+            "{what}: the browser never showed in the viewer's frame: its window at {at:?}, the page {page:?} of it; the desktop {}; chromium {}\n{}",
+            desk(c, "juniper-paul"),
+            chromium(c),
+            c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// An HTTP server that answers every request `{}` and keeps each one's
 /// request line and headers: what a vendor's API would be sent.
 struct Recorder {
@@ -747,7 +834,12 @@ fn anon_mib(c: &Container) -> u64 {
 /// stream answer, the first agent's desktop started for its first viewer;
 /// a viewer who takes over moves the pointer, and one who has not cannot;
 /// the agent's `computer_use` is among its tools and captures the screen;
-/// its browser opens on that desktop.
+/// its browser opens on that desktop, in the frame of the viewer that has
+/// watched since before it started; and the desktop restarted under its
+/// viewers, a viewer that opens the screen again (the page does, on its
+/// own) sees the browser on the new one. All run as Containers runs the
+/// image (`Runtime::Hosted`: no `/dev/shm`, no Docker marker; p5,
+/// 2026-10-05).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_hermes_desktop() {
@@ -764,7 +856,8 @@ async fn the_hermes_desktop() {
     });
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("desk", &["juniper"]);
-    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[]);
+    assert!(!c.exec(&["test", "-e", "/dev/shm"]) && !c.exec(&["test", "-e", "/.dockerenv"]), "run as Containers runs it: no /dev/shm, no Docker marker");
     fake.until(180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
     let before = anon_mib(&c);
@@ -836,21 +929,41 @@ async fn the_hermes_desktop() {
     );
     assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
 
-    // its browser, on its desktop
-    let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
-    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    // its browser, on its desktop, seen by the viewer that has watched
+    // since before the desktop started
+    let browse = |fake: &Fake| {
+        let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
+        fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap())
+    };
+    let turn = browse(&fake);
     fake.until(240_000, "the browser's reply", |w| reply(w, &turn).is_some()).await;
     eprintln!("desktop: the browser's reply: {:?}", fake.with(|w| reply(w, &turn)));
+    let rect = browser_shown(&c, &mut watcher, "the first browse").await;
+    let started = chromium(&c);
+    eprintln!("desktop: the browser's window at {rect:?} in the watcher's frame; chromium {started}; the container holds {} MiB", anon_mib(&c));
+    assert!(started.contains(" --no-sandbox --disable-dev-shm-usage "), "the image's Chromium, with the flags a container needs: {started}");
+    // and the desktop's Browser icon, a person's after Take over, starts the same
+    let panel = "/data/hermes/profiles/juniper-paul/bot-desktop/xdg/xfce4/panel";
+    let icon = c.exec_out(&["sh", "-c", &format!("cat {panel}/launcher-$(cat {panel}/.hermes-browser-launcher)/hermes.desktop")]);
+    assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/fragment/bin/chromium\" ")), "the Browser icon starts the image's Chromium: {icon}");
+
+    // The desktop restarts under its viewers (stopped as `hermes
+    // computer-use screen stop` stops it): each viewer's stream ends with
+    // its display, so a viewer knows to open it again (the screen's page
+    // does, on its own); the one it opens starts the display at once, and
+    // shows the browser on it at the agent's next call.
+    let stopped = c.exec_code(&["env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/hermes", "-p", "juniper-paul", "computer-use", "screen", "stop"]);
+    eprintln!("desktop: stopped: {stopped:?}");
+    let ended = tokio::time::timeout(Duration::from_secs(15), watcher.frame()).await.map(|r| r.map(|f| f.len()));
+    assert!(matches!(ended, Ok(Err(_))), "the watcher's stream ends with its display: {ended:?}");
     let t = Instant::now();
-    let shown = loop {
-        let d = desk(&c, "juniper-paul");
-        if d["windows"].as_array().is_some_and(|w| w.iter().any(|n| n.as_str().is_some_and(|n| n.contains("Example Domain")))) {
-            break d;
-        }
-        assert!(t.elapsed() < Duration::from_secs(30), "the browser never showed on the desktop: {d}\n{}", c.logs());
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    };
-    eprintln!("desktop: its windows {}; the container holds {} MiB", shown["windows"], anon_mib(&c));
+    let mut again = Viewer::open(&base, "watcher", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
+    eprintln!("desktop: the watcher back on a desktop started for it in {} ms", t.elapsed().as_millis());
+    let turn = browse(&fake);
+    fake.until(240_000, "the browser's reply after the restart", |w| reply(w, &turn).is_some()).await;
+    eprintln!("desktop: the browser's reply after the restart: {:?}", fake.with(|w| reply(w, &turn)));
+    let rect = browser_shown(&c, &mut again, "after the desktop's restart").await;
+    eprintln!("desktop: the browser's window at {rect:?} after the restart; chromium {}", chromium(&c));
 
     // gws, Google's Workspace CLI: in the image, and run in the agent's
     // terminal it sends the agent's Google placeholder as its bearer token
