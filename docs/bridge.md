@@ -91,7 +91,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_HELD_LEAVE_OUT` | none | what the save may leave out, written into the answer one per line (whitespace between here): gitignore patterns relative to `/data`, of letters, digits and `._-/*?[]`, at most 16 (docs/computers.md, "The hold"). The stub names `*.scratch` |
 | `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
-| `BRIDGE_STATE_DIR` | `/data/bridge` | its state |
+| `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
 | `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
@@ -104,7 +104,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
 | `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down, at most once a minute while it stays down |
+| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
 
 ## State, and what it never does twice
 

@@ -16,7 +16,9 @@
 //!
 //! The display starts lazily: a viewer runs `start` when the RFB socket
 //! does not answer, at most once a minute while it stays down (S3b: the
-//! dashboard and screen lazy).
+//! dashboard and screen lazy), and at once when it answered since the last
+//! start (it stopped or restarted under its viewers, whose streams end with
+//! it: the screen's page opens its stream again on its own).
 
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
@@ -71,25 +73,36 @@ pub struct ScreenConfig {
 /// a start that came to nothing is not the screen's last word.
 pub const START_AGAIN_MS: u64 = 60_000;
 
-/// Whether a viewer that finds the display down runs its start, given the
-/// last start's time.
-fn may_start(last: Option<Instant>, now: Instant) -> bool {
-    last.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(START_AGAIN_MS))
+/// The display's starts, as its viewers see them.
+#[derive(Debug, Default, Clone, Copy)]
+struct Starts {
+    /// When a viewer last ran the start.
+    last: Option<Instant>,
+    /// Whether the display answered a viewer since.
+    up_since: bool,
 }
 
-/// Who holds control, shared by every viewer; and when the display was
-/// last started.
+impl Starts {
+    /// Whether a viewer that finds the display down runs its start: never
+    /// started, up since the last start (so it went down since: a stop, a
+    /// restart, a crash), or still down a `START_AGAIN_MS` on.
+    fn may_start(self, now: Instant) -> bool {
+        self.up_since || self.last.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(START_AGAIN_MS))
+    }
+}
+
+/// Who holds control, shared by every viewer; and the display's starts.
 struct Control {
     holder: Mutex<Option<String>>,
     changes: broadcast::Sender<Option<String>>,
-    started: Mutex<Option<Instant>>,
+    starts: Mutex<Starts>,
 }
 
 pub async fn serve(cfg: ScreenConfig, stop: watch::Receiver<bool>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(cfg.listen).await.map_err(|e| format!("screen listen {}: {e}", cfg.listen))?;
     crate::ev!("screen.listening", { "listen": cfg.listen.to_string(), "rfb": cfg.target.is_some() });
     let (changes, _) = broadcast::channel(16);
-    let control = Arc::new(Control { holder: Mutex::new(None), changes, started: Mutex::new(None) });
+    let control = Arc::new(Control { holder: Mutex::new(None), changes, starts: Mutex::new(Starts::default()) });
     let cfg = Arc::new(cfg);
     let handler = move |req: Request<Incoming>, _peer: SocketAddr| {
         let (cfg, control) = (cfg.clone(), control.clone());
@@ -214,18 +227,20 @@ async fn dial(target: &Target) -> std::io::Result<Box<dyn Stream>> {
     }
 }
 
-/// The display, started if it is down (at most once a `START_AGAIN_MS`);
-/// then its socket.
+/// The display, started if it is down (`Starts::may_start`); then its
+/// socket.
 async fn open(target: &Target, cfg: &ScreenConfig, control: &Control) -> Option<Box<dyn Stream>> {
+    let up = || control.starts.lock().expect("starts").up_since = true;
     if let Ok(s) = dial(target).await {
+        up();
         return Some(s);
     }
     let start = {
-        let mut started = control.started.lock().expect("started");
+        let mut starts = control.starts.lock().expect("starts");
         let now = Instant::now();
-        let start = may_start(*started, now);
+        let start = starts.may_start(now);
         if start {
-            *started = Some(now);
+            *starts = Starts { last: Some(now), up_since: false };
         }
         start
     };
@@ -239,6 +254,7 @@ async fn open(target: &Target, cfg: &ScreenConfig, control: &Control) -> Option<
     for _ in 0..75 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         if let Ok(s) = dial(target).await {
+            up();
             return Some(s);
         }
     }
@@ -501,11 +517,26 @@ mod tests {
     #[test]
     fn a_display_down_is_started_again_once_a_minute() {
         let t = Instant::now();
-        assert!(may_start(None, t), "never started: start it");
-        assert!(!may_start(Some(t), t), "just started: wait for it");
-        assert!(!may_start(Some(t), t + Duration::from_millis(START_AGAIN_MS - 1)));
-        assert!(may_start(Some(t), t + Duration::from_millis(START_AGAIN_MS)), "still down a minute on: start it again");
-        assert!(!may_start(Some(t + Duration::from_secs(5)), t), "a clock read before the last start never starts twice");
+        let down = |last| Starts { last, up_since: false };
+        assert!(down(None).may_start(t), "never started: start it");
+        assert!(!down(Some(t)).may_start(t), "just started: wait for it");
+        assert!(!down(Some(t)).may_start(t + Duration::from_millis(START_AGAIN_MS - 1)));
+        assert!(down(Some(t)).may_start(t + Duration::from_millis(START_AGAIN_MS)), "still down a minute on: start it again");
+        assert!(!down(Some(t + Duration::from_secs(5))).may_start(t), "a clock read before the last start never starts twice");
+    }
+
+    /// A display that answered since its last start and is down now was
+    /// stopped or restarted under its viewers (p5, 2026-10-05: the screen
+    /// showed the agent's browser only once it was reopened): the next
+    /// viewer, the page opening its stream again, starts it at once, and
+    /// the viewers after it wait for that start.
+    #[test]
+    fn a_display_that_went_down_is_started_at_once() {
+        let t = Instant::now();
+        let went_down = Starts { last: Some(t), up_since: true };
+        assert!(went_down.may_start(t + Duration::from_secs(1)), "up since the last start: start it now, not a minute on");
+        let starting = Starts { last: Some(t + Duration::from_secs(1)), up_since: false };
+        assert!(!starting.may_start(t + Duration::from_secs(2)), "one start for a burst of viewers");
     }
 
     #[test]
