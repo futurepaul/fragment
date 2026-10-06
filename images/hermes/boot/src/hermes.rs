@@ -184,6 +184,39 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     y
 }
 
+/// The flags Chromium needs in a container: Hermes' own
+/// (`CHROMIUM_SANDBOX_BYPASS_ARGS`, its `tools/browser_tool_session.py`),
+/// which it gives its browser and its desktop's Browser icon only as root
+/// or where it sees Docker's marker (`/.dockerenv`). Cloudflare Containers
+/// has neither that marker nor a `/dev/shm`, and Chromium without these
+/// dies as it starts: no usable sandbox (no user namespaces), or no shared
+/// memory (p5, 2026-10-05).
+pub const CHROMIUM_FLAGS: [&str; 2] = ["--no-sandbox", "--disable-dev-shm-usage"];
+
+/// The image's Chromium: a script that starts Playwright's with
+/// `CHROMIUM_FLAGS` whatever the runtime. Hermes is pointed at it
+/// (`AGENT_BROWSER_EXECUTABLE_PATH`), so its browser and its desktop's
+/// Browser icon (Hermes' `bot_desktop.browser.executable()`) both run it.
+pub const CHROMIUM: &str = "/opt/fragment/bin/chromium";
+
+/// The script at `CHROMIUM`, written at image build: on a desktop
+/// (`DISPLAY` set) the full Chromium, `full`; with none the headless
+/// shell, `shell`, as Hermes picks between them itself (its boot pins the
+/// shell, and a running desktop swaps in the full one).
+pub fn chromium_script(full: &Path, shell: &Path) -> String {
+    let quoted = |p: &Path| {
+        let s = p.display().to_string();
+        assert!(p.is_absolute() && !s.contains('\''), "a browser's path, absolute, quotable: {s}");
+        format!("'{s}'")
+    };
+    let flags = CHROMIUM_FLAGS.join(" ");
+    format!(
+        "#!/bin/sh\n# The image's Chromium (hermes-boot build-info: images/hermes/boot/src/hermes.rs):\n# Playwright's, always with the flags a container needs.\n[ -n \"$DISPLAY\" ] && exec {} {flags} \"$@\"\nexec {} {flags} \"$@\"\n",
+        quoted(full),
+        quoted(shell)
+    )
+}
+
 /// What the computer keeps as its guest's tools' work, saved as a record
 /// of its own (docs/computers.md, "Data and the restore gate").
 pub const WORK: &str = "/data/work";
@@ -512,6 +545,45 @@ mod tests {
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
+    }
+
+    /// The image's Chromium starts Playwright's with the container's flags,
+    /// headed on a desktop and the headless shell with none: run here by
+    /// `sh`, as Hermes runs it.
+    #[test]
+    fn the_images_chromium_carries_the_containers_flags() {
+        let s = chromium_script(Path::new("/opt/p/chrome-linux64/chrome"), Path::new("/opt/p/shell/chrome-headless-shell"));
+        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
+        assert_eq!(CHROMIUM_FLAGS, ["--no-sandbox", "--disable-dev-shm-usage"], "Hermes' CHROMIUM_SANDBOX_BYPASS_ARGS");
+        let dir = std::env::temp_dir().join(format!("hermes-chromium-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // the two browsers, each saying what it was started with
+        let echo = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\necho {name} \"$@\"\n")).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            p
+        };
+        let script = dir.join("chromium");
+        std::fs::write(&script, chromium_script(&echo("full"), &echo("shell"))).unwrap();
+        let run = |display: Option<&str>| {
+            let mut c = std::process::Command::new("sh");
+            c.arg(&script).args(["--user-data-dir=/p", "https://example.com"]).env_remove("DISPLAY");
+            if let Some(d) = display {
+                c.env("DISPLAY", d);
+            }
+            String::from_utf8(c.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(run(Some(":20")), "full --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "on a desktop, the full Chromium");
+        assert_eq!(run(None), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "with none, the headless shell");
+        assert_eq!(run(Some("")), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "an empty DISPLAY is none");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[should_panic(expected = "a browser's path, absolute, quotable")]
+    fn a_browser_path_a_shell_would_misread_is_a_bug() {
+        chromium_script(Path::new("/opt/it's/chrome"), Path::new("/opt/shell"));
     }
 
     fn credential(provider: &str, env: &[&str], placeholder: &str) -> fragment_bridge::runtime::Credential {
