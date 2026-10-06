@@ -13,7 +13,7 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::api::{Api, Call, Reply};
+use crate::api::{Api, Call, Reply, Socket};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
@@ -158,7 +158,96 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a title is a blessed template's alone", r.status == 400, &r);
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
-    search_and_archive(s, api, &session, &username)
+    search_and_archive(s, api, &session, &username)?;
+    list_watch(s, api, &session, &username, &id)
+}
+
+/// A watch socket of a person's list, past its `hello`; or why not (the
+/// refusal's status is in it).
+fn watching(socket: Result<Socket>) -> Result<Socket, String> {
+    socket.and_then(|mut w| w.expect("hello").map(|_| w)).map_err(|e| format!("{e:#}"))
+}
+
+/// The next frame a watch socket was sent, or why none came (its read
+/// waits 5 s: a change reaches it in the request that made it).
+fn told(w: &mut Result<Socket, String>) -> Value {
+    match w {
+        Ok(w) => w.next().unwrap_or_else(|e| json!(format!("{e:#}"))),
+        Err(why) => json!(why.clone()),
+    }
+}
+
+/// The person's list, watched (`GET /api/fragments/watch`; Paul on p5,
+/// 2026-10-05: an app his agent made did not show in his sidebar until he
+/// reloaded). Their Principal tells each socket only that the list
+/// changed, and the page reads it again. Valid: the shell's socket (its
+/// session, from the platform's own page) is told of a fragment made, one
+/// shared with them by someone else, an archive, a removal and a delete;
+/// a second tab's is told too, and a key's (the CLI's) of its own list.
+/// Invalid: the session from any other page (no Origin, a fragment's), no
+/// one, or no upgrade. Its frame names nothing. Past the most sockets a
+/// list holds, one more is refused (429).
+fn list_watch(s: &mut Suite, api: &Api, session: &str, username: &str, id: &str) -> Result<()> {
+    let url = format!("{}/api/fragments/watch", api.base);
+    let cookie = format!("fragment_session={session}");
+    let page = |origin: Option<&str>| Socket::connect(api, &url, None, Some(&cookie), origin).map(|(socket, _)| socket);
+    let changed = json!({ "type": "changed" });
+    let mut tab = watching(page(Some(&api.base)));
+    let mut second = watching(page(Some(&api.base)));
+    s.ok("the shell's page watches the person's list: a socket with its session, from the platform's own page", tab.is_ok() && second.is_ok(), json!([tab.as_ref().err(), second.as_ref().err()]));
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "name": "watched" })), &[])?;
+    let made = r.body["name"].as_str().unwrap_or("").to_string();
+    let (one, two) = (told(&mut tab), told(&mut second));
+    s.ok("a fragment made is told to it at once, and to a second tab's, naming nothing", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
+
+    // someone else's fragment, shared with them; the CLI's socket is a key's
+    let other = api.person()?;
+    let mut cli = watching(Socket::connect(api, &url, Some(&other), None, None).map(|(socket, _)| socket));
+    let theirs = s.named(api, &other, "lent")?;
+    let r = api.create(&other, &theirs)?;
+    let own = told(&mut cli);
+    s.ok("a key's socket (the CLI's, naming no page) watches its own list: told of a fragment it made", r.status == 200 && own == changed, json!([r.status, own]));
+    let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{id}"), Some(&json!({ "role": "viewer" })))?;
+    let shared = told(&mut tab);
+    let list = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let listed = list.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == theirs.as_str() && f["role"] == "viewer"));
+    s.ok("one someone else shares with them is told, and their list then has it", r.status == 200 && shared == changed && listed, json!([r.status, shared, list.body]));
+    let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;
+    let (one, two) = (told(&mut tab), told(&mut second));
+    s.ok("an archive in one tab is told to every tab", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
+    let r = api.signed(&other, "DELETE", &format!("/api/f/{theirs}/members/{id}"), None)?;
+    let removed = told(&mut tab);
+    s.ok("their removal from someone else's is told", r.status == 200 && removed == changed, json!([r.status, removed]));
+    let r = shell(api, session, "DELETE", &format!("/api/f/{made}"), None, &[])?;
+    let deleted = told(&mut tab);
+    s.ok("and a delete of their own", r.status == 200 && deleted == changed, json!([r.status, deleted]));
+
+    // a page that is not the platform's own, or no one, watches nothing
+    let refused = |socket: Result<Socket>| watching(socket).err().unwrap_or_else(|| "opened".into());
+    let unnamed = refused(page(None));
+    s.ok("the session from an upgrade that names no page is no one's (401)", unnamed.contains("401"), &unnamed);
+    let fragment = refused(page(Some(&api.site_origin(&format!("x.{username}")))));
+    s.ok("nor from a fragment's page, one site with the platform (401)", fragment.contains("401"), &fragment);
+    let nobody = refused(Socket::connect(api, &url, None, None, Some(&api.base)).map(|(socket, _)| socket));
+    s.ok("and no one watches no list (401)", nobody.contains("401"), &nobody);
+    let r = shell(api, session, "GET", "/api/fragments/watch", None, &[])?;
+    s.ok("it is a socket: a request without the upgrade is refused (400)", r.status == 400, &r);
+
+    // a list holds at most LIST_WATCHERS_MAX sockets (two are open)
+    let mut more = vec![];
+    for _ in 2..fragment_proto::limits::LIST_WATCHERS_MAX {
+        more.push(watching(page(Some(&api.base))));
+    }
+    let past = refused(page(Some(&api.base)));
+    s.ok(
+        &format!("a list holds {} sockets at most: one more is refused (429)", fragment_proto::limits::LIST_WATCHERS_MAX),
+        more.iter().all(Result::is_ok) && past.contains("429"),
+        json!({ "opened": more.iter().filter(|w| w.is_ok()).count(), "past": past }),
+    );
+    for w in more.into_iter().chain([tab, second, cli]).flatten() {
+        w.close();
+    }
+    Ok(())
 }
 
 /// How long a message takes to reach a person's search: its fragment's
@@ -466,6 +555,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("desktop-app-card.png"));
     b.eval(&page, "(document.querySelector('#apps .row.app-row')?.dispatchEvent(new PointerEvent('pointerleave')), true)")?;
     let _ = b.screenshot(&page, &shots.join("desktop-app.png"));
+    sidebar_live(s, api, &mut b, &page, &session, &shots)?;
 
     // settings, at /settings: what a person needs of their account
     let id = super::signin::who(api, &session)?["id"].as_str().unwrap_or("").to_string();
@@ -618,6 +708,90 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let back = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).is_some_and(|a| a["connections"].is_null());
     s.ok("pressed again, it may use every provider again (null)", again && back, &view);
+    Ok(())
+}
+
+/// How soon an open shell shows a change to its person's list, made
+/// anywhere: "within a few seconds", with no reload.
+const SIDEBAR_LIVE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The sidebar is live (Paul on p5, 2026-10-05: "Fred published a
+/// calories app but it didn't show up in my apps list on the left until I
+/// reloaded"). Method: the shell open in two tabs; an agent of the
+/// person's, acting for them (`?for=<owner>`, as their computer's egress
+/// signs a `fragment` CLI's requests in agent mode), makes an app and
+/// deploys it through the API. Valid: both tabs list it within a few
+/// seconds, with no reload, and its card once the platform shoots it; the
+/// first tab's open chat is not reloaded, and the rows it showed are the
+/// same elements (patched in place). Then the same for an app someone
+/// else shares with them, one deleted elsewhere, and one archived in the
+/// other tab.
+fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let me = super::signin::who(api, session)?["id"].as_str().unwrap_or("").to_string();
+    // their agent: a key of theirs (`fragment login`'s) registers it
+    let keys = fragment_nip98::Keys::generate();
+    api.approve(session, &keys)?;
+    let (agent, _) = super::delegation::agent_of(api, &keys)?;
+    let second = b.open(&format!("{}/", api.base))?;
+    let ready = b.until(&second, "!document.getElementById('layout').hidden && document.querySelectorAll('#apps .row[data-key]').length === 1", wait);
+    // what the first tab shows: its open chat (counting its frame's loads) and its rows, marked
+    let marked = b.eval(
+        page,
+        "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); window.__loads = 0; f?.addEventListener('load', () => window.__loads++); \
+         window.__open = f?.dataset.fragment ?? null; const rows = [...document.querySelectorAll('#chats .row[data-key], #apps .row[data-key]')]; rows.forEach((r) => { r.__kept = true; }); return rows.length; })()",
+    )?;
+    let row = |name: &str| format!("document.querySelector({})", js(&format!("#apps .row[data-key={}]", js(&format!("app:{name}")))));
+    let both = |b: &mut Browser, expr: &str| b.until(page, expr, SIDEBAR_LIVE_WAIT) && b.until(&second, expr, SIDEBAR_LIVE_WAIT);
+
+    // the agent makes an app for its owner, writes its page, and deploys it
+    let as_agent = |method: &str, path: &str, body: Value| api.signed(&agent, method, &format!("{path}?for={me}"), Some(&body));
+    let made = as_agent("POST", "/api/fragments", json!({ "name": "meals", "template": "blank" }))?;
+    let t0 = std::time::Instant::now();
+    let name = made.body["name"].as_str().unwrap_or("").to_string();
+    let shown = both(b, &row(&name));
+    let took = t0.elapsed();
+    let page_html = "<!doctype html><title>Meals</title><h1>Meals</h1><p>What we ate today.</p>";
+    let wrote = as_agent("POST", &format!("/api/f/{name}/files"), json!({ "message": "the page", "files": [{ "path": "site/index.html", "text": page_html }] }))?;
+    let deployed = as_agent("POST", &format!("/api/f/{name}/deploy"), json!({}))?;
+    s.ok(
+        "an app the person's agent makes for them shows in the open shell's sidebar within a few seconds, with no reload, and in a second tab",
+        ready && made.status == 200 && shown,
+        json!({ "made": made.status, "inMs": took.as_millis() as u64, "first": b.eval(page, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")?, "second": b.eval(&second, "[...document.querySelectorAll('#apps .row')].map((r) => r.dataset.key)")? }),
+    );
+    let carded = b.until(page, &format!("{}?.querySelector('.app-card.shot img')?.src.startsWith('blob:')", row(&name)), super::site::CARD_WAIT);
+    s.ok("its row shows its preview card once the platform shoots its deploy", wrote.status == 200 && deployed.status == 200 && carded, json!([wrote.status, deployed.status]));
+    let kept = b.eval(
+        page,
+        "(() => { const f = [...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden); return { loads: window.__loads, open: f?.dataset.fragment ?? null, was: window.__open, \
+         kept: [...document.querySelectorAll('#chats .row[data-key], #apps .row[data-key]')].filter((r) => r.__kept).length }; })()",
+    )?;
+    s.ok(
+        "the open chat stays open, its frame not reloaded, and the rows shown before are the same elements (patched in place)",
+        kept["loads"] == 0 && kept["open"] == kept["was"] && !kept["open"].is_null() && kept["kept"] == marked && marked.as_i64().is_some_and(|n| n > 0),
+        json!({ "kept": kept, "marked": marked }),
+    );
+    let _ = b.screenshot(page, &shots.join("desktop-sidebar-live.png"));
+
+    // shared by someone else, deleted elsewhere, archived in the other tab
+    let other = api.person()?;
+    let theirs = api.qualified(&other, "potluck")?;
+    let r = api.create(&other, &theirs)?;
+    anyhow::ensure!(r.status == 200, "the other person's app: {r}");
+    let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{me}"), Some(&json!({ "role": "viewer" })))?;
+    let lent = both(b, &format!("{}?.querySelector('.meta')?.textContent === 'viewer'", row(&theirs)));
+    s.ok("an app someone else shares with them shows in both tabs, as a viewer's", r.status == 200 && lent, &r);
+    let there = b.eval(page, &format!("!!{}", row(&name)))? == true;
+    let r = shell(api, session, "DELETE", &format!("/api/f/{name}"), None, &[])?;
+    let gone = both(b, &format!("!{}", row(&name)));
+    s.ok("an app deleted elsewhere leaves both tabs' sidebars", there && r.status == 200 && gone, &r);
+    // the other tab archives it as its page does (the app's menu's call), and says nothing to the first
+    b.eval(&second, &format!("(fetch('/api/fragments/{theirs}/archived', {{ method: 'PUT', headers: {{ 'x-fragment-shell': '1', 'content-type': 'application/json' }}, body: '{{\"archived\":true}}' }}), true)"))?;
+    let archived = b.until(page, &format!("!{}", row(&theirs)), SIDEBAR_LIVE_WAIT);
+    shell(api, session, "PUT", &format!("/api/fragments/{theirs}/archived"), Some(&json!({ "archived": false })), &[])?;
+    let back = b.until(page, &row(&theirs), SIDEBAR_LIVE_WAIT);
+    s.ok("one archived in the other tab leaves the first's, and comes back unarchived", lent && archived && back, "");
+    b.close(second)?;
     Ok(())
 }
 
