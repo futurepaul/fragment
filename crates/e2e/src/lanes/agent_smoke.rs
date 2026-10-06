@@ -21,10 +21,11 @@
 //!    takes Take over, and shows the browser opened again;
 //! 5. a command Hermes' smart approvals asks about is a card its owner
 //!    answers, and the next message is answered;
-//! 6. asleep at its owner's first ask (nothing of its own, its guest's
-//!    sockets included, starts it again), a message wakes it, its wake
-//!    restored the sleep's save, and
-//!    what it made before the sleep is still in `/data/work`;
+//! 6. after its desktop ran, its work's end is saved awake, held (its
+//!    guest answered the hold); asleep at its owner's first ask (nothing of
+//!    its own, its guest's sockets included, starts it again), every save
+//!    it keeps held, a message wakes it, its wake restored the sleep's
+//!    save, and what it made before the sleep is still in `/data/work`;
 //! 7. its paid calls stay within what the run lent it, and the run says
 //!    what it cost;
 //! 8. it sleeps at the end (`--sweep` deletes its `e2e-` fragments).
@@ -40,7 +41,7 @@ use anyhow::{Context, Result};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::computers::{agent_replies, phase, turn_of, work_of, QUEUE_DRAIN};
+use super::computers::{agent_replies, lever, phase, turn_of, work_of, QUEUE_DRAIN};
 use super::jobs::records;
 use super::ledger::entries;
 use crate::api::{now_s, Api, Call, Socket};
@@ -65,6 +66,9 @@ const WORK: Duration = Duration::from_secs(12 * 60);
 const WAKE: Duration = Duration::from_secs(10 * 60);
 /// Its owner's sleep (a save of `/data`), asked until it is asleep.
 const SLEEP: Duration = Duration::from_secs(3 * 60);
+/// A turn's end to its awake save: the settle, a model call Hermes makes
+/// after its reply, the hold and the save of its `/data`.
+const SAVED: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 150);
 /// The shell's page, and the screen's, to connect and draw.
 const PAGE: Duration = Duration::from_secs(90);
 /// An open page to show what changed (a new app, the browser).
@@ -213,6 +217,17 @@ fn sleep(api: &Api, owner: &Keys, id: &str) -> (bool, Value, Vec<String>) {
         (last["phase"] == "asleep").then_some(())
     });
     (slept.is_some(), last, answers)
+}
+
+/// Every save its computer keeps (at most three: the sleep's just taken,
+/// and the awake ones before it) was held: its guest, the deployment's own
+/// image, answered each hold (docs/computers.md, "The hold"), so no save
+/// carries a hot copy of a database Hermes was writing.
+fn held_saves(s: &mut Suite, api: &Api, id: &str) {
+    let saves = lever(api, id, "saves").map(|r| r.body["saves"].clone()).unwrap_or(Value::Null);
+    let all = saves.as_array().cloned().unwrap_or_default();
+    println!("      (its saves kept, newest first: {})", all.iter().map(|x| format!("{} held {}", x["number"], x["held"])).collect::<Vec<_>>().join(", "));
+    s.ok("every save its computer keeps was held: its guest answered each hold", !all.is_empty() && all.iter().all(|x| x["held"] == true), &saves);
 }
 
 /// The app `name`, once it is its owner's in their list and live.
@@ -610,12 +625,26 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     );
     count(api, "after", &next, &mut spent);
 
+    // ---- its work's end is saved awake, its desktop used: the hold is
+    // answered (before the hosted hold's fix, never once the desktop had
+    // drawn: its Mesa cache is named `*.db`)
+    let numbered = lever(api, &id, "saves").map(|r| r.body["numbered"].as_u64().unwrap_or(0)).unwrap_or(0);
+    let t_saved = Instant::now();
+    let saved = within(SAVED, || lever(api, &id, "saves").ok().filter(|r| r.body["numbered"].as_u64().is_some_and(|n| n > numbered)).map(|r| r.body["saves"][0].clone()));
+    println!("      (its work's end to its awake save: {:.1?})", t_saved.elapsed());
+    s.ok(
+        "after its desktop ran, its work's end is saved awake, and its guest answered the hold (held)",
+        saved.as_ref().is_some_and(|x| x["held"] == true),
+        json!({ "save": saved, "before": numbered }),
+    );
+
     // ---- 6. asleep, a message wakes it, and its work is still there
     let rollbacks = view(api, &keys, &id)["rollbacks"].clone();
     let (slept, last, answers) = sleep(api, &keys, &id);
     let slept_s = now_s();
     println!("      (its owner's sleeps answered: {})", answers.join(", "));
     s.ok("its owner puts it to sleep (its /data saved)", slept, &last);
+    held_saves(s, api, &id);
     // its guest's own sockets (opened as it boots, and again when one
     // drops, also during the sleep's save) pre-wake no computer it runs on
     s.ok(
