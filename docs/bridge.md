@@ -42,7 +42,7 @@ A runtime gets commands and sends events, each naming its turn
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, text}` | a tool call |
-| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits (and the computer may sleep) |
+| `Prompt {prompt, text, options, ttl?}` | a card; the turn waits, its computer kept awake until the card is answered or expires |
 | `Asked` | the turn asked its asker something to answer in words (the question is a reply part before it): their next message to the agent in that chat is its answer (`Tell`); it waits, running, as long as a prompt's life |
 | `End {outcome}` | `idle`, `stopped`, or `error` |
 | `Say {agent, fragment, text}` | said with no turn running: a turn of its own |
@@ -58,7 +58,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | Method and path | Body | Reads |
 |---|---|---|
 | `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
-| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run or runs |
+| `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}` |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
@@ -185,6 +185,29 @@ turns ran.
 Every bound is a const in `limits.rs`, with its reason. SIGTERM: gone
 within 3 s.
 
+## A card keeps its computer awake
+
+A turn waiting on its card holds the keepalive until the card is
+answered or expires, at most the card's life (`BRIDGE_PROMPT_TTL_MS`, an
+hour; docs/durable-computers.md, P6 for now). So a card expires with its
+runtime there: Hermes' approval times out with it (the image sets
+`approvals.timeout` to the card's life), the command does not run, Hermes
+says so and ends the turn, and the chat's next message is answered.
+
+It used to be let go (decision 42 as first written), so an idle computer
+slept 20 minutes into an unanswered card, and the next life ended its turn
+as lost. Hermes, though, had kept the cut turn's message as its session's
+last, unanswered, and folds the next message into it (two user messages
+in a row are one): the model was given `[paul] do the risky thing\n\n[paul]
+good morning`, and asked the cut command's approval again. Every message
+after a missed card was met by the card again, and the computer slept
+under each one (Paul on p5, 2026-10-05: "I missed the 1hr window and now
+it's not responding to chats"; `an_expired_approval_ends_its_turn` in
+tests/docker.rs, and its scripted twin in tests/relay.rs). A restart for
+any other reason while a card is open (an owner's sleep, a crash, a
+deploy) still cuts the turn and leaves its message so: P5 and P6 of
+docs/explorations/pi-durable.md, and the debt ledger.
+
 ## Hermes' Relay, as the bridge speaks it
 
 Hermes v0.21.5 (tag `v2026.9.24`, the newest release on 2026-10-03;
@@ -217,7 +240,12 @@ get_chat_info`.
   sends once.
 - An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
   the owner's answer goes back at once as an inbound `prompt_response`.
-  Expiry needs no word: Hermes' `approvals.timeout` is the card's life.
+  Expiry needs no word: Hermes' `approvals.timeout` is the card's life
+  (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
+  is a test's shorter one). At its timeout Hermes tries to edit the card
+  (the bridge refuses: it is no message of the turn), sends `⌛ Approval
+  timed out …` (a step), hands the model `BLOCKED: Command timed out
+  without user response`, and the turn goes on to its reply.
 - A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
   a message's attachments are served at `/relay/media/<id>`, behind the
   token.

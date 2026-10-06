@@ -83,7 +83,7 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
 
 /// An agent `owner` registers, signing with a key of its own: its keys and
 /// its identity.
-fn agent_of(api: &Api, owner: &Keys) -> Result<(Keys, String)> {
+pub(super) fn agent_of(api: &Api, owner: &Keys) -> Result<(Keys, String)> {
     let keys = Keys::generate();
     let reg = "/api/identities";
     let r = api.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&keys, "POST", reg, owner) })))?;

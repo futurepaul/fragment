@@ -531,7 +531,11 @@ speaking Cloudflare's APIs) returns once this product works.
     wins. While a turn waits on an approval, the bridge drops its busy
     flag, so the computer can sleep instead of billing for hours. An
     answer that arrives after a sleep resumes the turn, or the card says
-    it expired.
+    it expired. *Amended 2026-10-05 (docs/durable-computers.md, P6 for
+    now):* an open card holds the busy flag until it is answered or
+    expires, at most its life (an hour). A sleep under it cut the turn,
+    and Hermes met the next message with the cut command asked again
+    (docs/bridge.md, "A card keeps its computer awake").
 43. **Computers reach the internet.** Browsing is the point, so
     `enableInternet` is on. The guest holds no secrets, so traffic that
     bypasses the intercepts (ports other than 80 and 443) carries nothing

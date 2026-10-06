@@ -41,6 +41,15 @@ async fn setup(name: &str, agents: &[&str]) -> (Fake, support::Running, Hermes, 
     (fake, bridge, hermes, dir)
 }
 
+/// A card's life in the expiry tests: the bridge's prompt life and the
+/// scripted Hermes' approval timeout, the same, as the Hermes image sets
+/// both (`HERMES_BOOT_APPROVAL_TIMEOUT_S`).
+const CARD_MS: u64 = 1_500;
+
+fn card_settings() -> fragment_bridge::engine::Settings {
+    fragment_bridge::engine::Settings { prompt_ttl_ms: CARD_MS, ..support::settings() }
+}
+
 /// Goal: Hermes' turn reaches the chat as the bridge's records: its tool
 /// progress lines as steps, its draft frames as the chat's drafts, its
 /// final send as the reply, its reactions as the turn's end.
@@ -121,7 +130,8 @@ async fn an_approval_through_the_relay() {
     let p = fake.with(|w| w.bodies(&chat, "work", "turn.prompt")[0].clone());
     let options: Vec<&str> = p["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
     assert_eq!(options, vec!["once", "session", "deny"]);
-    fake.until(WAIT, "the keepalive dropped while it waits", |w| w.keepalive_open == 0).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    fake.with(|w| assert_eq!((w.keepalive_open, w.keepalive_log.clone()), (1, vec![true]), "the card holds the computer awake"));
     fake.say(&chat, &person("paul"), json!({ "kind": "prompt_response", "prompt": p["prompt"], "option": "once" }));
     fake.until(WAIT, "the reply", |w| !replies(w, &chat).is_empty()).await;
     fake.with(|w| {
@@ -178,6 +188,121 @@ async fn stop_during_an_approval() {
         assert!(replies(w, &chat).is_empty());
     });
     hermes.with(|s| assert_eq!(s.interrupted, 1, "Hermes heard the Stop mid-approval"));
+    bridge.stop().await;
+}
+
+/// The records of `turn` on `chat`'s `work` of `kind`.
+fn work_of(w: &World, chat: &str, turn: &str, kind: &str) -> Vec<Value> {
+    w.bodies(chat, "work", kind).into_iter().filter(|b| b["turn"] == turn).collect()
+}
+
+/// Goal (Paul on p5, 2026-10-05: "the agent asked me for permission for
+/// something but I missed the 1hr window and now it's not responding to
+/// chats"): a card nobody answers is closed `expired` at its `expiresAt`,
+/// its turn ends once, as Hermes ends it (its approval times out with the
+/// card: the command is not run, and it says so), and the next message is
+/// claimed and answered: answered, not met by the card's request asked
+/// again.
+///
+/// Method: the Computer DO's idle rule, in a test's time (crates/core/src/
+/// computer.rs, `IDLE_MS`): a computer with no keepalive open sleeps 20
+/// minutes after its last record; here, at once. If the bridge lets its
+/// keepalive go while the card waits, the computer is put to sleep as the DO
+/// does it (the hold, its answer, the container gone, Hermes with it) and
+/// woken from its state by the next message, after the card's `expiresAt`;
+/// otherwise it stays awake through the expiry. The scripted Hermes keeps
+/// its session as v0.21.5 does: a turn cut before its reply leaves its
+/// message the session's last, and the next message is folded into it. On
+/// master the keepalive is let go (decision 42), the sleep cuts the turn,
+/// and the next message asks the cut approval again.
+#[tokio::test]
+async fn an_expired_card_ends_its_turn_and_the_next_message_is_answered() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let dir = support::dir("relay-expired");
+    let listen = free_port();
+    let cfg = support::config(&fake.url(), &dir, card_settings());
+    let bridge = support::start_killable(cfg.clone(), relay(listen, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    // Hermes' approval timeout is the card's life (the image sets both)
+    hermes.with(|s| s.approval_ms = CARD_MS);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let say = |text: &str| records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": text }))["seq"].as_u64().unwrap());
+    let risky = say("something risky");
+    fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
+    let expires_at = fake.with(|w| work_of(w, &chat, &risky, "turn.prompt")[0]["expiresAt"].as_u64().unwrap());
+    // the DO's idle rule: what the keepalive does while the card waits
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let let_go = fake.with(|w| w.keepalive_open == 0);
+    let (bridge, hermes, next) = if let_go {
+        // asleep under the card: the hold and its answer, then the
+        // container gone, its bridge and its Hermes with it
+        support::hold(&dir);
+        support::until(WAIT, "the bridge's answer to the hold", || support::held(&dir)).await;
+        bridge.kill().await;
+        hermes.with(|s| s.dead = true);
+        fake.until(WAIT, "its sockets closed", |w| w.live_sockets() == 0).await;
+        // bounded: the card's life
+        while fragment_bridge::log::now_ms() < expires_at + 200 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // the next message wakes it: no hold, its /data as it slept
+        let next = say("good morning");
+        support::unhold(&dir);
+        let bridge = support::start_killable(cfg, relay(listen, &dir));
+        let woken = hermes.after(listen, "computer-test", SECRET);
+        (bridge, woken, next)
+    } else {
+        fake.until(WAIT, "the card expired, awake, and its turn's end", |w| !work_of(w, &chat, &risky, "turn.prompt.closed").is_empty() && !work_of(w, &chat, &risky, "turn.end").is_empty()).await;
+        assert!(fragment_bridge::log::now_ms() >= expires_at, "not before its expiresAt");
+        hermes.with(|s| assert_eq!(s.timed_out, 1, "Hermes' own approval timed out with the card"));
+        let next = say("good morning");
+        (bridge, hermes, next)
+    };
+    fake.until(WAIT, "the next message's turn to end", |w| !work_of(w, &chat, &next, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        let closed = work_of(w, &chat, &risky, "turn.prompt.closed");
+        assert_eq!(closed.iter().map(|c| c["outcome"].clone()).collect::<Vec<_>>(), vec![json!("expired")], "the card closed once, expired");
+        assert_eq!(work_of(w, &chat, &risky, "turn.end").len(), 1, "its turn ends once");
+        let asked_again = work_of(w, &chat, &next, "turn.prompt");
+        assert!(asked_again.is_empty(), "the next message asks nothing: the expired card's request is not asked again (the computer slept under the card: {let_go}): {asked_again:?}");
+        let answer = replies(w, &chat).into_iter().find(|r| r["turn"] == next).map(|r| r["text"].clone());
+        assert_eq!(answer, Some(json!("echo: [paul] good morning")), "the next message is answered, and only it");
+        assert_eq!(work_of(w, &chat, &next, "turn.end")[0]["outcome"], "idle");
+    });
+    assert!(!let_go, "the card held the computer awake: an idle sleep under it is what cut its turn");
+    hermes.with(|s| assert!(s.session.is_empty(), "nothing is left unanswered in its session: {:?}", s.session));
+    bridge.stop().await;
+}
+
+/// Goal: a message said while a card is open waits behind its turn (one
+/// turn of an agent in a chat at a time), and is claimed and answered once
+/// the card expires and its turn ends: nothing queues behind an expired
+/// card. Its asker is not the card's (only the owner answers a card).
+#[tokio::test]
+async fn a_message_behind_an_expired_card_is_answered() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-expired-behind");
+    let listen = free_port();
+    let bridge = support::start(support::config(&fake.url(), &dir, card_settings()), relay(listen, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    hermes.with(|s| s.approval_ms = CARD_MS);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let risky = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "something risky" }))["seq"].as_u64().unwrap());
+    fake.until(WAIT, "the card", |w| !work_of(w, &chat, &risky, "turn.prompt").is_empty()).await;
+    let paul = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("paul"), json!({ "text": "hello?" }))["seq"].as_u64().unwrap());
+    let skyler = records::turn_id("juniper.paul", &chat, "chat", fake.say(&chat, &person("skyler"), json!({ "text": "me too" }))["seq"].as_u64().unwrap());
+    fake.until(WAIT, "both answered", |w| !work_of(w, &chat, &paul, "turn.end").is_empty() && !work_of(w, &chat, &skyler, "turn.end").is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(work_of(w, &chat, &risky, "turn.prompt.closed")[0]["outcome"], "expired");
+        let order: Vec<&str> = w.bodies(&chat, "work", "turn.start").iter().filter_map(|s| s["turn"].as_str()).map(|t| if t == risky { "risky" } else if t == paul { "paul" } else if t == skyler { "skyler" } else { "?" }).collect();
+        assert_eq!(order, vec!["risky", "paul", "skyler"], "in order, each once");
+        for t in [&risky, &paul, &skyler] {
+            assert_eq!(work_of(w, &chat, t, "turn.end").len(), 1, "{t} ends once");
+            assert!(replies(w, &chat).iter().any(|r| r["turn"] == t.as_str()), "{t} is answered: {:?}", replies(w, &chat));
+        }
+    });
     bridge.stop().await;
 }
 
