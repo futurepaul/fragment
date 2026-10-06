@@ -1117,29 +1117,125 @@ through workers-rs's `SecretStore`), cached a minute per isolate.
   store's bindings: `cell/secrets.mjs`, a shim like node.mjs's for
   `ctx.container`. Every class in entry.mjs takes its env through
   `withSecrets`, which, when `FRAGMENT_SECRETS` names the deployment's
-  secrets (`{"backend": "vars", "secrets": [{"binding", "secret_name"}, …]}`,
-  the pairs a deploy writes into `secrets_store_secrets`), puts an object
-  with an async `get()` in each binding's place; the agents' Worker runs
-  from agent/celld.mjs there, which does the same. Its class is named
-  `Fetcher`, as Cloudflare's binding's is, since workers-rs takes a binding
-  for a `SecretStore` by that name. The backend for now, `vars`, answers
-  the Worker variable of the binding's own name, which devstack writes into
-  `.dev.vars` (`devstack::Secrets::Shim`), where the spike kept them
-  before #134. Without `FRAGMENT_SECRETS`, as on Cloudflare, the env is
-  handed on as it came. The Rust is the same on both runtimes, and never
-  knows which it read.
-- **Next: OpenBao (Vault's KV v2 API) behind the shim.** It is one more
-  entry in `BACKENDS` in cell/secrets.mjs (a `secret_name` its key), with
-  its address and token in `FRAGMENT_SECRETS`, and nothing else changes:
-  not the cell's Rust, not the bindings' names, not the cache. That is
-  where it slots in.
+  secrets (the pairs a deploy writes into `secrets_store_secrets`, and a
+  backend), puts an object with an async `get()` in each binding's place;
+  the agents' Worker runs from agent/celld.mjs there, which does the same.
+  Its class is named `Fetcher`, as Cloudflare's binding's is, since
+  workers-rs takes a binding for a `SecretStore` by that name. Without
+  `FRAGMENT_SECRETS`, as on Cloudflare, the env is handed on as it came.
+  The Rust is the same on both runtimes, and never knows which it read.
+  Two backends:
+  - `openbao`: a secrets service (below). The self-hosted lane's.
+  - `vars`: the Worker variable of the binding's own name, which devstack
+    writes into `.dev.vars` (`devstack::Secrets::Shim`): plain `celld dev`.
+- **OpenBao behind the shim** (Paul, 2026-10-05: a service, not a Secrets
+  Store in the celld fork). OpenBao is the Linux Foundation's MPL-2.0 fork
+  of HashiCorp Vault, used as it ships (crates/devstack/src/openbao.rs):
+  - **The pin:** 2.7.1, each platform's tarball by the SHA-256 in the
+    release's `checksums.txt` (its signature checked against OpenBao's
+    key), fetched once into `target/tools`. `FRAGMENT_OPENBAO_TARBALL`
+    names an intranet's copy, checked against the same pin.
+  - **Its state:** a directory of its own (0700). `seal.key` is 32 random
+    bytes (0600) for the static seal, so every start unseals itself,
+    unattended. `data/` is pebbledb: one server, and 2.7 removed `file`.
+    The stack's AppRole ids are files too (0600).
+  - **Initialised once, by itself.** The config's `initialize` stanza
+    (declarative self-initialization) runs on the first start alone. It
+    mounts KV v2 at `fragment/` and writes two policies, the cell's token
+    role and the stack's AppRole; then OpenBao revokes its root token. No
+    root token or recovery key is left. A lost credential means removing
+    the directory: the next start seeds everything again.
+  - **Seeded at each start:** what master's devstack writes to wrangler's
+    local store (`Fleet::configure`, `store::Bound`) goes to
+    `fragment/<its store name>`, field `value`. A new version is written
+    only when the value changed.
+  - **Secret zero** is the cell's token, the one secret it gets outside
+    OpenBao. Its policy, `fragment-cell`, is `read` on
+    `fragment/data/*`: no write, list or metadata, no other mount, no
+    `sys/`. It is periodic (30 days), renewed at each start and hourly
+    while the stack runs, and minted again when it has lapsed. It reaches
+    both Workers as the variable `FRAGMENT_SECRETS_TOKEN` (`.dev.vars`,
+    0600), and the shim hides it from the rest of the env. The stack's
+    AppRole (`fragment-admin`) writes the mount and mints and renews the
+    cell's tokens; it deletes nothing and reaches no `sys/` path.
+  - **Loopback only,** with no TLS: the cell and OpenBao share the box,
+    and the LAN's front door would put OpenBao on the network for no
+    reader that needs it.
+  - **A read:** `GET <addr>/v1/fragment/data/<name>` with `X-Vault-Token`,
+    5 s at most, never following a redirect (the token goes nowhere
+    else). A failure is a typed error, never a hang, which keys.rs returns
+    as `host_failed`: `SecretsError [missing|refused|sealed|down|failed|malformed]: …`,
+    naming the path and, for a missing secret, the `bao kv put` that sets
+    it. The shim keeps no cache of its own: keys.rs keeps each value a
+    minute per isolate already, and a failure is never kept. The e2e's
+    audit log counts what that costs (Evidence, below).
+  - **Choosing it:** `cargo xtask dev --lan` uses OpenBao, its state in
+    `$FRAGMENT_LAN_STATE/openbao`. `--runtime celld` uses the variables
+    unless `FRAGMENT_SECRETS_BACKEND=openbao` (state in
+    `target/devstack/openbao`, which `--clean` clears). The e2e on celld
+    uses OpenBao unless `FRAGMENT_E2E_SECRETS=vars`. `wrangler dev` keeps
+    its own store.
+- **A company's Vault, or its OpenBao.** The shim reads Vault's KV v2 API,
+  so it reads a company's existing HashiCorp Vault with no change. Only
+  OpenBao is tested here. `FRAGMENT_SECRETS` names where:
+
+  ```json
+  {"backend": "openbao", "addr": "https://vault.corp.example:8200",
+   "mount": "secret", "prefix": "fragment", "namespace": "eng",
+   "secrets": [{"binding": "HOST_SECRET", "secret_name": "fragment-host-secret"}, …]}
+  ```
+
+  `prefix` and `namespace` are optional; a namespace goes as
+  `X-Vault-Namespace`. Each secret is a KV v2 entry whose one field is
+  `value` (`vault kv put -mount=secret fragment/fragment-host-secret
+  value=-` reads it from standard input). The cell's token is
+  `FRAGMENT_SECRETS_TOKEN`, and the company's CA is `CELLD_EXTRA_CA_FILE`.
+  - **Policies:** the cell's token reads `<mount>/data/<prefix>/*` and
+    nothing else. Whoever writes the secrets (people, a pipeline) holds a
+    policy of their own; the cell holds none that writes.
+  - **Audit:** Vault's and OpenBao's audit devices log every request with
+    its token and values HMAC'd. The e2e turns on a file device and counts
+    the cell's reads (`openbao::audited`). A deployment declares one in
+    its config (`audit "file" …`) and rotates the file (SIGHUP reopens
+    it).
+  - **Rotation:** a secret is put again, and warm isolates use it within
+    a minute (keys.rs's cache), with no restart. The host secret rotates
+    by name, as on Cloudflare (docs/secrets.md). The cell's token: mint
+    another, set the variable, restart, revoke the old one. The seal key:
+    the static seal's `previous_key` and `current_key` (n-1 to n); not
+    automated here.
+  - **Getting the token there** is the company's own secret zero: a file
+    from Vault Agent, its platform's auth (Kubernetes), or a periodic
+    token as here. The shim reads one token from one variable.
 - **Not yet behind it:** the sandcastle nodes' secrets
   (`FRAGMENT_NODE_SECRET_<ID>`, seam 2) are still Worker variables, which
   node.mjs reads as each isolate starts. A person's paired nodes' secrets
   are sealed in the registry, as before.
 - **Evidence (2026-10-05):** auth, signin, keys and secrets, 135 passed and
-  0 failed on celld through the shim, and 135 and 0 on `wrangler dev`
-  through its local store.
+  0 failed on celld through the shim's variables, and 135 and 0 on
+  `wrangler dev` through its local store. OpenBao:
+  - Host tests (`openbao::tests`; the three on the binary run with
+    `--include-ignored`, as the pinned browser's do): the state made once
+    and refused spoiled; the config; only the pinned tarball taken; the
+    shim against a scripted server (each kind of failure, a hang cut at
+    5 s, no redirect followed, the token hidden) and a wrong config; and
+    on OpenBao itself, initialised once and unsealed at every start, a
+    wrong key said; the cell's token reading its mount alone; the shim
+    reading a value and saying missing, refused, down and sealed. `cargo
+    xtask check`: 544 passed, 0 failed.
+  - The e2e on celld, every secret in OpenBao: auth, signin, keys,
+    secrets, ai, agents and restart, 243 passed and 0 failed (the same
+    with the variables: 241 and 0); codestore on macrofiche, 22 and 0.
+    restart stops OpenBao under a fresh node: a sign-in's callback fails
+    at once, naming it; started again it unseals itself, initialised
+    once, and the next sign-in works with no restart of the cell. The
+    cell read the secrets 72 times in the run (191 requests, 526 KiB of
+    audit log), about once per binding per isolate.
+  - The run found a race in the agents lane's reply check, on master too
+    (#157).
+  - `xtask dev --runtime celld` with OpenBao, and `--lan` on high ports:
+    sign-in through the WorkOS fake and through Dex; a second start keeps
+    the cell's token; Ctrl-C frees every port, OpenBao sealing itself.
 
 ## What corporate networks bring (research, 2026-10)
 
@@ -1841,6 +1937,11 @@ CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
 `CELLD_BIN` is celld built from the fork's branch `selfhost`
 (`cargo build --release -p celld`). celld bundles with esbuild, taken
 from worker-build's cache or `CELLD_ESBUILD`.
+
+The cell's own secrets on celld (seam 12) are its `.dev.vars` by default;
+`FRAGMENT_SECRETS_BACKEND=openbao` keeps them in the pinned OpenBao on
+loopback, as `--lan` does. The e2e on celld keeps them in OpenBao
+(`FRAGMENT_E2E_SECRETS=vars` for the variables).
 
 Preview cards on celld (seam 7): the stack starts the renderer over the
 pinned chrome-headless-shell, fetched into `target/tools` on first use.

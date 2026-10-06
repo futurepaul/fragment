@@ -67,8 +67,9 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
   binding whose secret the store lacks is an error where it is read
   (`HostFailed`); there is no fallback to a Worker secret or a variable.
   On celld, which has no Secrets Store, the cell's shim stands in for
-  the same bindings (`FRAGMENT_SECRETS`; docs/self-host.md, seam 12): the
-  Rust reads them as it reads the store's.
+  the same bindings (`FRAGMENT_SECRETS`; docs/self-host.md, seam 12),
+  backed by OpenBao (or a company's Vault) under the same names: the Rust
+  reads them as it reads the store's.
 - **Before a deploy.** It lists the store (read-only) before it builds or
   makes anything, and refuses when a secret the config names is not
   there, naming each, the field naming it, and the `cargo xtask secret

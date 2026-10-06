@@ -15,6 +15,7 @@ bring"); this is how the home network plays a company's.
 | issues certificates from its CA, and pushes the root to every device | a CA made on the box, **constrained to `fragment.home.arpa`** (it can vouch for nothing else, even if its key leaked); its root installed on the iPhone and the Mac by profile |
 | puts one TLS edge in front of the apps | `fragment-lan`'s front door on :443: `https://fragment.home.arpa`, fragments at `https://<label>--<user>.fragment.home.arpa`, Dex at `https://dex.fragment.home.arpa`; WebSockets and event streams pass through |
 | runs an identity provider | Dex v2.45.1 (pinned by digest), one static user per person, passwords in files |
+| runs a secrets service | OpenBao 2.7.1 (pinned by checksum), on loopback: the cell's own secrets, read with a token that reads nothing else (docs/self-host.md, seam 12) |
 | runs the model on its own network | Bonsai (`http://bonsai.localhost/v1`) |
 | runs the workloads on its own machines | sandcastle's engine on the box (microVMs, jailed) behind a `sandcastle-node`; a person's own machine (the Mac) paired to them |
 | opens the firewall to the office subnet only | ufw: 53, 80 and 443 from 192.168.50.0/24 |
@@ -30,6 +31,7 @@ beside it:
 | Dex | 127.0.0.1:8800 | the issuer `https://dex.fragment.home.arpa`, behind the door |
 | celld | 127.0.0.1:8790 | the cell and the agents' Worker, on loopback: devices reach them only through the door |
 | the code store, the model fake | 127.0.0.1:8792, :8796 | as `cargo xtask dev` (the model fake answers only image steps; Bonsai answers text) |
+| OpenBao | 127.0.0.1:8802 | the cell's own secrets (the host secret, the code store's key, Dex's client secret, a model key): unsealed from its key file at each start, seeded by the stack, read by the cell with its token |
 | the card renderer | 127.0.0.1, a free port | preview cards: the pinned chrome-headless-shell, which reaches fragments through the door and trusts the root |
 
 and in a second terminal, `sandcastle-node serve` on 127.0.0.1:8798, in
@@ -44,14 +46,19 @@ devices trust):
   `zone.key`), issued fresh at each start for 397 days (iOS allows 825);
 - `dex/`: `dex.yaml` (0600), the client's secret, and `passwords/<name>`
   (0600), one per person;
+- `openbao/` (0700): its seal key (`seal.key`, 0600), its data, the
+  stack's AppRole ids and the cell's token (`cell.token`), each 0600. The
+  stack seeds every secret into it at each start, so removing it loses
+  nothing: the next start makes it again;
 - `serve.json`: the front door's config;
 - `nodes.json` and `node.json`: the node list and the box's node (step 2,
   written by you).
 
 Logs: `target/devstack/lan-door.log` (a device that does not trust the
 root yet shows there as `TLS from <addr> failed: … UnknownCA` or
-`BadCertificate`), `target/devstack/lan-dex.log`, and the node log the
-banner names.
+`BadCertificate`), `target/devstack/lan-dex.log`,
+`$FRAGMENT_LAN_STATE/openbao/openbao.log`, and the node log the banner
+names.
 
 ## 1. The box, once (sudo)
 
@@ -184,8 +191,9 @@ It says `serving on 127.0.0.1:8798, intercepts on … to
 https://fragment.home.arpa`. Check that Bonsai answers too: `curl -s
 http://bonsai.localhost/v1/models` names `bonsai-2-27b`.
 
-The first start makes the CA and fetches Dex. The banner says where
-everything is: the front door, the DNS server and its upstream, the root's
+The first start makes the CA, fetches Dex and OpenBao (75 MB), and
+initialises OpenBao. The banner says where everything is (`secrets:`
+names OpenBao and its state): the front door, the DNS server and its upstream, the root's
 page with its **SHA-256 fingerprint** (write it down: step 5 compares it),
 and each person with their password's file.
 
@@ -213,8 +221,10 @@ Every setting, with its default: `FRAGMENT_LAN_ZONE` (fragment.home.arpa),
 `FRAGMENT_LAN_BIND` (that address), `FRAGMENT_LAN_DNS_UPSTREAM` (the
 gateway, :53), `FRAGMENT_LAN_HTTPS_PORT` (443), `FRAGMENT_LAN_HTTP_PORT` (80,
 0 for none), `FRAGMENT_LAN_DNS_PORT` (53, 0 for none), `DEX_BIN` (the pinned
-Dex), and `FRAGMENT_DEV_PORT` (8790: the cell, and its fakes and Dex above
-it). Preview cards reach fragments through the door (its first address, on
+Dex), `FRAGMENT_SECRETS_BACKEND` (`openbao`; `vars` puts the secrets in the
+cell's `.dev.vars` instead), `FRAGMENT_OPENBAO_TARBALL` (the pinned
+tarball, from a path), and `FRAGMENT_DEV_PORT` (8790: the cell, and its
+fakes, Dex and OpenBao above it). Preview cards reach fragments through the door (its first address, on
 the https port) and trust the root, unless `FRAGMENT_BROWSER_UPSTREAM` or
 `FRAGMENT_BROWSER_CA_FILE` say otherwise.
 
@@ -458,6 +468,9 @@ sudo security delete-certificate -c 'fragment LAN CA (omarchy)' /Library/Keychai
 | an app's row shows its icon, never its card | the card renderer could not reach the door: see the stack's output for `card browser:` lines |
 | the CLI: "unreachable, or it dropped the connection" | its machine does not trust the root yet (step 7), or cannot resolve the zone |
 | "the cell is not answering" (502) | the stack is starting or stopped; see the node log |
+| xtask: `OpenBao stays sealed: its seal key … does not open …` | `openbao/seal.key` is not the one its data was sealed with: put it back, or remove `$FRAGMENT_LAN_STATE/openbao` (the next start seeds every secret again) |
+| a page or the CLI: `host_failed`, `SecretsError [down]: OpenBao at http://127.0.0.1:8802 is not answering` | OpenBao stopped (it stops with the stack): start the stack again; `openbao/openbao.log` |
+| `SecretsError [refused]: … refused the cell's token` | the cell's token lapsed (30 days unrenewed) or was revoked: start the stack again, which mints another |
 
 ## Evidence, 2026-10-05: the guide rehearsed
 
@@ -615,6 +628,10 @@ Mac, the router, and the WAN-unplugged run. Those are steps 1 to 7.
 - **DNS forwards, it does not resolve.** The router's answers reach the
   device unchanged; a company's resolver would forward this zone to the box
   (Merlin's two lines are exactly that).
+- **OpenBao listens on loopback alone.** Only the cell reads it, on the
+  same box; the door never routes to it. A company's Vault is reached by
+  name over TLS instead, its CA in `CELLD_EXTRA_CA_FILE` (docs/self-host.md,
+  seam 12).
 - **The CLI trusts the OS's roots** beside the public ones, as every client
   on a company's network must. The e2e and the cell still trust the public
   roots alone.
