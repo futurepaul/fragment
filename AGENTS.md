@@ -128,6 +128,14 @@ prebuilt bundle is in the debt ledger).
   The node's test levers (`/api/test/*`) take a secret made per run.
   A wait that runs out its limit prints `(a wait ran out its …s at
   <file>:<line>)`: one that does so on a passing run costs every run.
+  A call that fails says when it was sent (UTC, as the node's logs stamp
+  their lines) and how long it waited: a dropped connection fails at
+  once, a hung call after its wait. A boot's log can lack its last
+  seconds when a failure stops the node at once (the Workers' output
+  reaches it late, in bursts): logs that just stop are not a node that
+  died. The run's client never reuses a connection idle 4 s: workerd
+  closes one idle 5 s, and a request written onto it as it closes is
+  lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
 - `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
   shards CI runs, each on its own runner with its own build and node
   (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
