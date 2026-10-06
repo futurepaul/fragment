@@ -1525,7 +1525,9 @@ subscribed to with `{channel, wake: true}` (only its egress asks for
 one: from anywhere else it names no URL, 400), by a page opening such a
 fragment (a pre-wake, at most every 30 s), by a request to one of its
 ports, by one of its agents becoming a member of any fragment, and by
-its owner. Records its own agents post wake nothing. An agent added to a
+its owner. Records its own agents post wake nothing, and neither do
+their own sockets: its guest following a fragment pre-wakes no
+computer its agents run on. An agent added to a
 fragment (a member's `PUT`, an invite it accepts, a fragment it makes
 for its owner) needs nothing more from whoever added it: the platform
 posts `{kind: "joined", fragment}` on the agent fragment's `tasks`, as

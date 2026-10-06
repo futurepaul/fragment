@@ -37,9 +37,12 @@ container starts until someone asks again).
 - **Wakes:** a record on a channel one of its agents subscribed to with
   `wake: true`; an open port tab; a pre-wake (a page opened a subscribed
   fragment, or someone started typing there: it starts at once and stops
-  after 60 s if nothing arrives); one of its agents added as a member of
-  any fragment (below: the platform posts `joined` and wakes it, held as
-  a record holds it); the owner's `POST /api/computers/{id}/wake`.
+  after 60 s if nothing arrives; never by its own agents' sockets, which
+  its guest opens as it boots and again after one drops, so its own guest
+  never starts it again as it goes to sleep); one of its agents added as
+  a member of any fragment (below: the platform posts `joined` and wakes
+  it, held as a record holds it); the owner's `POST
+  /api/computers/{id}/wake`.
 - **Awake while:** a port tab is open, or the guest holds the keepalive
   socket (below). Traffic from the container does not count (spike S3).
   Twenty minutes after neither holds, it sleeps. A $200 seat's computer
