@@ -25,15 +25,18 @@
 //! (`route`), signed by the agent, `for` naming whom it acts for and
 //! `fragment` the turn's fragment; and, from phase 4, the computer's model
 //! intercept (`complete`). The payer is the agent's owner (decision 36).
+//! A call names a tier, or `vision`: the deployment's vision model
+//! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
+//! image (Hermes' screenshots), metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 
 use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Reserved, Settle, Spend};
-use fragment_core::models::{self as bounds, Bounded, Stream};
+use fragment_core::models::{self as bounds, Bounded, Named, Stream};
 use fragment_core::price::Usage;
-use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind, Tier};
+use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -45,9 +48,9 @@ use crate::error::{CellError, CellResult};
 use crate::ledger::{self, FragmentOpen, LedgerError};
 use crate::{js, read_body, routed};
 
-/// A call's request: GLM takes a million tokens, about 4 MB; an agent's
-/// window sends a few hundred KiB.
-pub const MODEL_BODY_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
+/// and its prompt fit.
+pub use fragment_core::models::MODEL_BODY_MAX_BYTES;
 /// An unstreamed answer, or a refusal, read whole: at most `MAX_TOKENS`
 /// of text and its JSON.
 const ANSWER_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -64,15 +67,16 @@ pub struct InFragment<'a> {
     pub by_owner: bool,
 }
 
-/// One model call: who pays, which agent makes it, where, on which tier,
-/// the client's OpenAI-shaped body, and whether it streams.
+/// One model call: who pays, which agent makes it, where, on which tier
+/// (or the vision model), the client's OpenAI-shaped body, and whether it
+/// streams.
 pub struct ModelCall<'a> {
     /// The person whose ledger pays: the agent's owner.
     pub payer: &'a str,
     /// The agent making the call (its identity), when one does.
     pub agent: Option<&'a str>,
     pub fragment: Option<InFragment<'a>>,
-    pub tier: Tier,
+    pub named: Named,
     pub body: Value,
     pub stream: bool,
 }
@@ -113,7 +117,7 @@ struct Held {
     payer: String,
     reference: String,
     model: &'static str,
-    tier: Tier,
+    named: Named,
 }
 
 impl Held {
@@ -128,7 +132,7 @@ impl Held {
             match ledger::ask(&self.env, &self.payer, &settle).await {
                 Ok(settled) => {
                     // one line per event: `wrangler tail` drops lines (lesson 14)
-                    console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.tier, "model": self.model, "charge": settled.charge, "basis": settled.basis }));
+                    console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named.as_str(), "model": self.model, "charge": settled.charge, "basis": settled.basis }));
                     return;
                 }
                 Err(e) => last = e.message,
@@ -172,7 +176,8 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
     if body_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let bounded = bounds::bound(call.tier, call.body, call.stream).map_err(refused)?;
+    let model = bounds::capped(call.named, cfg.vision_model.as_str()).map_err(refused)?;
+    let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     // whose cap applies: the payer's own fragment's on its ledger; another
     // owner's, asked of theirs, unless the spender is that owner's
     let (fragment, capped) = match &call.fragment {
@@ -198,7 +203,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         // a reference of this call's own was never reserved before
         other => return Err(CellError::host(format!("a fresh model call's reservation answered {other:?}"))),
     }
-    let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, tier: call.tier };
+    let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, named: call.named };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
         Ok(r) => r,
@@ -392,9 +397,9 @@ pub(crate) struct Whose {
 }
 
 /// `POST /api/models/v1/chat/completions[?fragment=<name>]`: an agent's
-/// model call, signed by the agent (`for` names whom it acts for). Its
-/// owner pays; `fragment` (one the agent is in) is where the turn is, for
-/// that fragment's cap.
+/// model call, signed by the agent (`for` names whom it acts for), its
+/// `model` a tier or `vision`. Its owner pays; `fragment` (one the agent
+/// is in) is where the turn is, for that fragment's cap.
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, MODEL_BODY_MAX_BYTES).await?;
     let agent = crate::signer_for(env, &req, url, &body).await?;
@@ -402,18 +407,18 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
         return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
     }
     let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
-    let mut named = url.query_pairs().filter(|(k, _)| k == "fragment").map(|(_, v)| v.into_owned());
-    let fragment = named.next();
-    if named.next().is_some() {
+    let mut fragments = url.query_pairs().filter(|(k, _)| k == "fragment").map(|(_, v)| v.into_owned());
+    let fragment = fragments.next();
+    if fragments.next().is_some() {
         return Err(CellError::invalid("`fragment` is named once"));
     }
     let v: Value = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-    let tier = match v.get("model") {
-        None | Some(Value::Null) => bounds::tier_named(None),
-        Some(Value::String(m)) => bounds::tier_named(Some(m)),
+    let named = match v.get("model") {
+        None | Some(Value::Null) => bounds::route_named(None),
+        Some(Value::String(m)) => bounds::route_named(Some(m)),
         Some(_) => Err(bounds::Refusal::UnknownTier),
     };
-    let tier = tier.map_err(refused)?;
+    let named = named.map_err(refused)?;
     let stream = v.get("stream") == Some(&Value::Bool(true));
     let placed = match &fragment {
         None => None,
@@ -442,7 +447,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
             (Some(name), Some(whose)) => Some(InFragment { name, owner: &whose.owner, by_owner: whose.owner == owner && for_owner }),
             _ => None,
         },
-        tier,
+        named,
         body: v,
         stream,
     };
