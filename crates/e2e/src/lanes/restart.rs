@@ -1,7 +1,8 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
 //! job, sealed secrets and keys, sessions, and a channel's sequence
-//! included); then the node runs without hostnames and serves fragments
-//! from `/f/<name>/`.
+//! included; on a run with sandcastle nodes, a computer's placement, awake
+//! through the restart); then the node runs without hostnames and serves
+//! fragments from `/f/<name>/`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,6 +24,35 @@ const LEDGER_APP: &[u8] = include_bytes!("../../fixtures/ledger.mjs");
 const LEDGER_JSON: &[u8] = include_bytes!("../../fixtures/ledger.json");
 const SECRET: &str = "sk-e2e-restart-5b2e07";
 const MEMBER_EMAIL: &str = "restart-member@e2e.test";
+/// A person WorkOS signed in before sign-in was OpenID Connect.
+const KEPT_EMAIL: &str = "restart-kept@e2e.test";
+/// A node that dials in is back once it dials again: after a run's many
+/// restarts its backoff nears its ceiling (a minute, and jitter), and a
+/// dial may wait out its own bound (sandcastle's docs/node.md, The uplink).
+const NODE_BACK: Duration = Duration::from_secs(180);
+
+/// Its owner's wake of a computer placed on a node, again while its node is
+/// not back (each such answer `node_down`, typed): the last answer.
+fn woken(s: &Suite, api: &Api, who: &Keys, id: &str) -> crate::api::Reply {
+    let wake = || api.signed(who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let mut last = None;
+    s.eventually(NODE_BACK, || {
+        let r = wake();
+        let done = r.as_ref().is_ok_and(|r| r.status == 200 && r.body["phase"] == "awake");
+        if let Ok(r) = r {
+            last = Some(r);
+        }
+        done
+    });
+    last.unwrap_or_else(|| wake().unwrap_or_else(|e| panic!("a wake: {e:#}")))
+}
+
+/// The checks of a computer placed on a sandcastle node, across the restarts.
+const PLACED: [&str; 3] = [
+    "after a restart a computer on a sandcastle node is still placed there, and awake: its new object finds its container on the node, and puts it to sleep",
+    "woken after the restart, it wakes on the node it was placed on",
+    "after a crash it is still placed on its node, and wakes there",
+];
 
 fn count(api: &Api, keys: &Keys, name: &str) -> i64 {
     api.op(keys, name, "count", "q", json!({})).ok().and_then(|r| r.body["result"]["n"].as_i64()).unwrap_or(-1)
@@ -100,8 +130,71 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let searched = s.eventually(Duration::from_secs(30), || found(&api, "kale") == 1);
     anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
 
+    // a person WorkOS signed in before sign-in was OpenID Connect, kept as
+    // that sign-in kept them (docs/self-host.md, seam 4): AuthKit's runs
+    let kept = match s.oidc_signin() || s.hosted() {
+        false => Some(super::signin::kept_workos_person(s, &api, KEPT_EMAIL)?),
+        true => None,
+    };
+    // a sign-in begun and answered by the provider, finished only after the
+    // restart (it keeps its verifier and nonce in the registry; its
+    // provider's metadata and keys are fetched again)
+    let pending = api.unsigned("GET", "/auth/login?return=/after-restart&login_hint=restart-pending@e2e.test", None)?;
+    let pending_cookie = pending.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
+    let pending_back = api.external(&pending.header("location"))?;
+    anyhow::ensure!(pending.status == 302 && pending_back.status == 302, "a pending sign-in: {pending} / {pending_back}");
+
+    // a computer placed on a sandcastle node, awake as the platform stops
+    // (docs/self-host.md, seam 2): its container is the node's
+    let placed = match s.has_nodes() {
+        true => {
+            let who = api.person()?;
+            let r = api.signed(&who, "POST", "/api/computers", Some(&json!({})))?;
+            let id = r.body["computer"].as_str().unwrap_or("").to_string();
+            let r = api.signed(&who, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
+            let node = r.body["node"].as_str().unwrap_or("").to_string();
+            anyhow::ensure!(r.status == 200 && r.body["phase"] == "awake" && !node.is_empty(), "a computer on a node: {r}");
+            Some((who, id, node))
+        }
+        false => {
+            for label in PLACED {
+                s.skip(label, "it needs sandcastle nodes, and the run started none (FRAGMENT_E2E_NODES=two)");
+            }
+            None
+        }
+    };
+
     s.stop()?;
     let api = s.start(false, true)?;
+    if let Some((who, id, node)) = &placed {
+        let v = api.signed(who, "GET", &format!("/api/computers/{id}"), None)?;
+        let r = api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        s.ok(PLACED[0], v.body["node"] == node.as_str() && v.body["phase"] == "awake" && r.status == 200 && r.body["phase"] == "asleep", format!("{v} / {r}"));
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[1], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+    }
+    let r = api.call(Call { method: "GET", url: pending_back.header("location"), cookie: Some(pending_cookie), ..Call::default() })?;
+    let signed = r.cookies().into_iter().find_map(|c| c.strip_prefix("fragment_session=").map(str::to_string));
+    let shown = match &signed {
+        Some(session) => who(&api, session)?,
+        None => Value::Null,
+    };
+    s.ok(
+        "a sign-in begun before a restart finishes after it, as the person it began for",
+        r.status == 302 && r.header("location").ends_with("/after-restart") && shown.to_string().contains("restart-pending@e2e.test"),
+        format!("{r} / {shown}"),
+    );
+    match &kept {
+        Some(kept) => {
+            let session = api.sign_in(KEPT_EMAIL)?;
+            let me = who(&api, &session)?;
+            s.ok("after a restart a person kept from before sign-in was OpenID Connect signs in through AuthKit as themselves", me["id"] == kept.as_str(), &me);
+        }
+        None => s.skip(
+            "after a restart a person kept from before sign-in was OpenID Connect signs in as themselves",
+            "they are WorkOS's, made by the registry's levers: this run signs people in through the strict OpenID Connect fake, or keeps the hosted lane's rules",
+        ),
+    }
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
@@ -181,10 +274,34 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok("a mutation before the crash", r.status == 200, &r);
     // Local workerd's Workflows keep a sleep as a timer in the process
     // (miniflare's engine: no alarm behind it), so one sleeping through a
-    // crash of `wrangler dev` never wakes; Cloudflare's do.
-    s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+    // crash of `wrangler dev` never wakes; Cloudflare's do, and celld's
+    // (each instance a cell, its sleep an alarm: docs/self-host.md).
+    let nap = match s.durable_workflows() {
+        true => {
+            let (jobs, _) = jobs::jobs_fragment(s, &api, &owner, "restart-jobs", |_| {})?;
+            let r = api.op(&owner, &jobs, "nap", "through-the-crash", json!({ "ms": 4000 }))?;
+            let started = jobs::started(&r);
+            std::thread::sleep(Duration::from_millis(1000));
+            Some((jobs, started))
+        }
+        false => {
+            s.skip("a job sleeping through a crash wakes and finishes, once", "local Workflows do not outlive their process");
+            None
+        }
+    };
     s.crash()?;
     let api = s.start(false, true)?;
+    if let Some((who, id, node)) = &placed {
+        // awake as the platform crashed: its new object adopts the container, or starts it again, there
+        let r = woken(s, &api, who, id);
+        s.ok(PLACED[2], r.status == 200 && r.body["phase"] == "awake" && r.body["node"] == node.as_str(), &r);
+        api.signed(who, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+    }
+    if let Some((jobs, started)) = nap {
+        let woke = jobs::settle(&api, &owner, &jobs, started, &["succeeded", "held"], Duration::from_secs(60));
+        let naps = jobs::records(&api, &owner, &jobs, "feed").iter().filter(|r| r["kind"] == "nap").count();
+        s.ok("a job sleeping through a crash wakes and finishes, once", woke["status"] == "succeeded" && naps == 1, format!("{woke} ({naps} nap records)"));
+    }
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("after a crash an acknowledged mutation replays", r.body["replayed"] == true, &r);
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");

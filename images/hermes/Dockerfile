@@ -8,8 +8,41 @@
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
+# (or linux/arm64: Hermes' image is published for both, and every stage
+# here is built for the platform asked for; docs/self-host.md, seam 2).
 
 ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
+
+# sandbox-shim, as images/stub/Dockerfile takes it: Cloudflare's build for
+# amd64, and for arm64 built from the same source.
+FROM docker.io/cloudflare/sandbox:1.0.0 AS shim-amd64
+FROM rust:1.99-alpine AS shim-arm64
+RUN apk add --no-cache build-base
+ADD https://github.com/cloudflare/sandbox-sdk.git#f9e972a14123bef3b93e9bb337bab6e83419fe7e /src
+WORKDIR /src
+RUN cargo rustc --release --locked --package sandbox-tools --bin sandbox-shim -- -C target-feature=+crt-static \
+ && mkdir -p /usr/local/bin && cp target/release/sandbox-shim /usr/local/bin/sandbox-shim
+FROM shim-${TARGETARCH} AS shim
+
+# Litestream's release for the platform, pinned by hash.
+FROM scratch AS litestream-amd64
+ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /litestream.tgz
+FROM scratch AS litestream-arm64
+ADD --checksum=sha256:f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5 https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-arm64.tar.gz /litestream.tgz
+FROM litestream-${TARGETARCH} AS litestream
+
+# cua-driver's and gws's releases for the platform, pinned by hash (each
+# arm64 one as its release's own checksums list it).
+FROM scratch AS cua-driver-amd64
+ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
+FROM scratch AS cua-driver-arm64
+ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
+FROM cua-driver-${TARGETARCH} AS cua-driver
+FROM scratch AS gws-amd64
+ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
+FROM scratch AS gws-arm64
+ADD --checksum=sha256:e700fe63524932b10ec2130b47ece90aa850e66005fe52ccfc4cf8767bf9919a https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-musl.tar.gz /gws.tgz
+FROM gws-${TARGETARCH} AS gws
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -52,27 +85,42 @@ ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c4
 RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
-COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
-ADD --checksum=sha256:cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d https://github.com/benbjohnson/litestream/releases/download/v0.5.17/litestream-0.5.17-linux-x86_64.tar.gz /tmp/litestream.tgz
+COPY --from=shim /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
+COPY --from=litestream /litestream.tgz /tmp/litestream.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/litestream.tgz litestream && rm /tmp/litestream.tgz
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
 # Pinned (the release current at Hermes v0.21.5's), named to Hermes by
 # HERMES_CUA_DRIVER_CMD below, so Hermes never runs its upstream installer.
-ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
+COPY --from=cua-driver /cua-driver.tgz /tmp/cua-driver.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
  && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
 # gws, Google's Workspace CLI (github.com/googleworkspace/cli), pinned. Its
 # wrapper hands it the agent's Google connection: the placeholder in
 # GOOGLE_OAUTH_ACCESS_TOKEN as its access token (GOOGLE_WORKSPACE_CLI_TOKEN),
 # which the computer's egress swaps for the real token on Google's hosts.
-ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /tmp/gws.tgz
+COPY --from=gws /gws.tgz /tmp/gws.tgz
 RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.tgz \
  && printf '%s\n' '#!/bin/sh' '# gws with the agent'"'"'s Google connection (images/hermes/Dockerfile).' \
       '[ -n "$GOOGLE_WORKSPACE_CLI_TOKEN" ] || [ -z "$GOOGLE_OAUTH_ACCESS_TOKEN" ] || export GOOGLE_WORKSPACE_CLI_TOKEN="$GOOGLE_OAUTH_ACCESS_TOKEN"' \
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
+
+# Root for the session (Paul, 2026-10-05: "hermes needs to be able to
+# install binaries (not persisted)"). Hermes stays its unprivileged user, as
+# upstream runs it, and reaches root by passwordless sudo: `sudo apt-get
+# install`, a binary into /usr/local/bin, `sudo npm install -g`. The
+# computer is one person's VM and holds no secret (decisions 13, 43, 44),
+# so root inside it opens nothing of anyone else's. The system's
+# directories stay root's, as on a CI runner. What it installs lasts until
+# the computer's next start from this image (docs/computers.md, "Root in
+# our Hermes image"). apt's lists are kept, fresh as of this build.
+RUN apt-get -o Acquire::Retries=3 update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
+ && printf 'hermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && chmod 0440 /etc/sudoers.d/hermes \
+ && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/
 # The check the platform runs after it restores /data, before the gate
 # (docs/computers.md): the last hold's copies of Hermes' databases put back,
@@ -122,7 +170,17 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /run/computer /var/lib/fragment-run
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
-# restated, without upstream's VOLUME.
+# restated, without upstream's VOLUME. Two differ from upstream's:
+# - Hermes' file tools (write_file, patch) may write /tmp as well as its
+#   home (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
+#   to it), for the scratch an install is made from. /usr/local is not
+#   theirs to write: they run as Hermes' user, and root is the terminal's,
+#   through sudo.
+# - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
+#   optional backends (providers, platforms, speech; tools/lazy_deps.py),
+#   which a computer configures none of (its model is the platform's route,
+#   its chat the relay). Software the agent wants is its terminal's to
+#   install.
 FROM scratch
 COPY --from=hermes / /
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -133,7 +191,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
-    HERMES_WRITE_SAFE_ROOT=/data/hermes \
+    HERMES_WRITE_SAFE_ROOT=/data/hermes:/tmp \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \

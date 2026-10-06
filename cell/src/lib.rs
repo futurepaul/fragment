@@ -52,6 +52,8 @@ mod live;
 mod members;
 mod meter;
 mod models;
+mod nodes;
+mod oidc;
 mod ops;
 mod plane;
 mod principal;
@@ -556,28 +558,35 @@ fn command_body<T: serde::de::DeserializeOwned>(body: &[u8], what: &str) -> Cell
 }
 
 /// `/api/ledger…` (docs/ledger.md; docs/api.md, Ledger): `GET` reads the
-/// signer's (an agent's: its owner's); the deployment's operators grant
-/// credit and set a person's plan, seat and overdraft, the person named by
-/// username or identity.
+/// signer's (an agent's: its owner's); the deployment's operators read
+/// anyone's (`GET /api/ledger/<person>`: who used what, own hardware's
+/// points with it), grant credit, and set a person's plan, seat and
+/// overdraft, the person named by username or identity.
 async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
     if let (Method::Get, []) = (req.method(), rest) {
         return json_answer(&ledger::ask(env, &payer_of(&who)?, &ledger::Status {}).await?);
     }
-    let (Method::Post, [person, command]) = (req.method(), rest) else {
-        return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", req.method().as_ref(), url.path())));
+    // a command, or (none) an operator's read
+    let (person, command) = match (req.method(), rest) {
+        (Method::Get, [person]) => (*person, None),
+        (Method::Post, [person, command]) => (*person, Some(*command)),
+        (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     };
     if !cfg.is_operator(who.key.as_deref(), &who.id)? {
-        return Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators grant credit or set plans, seats and overdrafts"));
+        return Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators read another's ledger, grant credit, or set plans, seats and overdrafts"));
     }
-    let person = match *person {
+    let person = match person {
         "me" => who.id.clone(),
         id if npub::is_identity(id) => id.to_string(),
         username if fragment_proto::valid_username(username) => ask_registry(env, &calls::FindUsername { username: username.to_string() }).await?.identity.id,
         other => return Err(CellError::invalid(format!("{other:?} is not a username, an identity (id:…), or `me`"))),
     };
-    match *command {
+    let Some(command) = command else {
+        return json_answer(&ledger::ask(env, &person, &ledger::Status {}).await?);
+    };
+    match command {
         "grant" => {
             let mut g: fragment_proto::ledger::GrantCredit = command_body(&body, "grant")?;
             // who granted it is who signs
@@ -959,6 +968,8 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
+        // a person's own nodes: the page they approve one at (nodes.rs)
+        (_, ["nodes", "pair"]) => nodes::page(req, env, cfg, &url).await,
         (_, ["share" | "join", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
@@ -1038,6 +1049,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let who = signer(env, &req, &url, &body).await?;
             let rest = rest.to_vec();
             connections::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await
+        }
+        (_, ["api", "nodes", rest @ ..]) => {
+            let rest = rest.to_vec();
+            nodes::api(req, env, cfg, &url, &rest).await
         }
         (method, ["api", "computers", rest @ ..]) => {
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;

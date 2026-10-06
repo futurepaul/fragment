@@ -18,7 +18,8 @@
 //! computer answers when @mentioned, the lead otherwise. Its ports answer
 //! its owner on its own origin through a one-time ticket, in a tab or in a
 //! frame of the platform's page (frames.rs, `computer_ports`), and no one
-//! else.
+//! else. On a node the run started, its container killed under it while
+//! awake, it is started again by itself and comes up.
 //! A routine, its agent fragment's cron, wakes it asleep, and so does its
 //! agent being added to a new chat, which it then follows at once.
 
@@ -788,7 +789,19 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         s.ok("the first build is pinned again", r.status == 200 && r.body["image"] == "stub", &r);
         std::thread::sleep(QUEUE_DRAIN);
         api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
+        let woken_at = fragment_devstack::sandcastle::now_ms();
         s.ok("woken, it runs the first build again (a rollback)", version() == "1", version());
+        // its container killed under it while it is awake, it is started
+        // again by itself and comes up (on a node: the run kills it there;
+        // the placement section does so on each kind of node)
+        let killed = "its container killed under it while awake, the computer starts it again by itself, and it comes up";
+        match api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?.body["node"].as_str().map(str::to_string) {
+            Some(node) if s.has_nodes() => {
+                let (back, shown) = super::placement::killed_comes_back(s, api, &owner, &id, &node, &origin, woken_at)?;
+                s.ok(killed, back, shown);
+            }
+            _ => s.skip(killed, "it needs a node the run started to kill a container on (FRAGMENT_E2E_NODES)"),
+        }
     }
 
     // a computer's egress alone asks for a wake subscription

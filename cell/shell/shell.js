@@ -907,12 +907,14 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked, uses] = await Promise.all([
+  const [ledger, linked, uses, nodes] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+    api("GET", "/api/nodes").catch(() => null),
   ]);
-  const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
+  // an OpenID Connect sign-in may give no email: its username, else its subject
+  const emails = (state.me.subjects ?? []).map((x) => x.email || x.handle).filter(Boolean);
   const id = line("Identity", state.me.id);
   id.lastChild.classList.add("mono");
   const account = section(
@@ -955,21 +957,35 @@ async function openSettings(push = true) {
   actions.append(link, signout);
   account.append(actions);
   const standing = ledger?.standing?.standing;
+  // a computer on a machine of theirs is never charged: its use is tracked
+  // in points (a point is $0.001 at list: crates/core/src/price.rs `points`)
+  const points = ledger?.ownHardwarePoints ?? 0;
+  const ownsMachines = (nodes?.nodes ?? []).some((n) => n.kind === "own");
   const credit = ledger
     ? section(
         "Credit",
         line("Plan", ledger.plan === "seat_always_on" ? "Always-on seat" : ledger.plan === "seat" ? "Seat" : "Guest"),
         line("This month", `${usd(ledger.availableMicros ?? ledger.balanceMicros ?? 0)} left`),
+        ...(points > 0 || ownsMachines ? [line("Your own machines", `${points.toLocaleString()} ${points === 1 ? "point" : "points"} this month, not charged`)] : []),
         ...(standing && standing !== "ok"
           ? [el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + ".")]
           : []),
       )
     : section("Credit", el("p", "muted", "Your credit could not be read."));
+  credit.id = "settings-credit";
   const c = state.computer;
+  const onOwn = c?.node && nodes?.nodes?.some((n) => n.id === c.node && n.kind === "own");
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [
+          line("State", c.phase.replace("_", " ")),
+          line("Version", c.image),
+          ...(c.node ? [line("Runs on", nodeName(nodes, c.node))] : []),
+          ...(onOwn ? [line("Its use", "Tracked in points, not charged: it runs on your own machine")] : []),
+          ...(c.placed ? [line("Placed", c.placed)] : []),
+          ...(c.why ? [el("p", "settings-warning", c.why)] : []),
+        ]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   if (c) {
@@ -997,7 +1013,93 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, ...nodesSection(nodes), agents, skills, connections, cli, ...credited(WALLPAPER));
+}
+
+// ---- computers (experimental; docs/self-host.md, seam 2): the nodes the
+// person's computers may run on, the platform's and their own (bring your
+// own computer: a sandcastle node they paired), each up or down with their
+// computers on it, and where a new computer runs. A computer stays on the
+// node it first started on; the choice is for the next. A person has one
+// computer today: several, one per machine, is the experimental part.
+const NODE_STATE = { up: "Up", down: "Down", revoked: "Revoked" };
+// the end of a node's id, beside its name: two of a person's nodes named
+// alike before names were each person's own are told apart by it
+// (crates/core/src/pairing.rs `id_suffix`, ID_SUFFIX_CHARS)
+const nodeSuffix = (id) => `…${id.slice(-6)}`;
+const nodeName = (nodes, id) => {
+  const n = nodes?.nodes?.find((x) => x.id === id);
+  return n ? (n.kind === "own" ? `${n.name} ${nodeSuffix(n.id)} (yours)` : n.name) : id;
+};
+function nodesSection(nodes) {
+  if (!nodes || (!nodes.nodes.length && !nodes.byoc)) return [];
+  const s = section("Computers (experimental)");
+  s.id = "settings-nodes";
+  s.append(el("p", "muted", "Where your computers run. Experimental: a computer stays on the machine it first started on; what you choose here is for your next one."));
+  // where new computers run: the platform's rule, or a node they may use
+  const usable = nodes.nodes.filter((n) => n.state !== "revoked");
+  const where = el("label", "settings-line");
+  const pick = el("select");
+  pick.id = "settings-nodes-prefer";
+  const auto = el("option", null, "Automatic (the platform's machines)");
+  auto.value = "";
+  pick.append(auto, ...usable.map((n) => {
+    const o = el("option", null, `${nodeName(nodes, n.id)}, ${n.arch}${n.state === "up" ? "" : ", down now"}`);
+    o.value = n.id;
+    return o;
+  }));
+  pick.value = nodes.prefer && usable.some((n) => n.id === nodes.prefer) ? nodes.prefer : "";
+  pick.onchange = async () => {
+    pick.disabled = true;
+    try {
+      await api("PUT", "/api/nodes/prefer", { node: pick.value || null });
+    } catch (e) {
+      notice("That was not changed", e.message);
+    }
+    await openSettings(false);
+  };
+  where.append(el("span", "settings-key", "New computers run on"), pick);
+  s.append(where, el("p", "muted", "If that machine is down, or cannot run the computer, the platform's rule places it, and the computer says why."));
+  for (const n of nodes.nodes) {
+    const row = el("div", "provider node");
+    row.dataset.node = n.id;
+    row.dataset.state = n.state;
+    const head = el("div", "provider-head");
+    head.append(el("span", "provider-name", n.name), el("span", "provider-kind", n.kind === "own" ? `Yours · ${n.arch} · ${nodeSuffix(n.id)}` : `The platform's · ${n.arch}`));
+    head.append(el("span", `provider-state ${n.state === "up" ? "connected" : "needs_reauthorization"}`, NODE_STATE[n.state] ?? n.state));
+    row.append(head);
+    if (n.why && n.state === "down") row.append(el("span", "muted", n.why));
+    if (n.computers.length) row.append(el("span", "muted", n.computers.length === 1 ? "Your computer runs here." : `${n.computers.length} of your computers run here.`));
+    if (n.kind === "own" && n.state !== "revoked") row.append(el("span", "muted", "What runs here is tracked in points, not charged."));
+    if (n.kind === "own" && n.state !== "revoked") {
+      const actions = el("div", "settings-actions");
+      const revoke = el("button", "quiet", "Revoke");
+      revoke.type = "button";
+      revoke.onclick = async () => {
+        if (!confirm(`Revoke ${nodeName(nodes, n.id)}? It is cut off at once, and runs none of your computers again${n.computers.length ? ", the one there included" : ""}.`)) return;
+        revoke.disabled = true;
+        try {
+          await api("DELETE", `/api/nodes/${seg(n.id)}`);
+        } catch (e) {
+          notice("It was not revoked", e.message);
+        }
+        await openSettings(false);
+      };
+      actions.append(revoke);
+      row.append(actions);
+    }
+    s.append(row);
+  }
+  if (nodes.byoc) {
+    s.append(
+      say("Bring a machine of yours: start sandcastle on it, then run this there and approve the code it shows here:"),
+      el("pre", "command", `sandcastle-node pair ${location.origin} --config /etc/sandcastle-node/node.json \\\n  --engine /var/lib/sandcastle/engine.sock --ports /var/lib/sandcastle/ports.sock \\\n  --egress /run/sandcastle-node/egress.sock`),
+      say("It takes the machine's name, which none of yours may share: `--name` gives it another. Behind a private CA, add `--ca-file` with its PEM. It runs only the computers you choose for it, here, and what runs there is tracked in points, not charged."),
+    );
+  } else {
+    s.append(el("p", "muted", "This platform's machines are its operator's: it pairs none of yours."));
+  }
+  return [s];
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform

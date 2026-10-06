@@ -7,7 +7,10 @@
 //! with nothing but the image changed.
 //!
 //! It builds the Hermes image (3.8 GB), so it runs only by name
-//! (`cargo xtask e2e --only hermes`).
+//! (`cargo xtask e2e --only hermes`). With sandcastle nodes
+//! (`FRAGMENT_E2E_NODES`: docs/self-host.md, S3) the same flows run there:
+//! the images built into local Docker for the engine double (`two`), or
+//! loaded into the machine's engine (`real`), every computer a microVM.
 
 use std::path::Path;
 use std::time::Duration;
@@ -46,6 +49,14 @@ const PNG: &[u8] = &[
     0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00,
     0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
+/// An install for the session, offline: a package Hermes builds and
+/// installs through apt as root, a program it puts in /usr/local/bin as
+/// root, a file in its home; then both programs run, on one line (the
+/// scripted model quotes a tool's first line).
+const INSTALL: &str = r#"d=/tmp/fragment-hello && mkdir -p $d/DEBIAN $d/usr/bin && printf 'Package: fragment-hello\nVersion: 1.0\nArchitecture: all\nMaintainer: e2e <e2e@e2e.test>\nDescription: a package an agent installs\n' > $d/DEBIAN/control && printf '#!/bin/sh\necho hello-from-apt\n' > $d/usr/bin/fragment-hello && chmod 0755 $d $d/DEBIAN $d/usr/bin/fragment-hello && dpkg-deb --build --root-owner-group $d /tmp/fragment-hello.deb > /dev/null && sudo apt-get install -y /tmp/fragment-hello.deb > /dev/null 2>&1 && printf '#!/bin/sh\necho hello-from-usr-local\n' > /tmp/fragment-hi && sudo install -m 0755 /tmp/fragment-hi /usr/local/bin/fragment-hi && echo kept-in-its-home > /data/hermes/fragment-kept.txt && echo "$(fragment-hello) $(fragment-hi)""#;
+/// After a sleep and a wake: the file in its home. Nothing is said of the
+/// install: a wake from a snapshot keeps it, a start from the image does not.
+const HOME_AFTER: &str = "cat /data/hermes/fragment-kept.txt";
 /// A fragment someone shares with the agent's owner, whose `notes` its
 /// editors post to.
 const NOTES_JSON: &[u8] = br#"{ "channels": { "notes": { "read": "viewer", "post": "editor" } } }"#;
@@ -68,16 +79,15 @@ fn said_count(text: &str) -> Option<u32> {
 
 /// The Hermes images beside the stubs in the node's staged cell config:
 /// `hermes`, and `hermes-next`, the same image another build (for the
-/// upgrade and the rollback).
+/// upgrade and the rollback). wrangler builds them for its containers; a
+/// run with sandcastle nodes builds them from the same config for the
+/// nodes (`start_nodes`).
 pub fn stage_images(project: &Path) -> Result<()> {
     let config = project.join("wrangler.jsonc");
     let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&config)?)?;
-    // the Hermes image builds from the repo's root: it carries the fragment CLI
-    let root = fragment_devstack::repo_root();
-    let dockerfile = root.join("images/hermes/Dockerfile");
     let images = v["containers"][0]["images"].as_object_mut().context("the staged config's container has images")?;
-    images.insert("hermes".into(), json!({ "dockerfile": dockerfile, "build_context": root }));
-    images.insert("hermes-next".into(), json!({ "dockerfile": dockerfile, "build_context": root, "build_vars": { "IMAGE_VERSION": "2" } }));
+    images.insert("hermes".into(), fragment_devstack::sandcastle::hermes_image(None));
+    images.insert("hermes-next".into(), fragment_devstack::sandcastle::hermes_image(Some("2")));
     std::fs::write(&config, serde_json::to_string_pretty(&v)?)?;
     Ok(())
 }
@@ -250,8 +260,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let aig = super::ledger::entries(api, &owner_id, "aig:");
     s.ok("and each is settled on its owner's ledger", !aig.is_empty() && aig.iter().all(|e| super::ledger::end_of(e) == "settled"), json!(aig));
 
-    // a tool step, then the answer that names it
-    let r = say(2, "run: echo tool-ran")?;
+    // a tool step, then the answer that names it. Hermes' gateway looks for
+    // tool progress every 0.3 s while its turn runs, so a turn over sooner
+    // shows no step (on a node, against the scripted model, a turn can take
+    // 0.1 s): the command takes a second, as a real one does
+    let r = say(2, "run: sleep 1 && echo tool-ran")?;
     let tooled = turn_for(&r);
     s.eventually(TURN, || ended(&tooled).is_some());
     let steps: Vec<Value> = work_of(&records(api, &owner, &chat_name, "work"), &tooled).into_iter().filter(|r| r["body"]["kind"] == "turn.step").collect();
@@ -518,6 +531,17 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("an agent its owner holds at viewer edits nothing", status_of(&held).as_deref() == Some("403"), json!(reply_of(&held)));
     api.signed(&owner, "PUT", &format!("/api/identities/{identity}/held"), Some(&json!({ "held": null })))?;
 
+    // an install for the session (Paul, 2026-10-05; docs/computers.md, "Root
+    // in our Hermes image"): Hermes' user runs anything as root with sudo,
+    // here offline (a package it builds, through apt; a program into
+    // /usr/local/bin)
+    let installed = run(s, 90, INSTALL)?;
+    s.ok(
+        "Hermes installs software as root with passwordless sudo, a package through apt and a program into /usr/local/bin, and runs both",
+        said(&installed, "hello-from-apt hello-from-usr-local"),
+        json!({ "reply": installed }),
+    );
+
     // a restart mid-turn: a turn waiting on its card when the computer sleeps
     let r = say(10, "run: rm -rf /tmp/fragment-restart && echo tool-ran")?;
     let lost = turn_for(&r);
@@ -544,6 +568,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         "after a sleep and a wake, Hermes answers with the conversation it had before (its /data restored)",
         reply_of(&remembered).is_some_and(|t| t.contains("do you remember") && said_count(&t).is_some_and(|n| n > 1)),
         json!({ "reply": reply_of(&remembered), "model_saw": model_saw(s, "do you remember", 4) }),
+    );
+    // what it wrote in its home came back with /data; the install may or
+    // may not have (docs/computers.md, "Root in our Hermes image")
+    let after = run(s, 91, HOME_AFTER)?;
+    s.ok(
+        "after the sleep and the wake, what it wrote in its home beside the install is kept",
+        said(&after, "kept-in-its-home"),
+        json!({ "reply": after }),
     );
 
     // an upgrade, then a rollback, by pin

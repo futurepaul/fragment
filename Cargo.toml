@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/fakes", "crates/devstack", "crates/e2e", "crates/templates", "xtask"]
+members = ["cli", "crates/proto", "crates/nip98", "crates/core", "crates/fakes", "crates/devstack", "crates/e2e", "crates/lan", "crates/templates", "xtask"]
 # cell/ and agent/ build for wasm32 with worker-build.
 exclude = ["cell", "agent"]
 
@@ -10,3 +10,8 @@ license = "MIT"
 
 [profile.release]
 strip = true
+
+# RSA keys are made by the OIDC fake (dev, the e2e) and oidc.rs's tests:
+# its bignums unoptimized make one in seconds instead of milliseconds.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3

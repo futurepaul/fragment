@@ -8,6 +8,7 @@ mod blobs;
 mod brain;
 mod chat;
 mod author;
+mod codestore;
 mod computers;
 mod control;
 mod credentials;
@@ -24,6 +25,8 @@ mod ledger;
 mod limits;
 mod members;
 mod notes;
+mod pairing;
+mod placement;
 mod plane;
 mod posts;
 mod restart;
@@ -58,6 +61,7 @@ const LANES: &[Lane] = &[
     members::secrets,
     delegation::delegation,
     plane::files,
+    codestore::codestore,
     plane::deploy,
     templates::templates,
     share::share,
@@ -101,6 +105,8 @@ const LANES: &[Lane] = &[
     computers::computers,
     chat::chat,
     shell::shell_ui,
+    placement::placement,
+    pairing::pairing,
     hermes::hermes,
     sync::folder_sync,
     restart::restart,
@@ -123,11 +129,11 @@ const LANES: &[Lane] = &[
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "sync", "restart", "pathmode"],
+    &["shell", "computers", "chat", "placement", "pairing", "hermes", "sync", "restart", "pathmode"],
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
-        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
+        "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "codestore", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
     ],
 ];

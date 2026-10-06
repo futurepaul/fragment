@@ -91,13 +91,15 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, isolation, frames, ops, public,
+  delegation, files, codestore, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  placement, pairing, hermes, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
-  in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
+  in Docker (or on two sandcastle nodes the run starts, with
+  `FRAGMENT_E2E_NODES=two` and `SANDCASTLE_DIR`, which `placement`
+  needs: docs/self-host.md, seam 2), and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
   (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
@@ -159,9 +161,12 @@ prebuilt bundle is in the debt ledger).
   spend their owner's ledger (dev people are seats, with the month's
   included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
-  http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
-  a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Its secrets are seeded into
+  http://127.0.0.1:8790/ through the WorkOS fake's AuthKit on :8795 (any
+  email; Pipes on :8794), or a real WorkOS environment when
+  `WORKOS_CLIENT_ID_FILE` and `WORKOS_API_KEY_FILE` name its files and
+  `WORKOS_AUTHKIT_DOMAIN`, `WORKOS_OAUTH_CLIENT_ID_FILE` and
+  `WORKOS_OAUTH_CLIENT_SECRET_FILE` its OAuth application (sign-in is
+  OpenID Connect: docs/self-host.md, seam 4). Its secrets are seeded into
   wrangler's local Secrets Store in `cell/.wrangler/state` and bound by
   name as a deploy binds them (`--clean` clears them with the state;
   docs/secrets.md). Each boot's log is

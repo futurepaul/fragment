@@ -528,6 +528,25 @@ fn ceil_div(n: i128, d: i128) -> i128 {
     (n + d - 1) / d
 }
 
+/// One point, in micro-dollars of list price: a tenth of a cent. Own
+/// hardware (a computer on a node its owner paired: docs/self-host.md,
+/// seams 2 and 10) is never charged; what it used is tracked in points
+/// instead, so a company reads who used what, across people and months,
+/// in one unit. At list price, not the charge: the operator's margin and
+/// fee move no points. An hour awake on the default computer
+/// (`DEFAULT_INSTANCES`, $0.064224) is 64.224 points.
+pub const POINT_MICROS: i64 = 1_000;
+
+/// List-price micro-dollars as points (`POINT_MICROS`), rounded up, so any
+/// use shows as at least one. The one conversion: everything that shows
+/// points (the ledger's status, and so the shell and the CLI) reads it
+/// from here.
+pub fn points(list_micros: i64) -> i64 {
+    assert!(list_micros >= 0, "a list price is never negative");
+    let points = (list_micros as u64).div_ceil(POINT_MICROS as u64);
+    i64::try_from(points).expect("points are fewer than the micro-dollars they count")
+}
+
 /// Micro-dollars as dollars for people: `$0.0412`, `$20.00`.
 pub fn dollars(m: i64) -> String {
     let sign = if m < 0 { "-" } else { "" };
@@ -762,6 +781,23 @@ mod tests {
         assert_eq!(dollars(41_234), "$0.041234");
         assert_eq!(dollars(-2 * USD), "-$2.00");
         assert_eq!(dollars(i64::MIN), "-$9223372036854.775808");
+    }
+
+    /// Own hardware's points: a tenth of a cent of list price each, rounded
+    /// up (any use shows); an hour of the default computer is 65.
+    #[test]
+    fn points_count_list_price_by_the_tenth_of_a_cent() {
+        assert_eq!([0, 1, 999, 1_000, 1_001, 2_000].map(points), [0, 1, 1, 1, 2, 2]);
+        let hour = PriceBook::defaults().price(&Usage::Awake { instance: DEFAULT_INSTANCES[0].0.into(), ms: 3_600_000 }).unwrap();
+        assert_eq!((hour.list, points(hour.list)), (64_224, 65));
+        assert_eq!(points(30 * 24 * hour.list), 46_242, "an always-on month, about $46 at list");
+        assert_eq!(points(CHARGE_MAX), CHARGE_MAX / POINT_MICROS, "the largest row's list price converts without overflow");
+    }
+
+    #[test]
+    #[should_panic(expected = "never negative")]
+    fn a_negative_list_price_is_no_points() {
+        points(-1);
     }
 
     /// Usages are tagged by kind, in snake_case, and refuse unknown fields.

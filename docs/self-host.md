@@ -1,0 +1,2002 @@
+# fragment self-hosted
+
+Status: **proposed 2026-10-03** (Paul asked for a spike). It lives on the
+branch `selfhost`, which is kept unmerged and rebased onto master until
+master is live on Cloudflare. Where this disagrees with
+`docs/cloudflare-v1.md`, that doc wins for master; this one is the
+self-hosted lane its "The product" section says returns once the
+product works.
+
+## The four ways fragment runs
+
+1. **On Cloudflare.** This is master's plan of record.
+2. **Self-hosted on bare metal.** celld runs the cells and sandcastle
+   runs the computers, with state in a bucket. fragment.club ran this way
+   until the cut (tag `celld-final`), minus sandcastle.
+3. **Local, or a company's network, with no internet.** The LLM is on the
+   same network. A developer's box is the smallest case; an intranet is
+   the largest.
+4. **Blends.** Any part runs where another doesn't. The first blend worth
+   selling is computers on sandcastle nodes (faster, bigger, cheaper
+   machines than Containers' 4 vCPU and 12 GiB ceiling) with everything
+   else on Cloudflare.
+
+## The rule: one cell, interfaces, and placement as configuration
+
+The cell is written against two kinds of interface:
+
+- **Cloudflare's runtime APIs:** Durable Objects, the Worker Loader and
+  Facets, Workflows, Queues, R2, and `ctx.container`. These are already
+  the platform's interfaces (decision 2). celld implements them, and
+  sandcastle implements `ctx.container`.
+- **Protocols, for whatever sits outside a runtime.** These are OpenAI's
+  chat completions, OpenID Connect, the code-store contract, the Chrome
+  DevTools Protocol, and Web Push.
+
+Self-hosting supplies other implementations of the same interfaces. The
+cell never asks "am I self-hosted?". It reads capabilities from its
+configuration instead: where its model upstream is, where a computer
+runs, who signs people in, and where its git lives. A mode flag is a
+design bug, for the same reason decision 2's rule makes a Hermes branch
+one.
+
+So the measure of this branch is **how little of it is not
+configuration**. Every place where self-hosting forces a branch in the
+cell is a seam master should fix. Those are listed under "What this
+shows about master", below.
+
+## The seams
+
+Each seam lists what Cloudflare uses, what self-hosting uses, what the
+spike does, and what it suggests for master.
+
+### 1. The runtime: workerd or celld
+
+celld (`github.com/futurepaul/celld`, a fork of `denoland/celld`)
+implements everything the cell uses except the `ai` and `browser`
+bindings. Workers AI and Browser Rendering are out of celld's scope, so
+it refuses those keys, along with `build` and `routes`, at deploy time.
+Its `containers` support exists only on the fork's `krun-engine` branch.
+This design doesn't need it (seam 2).
+
+- **Cloudflare:** `wrangler deploy`, from the config `xtask deploy`
+  renders.
+- **Self-hosted:** `celld deploy` (a fleet) or `celld dev` (one node,
+  state in a local directory), from a config rendered for celld. The
+  render drops `ai`, `browser`, `build`, `routes` and `containers`.
+  Cards then go to the renderer (seam 7).
+- **The bucket:** celld takes a cell's ownership with a conditional
+  write, so its bucket must support `If-None-Match` and `If-Match`. AWS
+  S3, R2, Ceph RGW and Tigris do. **Garage does not**, and MinIO's
+  community edition has been archived since February 2026. A one-box
+  install needs no bucket at all: `celld dev` keeps state on disk.
+- **Master:** nothing, beyond a celld target in xtask.
+
+### 2. Computers: Cloudflare's container API, placed on a node
+
+This is the largest seam, and the one the earlier designs circled
+(`docs/two-substrates.md` and `docs/containers-on-celld.md` on their
+branches; sandcastle's `docs/krun-engine.md`, E6).
+
+The Computer DO already reaches its container through one object,
+`ContainerHost` (`cell/entry.mjs`). Every runtime call it makes is a
+method of `ctx.container`, and so is every call the Sandbox SDK's
+`DirectoryBackup` makes. The seam is therefore that object:
+
+- **`ctx.container`:** Cloudflare Containers, or Docker under
+  `wrangler dev`.
+- **A sandcastle node:** a `RemoteContainer` in the cell that implements
+  the same methods over the node's engine API. `ContainerHost` picks one
+  by the computer's placement, and nothing else changes: not
+  `computer.rs`, not `DirectoryBackup`, not the image.
+
+**Decision proposed: sandcastle is always reached as a node, even on the
+same box.** The alternative is celld's `krun-engine` backend, where
+`ctx.container` inside celld is sandcastle over a unix socket. Reaching
+it as a node instead means:
+
+- **one path for every placement.** A blend (the cell on Cloudflare) and
+  a LAN (the cell on one box, computers on others) need a node anyway.
+  With one box as the same path over loopback, there is one thing to
+  test.
+- **celld needs no container support.** That is one fewer fork branch to
+  carry and rebase.
+- **sandcastle's ceiling stops being celld's.** Placement across
+  machines, isolation tiers and larger sizes are a node's concern.
+
+**The engine API, on the network.** sandcastle's engine already speaks
+Cloudflare's container API, as HTTP with JSON on a unix socket. A node
+adds:
+
+- **a TCP listener,** where every request is signed by the platform. A
+  node is enrolled with a key that only the platform and the node hold.
+- **exec over a WebSocket.** The engine's framed stream travels in binary
+  messages, because a Worker's `fetch` can upgrade only to a WebSocket.
+- **guest ports over HTTP.** `ANY /v1/containers/{name}/ports/{port}/…`
+  is proxied to the guest, WebSockets included, in place of `ports.sock`'s
+  file descriptors.
+- **intercepts to a URL.** An intercepted request goes to the platform's
+  `/api/nodes/egress`, signed by the node and naming the container and
+  the intercept's index. The Computer DO dispatches it to the binding it
+  set. A callback that finds no binding (because the object restarted
+  while its container ran) re-arms first.
+- **its CA at Cloudflare's path,**
+  `/etc/cloudflare/certs/cloudflare-containers-ca.crt`. The engine
+  already does this, so the Hermes image needs no change.
+
+**Reachability is the network's job, not the protocol's.**
+
+| Where the node is | How the cell reaches it |
+|---|---|
+| The same box | loopback |
+| A LAN or an intranet | a private address with TLS from the operator's CA |
+| A datacenter | a public address with TLS |
+| Behind NAT, or a corporate proxy that allows only outbound HTTPS | the **uplink** (phase S7): the node dials a WebSocket out to a `Node` Durable Object, which offers the same HTTP API through a `fetch` |
+
+The uplink is the only shape that works everywhere (the research below),
+and it is the "person's own computer" shape of `two-substrates.md`'s
+phase 5. iroh is an optimisation over it, not a transport we depend on.
+
+**The uplink (S7).** sandcastle's `docs/node.md`, "The uplink", is the
+protocol. In short:
+
+- The node dials `<platform>/api/nodes/uplink`. The dial is signed with
+  the node's secret over its id, a fresh nonce and the time. The platform
+  answers with a signed `hello` over that nonce before the node serves
+  anything.
+- One `Node` Durable Object per node id holds the socket (`cell/uplink.mjs`).
+  Its `fetch` sends a request down the socket as a stream of frames, and
+  streams the answer back. A `101` comes back as a `WebSocketPair`
+  bridged to the stream. A call is one message, because a Worker's TCP
+  Nagles (found item 9).
+- When the socket drops, a read the node had not yet answered (`wait`,
+  inspect) is asked again on its next dial. So a computer's `monitor()`
+  outlives a reconnect.
+- `NodeContainer` takes its transport from the node's listing in
+  `FRAGMENT_NODES` (below): a `fetch` to the node's `url`, or the `Node`
+  object's `fetch` for a node with `"uplink": true`. Nothing else in it
+  changes, and the calls are signed as before.
+- Intercepts stay on HTTPS to `/api/nodes/egress`: a node that can dial
+  the platform can reach it, and the router spreads them across the
+  computers' objects instead of one node's.
+
+**Placement: computers across nodes (built, branch `selfhost-placement`).**
+A deployment lists its nodes in one variable, `FRAGMENT_NODES`, which
+`fragment_core::placement` checks at the cell's first request:
+
+```json
+{ "nodes": [
+    { "id": "box", "url": "http://192.168.50.7:9400", "arch": "x86_64", "capacity": 32 },
+    { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8 } ],
+  "images": {
+    "stub": { "x86_64": "registry.lan/fragment-stub:3", "aarch64": "registry.lan/fragment-stub:3-arm64" },
+    "hermes": "registry.lan/fragment-hermes:7" } }
+```
+
+- **A node** is its id, how the platform reaches it (`url`, or `uplink`
+  when it dials in), its architecture, and its capacity: the computers it
+  holds.
+- **Its secret** is the Worker secret `FRAGMENT_NODE_SECRET_<ID>` (the id
+  upper-cased, `-` as `_`), never in the variable. That is how operator
+  keys live already (`FRAGMENT_KEY_<NAME>`, docs/secrets.md). The list is
+  configuration a deploy renders, and a secret per node rotates alone.
+- **An image** is named as computers are pinned to it, with one
+  reference for every architecture (a multi-arch index, or a fleet of one
+  architecture) or one per architecture. A node takes a computer only
+  when its image has a reference for the node's architecture.
+- **Why one JSON variable**, not a variable per field: a node is a row
+  whose fields are checked together (an uplink has no url; an image needs
+  a reference for some architecture), and a row a deploy adds or drops
+  whole.
+
+**The rule.** A computer is placed at its first start (`place` in
+`computer.rs`). Every node is probed at once: its health within 6 s, the
+architecture it reports, and its `Node` object's count. The candidates are
+the nodes that are up, report the architecture they are listed with, and
+hold the image for it. Of these, the node with the fewest computers for
+its capacity takes it. A tie goes to the node listed first, which is the
+deployment's preference. The node's object takes the computer once and
+refuses one past capacity, so two placements that race never overfill a
+node. Placed one after another on two nodes of one capacity, computers
+alternate.
+
+**Pinned for life.** The node is the computer's (`node` in its view, and
+a meta row that `ContainerHost` reads as an isolate starts), because its
+container and its snapshots live there. **Moving a computer is not
+built**, and a node's count never falls. Since `/data` is backed up to
+the bucket, a move would be a start on another node and a restore, as a
+new image already is (decision 18).
+
+**A node that is down** gets a typed answer, not a hang:
+
+- every call to a node is bounded: a health 6 s, the first look at a
+  container 6 s, a start 120 s (it checks health first), any other call
+  30 s. A `wait`, an exec's stream and a port's stream are not bounded;
+- a failed transport, or a 502, 503 or 504 (the `Node` object with no
+  uplink open, or a proxy in front), is `NodeDown`;
+- the wake answers 503 `node_down`, naming the node, and the view's `why`
+  says the same until a start comes up. The computer stays placed there;
+- when no node can take a new computer, the wake answers 503 `no_node`,
+  with each node's reason.
+
+**One path.** `ContainerHost` uses `ctx.container` when there is no
+`FRAGMENT_NODES`, and otherwise the `NodeContainer` of the computer's
+node. The single-node variables (`FRAGMENT_NODE_URL`, `_SECRET` and
+`_IMAGES`) are gone: a cell that still has them refuses its first request
+and names what replaced them. An owner's choice of node is the next
+part's.
+
+**Bring your own computer (experimental; branch `selfhost-pair`).** A
+person starts sandcastle on a machine of theirs, pairs it with their
+account, and it becomes a node for their computers alone. Paul's sketch
+(2026-10-05): "fire up sandcastle on whatever machine and then somehow
+pair it with their fragment account and it becomes avail as a resource";
+"picking your node should be in settings".
+
+- **Two kinds of node.** The deployment's (`FRAGMENT_NODES`, the
+  operator's, everyone's) and a person's own (paired, theirs alone).
+- **The switch: `FRAGMENT_BYOC`, `on` or `off`, off unless the deployment
+  says on.** Off is a company's intranet, whose IT provides every node; on
+  is a home or personal deployment. Off is the default because on opens an
+  unsigned endpoint (a node's start) and lets any account attach a
+  machine, and a deployment should choose that, not inherit it. On needs
+  `FRAGMENT_NODES` for its images (a person's node runs the references for
+  its architecture), and may then list no node of its own (`"nodes": []`).
+  Off, every step below is refused, saying why.
+- **Pairing is a device authorization** (RFC 8628's shape; the CLI's key
+  approval is the model, `fragment_core::pairing`):
+  1. `sandcastle-node pair https://fragment.home.arpa --config
+     /etc/sandcastle-node/node.json` asks the platform, unsigned (`POST
+     /api/nodes/pair`, its name and architecture). It prints a link and an
+     8-letter code (two groups of four; 20 consonants, so about 2^34.6).
+     The device code it polls with is 32 random bytes that only it holds;
+     the platform keeps its SHA-256.
+  2. The person opens the link where they are signed in (`/nodes/pair`),
+     checks the code against the node's terminal, and approves. The form
+     posts from the platform's own origin, with the session, as `/cli`'s
+     does. The page warns: approve only a machine you started. A box on
+     the form, "Run my new computers on it", makes the node their choice
+     in the same step (below): a person's first computer starts as they
+     pick a username, before settings can be reached, so without it a new
+     person's first computer could never land on their own node.
+  3. The platform names the node (`paired-<16 hex>`, never the node's
+     choice) and mints its secret (32 random bytes), sealed in the registry
+     for that id (`keys::seal`, scope `PairedNode:<id>`).
+  4. The node's next poll takes the id and the secret, once: the pairing
+     row goes with the answer, so a replay finds nothing. The node writes
+     the secret to its file (0600) and its config (the platform, its
+     uplink as that id, the secret's file, and `ca_file` for a private
+     CA), then `serve` dials. The secret is never printed or shown.
+- **Bounds.** A code lives 10 minutes. At most 32 pairings wait and 10
+  begin a minute, platform-wide (a start is unsigned). A poll sooner than
+  its interval (5 s) answers `slow_down` and adds 5 s. A person may try 5
+  wrong codes in 10 minutes; past that, nothing is looked up. A person
+  holds at most 8 live nodes, and 32 rows with revoked ones.
+- **Names, one per person.** A node is named by `sandcastle-node pair`
+  (the machine's host name, or `--name`). A person's live nodes are named
+  apart (`pairing::approvable`, `same_name`: whatever the case, or spaces
+  around): a pairing named as one of theirs is refused, at the page and at
+  the approval (409 `already_exists`), naming that node by the end of its
+  id and saying how to go on: revoke it in settings, or pair under another
+  name with `--name`. A revoked node's name is free again; another person
+  may use any name. Settings show each of a person's nodes with the last 6
+  characters of its id beside its name (`pairing::id_suffix`), in the list
+  and in "New computers run on", so two named alike before this rule
+  (Paul's two "mac"s, one down, one up) are told apart.
+- **Ids.** A deployment node may not begin `paired-` (its list is refused
+  at the first request), and a person's node never has another's id: the
+  uplink checks a paired id's dial against the secret the registry holds
+  for it. A node that dials as someone else's node, or as the deployment's,
+  without its secret is refused (401), and as a deployment node that does
+  not dial in, 403.
+- **Revoking** (settings, or `DELETE /api/nodes/{id}`): the registry drops
+  the secret and keeps the row, so the node's computers can say what became
+  of it; the node's `Node` object closes its uplink (4003), fails every
+  call in flight, and from then on refuses its dials (403) and answers
+  every call `node_revoked` (410). A computer placed there stays placed
+  (moving is not built): its wake answers 410 `node_revoked`, typed, and
+  its view says why. Its intercepts are refused too.
+- **The choice, in settings: "where new computers run".** Automatic (the
+  deployment's rule over the deployment's nodes), or one node the person
+  may use: one of the deployment's, or one of theirs. A person's own node
+  is never in the deployment's rule: a node someone was tricked into
+  approving runs nothing until they pick it (in settings, or with the
+  approval's box ticked).
+- **Placement honors it at a computer's first start** (`rank_for`): the
+  chosen node first if it can take the computer, then the deployment's
+  rule. When it cannot (down, another architecture than it is listed or
+  paired with, no image for its architecture, full, or no longer theirs:
+  revoked, delisted, or BYOC off), the deployment's rule places it, and the
+  computer says so in its view's `placed`: "by the deployment's rule: mac,
+  its owner's choice, is down (…)". With nowhere to fall back, the wake
+  answers `no_node`, each node's reason given, the choice's first. A
+  fallback is for life, as every placement is; a laptop that sleeps is the
+  case to know.
+- **Own hardware is tracked in points, never charged** (seam 10; Paul,
+  2026-10-05: "not actually billed, but it's useful to keep track of
+  usage"). The notion rides on the placement: a computer placed on a
+  paired node meters its awake time as every computer does (the same
+  intervals, the same `awake:<computer>:<from>` rows to its owner's
+  ledger), and each row names the node (`MeterRow::own_node`). The ledger
+  prices it at list, keeps it, charges nothing, and adds its list price
+  to the month's own-hardware count, which the status shows in points.
+  Its wake is never refused for want of credit (no credit, past the
+  overdraft): the ledger's refusal is passed over when the computer is on
+  its owner's node, or, not placed yet, when their chosen node of theirs
+  can take it now (placed there and only there: a refused wake pins
+  nothing to the deployment's nodes). A guest's or a canceled seat's
+  refusal still stands. Its agents' model calls are the platform's and
+  billed as ever. A computer on one of the deployment's nodes is billed
+  exactly as before.
+- **Experimental, and why.** A person has one computer today, placed once.
+  So the choice matters for a computer that has not started yet (a new
+  person's, or after a choice is set before the first agent); an existing
+  computer stays where it is, and settings show where. Several computers
+  for one person, one per machine, is the part with no UI yet. Settings'
+  "Computers (experimental)" lists the person's nodes and the deployment's
+  (each up or down, their computers on each), the choice, and each of
+  their nodes' Revoke.
+
+**Images per architecture.** Both computer images now build for
+`linux/amd64` and `linux/arm64` from one Dockerfile each, every stage for
+the platform asked for:
+
+- Hermes' base image is published for both.
+- `sandbox-shim`, which DirectoryBackup execs, is not: Cloudflare
+  publishes `cloudflare/sandbox:1.0.0` for amd64 alone. amd64 keeps
+  Cloudflare's binary. arm64 builds it from the same source
+  (`cloudflare/sandbox-sdk` at `@cloudflare/sandbox@1.0.0`,
+  `crates/sandbox-tools`, Apache-2.0), as that repo's own Dockerfile
+  does.
+- Litestream's release is pinned by hash for each architecture.
+- An operator loads the images on each node and names their references
+  in `FRAGMENT_NODES`' `images`. A platform only names them (sandcastle's
+  docs/node.md).
+
+**Snapshots stay node-local.** A computer that moves to another node
+starts from its image and restores `/data` from its last backup. That
+is the path a new image already takes (decision 18).
+
+**Isolation is reported, not assumed.** A node is a microVM host when it
+has `/dev/kvm`, as this box does. KVM is often missing inside corporate
+VMs: VMware leaves nested virtualization unsupported in production, and
+AWS and GCP offer it only on some instance types. gVisor is the
+non-KVM tier, later. The node states its tier, and the operator's policy
+decides whether that tier may run strangers' code.
+
+**Master:**
+
+- A computer's placement becomes a field of the computer: `cloudflare`
+  or `node:<id>`. Decision 13's "bring-your-own machines can return
+  without a redesign" is this field. Built here as `node`, for
+  deployments whose computers are all on nodes; a blend of both is that
+  field with `ctx.container` as one more place.
+- A computer should need no internet. Today a guest calls code.storage
+  directly (the debt-ledger entry "An agent's sync and deploy reach
+  code.storage directly"). With git behind an intercept
+  (`git.fragment.internal`), as models and storage already are,
+  `enableInternet` becomes the operator's policy. That is what an
+  intranet needs, and it is a security win on Cloudflare too.
+
+### 3. Models: one OpenAI-compatible upstream
+
+**Today.** The route already speaks OpenAI chat completions downstream:
+guests call `model.fragment.internal/v1/chat/completions`, and the goose
+agent calls `/api/models/v1/chat/completions`. Upstream it speaks the
+Workers AI binding's shape. Its dev and e2e seam, `FRAGMENT_AI_URL`,
+posts that binding-shaped input to `<url>/run/<@cf id>`.
+
+**Self-hosted.** `FRAGMENT_MODEL_URL` is an OpenAI-compatible base URL:
+vLLM, llama.cpp's `llama-server --jinja`, Ollama, LiteLLM, or a
+company's gateway. `FRAGMENT_MODEL_KEY_FILE` holds its key, when it
+takes one. `FRAGMENT_MODELS` maps each tier's model id to the upstream's
+model name, keeping the `@cf` ids as the price book's labels. Usage
+comes from `stream_options.include_usage`. A call whose answer carries
+no usage is charged the reserved worst case, as today.
+
+**Image steps** stay off unless an images upstream is configured. A
+local diffusion server must answer with a JPEG (`media.rs`).
+
+**What fits this box (an RTX 5070 Ti, 16 GB):**
+
+- **gpt-oss-20b** is the agentic floor, at 128K context.
+- **Qwen3.6-35B-A3B,** with its experts offloaded to RAM.
+- **Bonsai-2-27B** is being set up by another session in
+  `~/dev/localinfer`, behind an OpenAI-shaped `/v1/chat/completions`.
+
+Tool calling varies by server: Ollama's `/v1` has no `tool_choice`, and
+llama.cpp has known argument quirks. So the self-hosted lane runs the
+real-Hermes lane against a real local model, not only a scripted one.
+
+**Master:** consider the same protocol on Cloudflare. AI Gateway has an
+OpenAI-compatible endpoint (`…/compat/chat/completions`, model
+`workers-ai/@cf/…`). If its Unified Billing, metadata and session
+affinity hold there (to verify), the binding-shaped path and its fake
+could go. Then dev, the e2e, Cloudflare and self-hosting would speak one
+upstream protocol. Either way, the e2e's fake should speak the protocol
+production uses.
+
+### 4. Sign-in: OpenID Connect
+
+**Master today.**
+
+- The sign-in is WorkOS-shaped: `/user_management/authorize`, then a JSON
+  `authenticate` call.
+- The cell reads `user.id` and `user.email` from the response, and the
+  `sid` claim of an access token that it does not verify. It trusts TLS
+  instead.
+- People are keyed by `(issuer, subject)`, with the issuer
+  `workos:<client_id>`. That key is already right for OIDC.
+
+**Can WorkOS sign people in over standard OpenID Connect? Yes** (research,
+2026-10-04). AuthKit is an OAuth 2.0 and OpenID Connect authorization
+server at the AuthKit domain for an *OAuth application* (WorkOS Connect,
+first-party for our own app):
+
+- **Discovery** at `https://<authkit domain>/.well-known/openid-configuration`:
+  the issuer is the domain itself, with `/oauth2/authorize`,
+  `/oauth2/token`, `/oauth2/jwks` and `/oauth2/userinfo`, and RS256.
+  It lists neither client methods nor PKCE methods; its OAuth metadata
+  (`/.well-known/oauth-authorization-server`) lists S256, and `none`,
+  `client_secret_post` and `client_secret_basic`
+  ([metadata](https://workos.com/docs/reference/workos-connect/metadata/openid-configuration)).
+- **The code flow**: `/oauth2/authorize` requires `client_id`, `nonce`,
+  `redirect_uri`, `response_type=code` and `scope`, with `state` and
+  S256 optional ([authorize](https://workos.com/docs/reference/workos-connect/authorize)).
+  `/oauth2/token` takes the client's id and secret in the body
+  ([token](https://workos.com/docs/reference/workos-connect/token)).
+- **The id_token**: RS256 by the JWKS, with `iss`, `aud` (the request's
+  client id), `sub`, `name`, `given_name`, `family_name`, `email`,
+  `email_verified`, `nonce`, `exp` and `iat` (token, above). Applications
+  "must verify the tokens … using the JWKS for your environment", and
+  WorkOS's own example is `openid-client` pointed at the AuthKit domain
+  ([OAuth applications](https://workos.com/docs/authkit/connect/oauth)).
+- **`sub` is the WorkOS user id**, `user_…`: userinfo's `sub` is
+  `user.id` ([userinfo](https://workos.com/docs/reference/workos-connect/userinfo)),
+  the same users AuthKit manages ([Connect](https://workos.com/docs/authkit/connect)).
+  It is the id Pipes takes.
+
+Three gaps the docs leave, which only real WorkOS settles:
+
+- **PKCE.** The authorize reference says "PKCE is only supported by
+  applications created through Dynamic Client Registration"; the OAuth
+  guide says a public application must use it. The cell always sends
+  S256 and its verifier. A confidential application should ignore them,
+  as RFC 6749 3.1 says a server ignores parameters it does not know.
+- **Logout.** There is no `end_session_endpoint`. Signing out ends the
+  platform's sessions only. AuthKit's own session stays, so the next
+  sign-in in that browser is silent. Master ends it through
+  `/user_management/sessions/logout?session_id=`, with the `sid` of a
+  User Management access token
+  ([sessions](https://workos.com/docs/authkit/sessions)); a Connect access
+  token's `sid` is the consent's id
+  ([claims](https://workos.com/docs/authkit/connect/token-claims)).
+- **Invitations.** `invitation_token`, `login_hint` and `screen_hint` are
+  documented for `/user_management/authorize` alone
+  ([hints](https://workos.com/blog/customizing-authkit-flows)). With
+  sign-up off, an invitee accepts on AuthKit's own page: the dashboard's
+  "User invitation URL" goes back to its default. Then they sign in.
+
+**Built (branch `selfhost-signin`): one sign-in, OpenID Connect. WorkOS
+AuthKit is one issuer, configured.** There is one flow and no provider's
+code path:
+
+- **The request.** The router reads the provider's metadata and sends the
+  browser to its `authorization_endpoint` with a state bound to the
+  browser by a cookie, a nonce, and PKCE's S256 challenge. The registry
+  keeps the verifier and the nonce with the state; the verifier never
+  leaves it.
+- **The callback.** The registry spends the state first, before anything
+  is awaited, so a callback sent again or raced finishes once. It
+  exchanges the code form-encoded (RFC 6749 4.1.3, with the verifier),
+  the client authenticated with Basic (id and secret form-encoded first,
+  2.3.1) or in the form.
+- **The id_token is verified** (`fragment_core::oidc`): its signature by
+  a key of the provider's JWKS only, RS256 (the `rsa` crate, public-key
+  operations only) or ES256 (`p256`); never `none`, an HMAC, an
+  algorithm the provider does not list, or a key the token names itself.
+  Then `iss` exactly, `aud` (and `azp` when there are several audiences),
+  `exp`, `iat` and `nbf` within two minutes of skew, an `iat` at most 15
+  minutes old, the nonce, and `sub`. A token that fails is 401, logged as
+  `signin.refused` with why.
+- **Who it is.** `(keyed_as, sub)`: the issuer as the deployment keys its
+  people, its URL unless it says otherwise. The email, name and username
+  are attributes, refreshed at each sign-in and never matched. No email
+  is assumed: a sign-in is shown by its email, else its first username
+  claim (`preferred_username`, `upn`), else its `sub`.
+- **The session and logout.** A platform session of the platform's own
+  (30 days) keeps the id_token sealed. Logout is RP-initiated
+  (RP-Initiated Logout 1.0) when the provider advertises an
+  `end_session_endpoint`: the id_token is the `id_token_hint` (Okta and
+  ADFS require one), with `client_id` and `post_logout_redirect_uri`.
+  Otherwise (AuthKit, Dex) it ends the sessions here only.
+- **Caches.** The metadata and the JWKS are kept an hour per isolate. A
+  key the JWKS lacks fetches it again, at most once in 15 seconds: a
+  rotation is picked up within that, and a provider naming keys it never
+  published is not asked again and again. Only the provider's own token
+  endpoint hands the cell an id_token, so the bound is against a
+  misbehaving provider, not a stranger.
+
+| Setting | What |
+|---|---|
+| `FRAGMENT_OIDC_ISSUER` | the issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback). Its metadata is at `<issuer>/.well-known/openid-configuration` |
+| `FRAGMENT_OIDC_CLIENT_ID` | the client |
+| `FRAGMENT_OIDC_CLIENT_SECRET` | a Worker secret, read only by keys.rs (docs/secrets.md); absent, the client is public and PKCE is its only proof |
+| `FRAGMENT_OIDC_KEYED_AS` | the issuer people are keyed under, default `FRAGMENT_OIDC_ISSUER`; required beside `WORKOS_CLIENT_ID`. Printable ASCII, at most 255 bytes, never `e2e.test`. A `workos:` one must be `WORKOS_CLIENT_ID`'s |
+| `FRAGMENT_OIDC_SCOPES` | default `openid email profile` |
+| `FRAGMENT_OIDC_CLAIMS` | JSON: `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. ADFS: `{"username": ["upn", "unique_name"]}` |
+| `FRAGMENT_OIDC_AUTH` | `client_secret_basic`, `client_secret_post` or `none`; default, with a secret, the first of the two the provider lists (Basic when it lists none) |
+
+**WorkOS, as configuration.** A WorkOS deployment's sign-in is these
+settings, spelled out in one place (`devstack::OidcVars::authkit`, which
+`cargo xtask dev`, `cargo xtask deploy` and the e2e use):
+
+- the issuer `https://<authkit domain>`;
+- the client: an OAuth application, first-party, with its own id and
+  secret (not the environment's), its redirect URI
+  `<platform>/auth/callback`;
+- `client_secret_post`, as WorkOS's token reference has it;
+- `FRAGMENT_OIDC_KEYED_AS=workos:<WORKOS_CLIENT_ID>`.
+
+The deploy config's `workos` names `authkit_domain`,
+`oauth_client_id_file` and `oauth_client_secret_file` beside the
+environment's files (`deploy/example.jsonc`).
+
+The WorkOS code left is Pipes': `keys.rs` (`pipes_*`), `connections.rs`
+and the computer's swap. It reads a person's WorkOS user id as their
+subject under `workos:<client id>` (`WorkOsConfig::issuer`). Gone are
+`/user_management/authorize` and `/authenticate`, the unverified `sid`,
+WorkOS's logout, and the invitation token's pass-through.
+
+**The move: the key is kept, not mapped.** Every person WorkOS signed in
+is `(workos:<client id>, user_…)` in the registry's `subjects`. AuthKit's
+id_token names the same `user_…` as `sub`, and
+`FRAGMENT_OIDC_KEYED_AS=workos:<client id>` keys it there. So:
+
+- every existing identity matches on its next sign-in, and no key in
+  `subjects` is rewritten (a sign-in refreshes the attributes alone, as
+  it always has);
+- Pipes reads the same key for old and new people alike;
+- going back is the old code and settings, with no data to undo;
+- sessions are by identity, so live ones last through the deploy;
+- a sign-in pending across the deploy (at most ten minutes) began without
+  a verifier, and is told to start again;
+- the `sessions` table of a deployment from before keeps a `workos_sid`
+  column that nothing reads.
+
+Mapping instead would rewrite every row's issuer to the AuthKit URL:
+a migration of live data, with Pipes' key to move alongside, and an
+orphaned account wherever one step missed. The way left to orphan anyone
+is a deployment keying them under another name, so the isolate refuses
+to start beside `WORKOS_CLIENT_ID` without `FRAGMENT_OIDC_KEYED_AS`, or
+with a `workos:` one of another environment; and the one place the WorkOS
+settings are spelled out sets it.
+
+Where it lives: the rules in `crates/core/src/oidc.rs`; the metadata,
+keys and verification in `cell/src/oidc.rs`; the state, verifier, nonce,
+exchange and session in `cell/src/registry/signin.rs`; the redirects in
+`cell/src/auth.rs`; the secret and the token request in
+`cell/src/keys.rs`. The fakes: `crates/fakes/src/oidc.rs` plays a strict
+provider (`Profile::Strict`, as Keycloak or Dex) or AuthKit
+(`Profile::AuthKit`: its metadata field for field, `/oauth2/*`, the nonce
+required, PKCE checked when sent, the client in the body, `user_…`
+subjects, WorkOS's claims, a JWT access token, userinfo, and no logout);
+`crates/fakes/src/workos.rs` is that AuthKit at a port of its own, as
+AuthKit's domain is its own, beside Pipes, whose users are AuthKit's.
+
+**Private CAs.** A company's browsers already trust its CA. The cell's
+own fetches (metadata, JWKS, token) go through its runtime's TLS:
+
+- `wrangler dev`: Miniflare hands workerd the certificates in
+  `NODE_EXTRA_CA_CERTS` as trusted, so a private CA works.
+- celld: a Worker's `fetch` trusts the webpki (Mozilla) roots, plus the
+  PEM bundle `CELLD_EXTRA_CA_FILE` names (the fork's `selfhost` branch:
+  `fetch`, outbound WebSockets and `connect()`). The LAN mode hands it its
+  root (docs/self-host-lan.md).
+- Cloudflare: Workers trust public CAs. A provider on a private CA is
+  unreachable from Cloudflare anyway, unless it is fronted publicly.
+- On one box, the issuer may be plain http on loopback, as the fakes and
+  Dex are here.
+
+**Offline providers.** Dex, Keycloak and Authentik serve discovery and
+a JWKS, and need no internet. ADFS 2016 and later does too, with `upn`
+and `unique_name` instead of an email. Entra and WorkOS need the
+internet. SAML and LDAP go through a bridge the company already runs
+(Keycloak, Authentik, Dex), not into the cell.
+
+**Not built:**
+
+- admins from a groups claim. Operators stay `FRAGMENT_OPERATORS`. A
+  groups claim would need the registry to keep a role on the identity,
+  refreshed at each sign-in, and the signer's resolve to carry it.
+- `private_key_jwt`, the userinfo endpoint, refresh tokens, and back-
+  or front-channel logout. The platform's session is its own (30 days),
+  so **a person disabled at the provider keeps their sessions until they
+  end or sign out.** A company will ask for back-channel logout, or a
+  shorter session, next.
+- two providers at once. A deployment has one; `/auth/link` adds a
+  second sign-in from the same provider.
+
+**Connections** (WorkOS Pipes) are online by nature. A deployment whose
+`FRAGMENT_PROVIDERS` names no connection offers none. A person signed
+in by another provider has no WorkOS user, so they have no connections
+either.
+
+**Evidence** (`selfhost-signin`, 2026-10-04):
+
+- Host tests: 13 in `fragment_core::oidc`, among them whom a sign-in keys
+  (AuthKit's people keep their key; beside WorkOS the URL is never a
+  default; another environment's name is refused). The fakes' own tests
+  run the cell's half of the flow against each provider; AuthKit's checks
+  its metadata, the client in the body, `user_…` subjects, userinfo, and
+  what it refuses (no nonce, PKCE other than S256, a person without an
+  email). `xtask deploy`'s renders the WorkOS settings. `cargo xtask
+  check`: 428 passed.
+- The e2e on celld, sections auth, identities, signin, levers, restart
+  and shell:
+  - through the WorkOS fake's AuthKit (the default): 279 passed, 0
+    failed, 0 skipped;
+  - through the strict fake (`FRAGMENT_E2E_SIGNIN=oidc`): 271 passed, 0
+    failed, 2 skipped (the shell's Pipes checks, and the restart's
+    WorkOS person: both are WorkOS's people).
+- Every sign-in check runs against both providers, the same checks on
+  the same flow. What differs is what the providers differ in: the
+  client's method (`client_secret_post` configured for AuthKit, Basic
+  chosen from the strict one's list), logout (AuthKit has none: the
+  session ends here), and the strict provider's people with no email and
+  its ES256.
+- The move: a person kept as WorkOS's sign-in kept them, `(workos:<client
+  id>, user_…)`, signs in through AuthKit as the same identity with their
+  one sign-in, and Pipes finds their connection; again after a restart.
+  A new AuthKit person is keyed `workos:<client id>`, their handle the
+  WorkOS user id.
+- The eight spoiled id_tokens, the PKCE code injection, the spent code
+  and the key rotation pass against AuthKit's fake as against the strict
+  one.
+- The whole suite on celld through the WorkOS fake's AuthKit: 1302
+  passed, 2 failed, 11 skipped. Neither failure is sign-in's:
+  - lockdown's health probe, right after a refused oversized body, met a
+    closed connection; the section alone then passed, 19 of 19;
+  - the ledger's card check expects a shot, which celld does not take.
+    The check is not gated on `shoots_cards`, on `selfhost` as here.
+- `cargo xtask dev --runtime celld` signed a person in through the WorkOS
+  fake's AuthKit (curl, `FRAGMENT_DEV_PORT=9420`): S256, a state and a
+  nonce to `/oauth2/authorize`, the callback's session, and the person
+  `(workos:client_fragment_dev, user_…)`.
+
+**Evidence before, 2026-10-03** (`selfhost-oidc`, OpenID Connect beside
+WorkOS):
+
+- **Dex v2.45.1** (the static binary from its release image, run
+  unprivileged in /tmp, memory storage, one static user) signed in on
+  the dev stack on celld (`FRAGMENT_DEV_PORT=9310`). curl drove the
+  browser's part.
+  - `/auth/login` went to Dex with S256, a state and a nonce. The
+    password form posted, and Dex redirected to the callback, which set
+    the session.
+  - The identity came back as `(http://127.0.0.1:5556/dex, <Dex's sub>)`,
+    with `admin@example.com` as its email. Dex's local users carry no
+    `preferred_username`, so the handle fell back to the `sub`.
+  - Signing in again was the same person. A wrong password signed no one
+    in.
+  - `fragment login` approved its key in that session, and `fragment
+    whoami` answered the same identity.
+  - Logout was local only (Dex advertises no `end_session_endpoint`), and
+    the session then answered 401.
+  - With Dex rotating its keys every 20 seconds (it signs with a new key
+    the moment it publishes it), sign-in still worked after a rotation:
+    the refetch picked up the new key.
+- The whole suite on celld through the OIDC fake: 1273 passed, 1 failed
+  (a race in share, which passed alone), 12 skipped.
+
+**Landing it in master.** Master signs people in on the finite.place
+previews, which hold real data. The move, in order:
+
+1. **Paul, in the WorkOS dashboard** (staging first, then production):
+   - create an OAuth application, first-party, confidential, its
+     redirect URIs `https://<platform>/auth/callback` (and
+     `http://127.0.0.1:8790/auth/callback` on staging), and save its client
+     id and secret to files;
+   - note the AuthKit domain;
+   - point the "User invitation URL" back at AuthKit's default, so an
+     invitee accepts there.
+2. **One PR to master, the code** (this branch's sign-in commits, without
+   the rest of the spike): the core and the cell as here, the fakes, the
+   e2e, `xtask deploy`'s three new fields, the docs. CI proves the flow
+   on the fakes. It does not deploy.
+3. **The hosted lane on a branch preview** (`e2e.finite.place`) with the
+   staging application. It signs its people in through the levers, so it
+   proves the deploy, the settings, and that nothing else moved. A person
+   then signs in by hand through real AuthKit (Paul, or a test user with
+   a password), which proves what no fake can:
+   - discovery, the JWKS and RS256 verify;
+   - `aud` is the application's client id;
+   - S256 and the verifier are accepted, or ignored;
+   - `client_secret_post` is accepted;
+   - **`sub` equals the `user_…` Pipes knows**: a person who signed in
+     before signs in as the same identity, and their connections answer;
+   - an invitee can accept and sign in;
+   - logout, and what the next sign-in does.
+4. **Production**: Paul's deploy with production's application, then
+   one sign-in by an existing person, checked to be the same identity.
+
+**The risk to live sign-in:**
+
+- If AuthKit refuses the authorize request (PKCE, a parameter), no one
+  can sign in until a revert. Existing sessions keep working: they are
+  the platform's own, 30 days.
+- If `sub` were not the User Management id, every existing person would
+  get a fresh identity on sign-in: the orphaning the move must not cause.
+  The docs say it is the same id, and step 3 checks it before production.
+  Recovery would be `/auth/link` from an old session, or a one-off
+  re-key, since no row was rewritten.
+- Signing out no longer ends AuthKit's session, so a shared browser
+  signs its next person in silently. If that matters, the fix is
+  `prompt=login` after a logout (if AuthKit honors it), or a shorter
+  AuthKit session in the dashboard.
+- A revert is the old code and the old settings. The data is untouched.
+
+### 5. Files: the code-store contract
+
+**Today.** code.storage's REST contract is the subset that
+`crates/fakes/src/codestorage.rs` implements, with real rules: JWT
+scopes, compare-and-swap, merges, signed webhooks. The fake is not git:
+its commit ids are synthetic, and it keeps one JSON file behind one
+mutex, bound to loopback.
+
+**Self-hosted.** A code store that implements the contract durably:
+- the fake's rules over real git on disk (gitoxide), or over the bucket;
+- reachable by the cell, the CLI and, through an intercept, computers;
+- named in configuration, as `CODESTORAGE_API_URL` already is.
+
+**The store: macrofiche** (`github.com/futurepaul/macrofiche`, a
+sibling project as sandcastle is): git itself, pinned and driven as
+jailed processes, answering the contract (its `docs/contract.md`, read
+from this repo, and `docs/design.md`).
+
+**Built (branch `selfhost-macrofiche`): the stack and the e2e on a code
+store outside them,** chosen by configuration:
+
+| Where the git lives | dev (`cargo xtask dev`) | the e2e |
+|---|---|---|
+| the fake in the process (the default) | nothing set | `FRAGMENT_E2E_CODESTORE` unset or `fake` |
+| a store already running | `CODESTORAGE_API_URL`, `CODESTORAGE_ORG`, `CODESTORAGE_PRIVATE_KEY_FILE` (the variables the cell reads in production; the key by its file) | the same, with `FRAGMENT_E2E_CODESTORE=external` |
+| macrofiche, started for the stack | `MACROFICHE_BIN` | `FRAGMENT_E2E_CODESTORE=macrofiche` and `MACROFICHE_BIN` |
+
+- `devstack::codestore` holds the choice and macrofiche's start-up: its
+  state directory (`target/devstack/macrofiche` in dev, the run's scratch
+  in the e2e), a config file naming its listener and the org with its
+  public key (SPKI PEM, `OrgKey::public_pem` from the private key the
+  cell signs with), started on the fake's port in dev, and stopped with
+  the stack. That shape follows macrofiche's design before it had a
+  binary, and lives in one function.
+- `fake-codestorage` (`crates/fakes`) is the fake as a process of its
+  own, with an org key: a store outside the node whose levers nothing can
+  reach. It proves the external mode without macrofiche.
+- On an external store the e2e reads git only through the contract's
+  routes, with tokens it signs with the org key (`crates/e2e/src/store.rs`):
+  a file, a head, the org's repos, main's history. Its own writes are
+  another writer's: a commit pack, and a deploy's ref move (live created
+  at main's tip, else merged to it).
+- **No store registers the cell's webhook.** macrofiche configures one
+  webhook per org (its design, question 2), and the cell's are per
+  fragment (`/api/f/<name>/webhook`, each with its own secret). So, as on
+  the hosted fleet, `refresh` and the poll move the pins: the e2e follows
+  each of its writes with the owner's `refresh`, as the CLI does.
+- A check that pulls one of the fake's levers is a skip that says which:
+  an outage of file reads, sabotaged commit packs, counts of the requests
+  it answered, and its refs' ephemeral flag. Beside each, the part a real
+  store can show is checked: a replay commits nothing (main's history, in
+  place of the fake's count of packs), two saves are two commits, a
+  preview ref is at main's tip read with `ephemeral=true`.
+- e2e `create` asserted the fake's UUID-shaped url form; on an external
+  store the url form is the store's own (the service's, and macrofiche's,
+  is the repo's name).
+
+Running it:
+
+```sh
+# the fake as a process of its own
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out org-key.pem
+target/release/fake-codestorage --org fragment-ext --key-file org-key.pem --port 9450 &
+FRAGMENT_E2E_CODESTORE=external CODESTORAGE_API_URL=http://127.0.0.1:9450 \
+  CODESTORAGE_ORG=fragment-ext CODESTORAGE_PRIVATE_KEY_FILE=$PWD/org-key.pem \
+  FRAGMENT_E2E_RUNTIME=celld CELLD_BIN=../celld/target/release/celld cargo xtask e2e
+# macrofiche, started by the run
+FRAGMENT_E2E_CODESTORE=macrofiche MACROFICHE_BIN=../macrofiche/target/release/macrofiche cargo xtask e2e
+# dev on either
+MACROFICHE_BIN=../macrofiche/target/release/macrofiche cargo xtask dev --clean
+```
+
+A cell remembers each fragment's repo, so a dev stack moved to another
+store takes `--clean`.
+
+**Evidence, 2026-10-03:**
+
+- The whole suite on celld, its git in the fake run as a process of its
+  own (`fake-codestorage`, `FRAGMENT_E2E_CODESTORE=external`), none of
+  its levers reachable: 1293 passed, 0 failed, 22 skipped. Eleven skips
+  are the fake's levers or its webhook, each naming which; four are the container
+  sections, seven the card checks (celld shoots no cards). The store
+  held 158 repos after `create` alone: its 150 fillers were made through
+  `POST /api/repos`, and the name made again was found past the list's
+  first page.
+- The sections the change touches, on the fake in the process as
+  before (create, files, deploy, templates, ops, effects, site,
+  appfiles, blobs, notes, brain, ai, ledger, sync, restart, addon): 471
+  passed, 0 failed, 7 skipped (cards).
+- `cargo xtask dev --runtime celld` on the same store
+  (`FRAGMENT_DEV_PORT=9100`): ready in 4.6 s, its banner and the cell's
+  variables naming the store.
+- macrofiche: not yet run. Its design is done and its engine phase under
+  way; it has no binary to start yet.
+
+**Master:** none now. Cloudflare Artifacts may replace code.storage
+(decision 1). If it does, the self-hosted code store implements whatever
+contract master then speaks.
+
+### 6. Blobs and computer storage
+
+- **Cloudflare:** R2.
+- **Self-hosted:** celld's R2 over its bucket, or over the local
+  directory under `celld dev`.
+- **Master:** nothing.
+
+### 7. Preview cards: Browser Rendering's routes, over a pinned browser
+
+- **Cloudflare:** Browser Rendering, through the `BROWSER` binding.
+  `wrangler dev` runs its local mode (a Chrome for Testing it downloads
+  on the first shot).
+- **Self-hosted:** the same three routes (`POST /v1/devtools/browser`,
+  the CDP socket at `/v1/devtools/browser/<id>`, and `DELETE`), served by
+  the **renderer** over a pinned chrome-headless-shell. The cell reaches
+  it with `fetch` at `FRAGMENT_BROWSER_URL`, which wins over the binding.
+  card.rs's acquire, CDP and release are one path; only who answers
+  differs (`Renderer`).
+
+**Built (branch `selfhost-cards`).**
+
+**The browser: chrome-headless-shell 154.0.8037.92**, Chrome for
+Testing's Stable on 2026-10-04. The survey, that day:
+
+| | What it is | CDP | Screenshots | Licence |
+|---|---|---|---|---|
+| **chrome-headless-shell** | Chrome's old headless mode as its own build: one zip per platform (linux64, linux-arm64, mac-arm64, mac-x64), 99 to 121 MB, 274 MB unpacked | yes | Blink's own | BSD-3 (Chromium) |
+| browserless | a Node server around Chrome; its image is about 1 GB | yes | Chrome's | SSPL, or commercial |
+| Lightpanda 1.0 | one 188 MB binary, no layout engine | yes | the page's text alone, PNG only | AGPL-3.0 |
+| Steel | a Node API over Chrome; 0.7 to 1.4 GB images | yes | Chrome's | Apache-2.0 |
+| Playwright's server | needs Node | its own protocol | Chrome's | Apache-2.0 |
+| Obscura | one 71 MB binary, layout of its own | yes | not Chromium's | Apache-2.0 |
+| Firefox | | WebDriver BiDi only: CDP went in 141 | | MPL-2.0 |
+
+Gotenberg and chromedp's headless-shell image wrap Chrome too; Servo and
+Ladybird speak no CDP. So the pick is Chrome itself, its smallest build,
+pinned as the Node is: no wrapper, and the CDP card.rs already speaks.
+It is one zip but not one binary: it needs the host's NSS, glib and X11
+libraries (its `deb.deps`) and fonts.
+
+Sources: [Chrome for Testing's versions](https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json),
+[browserless's licence](https://github.com/browserless/browserless/blob/main/LICENSE),
+[Lightpanda's renderer](https://github.com/lightpanda-io/browser/blob/main/src/rust/render/lib.rs),
+[Steel](https://github.com/steel-dev/steel-browser),
+[Playwright's server](https://playwright.dev/docs/api/class-browsertype),
+[Obscura](https://github.com/h4ckf0r0day/obscura),
+[Firefox 141](https://developer.mozilla.org/en-US/docs/Mozilla/Firefox/Releases/141).
+
+**Where the adapter lives: a renderer beside the stack**
+(`crates/devstack/src/rendering`), the smallest of three:
+
+- The cell speaking CDP to a browser it is configured with would be a
+  second way to get one: Browser Rendering's acquire and release have no
+  CDP equivalent.
+- celld implementing the `browser` binding, as miniflare does, would
+  launch browsers inside a fork whose aim is fewer differences from
+  upstream, and Browser Rendering is out of celld's scope.
+- A renderer keeps card.rs's one path and celld unchanged. The cell's
+  `fetch` reaches it as it reaches the model server or a node. celld's
+  `fetch` upgrades to a WebSocket (its `__fetchWebSocketUpgrade`), as
+  the node's exec already uses.
+
+The renderer starts a browser per session (a fresh profile and home) and
+drives it over `--remote-debugging-pipe`. At most four run at once. A
+session is stopped after its `keep_alive` without a client (default
+60 s, at most 10 min), or 15 min after it began. A message either way is
+at most 64 MiB.
+
+**Isolation.** A card's page is a stranger's code. Its browser reaches
+fragments' origins and nothing else on the box:
+
+- **The gate.** Every connection the browser makes (http, https,
+  WebSockets) goes through a SOCKS5 proxy in the renderer
+  (`--proxy-server`, with `<-loopback>`, so loopback and `*.localhost`
+  go through it too). The gate lets through
+  `<one label with "--">.<suffix>:<the origins' port>` alone, and
+  connects it to one configured address: the node, or the edge before
+  it. It resolves no name. An IP literal, `localhost`, any other name,
+  and a name rebound to another address all go nowhere, so the sandcastle
+  engine, Bonsai, Dex, the LAN and the internet are out of reach.
+- **Nothing beside it.** The browser resolves nothing itself
+  (`--host-resolver-rules`, the gate's literal excepted). It sends no
+  QUIC, and no WebRTC UDP outside its proxy
+  (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`).
+  WebTransport fails outright with a proxy set.
+- **No port.** The browser listens on none: its pipe is the renderer's
+  alone.
+- **The process.** Chrome's sandbox stays on. Each browser gets a clean
+  environment (no variable of the stack's), its own process group
+  (killed whole), and a home removed after it.
+- **The renderer** listens on loopback, unauthenticated. A local process
+  may start sessions, which reach only what any visitor reaches.
+
+**A private CA.** On an intranet, fragments are
+`https://<label>--<user>.fragment.home.arpa` under the operator's CA.
+`FRAGMENT_BROWSER_CA_FILE` names its PEM. The renderer makes an NSS
+database trusting it, with NSS's `certutil` (Debian's `libnss3-tools`,
+Fedora's `nss-tools`, Arch's `nss`), and copies it into each browser's
+`~/.pki/nssdb`, where Chrome on Linux reads local roots. The browser
+checks the edge's certificate itself, as a visitor's browser does.
+
+- `--ignore-certificate-errors-spki-list` was the alternative. It
+  matches only the certificates a server presents, so a pinned CA fails
+  against a server that sends its leaf alone (tried: refused).
+- On macOS the browser trusts the system keychain: the CA goes there.
+
+**Pinning.** `browser_release.rs` pins the version and each zip's
+SHA-256. Chrome for Testing publishes no checksums, so each hash is of a
+zip whose MD5 matched the one Google's bucket answers. `browser.rs`
+fetches it into `target/tools` once, checks it before unpacking, refuses
+links and paths outside its directory, and names the directory only once
+the binary answers `--version` with the pin. An intranet supplies the
+zip itself (`FRAGMENT_BROWSER_ZIP=<path>`), checked against the same pin.
+
+**Evidence, 2026-10-04:**
+
+- **The e2e on celld,** sections site, deploy and ledger: 152 passed,
+  0 failed, 0 skipped. Before, celld shot no cards, and these sections
+  skipped their card checks there. Now they run: a deploy's card and a
+  viewer's copy of it, a second
+  deploy's card, revalidation by its tag, two failed shots then the card,
+  five then one `card.failed`, and the shot's browser time on the
+  owner's ledger. A guest's deploy and a members-only fragment still get
+  none.
+- **The same sections on `wrangler dev`** (Browser Rendering's local
+  mode, the Cloudflare path, unchanged): 152 passed, 0 failed.
+- **`cargo xtask dev --runtime celld`** (`FRAGMENT_DEV_PORT=9460`) was
+  ready in 4.9 s, the renderer named in its banner and in the cell's
+  `FRAGMENT_BROWSER_URL`. A session started (the browser answering CDP)
+  in 35 to 39 ms, and closed in about 10 ms, leaving no process.
+- **13 host tests** run against stand-in browsers (shell scripts on the
+  same pipes):
+  - a session's CDP both ways, a 300 KB message whole;
+  - a second client refused (409), then let in once the first leaves;
+  - a close, and its replay (404);
+  - the routes it refuses;
+  - four sessions, then 429;
+  - a browser that dies as it starts fails the start at once, saying
+    what it said;
+  - a NUL in a message refused;
+  - an idle session stopped after its `keep_alive`;
+  - every browser stopped with its renderer, and a crashed renderer's
+    homes cleared by the next;
+  - the gate's rule and its SOCKS5;
+  - the CDP socket, tungstenite's server side: a message in fragments
+    joined; unmasked, reserved, unknown, oversized and non-UTF-8 frames
+    each closed with its code;
+  - the pinned zip: a hash mismatch, a path outside, a link, the limits.
+- **Two run by name** against chrome-headless-shell 154 itself
+  (`cargo test -p fragment-devstack -- --ignored`):
+  - A card's JPEG through the renderer. Its page reached its own origin
+    alone. A loopback service, tried by IP literal, `localhost` and
+    another `*.localhost` name, by image, fetch and WebSocket, heard
+    nothing; nor did the internet; and pages there did not open.
+  - Fragments on https under a test CA: refused without it
+    (`ERR_CERT_AUTHORITY_INVALID`), opened with it named.
+- Before it was built, the same flags under a SOCKS5 stand-in showed
+  what Chrome sends a proxy: every name, `127.0.0.1`, `::1` and
+  `localhost` included, as a name (remote DNS), and its WebSockets.
+
+**Master:** where the browser is becomes configuration
+(`FRAGMENT_BROWSER_URL`), as the model upstream is. Cloudflare keeps the
+binding.
+
+### 8. Notifications
+
+Web push goes through the browser vendors' push services (FCM, APNs,
+Mozilla), which no operator runs and an air-gapped network cannot
+reach.
+
+- **Offline,** push is off and the shell's live channel notifies an open
+  tab.
+- **Master:** push is one delivery backend among several, and a
+  deployment that cannot reach a push service says so instead of
+  retrying forever. Webhooks to a company's chat are the intranet's
+  answer.
+
+### 9. Hosts and TLS
+
+Each fragment's own origin (`<label>--<user>.<zone>`) is the isolation
+model, so every way of running needs a wildcard name and a matching
+certificate, or a single-box exemption.
+
+| Where | Names | TLS |
+|---|---|---|
+| This box | `*.fragment.localhost` (Chrome and Firefox map it to loopback; Safari since macOS 26) | none: localhost is a secure context |
+| A home LAN | a wildcard the box answers on the LAN, or a real domain's wildcard pointing at a private address (home routers' rebind protection may drop it) | a dev CA installed on each device, or a public wildcard certificate (DNS-01, online every 90 days) |
+| An intranet | a delegated subzone, with the wildcard inside it. Companies grant this more readily than a wildcard in Active Directory DNS, which security tools flag as an attack | the operator's certificate files, or ACME from step-ca or Vault, or a dev CA |
+| The worst intranet (one hostname, no wildcard) | path mode, labeled as a single trust domain (the debt ledger) | the one certificate |
+
+An intranet zone is same-site with every other app under the company's
+domain. Isolation must therefore rest on the origin: host-only
+`__Host-` cookies and Origin checks, never on SameSite.
+
+### 10. Money
+
+The ledger meters wherever fragment runs.
+
+- **A company** sets `FRAGMENT_DEFAULT_PLAN=seat` and credits from
+  configuration.
+- **One box** runs on a seat with the month's included credit, as dev
+  does.
+
+A local model has no list price, so its prices come from configuration
+(the price book's defaults are already a debt-ledger entry).
+
+**A person's own hardware: points, not dollars (built, branch
+`selfhost-points`).** A computer on a node its owner paired (bring your
+own computer, seam 2) costs the platform nothing to keep awake, so it is
+never charged, and a wake there is never refused for want of credit. Its
+use is still tracked, so a company can see who used what:
+
+- **One notion, carried by the placement.** The computer's node is a
+  paired one (`paired-…`): its awake rows name it (`own_node`), and that
+  is all the ledger needs. No parallel ledger: the same rows, kept as
+  every row is (replayed once by reference, forgotten after 90 days), each
+  with its list price and a charge of 0, and a per-month count of their
+  list price beside the fragments' spend (`Store::own_hardware`; the
+  Ledger DO's `own_hardware` table). A row counts in the month it reached
+  the ledger, as a charge draws that month's credit, so every point shows
+  in some month's status.
+- **The conversion: 1 point = $0.001 of list price, rounded up**
+  (`fragment_core::price::points`, `POINT_MICROS`: the one place). List
+  price, not the charge, so the operator's margin moves no points and
+  people's points compare across a deployment and over time. An hour of
+  the default computer (2 vCPU, 6 GiB: $0.064224) is about 64 points; an
+  always-on month about 46,000. Rounded up once on the month's total, so
+  any use shows.
+- **Shown as points wherever usage is shown.** The status
+  (`GET /api/ledger`) carries `ownHardwarePoints`, this month's, beside
+  dollars that it is in none of. Settings' Credit says "Your own machines:
+  N points this month, not charged"; the Computer section says its use is
+  tracked in points; each of the person's nodes says so. `fragment ledger`
+  prints it. Operators read anyone's status (`GET /api/ledger/<person>`,
+  `fragment ledger show <person>`): who used what, points included.
+- **What stays in dollars.** A deployment node's computer is billed
+  exactly as before; so is everything else on own hardware's computers
+  that is not the machine itself (their agents' model calls, operator
+  keys).
+
+### 11. Nothing calls home
+
+**At runtime:**
+
+- The shell and the chat template load Google Fonts. Vendor them in
+  master: this is a privacy win anywhere.
+- The skills point agents at esm.sh, unpkg, jsdelivr and pip. Offline,
+  they need a configured mirror or vendored copies.
+
+**At build time:**
+
+- npm (wrangler, the Sandbox SDK), Docker Hub images, GitHub downloads
+  for noVNC and Litestream, and crates.io.
+- An intranet takes a release as one bundle: images pinned by digest
+  under one configurable registry, the CLI, the templates, and model
+  weights.
+- Every service and every computer takes one CA bundle and the proxy
+  environment (`HTTPS_PROXY`, a portable `NO_PROXY`, pip and npm
+  mirrors).
+
+### 12. Secrets: one interface, the store's bindings
+
+Master keeps the deployment's own secrets (the host secret, the
+code.storage org key, WorkOS's client id and API key, the operator keys)
+in Cloudflare's Secrets Store (#134; docs/secrets.md), and so does this
+branch, with two of its own beside them: the sign-in client's secret
+(`OIDC_CLIENT_SECRET`, seam 4) and a model upstream's key (`MODEL_KEY`,
+seam 3). The interface is the binding: the cell reads each as
+`await env.<BINDING>.get()` (cell/src/keys.rs and agent/src/keys.rs,
+through workers-rs's `SecretStore`), cached a minute per isolate.
+
+- **Cloudflare:** the account's Secrets Store; `secrets_store_secrets`
+  binds each by name (`cargo xtask deploy`), and `wrangler dev` binds the
+  same names in its local store, which devstack seeds
+  (`devstack::Secrets::Store`).
+- **celld:** has no Secrets Store, upstream (v0.6.1) or on the fork: its
+  deploy refuses `secrets_store_secrets` as an unknown key (celld's
+  `SUPPORTED_KEYS`), and `celld dev` hands a Worker variables alone
+  (`.dev.vars`, as plain text). So the cell gives itself stand-ins of the
+  store's bindings: `cell/secrets.mjs`, a shim like node.mjs's for
+  `ctx.container`. Every class in entry.mjs takes its env through
+  `withSecrets`, which, when `FRAGMENT_SECRETS` names the deployment's
+  secrets (`{"backend": "vars", "secrets": [{"binding", "secret_name"}, …]}`,
+  the pairs a deploy writes into `secrets_store_secrets`), puts an object
+  with an async `get()` in each binding's place; the agents' Worker runs
+  from agent/celld.mjs there, which does the same. Its class is named
+  `Fetcher`, as Cloudflare's binding's is, since workers-rs takes a binding
+  for a `SecretStore` by that name. The backend for now, `vars`, answers
+  the Worker variable of the binding's own name, which devstack writes into
+  `.dev.vars` (`devstack::Secrets::Shim`), where the spike kept them
+  before #134. Without `FRAGMENT_SECRETS`, as on Cloudflare, the env is
+  handed on as it came. The Rust is the same on both runtimes, and never
+  knows which it read.
+- **Next: OpenBao (Vault's KV v2 API) behind the shim.** It is one more
+  entry in `BACKENDS` in cell/secrets.mjs (a `secret_name` its key), with
+  its address and token in `FRAGMENT_SECRETS`, and nothing else changes:
+  not the cell's Rust, not the bindings' names, not the cache. That is
+  where it slots in.
+- **Not yet behind it:** the sandcastle nodes' secrets
+  (`FRAGMENT_NODE_SECRET_<ID>`, seam 2) are still Worker variables, which
+  node.mjs reads as each isolate starts. A person's paired nodes' secrets
+  are sealed in the registry, as before.
+- **Evidence (2026-10-05):** auth, signin, keys and secrets, 135 passed and
+  0 failed on celld through the shim, and 135 and 0 on `wrangler dev`
+  through its local store.
+
+## What corporate networks bring (research, 2026-10)
+
+The constraints that shape this design, in order:
+
+1. **A wildcard DNS name is not guaranteed.** A delegated subzone is the
+   request to make. Path mode is the degraded fallback. Never depend on
+   mDNS: it doesn't cross VLANs and can't do wildcards.
+2. **A private CA, everywhere.** Every non-browser client (Rust, Node,
+   Python, git, and everything inside computers) takes one CA bundle.
+   Wildcard certificates may be banned, and ACME may not exist, so the
+   certificate source is pluggable.
+3. **Nothing may call home, and a release travels as one bundle.**
+4. **Egress is proxied and often TLS-inspected.**
+   - Zscaler has broken WebSockets and downgrades HTTP/2.
+   - Proxies buffer SSE.
+   - Live channels need a fallback.
+5. **Identity is generic OIDC** against whatever the company runs: Entra
+   or Okta online; ADFS, Keycloak or Dex offline.
+6. **The LLM is any OpenAI-compatible endpoint,** with uneven tool
+   calling and possibly short context.
+7. **KVM is not guaranteed** inside corporate VMs.
+   - Packaging must fit one box, one VM, and Kubernetes or OpenShift
+     (non-root, arbitrary UID).
+   - Computers need a non-KVM tier.
+8. **Intranet zones are same-site.** Blends are cross-site, so they need
+   partitioned cookies, and Chrome's Local Network Access prompts when a
+   public page reaches a private address. Keep one browser-facing edge,
+   and tunnel compute behind it.
+9. **Between sites, the only path guaranteed is outbound HTTPS on 443.**
+   That is the uplink. UDP peer-to-peer (iroh, Tailscale) is an
+   optimisation with self-hosted relays.
+10. **Web push is unavailable offline, and S3 compatibility varies.**
+
+## What this shows about master
+
+These are seams the spike exposes, each a candidate change on master
+that also makes Cloudflare simpler or safer:
+
+1. **The model route's dev seam is shaped like a binding, not a
+   protocol.** Speaking OpenAI-compatible upstream, possibly AI
+   Gateway's compat endpoint, would leave one path and a fake that
+   tests it (seam 3).
+2. **Computers reach a vendor directly.** Git behind an intercept means
+   a computer needs no internet (seam 2).
+3. **Sign-in trusts an unverified access token.** OIDC with a verified
+   `id_token` fixes that, and makes WorkOS one provider: AuthKit is an
+   OpenID Connect provider for an OAuth application (seam 4; built on
+   `selfhost-signin`, with a plan for landing it).
+4. **A computer's placement is implicit in the `containers` binding.**
+   As a field, it is decision 13's promise kept (seam 2).
+5. **Google Fonts** in the shell and the chat template (seam 11).
+6. **`FRAGMENT_EGRESS_LOCAL=allow` doubles as "this is a local fleet"**
+   for the test levers (`config.rs`). An intranet needs local egress
+   without being a test fleet, so these should be two settings.
+7. **Push has no "unreachable" state** (seam 8).
+8. **In sandcastle:** the engine assumed Debian's library paths and
+   `/lib64` link, so every VM on Arch (this box) died before ready, and
+   said nothing; and it assumed x86_64 throughout. Fixed: sandcastle#1
+   and #2 (merged), and the arm64 port on its `node` branch.
+9. **`ContainerHost` reported to routes the cell does not have**
+   (`container/exited` for `computer/exited`): every WebSocket to a
+   computer's port answered 500, and no exit was reported. Fixed on
+   master (#126).
+10. **The CLI trusted the public roots alone**, so it could not reach a
+    platform behind a company's CA. Fixed on master (#130).
+11. **The secrets are read through workers-rs's typed binding**
+    (`Env::secret_store`), which takes an object for a Secrets Store
+    binding only when its class is named `Fetcher`: workerd's own class.
+    Every other binding the cell reads through js.rs, by what it does. The
+    shim names its stand-in `Fetcher` so the cell's Rust needs no change
+    (seam 12), but reading the binding by its `get()` would let any
+    runtime's stand in. celld's service bindings fail the same check
+    (their class reads as `Object`), so workers-rs's `Env::service` refuses
+    them there: worth an upstream celld issue for Paul to post.
+
+**Decided (Paul, 2026-10-05):** `FRAGMENT_MODEL_URL` (seam 3) and
+`FRAGMENT_BROWSER_URL` (seam 7) go to master, but not yet: they land when
+self-hosting does, once master is live on Cloudflare. Until then they stay
+on this branch.
+
+## What the spike found (running it)
+
+These are listed as found. Each names where it bites and what to do.
+
+1. **Preview cards share the delivery queue with chat.** On the first
+   shot, `wrangler dev`'s local Browser Rendering downloads Chrome. The
+   shot took 55 s, and the queue consumer held the next batch behind it.
+   A person's first message to an agent waited 45 s before its delivery
+   ran. Offline, a deployment has no Chrome to download (on celld, the
+   pinned browser is fetched, or supplied, before the stack starts: seam 7).
+   - **Master:** cards should get their own queue, or the shot should go
+     after the batch's deliveries. Cards are already skipped when there
+     is no hostname suffix; a deployment without Browser Rendering should
+     skip them the same way.
+2. **The agent's model deadline is fixed at 100 s** (`agent/src/model.rs`,
+   `DEADLINE_MS`). Bonsai-2-27B on this box's CPU processes a prompt at
+   about 8 tokens a second, so the agent's ~700-token first prompt alone
+   takes 90 s. On the GPU it takes 0.2 s. A self-hosted model's speed
+   varies by orders of magnitude.
+   - **Master:** the deadline should be configuration that the
+     deployment's model route announces.
+3. **A failing model upstream fails well.** A dead port ("Network
+   connection lost") and a slow model (the deadline) both release the
+   call's reservation on the ledger, and the agent says in the chat what
+   failed.
+4. **The dev stack needed Docker even with no computers to run.** Now,
+   with no Docker and no node, it runs without computers and says so.
+5. **celld's fork still depends on fragment's deleted native crate.** The
+   `native:<name>` seam that served `KEYS` (commits `5b76ced` and
+   `aecfbb6`) points at `crates/native`, which phase 2 removed. The
+   branch `selfhost` of the celld fork deletes the seam: master needs it
+   no longer, and that is one less difference from upstream celld.
+6. **A redeploy of the same code broke the app's next call on celld.**
+   - `platform.mjs` locks an app out of facets by making
+     `DurableObjectState`'s `facets` a getter-only accessor on its
+     prototype.
+   - celld's JS `DurableObjectState` assigned `this.facets` in its
+     constructor. The same code redeployed reuses the loaded isolate, so
+     the next facet's state threw: "Cannot set property facets … which
+     has only a getter".
+   - The e2e's `ops` section found it ("redeploying keeps the app's
+     data").
+   - Fixed in celld (branch `selfhost`): `facets` is now defined as an own
+     property, as workerd's native accessor behaves.
+   - It is a parity bug that only a second runtime shows. The e2e on both
+     runtimes is the guard decision 2's port relies on.
+7. **`fragment init` printed a webhook URL that answers 404** to any
+   sender who isn't signed in. It used the short name (`/api/f/inbox/…`),
+   which resolves only through a signer. This is a master bug, not a
+   self-hosting one: the fix (commit "cli: init prints the webhook URL
+   with the fragment's full name") is ready to cherry-pick onto master.
+8. **celld's `dev` stops on SIGINT** (Ctrl-C), not promptly on SIGTERM,
+   so devstack stops it with SIGINT.
+9. **A Worker's TCP Nagles, and a Worker cannot stop it.** Through the
+   uplink, every call with a body (start, each intercept) took 40 ms
+   more than the same call direct, so a wake took 290 ms. workerd sets
+   no TCP_NODELAY and a Worker cannot set it, so the protocol carries
+   that: a message holds every frame that is ready (a call is one
+   message), and the node acknowledges at once (TCP_QUICKACK). A wake
+   now takes 46 ms (sandcastle's `docs/node.md`, The uplink, Evidence).
+10. **A dropped uplink lost the computer's `wait`.** The computer stayed
+    awake but would never have heard its container exit. The `Node`
+    object now asks a dropped read (a `GET` that is not an upgrade) again
+    on the node's next dial, for up to 30 s. So `monitor()` outlives a
+    reconnect, and `NodeContainer` is unchanged.
+11. **A long platform outage pushes the node's backoff toward a
+    minute.** A computer that wakes in that gap fails its start
+    (`wont_wake`), as it would against an unreachable node on `listen`.
+    Its owner wakes it again. A deploy is no such outage: the node dials
+    again in about a second.
+12. **`cargo xtask dev` took fixed ports** (8790 to 8796), so two stacks
+    could not share a box. `FRAGMENT_DEV_PORT=<p>` moves the cell to `p`
+    and each fake by as much.
+13. **No intercept carried a WebSocket.** A computer's guest opens two
+    WebSockets through `api.fragment.internal`: its keepalive, and
+    `__live` to follow a chat. Neither sandcastle-node's egress, the
+    engine's egress proxy nor the Docker double took an upgrade.
+    - Without them the bridge falls back to polling, so the chat
+      section's Stop and file chips missed their moments.
+    - Without the keepalive, a turn longer than the 20-minute hold could
+      be put to sleep under the guest.
+    - Fixed in the node and the double (sandcastle's `node-placement`):
+      the upgrade is signed over the empty body, and the platform's 101
+      is joined to the guest's.
+    - **The engine's egress proxy still lacks it** (sandcastle's
+      docs/node.md says what it needs). A real node runs no
+      WebSocket-following guest until then.
+14. **A node's intercept followed a provider's redirect.** `nodeEgress`
+    rebuilt the guest's request with fetch's default `redirect:
+    "follow"`, so a provider's redirect was followed with the swapped
+    token. Under the runtime's own intercepts, the guest gets the 3xx.
+    The computers section caught it, and it is fixed (`redirect:
+    "manual"`).
+15. **A failed start on a node was reported twice:** as the start's
+    failure, and by `monitor()` as an exit. Exits count against a
+    computer's starts, so one wake with its node down ran three starts
+    at once and left it "won't wake: its container kept stopping".
+    `monitor()` of a start that failed now says so, and the start alone
+    reports it.
+    - It also showed a bug on master: an exit while starting metered the
+      owner from the end of their last awake interval, so they paid for
+      the sleep before it. Fixed on its own (PR #131).
+16. **An exec's socket stayed open after its process exited.** Nothing
+    closed it from the platform's end. `NodeProcess` now closes it as the
+    process exits, and answers the exit once the socket has closed (or
+    after 2 s).
+17. **On celld, an object's answer was never sent after an outbound
+    socket closed.** A wake whose last await was an exec socket's close
+    event returned its view, but celld held the response for 60 s
+    (`phase="handler"`). The handler resumed inside the socket's own close
+    event, and its driver polled only when it had no op of its own
+    pending; the container's `wait` always was one. Fixed in celld (branch
+    `selfhost-placement`, `9b31c97`: a settled handler wakes its driver).
+    It is a parity bug: workerd sends the answer.
+18. **On celld, a WebSocket one object returned to another closed with
+    1006.** When the uplink's caller closed, celld tore the pair down,
+    and dropped the `Node` object's answering close. Fixed in celld
+    (`04a2cf5`): the caller's close waits for the object's, for up to 5 s.
+19. **A computer's first look at its node failed while its uplink was
+    dialing again.** After a crash of the platform, the node dialed back
+    11 s later, because its backoff had grown on refusals while celld
+    drained. The new object saw "not running", started over a container
+    that was in fact running, and was refused 409. Now:
+    - a look that found the node silent is asked again before the
+      object adopts or starts;
+    - a start refused 409 replaces the container it could not see
+      (lesson 6: never reused half-known).
+20. **The pairing section's impostor could not bind its socket in a
+    deep checkout.** It made its directory `n/impostor-<id>`, and a
+    person's node's id is 23 characters: under `fragment-selfhost/` its
+    `egress.sock` was 110 bytes, past `sun_path`'s 107, so the node
+    exited before it dialed ("path must be shorter than SUN_LEN"), and
+    the check read "no refusal within 20 s". Under `fragment-pair/`, 4
+    bytes shorter, it fit: the fold broke nothing, and it was no race.
+    Its directory is now `n/x-<label>`, and every socket path the harness
+    hands a node is checked first (`sandcastle::socket_path`), refused
+    with its length.
+
+21. **On celld, a computer started again by its exit's report never came
+    up.** Its exec failed at once, every 100 ms for two minutes ("the
+    container took no exec within 120s"), for three starts, and the
+    computer ended "won't wake: its container kept stopping". It struck
+    intermittently, on the real engine and the double alike, in the
+    computers section's second agent. In those runs every start made by an
+    exit's report failed, and every start made by a request came up.
+    - The trigger was no crash. The lane puts the computer to sleep so its
+      stub reads its second agent: the SIGTERM ends the container (code 0),
+      and the agent's `joined` wake, landing during the sleep, asks for a
+      start once it is gone. When the exit's report beat the sleep's own
+      `Asleep`, that report made the start. A container that dies under an
+      awake computer takes the same path, and no check killed one.
+    - The cause: `ContainerHost` called the object's Rust directly from
+      `monitor()`'s continuation, which celld runs as part of the request
+      that started the container, answered long before. celld ties a
+      WebSocket to the request that opens it, and closes it as that request
+      retires: the exec's upgrade failed at once ("isolate stopped reading
+      WebSocket") on a node that listens, and its socket closed before the
+      process exited on one that dials in. Plain fetches (the start, the
+      intercepts) went through, so only a start with a backup to restore,
+      which execs first, failed. workerd keeps an object's I/O for the
+      object, not the request.
+    - Fixed: every report (an exit, a tab's socket) comes back in through
+      the object's namespace, a request of its own. The placement section
+      now kills each computer's container under it while it is awake (on
+      the node that listens, and on the one that dials in) and waits for
+      it to come up again, and the computers section does the same on any
+      node the run started, the real engine's included. Before the fix
+      both placement checks failed on celld (stuck `starting`); on
+      wrangler dev they pass with or without it.
+    - After: on the double, computers, pairing and placement passed six
+      runs in a row, every check (158 with the computers section's own
+      kill); on the real engine, computers and chat 176 of 176, the killed
+      microVM's computer up again in 0.5 s; on wrangler dev, placement,
+      computers and chat 190 of 190.
+22. **On celld, every computer on a node that listens was started over
+    two minutes into its life.** A node's `wait` is a long poll that lasts
+    the container's life. celld bounds an outbound fetch at 120 s
+    (`CELLD_FETCH_TIMEOUT_S`), so the poll failed at 120 s, `monitor()`
+    reported an exit, and the object started the computer again: 409,
+    destroy, start. The stub came back unnoticed. Hermes lost the turn it
+    was running, its bridge's queue filled ("too many messages are waiting
+    for this agent"), and after three of these it was "won't wake: its
+    container kept stopping". workerd's fetch has no such bound, and a
+    corporate proxy may cut a quiet connection the same way.
+    - Fixed in `NodeContainer` (`#waited`): a poll cut without an answer
+      asks the node whether the container still runs, and waits on it
+      again. A refusal of the node's own, a container no longer running,
+      a node that does not answer the look, or a fourth cut in a row
+      within 5 s each is thrown, as before. Each cut is logged
+      (`waitCut`). It fired once in each long run below, and the
+      computer stayed up.
+    - A model call through the route is under the same bound on celld: a
+      model slower than 120 s to finish a call needs
+      `CELLD_FETCH_TIMEOUT_S` raised. Bonsai on the GPU took at most 7 s.
+23. **On the Docker double, Hermes never started.** The double ran each
+    container with `docker run --init`, so the image's entrypoint was PID
+    2. s6-overlay must be PID 1, and Hermes' image exited 100 at once
+    ("s6-overlay-suexec: fatal: can only run as pid 1"). In the engine's
+    guest and on Cloudflare the entrypoint is PID 1. Fixed in sandcastle
+    (branch `hermes-node`, off `node`): no `--init`. A signal the
+    entrypoint has no handler for is now dropped, as in the guest. The
+    bridge handles SIGTERM, so the stub lanes are unchanged.
+24. **A scripted tool turn on a node was over before Hermes showed its
+    step.** Hermes' gateway looks for tool progress every 0.3 s while a
+    turn runs. On a node, against the scripted model, a whole tool turn
+    took 0.1 s, so it posted no progress and no step. The lane's command
+    now takes a second, as real ones do.
+25. **The bridge read a terminal command as two steps** (on master too:
+    PR #138). Hermes shows a command as `💻 terminal`, then the command in
+    a fenced block. The bridge made each line a step, so `uname -a &&
+    nproc` was "terminal" with no arguments and a tool called "uname".
+    The block is now its header's arguments. The lane checks for one
+    terminal step naming its command; before, it only asked for a step
+    named terminal.
+26. **What a real model showed** (Bonsai-2-27B under NInfer; S3's live
+    run, below). Hermes, the bridge and the route worked with it: OpenAI
+    tool calls streamed (each call's arguments in one chunk), reasoning in
+    `reasoning_content`, usage on a last chunk with no choices, and a
+    262,144-token window for Hermes' 12,000-token prompt (25 tools). What
+    broke, or surprised:
+    - **Session titles fail on every turn.** Hermes names a chat with an
+      auxiliary call that asks for `response_format: json_schema`
+      (strict). NInfer answers 400 `response_format_not_supported`
+      ("only text"). The turn is not affected; the title is never set.
+      vLLM and llama.cpp support it. A deployment whose server does not
+      could have the route drop `response_format` by configuration, or
+      the image turn titles off. Not done.
+    - **A clarify card's "Other (type your answer)" could not carry the
+      answer** (fixed 2026-10-05, found 27). Hermes asks with choices and
+      a free-text "other". The chat's `prompt_response` has no text, so
+      the bridge answers "other". Hermes then asks "Type your answer:",
+      which the bridge recorded as a step, and the person's next message
+      queued as a new turn behind the asking one.
+    - **Writes outside `/data/hermes` are refused** (the image sets
+      `HERMES_WRITE_SAFE_ROOT`), and `/data` is root's. Asked to write
+      `/data/notes/…`, Hermes said so and offered `/data/hermes/notes/…`
+      (once), or tried `mkdir`, `sudo`, then asked where (once).
+    - **Smart approvals are the model's call.** With a real model as the
+      guardian, `mkdir -p /tmp/x && rm -rf /tmp/x` ran without a card. The
+      scripted lane's guardian always escalates.
+    - **Hermes improves itself between turns.** After a turn, its review
+      wrote a skill (`system-ops`) with several more model calls, and the
+      bridge synced it to the agent's fragment, with one sync conflict
+      kept as `SKILL.md.local-…`. Each such call is metered as a turn's.
+    - **One stream ended without a `finish_reason`**, which Hermes took as
+      a dropped stream and asked again. The cause was not found: asked
+      directly through the intercept, the route's stream ends with its
+      finish reason, the usage and `[DONE]`.
+27. **An agent asking in words deadlocked its chat** (the guide's
+    rehearsal, 2026-10-05; on master too). Hermes' `clarify` with no
+    choices (and "Other" on one with choices) sends `❓ <question>` (or
+    `✏️ Type your answer:`) and blocks until the person's next message,
+    which its gateway intercepts as the answer even mid-turn. The bridge
+    recorded the question as a step and queued the next message as a turn
+    behind the asking one, so both waited for Hermes' clarify timeout (an
+    hour); Stop's interrupt never reached the blocked wait. A new agent did
+    this on its first message, its job. Now the question is the agent's
+    reply part (`Event::Asked` after it), the asker's next message to that
+    agent in that chat goes to the running turn (`Command::Tell`, an
+    inbound in the same chat), and a Stop while it asks is followed by
+    "Stop." so the wait lets go. Tests: the engine's
+    `a_question_is_answered_by_the_next_message` and
+    `a_question_waits_as_long_as_a_prompt`, the wire's
+    `a_question_in_words`, and in process `a_question_answered_in_words`
+    (the script runtime's `ask-me`); live on Bonsai, an open question, a
+    Stop while asking, and "Other" then typed (docs/self-host-lan.md,
+    Evidence, 2026-10-05).
+28. **Master's secrets moved into its Secrets Store, which celld lacks**
+    (the rebase onto #134 and #147, 2026-10-05). The deployment's secrets
+    became Secrets Store bindings the cell reads by `get()`, and celld
+    refuses `secrets_store_secrets`. The cell now stands in for them on
+    celld itself (seam 12). The spike's own secrets followed master's
+    model: the sign-in client's secret (`OIDC_CLIENT_SECRET`, the deploy
+    config's `workos.oauth_client_secret` a store name; the OAuth
+    application's client id is plain config, as an authorize URL shows it)
+    and a model upstream's key (`MODEL_KEY`). WorkOS's client id is a store
+    secret now, so the deploy cannot spell out whom AuthKit's people are
+    keyed as: `FRAGMENT_OIDC_KEYED_AS=workos` names the bound environment,
+    and the registry reads its client id at the exchange. Reads that became
+    async (a node's pairing, its secret, a logout's id_token) write only
+    after their await, and only over what they read.
+29. **A computer had no `/data` until its bridge first wrote** (on master
+    too: #151). Master's contract is that the image makes `/data` on a
+    first start; the bridge made it only with its first state write, after
+    reading the platform. Since #147 a sleep whose save fails keeps its
+    container, and the save of a `/data` that is not there fails, so a
+    computer slept before its bridge first wrote stayed awake for half an
+    hour. The restart and pairing sections, which sleep agentless stubs on
+    nodes, found it. The bridge now makes its state directory as it starts,
+    past the restore gate.
+30. **Hermes' desktop never started in a microVM** (master's screen
+    checks, #143, first run on the real engine, 2026-10-05). The VM's
+    `/dev` is a bare devtmpfs, without the links a container's has
+    (`/dev/fd`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`), so the
+    desktop launcher's process substitution failed ("/dev/fd/63: No such
+    file or directory", then "Xvnc exited during startup", in its
+    `launcher.log` in the VM). The screen's control socket passed through
+    the same port, so the node's port path is not it. sandcastle#7 makes
+    the links in the guest's init; the box's installed engine is the
+    `node` branch's, so the three checks fail here until it carries it.
+
+## The spike, on this box
+
+This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
+5070 Ti (16 GB) and `/dev/kvm`. It runs Arch Linux (omarchy).
+
+| Mode | Cells | Computers | Models | Git, sign-in |
+|---|---|---|---|---|
+| **A: blend** | `wrangler dev` (Cloudflare's local runtime) | a sandcastle node on this box | the local server | the fakes |
+| **B: offline** | `celld dev` | a sandcastle node on this box | the local server | the fakes |
+| **C: LAN** | B, reached from another machine on the home network | | | |
+
+**Phases, each ending with evidence:**
+
+- **S1. Models upstream.** `FRAGMENT_MODEL_URL` with a tier map. Exit:
+  the `ai` section green against an OpenAI-compatible fake, and a goose
+  agent's turn answered by the local model.
+- **S2. A node.**
+  - The engine on TCP, with signed requests, exec over WebSocket, ports
+    over HTTP, and intercepts to a URL.
+  - `RemoteContainer` in the cell.
+  - Exit: the `computers` section (the stub image) green with every
+    computer on the node.
+- **S3. Hermes on the node, on the local model.** Exit: the real-Hermes
+  lane's reply, steps and restart checks, on sandcastle with the local
+  model (a blend: Cloudflare's runtime, our computers).
+- **S4. The cell on celld.** A celld render of the config, and
+  `cargo xtask dev --runtime celld`. Exit: the core sections green on
+  celld (auth, create, deploy, live, channels, jobs, blobs), then S2's
+  and S3's on it.
+- **S5. Offline.**
+  - Run with no route to the internet, only to the LLM.
+  - Exit: the same sections green, and a packet count showing no
+    outbound connection beyond the LLM's address.
+- **S6. LAN.** A wildcard name and a dev CA on the home network. Exit: a
+  second machine signs in, opens a fragment, and chats with an agent.
+- **S7. The uplink.** The node dials out. Exit: S2's checks with the
+  node behind NAT and no inbound port, then against a Cloudflare preview
+  (the first real blend; deploying a preview is Paul's call).
+
+### Rebased onto master, 2026-10-05
+
+Onto 5f05b81: #134 (the secrets in Cloudflare's Secrets Store), the
+desktop and gws (#143), durable computers' saves (#147) and what a held
+save leaves out (#148), the crash lever (f233f33) and the bridge's turns.
+The backup before it is the tag `pre-rebase-2026-10-05b`.
+
+- **Dropped as master's:** "an agent asking in words" and "login opens
+  the link" (the same patches as 98b7980 and 7fcfb90); the bridge's
+  terminal step was master's eb84d7c, so only its sandcastle.rs part
+  stays. The two Hermes-install commits are one, #146's net (still open).
+- **Kept, still needed:** an exit's report comes back in as a request of
+  its own (found 21: master's reports still continue the start's call),
+  and a node's wait outlives a fetch's bound (found 22, node.mjs alone).
+- **Layered on master's shapes:** placement runs in master's `plan`
+  (before the image's reference is read), with the node's notes beside
+  the saves' in the view; the secrets are seam 12 and found 28.
+- **Evidence:** `cargo xtask check`, 539 passed, 0 failed. Two nodes
+  (computers, chat, shell-ui, placement, pairing, restart): 333 passed, 0
+  failed. The real engine (computers, chat, hermes): 242 passed, 3
+  failed, master's new screen checks (found 30). Run on 653f9bd, before
+  #148, which changes computers alone: on celld, the core sections (auth,
+  signin, create, deploy, live, channels, jobs, blobs, secrets, keys,
+  site, ledger, restart) 528 passed, 0 failed (3 skips: a node's checks,
+  in the two-node run), and codestore against macrofiche 22 and 0; on
+  `wrangler dev`, the sections #134 touched (auth, signin, keys,
+  secrets), 135 and 0.
+
+### Status, 2026-10-04
+
+- **S1: done.** The model route sends the models it maps to an
+  OpenAI-compatible server; the models it does not map (image steps) go
+  on to the binding as before.
+  - The e2e drives it: `FRAGMENT_E2E_MODELS=openai`, the model fake
+    answering `/v1/chat/completions` in OpenAI's shape.
+  - ai, agents and ledger: 143 passed, 0 failed, on celld.
+  - It works end to end with the local Bonsai-2-27B (below).
+- **S4: done for everything but computers.** `cargo xtask dev --runtime
+  celld`, and the e2e on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+  - The full suite: 1271 passed and 6 failed. The six were card checks;
+    a deployment without a browser now takes no shots, and those checks
+    are skips there, so a rerun of the affected sections passed 200, 0
+    failed.
+  - It skips the four sections that need the runtime's containers
+    (computers, chat, shell-ui, hermes): their lane is the node's.
+  - It found one parity bug in celld (found item 6, fixed).
+  - It makes a check local workerd cannot: "a job sleeping through a
+    crash wakes and finishes, once". celld's Workflows are durable; until
+    now only the hosted lane made that check.
+- **S5: done.** The same flows, run in a network namespace with loopback
+  only (`unshare -rn`, no root). The only way out is a unix socket bridged
+  (`socat`) to the local model's port.
+  - Every flow passed, and celld logged no errors.
+  - The calories agent was told "I ate an apple". It called its
+    `log_food` tool through the model route on the local Bonsai-2-27B
+    (`ninfer-serve`, about 165 tokens a second), and answered "Logged
+    apple (95 kcal); total today: 95 kcal". The app's `today` query shows
+    the entry.
+  - The whole run took about 25 s, the stack ready in 4.6 s.
+  - Without the bridge, everything but the model call passed, and the
+    agent said in the chat that the model had failed.
+- **S2: run on the real engine** (2026-10-05): the computers and chat
+  sections on one node in front of this box's engine, every computer a
+  jailed microVM, 176 of 176 (found 21; sandcastle's docs/node.md,
+  Computers on the real engine).
+- **S3: done, on the scripted model and live on Bonsai** (2026-10-05;
+  branch `selfhost-hermes`, and sandcastle's `hermes-node`).
+  - The Hermes lane runs on sandcastle nodes: the images it stages are
+    built for the nodes (the double runs them in Docker; the real engine
+    loads them). The engine admits the image: its limits are 32 GiB a
+    `docker save` tar and 16 GiB a layer, and Hermes' is 1.36 GB (its
+    layers compressed; 5.5 GB unpacked). Its first load took 25 s (23 s
+    of it the VM building its disk), and later loads of the same image
+    1.2 s. `hermes-next` built in 22 s.
+  - **On the real engine (`FRAGMENT_E2E_NODES=real`, on celld): 44
+    passed, 0 failed, 0 skipped**, the section in 284 s. Reply, steps,
+    approvals, Stop, the restart mid-turn, sleep and wake with `/data`
+    restored, upgrade and rollback, a second profile, and the routine.
+    The microVM was ready in 0.35 s; Hermes followed its chat 1.1 s
+    after the wake and answered the first message in 3.2 s.
+  - On the Docker double (`two`, celld): 44 of 44, in 304 s.
+  - Found on the way: celld's 120 s fetch bound cut every node's `wait`
+    (found 22), the double's `--init` (23), the lane's 0.3 s race (24),
+    and the bridge's steps (25, on master too).
+  - **Live, on Bonsai-2-27B**: the dev stack on celld, its computers on
+    the real engine through one node, a person and a Hermes agent made
+    as the shell makes them (`makeAgent`, tier medium), driven over the
+    shell's own API. Each time is from the message to the turn's end:
+
+    | Said | Took | Steps | Juniper (Hermes on Bonsai) |
+    |---|---|---|---|
+    | its job, as the shell's first message (the computer cold: VM, `/data`, Hermes) | 8.1 s | | "Hello, Paul — I'm Juniper, a careful gardener who keeps notes on this computer; I can browse the web, run tools and code, manage files…" |
+    | What is 17 times 23? | 0.6 s | | "391" |
+    | Use your terminal to run `uname -a` and `nproc` … | 2.0 s | terminal, and "uname" (found 25) | "It's a Linux machine (kernel 6.12.91, x86_64) … in what appears to be a container …, with 2 CPU cores." |
+    | Write `/data/notes/tomatoes.md` … | 5.1 s | Writing | "I can't write there — the system blocks file writes outside the safe root (`/data/hermes`). Want me to write it to `/data/hermes/notes/tomatoes.md` instead?" |
+    | (asleep, then) Which vegetable did my note mention …? | 5.1 s | | "Your note mentioned **tomatoes**, to be watered **at dawn**." |
+    | Delete `/tmp/juniper-scratch` with `rm -rf` … | 4.1 s | terminal, and "mkdir" (found 25) | "Done — I created `/tmp/juniper-scratch` and then deleted it; `rm -rf` finished with exit code 0." |
+    | (asleep, on the fixed bridge) show the memory with `free -m` | 6.5 s | terminal `free -m` | "about 5.9 GB of RAM, of which almost all is available …" |
+    | Make `/data/hermes/garden`, write a plan, list it, show it | 6.6 s | Writing, terminal `ls -la /data/hermes/garden`, Reading | the folder, and the plan's three bullets |
+    | How many bullet points, and the second? | 4.8 s | | "Three bullet points. The second one: 'Check for new growth and any pest damage.'" |
+
+    A model call took 0.5 to 7 s (Bonsai on the GPU, about 150 tokens a
+    second, its prompt cache on the agent's session). What broke with a
+    real model, and what was fixed, is found 26.
+- **S7: done locally, against the fake engine.** The node dials
+  `/api/nodes/uplink`, and a `Node` Durable Object serves the node's API
+  over it (`cell/uplink.mjs`, and sandcastle's `crates/node/src/uplink`;
+  sandcastle's `docs/node.md`, The uplink).
+  - The setup: the node and a fake engine (a lower-rung test double: no
+    VMs) ran in a network namespace with loopback alone and listened
+    nowhere. Their only way out was a unix-socket bridge to the
+    platform's port.
+  - Through the uplink: wake (start and four intercepts) in 46 ms;
+    inspect, signal, `wait` and destroy; a guest port's HTTP (3 MB down
+    and 2 MiB up, intact) and its WebSocket; the guest's request
+    through its intercept and back; sleep.
+  - A node restart: the computer stayed awake, its `wait` asked again.
+  - A platform restart: the node dialed again by itself, and the
+    computer's new object found and adopted its container.
+  - Not shown in the stack: exec's stdin. The Sandbox SDK, its only
+    user, speaks after a `sandbox-shim`, which no double plays. It is
+    shown in sandcastle's in-process test.
+  - Still to do: S2's checks on a real engine, which needs root, and
+    the same against a Cloudflare preview. Both are Paul's.
+- **The LAN guide, rehearsed end to end** (2026-10-05; docs/self-host-lan.md,
+  Evidence): every step short of sudo, the router and the devices, with
+  computers on the real engine, Hermes on Bonsai, BYOC pairing to a stand-in
+  Mac, and cards. It found found 27, the renderer's LAN defaults, a
+  person's first computer placed before they could choose their node (the
+  pairing page now offers it), and the CLI's login waiting on its browser.
+- **S6: built, tested on high ports** (branch `selfhost-lan`;
+  docs/self-host-lan.md, Paul's guide). `cargo xtask dev --lan` serves the
+  stack on celld as an intranet would: DNS for `fragment.home.arpa` on the
+  box (every other name to the router), a CA made there and constrained to
+  the zone, a TLS front door on 443 before the cell and Dex (pinned by
+  digest), and the root's profile over http for the iPhone. From this box:
+  `dig`, `curl --resolve` and headless Chromium signed in through Dex, opened
+  a fragment live over `wss`, an agent answered on Bonsai, and a
+  sandcastle node's uplink connected through the door. Left: ports 53, 80
+  and 443 (sudo), the phone, the Mac and the router (the guide's steps).
+- **Seam 5, git in a code store outside the stack: done.**
+  - **macrofiche**, a sibling project like sandcastle, is a self-hosted
+    git store with code.storage's API, built on git 2.55.0 pinned and
+    jailed (`/home/futurepaul/dev/finite/macrofiche`, its `docs/design.md`).
+  - The dev stack and the e2e run on the fake, a store already running,
+    or macrofiche started for them (`FRAGMENT_E2E_CODESTORE=macrofiche`,
+    `MACROFICHE_BIN`).
+  - **The whole suite on celld against macrofiche: 1316 passed, 0
+    failed, 22 skipped, in 5 m 50 s (2026-10-04).** Each skip says why:
+    - 10 skips pull the fake's own levers or count its requests;
+    - 7 are card checks, as celld has no browser;
+    - 4 are the container sections, which are the node's lane;
+    - 1 is the webhook-announced poll, as the harness does not yet
+      register macrofiche's per-repo webhook.
+  - So every cell, every fragment's git and every run here was
+    self-hosted: celld and macrofiche, with the fakes standing only for
+    sign-in (WorkOS or OpenID Connect), the model, and push.
+- **Seam 7, preview cards on celld: done** (branch `selfhost-cards`).
+  The renderer serves Browser Rendering's routes over the pinned
+  chrome-headless-shell 154; the cell's card path is Cloudflare's
+  (seam 7, Evidence).
+- **Seam 4, sign-in on OpenID Connect: one core** (branch
+  `selfhost-signin`). WorkOS AuthKit is one issuer, configured; Pipes is
+  the only WorkOS code left; its people keep their key. The e2e runs it
+  against the WorkOS fake's AuthKit and the strict fake, and it signed in
+  through a real Dex (seam 4, Evidence). Real AuthKit is the hosted
+  lane's, and Paul's (seam 4, Landing it in master).
+- **Placement, computers across nodes: built** (2026-10-04; branch
+  `selfhost-placement`, sandcastle's `node` (from `node-placement`), and
+  celld's `selfhost` (its two fixes, found 17 and 18)). The design and the
+  rule are seam 2's Placement.
+  - Host tests: 7 in `fragment_core::placement`. They cover the
+    configuration read and refused, the rule, nodes that are down or the
+    wrong architecture or lack the image, and probes read from JSON and
+    replayed. 2 in `devstack::sandcastle`, and the rungs' in the e2e's
+    `needs`.
+  - The e2e starts two nodes (`FRAGMENT_E2E_NODES=two`): `direct`, which
+    listens, and `uplink`, which dials in. Each is a sandcastle-node over
+    sandcastle's Docker engine double (no root, no VMs). Computers
+    alternated between them, section by section.
+  - **wrangler dev:** computers, chat, shell-ui, placement and restart
+    passed 258, failed 0, skipped 1 (local Workflows).
+  - **celld** (with its two fixes, found 17 and 18): placement 13 of 13
+    and restart green on every run. After the rebase onto the renderer
+    (seam 7) and sign-in on one core (seam 4), the five sections passed
+    260, failed 0, skipped 0 (cards are shot now), and auth, signin and
+    site 177, 0, 0.
+    - chat's Stop check failed in 3 of 8 runs on celld. The cause was the
+      lane, not celld: it clicked the Stop the page still showed for the
+      turn before, whose end the page had not yet heard, so nothing was
+      stopped. It now waits for the Stop of the slow message's own turn
+      (`turn_of`). With that, chat passed 4 of 4 on celld. The fix is on
+      master too (its own PR).
+  - **The whole suite on celld with the two nodes, before the rebase:
+    1526 passed, 1 failed (chat's Stop), 11 skipped.** The skips were 8
+    card checks and the fake's levers. That covers every section,
+    including the four that need computers, which runs before had
+    skipped.
+  - The placement section shows:
+    - a computer placed at its first start, not before;
+    - two placed one after the other land on the two nodes;
+    - each one's screen answers through its node, whether the node
+      listens or dials in;
+    - asleep and woken, a computer wakes on its node, `/data` restored;
+    - its container killed under it while awake, on either node, it is
+      started again there by itself and comes up (found 21);
+    - each node down in turn: a wake answers 503 `node_down`, naming the
+      node, within 15 s (at once for `direct`, about 5 s for `uplink`);
+      the view says why, and a new computer goes to the node that is up;
+    - the node back, the computer wakes on it again.
+  - The restart section keeps a computer awake on a node through a
+    graceful restart (its new object finds the container and puts it to
+    sleep) and through a crash, and wakes it on the same node each time.
+  - **Images per architecture:** the stub built for `linux/arm64` on
+    this box in 265 s, under qemu (binfmt_misc's `qemu-aarch64` is
+    registered with flag F, and buildx lists `linux/arm64`). It runs:
+    `uname -m` answers aarch64, and its shim runs. Hermes' arm64 stages
+    (the shim, Litestream) build; the whole image (3.8 GB) was not built
+    here. It is faster natively in the Mac's Linux VM.
+  - **Not built:**
+    - an owner's preference;
+    - moving a computer;
+    - a node's count falling;
+    - WebSockets through the real engine's egress proxy (found 13);
+    - `xtask deploy` rendering `FRAGMENT_NODES` and the node secrets for
+      a blend on Cloudflare.
+
+- **Bring your own computer: built, experimental** (2026-10-05; branch
+  `selfhost-pair`, and sandcastle's `node-pair`). The design is seam 2's
+  part of that name.
+  - Host tests (11 here, 8 in sandcastle): `fragment_core::pairing` (7:
+    a pairing valid, a wrong code, an expired one, a replayed approval,
+    the bounds, revoking, and BYOC off), `placement`'s choices (3: a
+    choice first, each fallback with its reason, BYOC's switch), proto's
+    poll answers (1), and sandcastle's `pair` (5 in the crate: its
+    arguments, the uplink, the config it writes; 3 in process against a
+    stand-in platform: a pairing to its files, five refusals that write
+    nothing, and a lost poll asked again). `cargo xtask check` passes.
+  - The e2e's `pairing` section (`FRAGMENT_E2E_NODES=two`, which turns
+    BYOC on): the device flow over HTTP; three impostors refused; a real
+    `sandcastle-node pair` in front of the Docker engine double, approved,
+    dialing in; the person's computer placed there by choice, its screen
+    through the uplink; a choice that is down falling back, saying why;
+    the pairing and choice across a restart; revoking (the uplink cut,
+    the wake `node_revoked`, before and after a restart); BYOC off; and
+    starts past their bound. With Chrome, settings' Computers
+    (experimental) shows the node up, the computer on it, the choice, and
+    Revoke. **On celld: pairing 37 of 37; with computers, shell-ui,
+    placement and restart in one run, 227 passed, 0 failed, 0 skipped.
+    On wrangler dev (workerd): pairing and placement, 50 of 50.**
+  - Found on the way: a computer whose node is gone (delisted, or a
+    person's revoked) answered its wake "no image for its architecture"
+    (the gone node has no images) instead of why; its start now throws
+    the node's own error, so a delisted node is `node_down` and a revoked
+    one `node_revoked`. On wrangler dev, `pair` met two things celld let
+    pass: an absolute URI on the request line (refused: it now sends
+    origin form), and a poll its proxy lost (a 502 that never reached the
+    cell: a lost poll is now asked again, up to three in a row).
+  - Not built: moving a computer; several computers per person; a node
+    renamed; a paired node's capacity from its engine (it is
+    `OWN_CAPACITY`); billing a computer on its owner's own machine
+    differently (its awake time is metered as any computer's).
+
+### Running it
+
+On the home network, as an intranet: docs/self-host-lan.md.
+
+The dev stack, on wrangler's workerd or on celld, against a local
+OpenAI-compatible model:
+
+```sh
+export FRAGMENT_MODEL_URL=http://127.0.0.1:8080/v1   # any OpenAI-compatible server
+export FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}'
+cargo xtask dev                                      # wrangler dev (workerd)
+CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+`CELLD_BIN` is celld built from the fork's branch `selfhost`
+(`cargo build --release -p celld`). celld bundles with esbuild, taken
+from worker-build's cache or `CELLD_ESBUILD`.
+
+Preview cards on celld (seam 7): the stack starts the renderer over the
+pinned chrome-headless-shell, fetched into `target/tools` on first use.
+
+- `FRAGMENT_BROWSER_ZIP`: the pinned zip, by path, in place of the
+  fetch (an intranet's copy, checked against the same SHA-256).
+- `FRAGMENT_BROWSER_UPSTREAM`: where fragments are served, `ip:port`
+  (default this box, at the platform URL's port: the node, or an edge
+  before it).
+- `FRAGMENT_BROWSER_CA_FILE`: a private CA's PEM, for fragments on https
+  under it. It needs NSS's `certutil` on the box.
+
+The browser runs with Chrome's sandbox, so the host must allow
+unprivileged user namespaces (Ubuntu 24.04's AppArmor restricts them;
+its `kernel.apparmor_restrict_unprivileged_userns`).
+
+Computers on sandcastle nodes take one setting, `FRAGMENT_NODES_FILE`.
+It names a file in `FRAGMENT_NODES`' shape (seam 2, Placement), where
+each node also has a `secret_file`. The dev stack reads each secret and
+hands it to the cell as `FRAGMENT_NODE_SECRET_<ID>`:
+
+```json
+{ "nodes": [
+    { "id": "box", "url": "http://127.0.0.1:9400", "arch": "x86_64", "capacity": 32, "secret_file": "/home/me/.config/fragment/nodes/box.secret" },
+    { "id": "mac", "uplink": true, "arch": "aarch64", "capacity": 8, "secret_file": "/home/me/.config/fragment/nodes/mac.secret" } ],
+  "images": { "stub": { "x86_64": "docker.io/library/fragment-stub:1", "aarch64": "docker.io/library/fragment-stub:1-arm64" } } }
+```
+
+**Hermes on this box's node** (S3), with the agents' model on Bonsai:
+
+```sh
+# the stub and Hermes, built here and loaded into the engine (Docker: the docker group);
+# it prints the "images" to put in the node list
+cargo xtask node-images            # --tag <tag> (default local), --engine <dir> (default /var/lib/sandcastle)
+# the node, in front of the engine (its config: listen, engine, ports, egress, secret_file, platform)
+sandcastle-node serve --config ~/.local/opt/sandcastle/node.json &
+FRAGMENT_NODES_FILE=~/.local/opt/sandcastle/nodes.json FRAGMENT_COMPUTER_IMAGE=hermes \
+  FRAGMENT_MODEL_URL=http://bonsai.localhost/v1 \
+  FRAGMENT_MODELS='{"@cf/zai-org/glm-5.3":"bonsai-2-27b","@cf/zai-org/glm-5.3-flash":"bonsai-2-27b"}' \
+  CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+`FRAGMENT_COMPUTER_IMAGE` is the image a new computer is pinned to, one
+of the node list's (default `stub`); the shell offers a person's existing
+computer the move to it. The node's `platform` is the stack's URL, and
+the list names the node's `url` and `secret_file`. A new agent from the
+shell is then Hermes, and every one of its model calls goes to Bonsai.
+
+The e2e starts two nodes of its own with `FRAGMENT_E2E_NODES=two`: one
+that listens, and one that dials in. Each is a `sandcastle-node` in front
+of sandcastle's Docker engine double, which runs each container in local
+Docker (no root, no VMs). `SANDCASTLE_DIR` names a sandcastle checkout
+(branch `node-placement`) with `sandcastle-node` and
+`sandcastle-docker-engine` built, and `sandcastle-docker-relay` built
+static (`--target x86_64-unknown-linux-musl`). The run builds the cell's
+images for them, tagged for the run.
+
+```sh
+FRAGMENT_E2E_NODES=two SANDCASTLE_DIR=../sandcastle-placement FRAGMENT_E2E_RUNTIME=celld \
+  CELLD_BIN=../celld/target/release/celld cargo xtask e2e --only computers,chat,shell-ui,placement,restart
+```
+
+Sign-in (seam 4) is one OpenID Connect provider:
+
+- by default, the WorkOS fake's AuthKit, on the port after its API's (any
+  email);
+- `FRAGMENT_SIGNIN=oidc`: the strict fake (any email, or a username with
+  no email);
+- a real WorkOS environment: `WORKOS_CLIENT_ID_FILE` and
+  `WORKOS_API_KEY_FILE` (Pipes), with `WORKOS_AUTHKIT_DOMAIN`,
+  `WORKOS_OAUTH_CLIENT_ID_FILE` and `WORKOS_OAUTH_CLIENT_SECRET_FILE`
+  (its OAuth application);
+- any other provider: `FRAGMENT_OIDC_ISSUER`, `FRAGMENT_OIDC_CLIENT_ID`
+  and `FRAGMENT_OIDC_CLIENT_SECRET_FILE`, and optionally
+  `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS`, `FRAGMENT_OIDC_AUTH` and
+  `FRAGMENT_OIDC_KEYED_AS`.
+
+A real provider's redirect URIs must include
+`http://127.0.0.1:<port>/auth/callback`. `FRAGMENT_DEV_PORT` moves the
+stack and its fakes, so it can run beside another on :8790. Dex on one
+box, as tried here:
+
+```sh
+# config.yaml: issuer http://127.0.0.1:5556/dex, storage memory, web.http 127.0.0.1:5556,
+# oauth2.skipApprovalScreen, a static client (fragment-dev, its secret, the redirect URI),
+# enablePasswordDB, and staticPasswords
+dex serve config.yaml &
+FRAGMENT_DEV_PORT=9310 FRAGMENT_OIDC_ISSUER=http://127.0.0.1:5556/dex \
+  FRAGMENT_OIDC_CLIENT_ID=fragment-dev FRAGMENT_OIDC_CLIENT_SECRET_FILE=client-secret \
+  CELLD_BIN=../celld/target/release/celld cargo xtask dev --runtime celld
+```
+
+The e2e signs its people in through the WorkOS fake's AuthKit, or
+through the strict fake with `FRAGMENT_E2E_SIGNIN=oidc`.
+
+To run offline, start the stack inside `unshare -rn` (bring `lo` up
+first). Give it the model through a unix socket: `socat` on the host from
+the socket to the model's port, and in the namespace from a loopback
+port to the socket.
+
+People pair nodes of their own with `FRAGMENT_BYOC=on` beside
+`FRAGMENT_NODES_FILE` (its images): on the machine,
+`sandcastle-node pair http://127.0.0.1:8790 --config <dir>/node.json
+--engine <engine.sock> --ports <ports.sock> --egress <egress.sock>`
+(seam 2, Bring your own computer; the e2e's `pairing` section does this).
+
+A node the platform cannot reach dials it instead (the uplink):
+
+- `"uplink": true` for it in the platform's node list, with no `url`;
+- an `uplink` section in the node's config:
+  `{"url": "ws://127.0.0.1:<port>/api/nodes/uplink", "id": "<id>"}` (`wss`
+  in production), with `listen` dropped.
+
+To stand a node behind NAT on this box, use the same trick as for the
+model: run the node in `unshare -rn`, with `socat` from a loopback port
+in the namespace to a unix socket, and from there to the platform's
+port. Give both relays `nodelay`. A relay that Nagles costs the uplink
+an order of magnitude (sandcastle's `docs/node.md`, Evidence).
+`FRAGMENT_DEV_PORT=8890 cargo xtask dev` keeps such a stack clear of the
+default dev ports.
+
+## Open questions for Paul
+
+- **Sign-in's sessions against the provider's** (seam 4). A platform
+  session lasts 30 days whatever the provider says, so a person disabled
+  in the company's directory keeps their sessions until they end. The
+  choices are back-channel logout (the provider calls the platform), a
+  session no longer than the id_token's `auth_time` allows, or a fresh
+  sign-in every day.
+- **WorkOS through OIDC on master** (seam 4). AuthKit serves it, for an
+  OAuth application; the people keep `workos:<client>` as their key, so
+  nothing is migrated. Landing it needs an OAuth application in the
+  dashboard, a check by hand against real AuthKit, and a choice about
+  logout, which then no longer ends AuthKit's session (seam 4, Landing
+  it in master).
+
+- **Sandcastle as a node everywhere** (seam 2), rather than celld's
+  `krun-engine` backend. This is recommended; it supersedes
+  `containers-on-celld.md`'s plan to put the engine inside celld.
+- **Which local model is the self-hosted lane's reference?** gpt-oss-20b
+  is the agentic consensus for 16 GB. The Bonsai setup in
+  `~/dev/localinfer` is another candidate.
+- **The code store.** Do we make the fake real now, or wait for
+  Artifacts' contract?
+- **The root the engine needs on this box.** sandcastle's engine jails
+  each VM, so it runs as root (`sudo systemd-run …`). Someone has to
+  start it.
+- **Placement's preference** (seam 2): answered by Bring your own
+  computer, a person's choice in settings. Left open: whether a choice
+  that is down should wait rather than fall back (a fallback is for life),
+  and whether automatic should ever use a person's own nodes (today never,
+  so a node someone was tricked into approving takes nothing).
+- **BYOC's default** (seam 2): off, so an intranet is safe as deployed;
+  a home deployment says `FRAGMENT_BYOC=on`.
+- **The Mac as a node.** Its Linux VM builds the arm64 images natively
+  (`docker build --platform linux/arm64 -f images/hermes/Dockerfile .`),
+  loads them into its engine, and dials the box with `"uplink"` in its
+  config. The box's node list then names its id, `"arch": "aarch64"`, and
+  the images' arm64 references. Its secret is a file on each side.

@@ -79,6 +79,9 @@ pub enum Skip {
     /// The deployment serves fragments by path, with no origin of their own
     /// (no `FRAGMENT_HOST_SUFFIX` and `FRAGMENT_PLATFORM_URL`).
     NoAddress,
+    /// The deployment has no browser to shoot with: no `browser` binding,
+    /// and no `FRAGMENT_BROWSER_URL` (docs/self-host.md, seam 7).
+    NoBrowser,
     /// Its owner pays for nothing now (a guest), or is past the overdraft.
     OwnerPays,
 }
@@ -89,6 +92,7 @@ impl Skip {
             Skip::NotAnApp => "a chat or an agent is not an app: it has no card",
             Skip::MembersOnly => "a members-only fragment has no card: a visitor without an account sees only its refusal",
             Skip::NoAddress => "this deployment serves fragments by path, so a visitor has no page of theirs to open",
+            Skip::NoBrowser => "this deployment has no browser to shoot cards with (no `browser` binding, nor FRAGMENT_BROWSER_URL)",
             Skip::OwnerPays => "its owner's ledger takes no shot now (a guest pays for nothing; past the overdraft, nothing new is made)",
         }
     }

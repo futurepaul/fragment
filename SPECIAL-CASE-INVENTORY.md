@@ -14,9 +14,10 @@ a vendor's product beyond the credential it holds.
 
 | Surface | Why it is platform | Built on |
 |---|---|---|
-| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`) | Security: it mints the credentials every other surface trusts. | WorkOS AuthKit; the registry |
+| Sign-in, sessions, CLI approval (`/auth/*`, `/cli`; the shell's tabs sign in through `/auth/frame`) | Security: it mints the credentials every other surface trusts. | An OpenID Connect provider (WorkOS AuthKit's); the registry |
 | The shell (`/`, `/settings`): sidebar, tabs, profile and settings, search, first run | Security: it holds your session and frames your fragments and computers. The thin page users can't break. | The public fragment, computer, identity and ledger APIs |
 | Identity and delegation | Security: who an agent acts for, and at what role. | The registry |
+| A person's own nodes (`/nodes/pair`, `/api/nodes/*`; experimental, `FRAGMENT_BYOC=on` only) | Security: it mints a machine's credential to run its owner's computers, and approving one is a session's act, as a CLI key's is. | The registry; a node's uplink |
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | The share sheet and invites | Security: it acts as the fragment's owner. | The members and invites API |

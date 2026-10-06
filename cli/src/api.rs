@@ -58,7 +58,8 @@ impl Code {
         match error {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
-            ErrorCode::Forbidden | ErrorCode::NotConnected => Code::Forbidden,
+            // a computer on a node its owner revoked runs nowhere until they act: no retry helps
+            ErrorCode::Forbidden | ErrorCode::NotConnected | ErrorCode::NodeRevoked => Code::Forbidden,
             // the CLI calls the platform's host, which never moves
             ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode | ErrorCode::Moved => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
@@ -69,7 +70,7 @@ impl Code {
             ErrorCode::BudgetUsedUp => Code::BudgetUsedUp,
             ErrorCode::StorageFull => Code::StorageFull,
             ErrorCode::HostFailed => Code::ServerError,
-            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake => Code::Unavailable,
+            ErrorCode::UpstreamFailed | ErrorCode::RegistryUnavailable | ErrorCode::NodeFull | ErrorCode::WontWake | ErrorCode::NodeDown | ErrorCode::NoNode => Code::Unavailable,
         }
     }
 
@@ -648,6 +649,8 @@ mod tests {
             (ErrorCode::WontWake, "unavailable"),
             (ErrorCode::Moved, "not_found"),
             (ErrorCode::NotConnected, "forbidden"),
+            (ErrorCode::NodeDown, "unavailable"),
+            (ErrorCode::NoNode, "unavailable"),
         ];
         for (error, cli) in table {
             let body = serde_json::to_vec(&ErrorBody { error, message: "name taken, already exists".into() }).unwrap();

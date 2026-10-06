@@ -58,10 +58,22 @@ pub(crate) fn from_js(v: &JsValue) -> Result<serde_json::Value, String> {
 /// `obj.method(...args)`, settled (a value, a promise, or an RPC
 /// thenable): for the objects entry.mjs hands the cell (a computer's
 /// `ContainerHost`). A throw or a rejection is the host's failure, its
-/// message kept.
+/// message kept; but a sandcastle node that does not answer (node.mjs's
+/// `NodeDown`) is `ErrorCode::NodeDown`, and a person's node they revoked
+/// (`NodeRevoked`) is `ErrorCode::NodeRevoked`.
 pub(crate) async fn invoke(obj: &JsValue, method: &str, args: &[JsValue]) -> CellResult<JsValue> {
-    let out = call(obj, method, args).map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))?;
-    settle(out).await.map_err(|e| CellError::host(format!("{method}: {}", js_message(&e))))
+    let out = call(obj, method, args).map_err(|e| host_error(method, &e))?;
+    settle(out).await.map_err(|e| host_error(method, &e))
+}
+
+fn host_error(method: &str, e: &JsValue) -> CellError {
+    let message = js_message(e);
+    let name = e.is_object().then(|| Reflect::get(e, &JsValue::from_str("name")).ok()).flatten().and_then(|n| n.as_string());
+    match name.as_deref() {
+        Some("NodeDown") => CellError::new(ErrorCode::NodeDown, message),
+        Some("NodeRevoked") => CellError::new(ErrorCode::NodeRevoked, message),
+        _ => CellError::host(format!("{method}: {message}")),
+    }
 }
 
 /// `obj[key]`.
@@ -314,6 +326,11 @@ pub async fn delete_app_facet(ctx: &JsValue, name: &str) -> CellResult<()> {
 }
 
 /// A binding of the node's; `section` is where wrangler.jsonc declares it.
+/// Whether the deployment declares the binding `name`.
+pub fn has_binding(env: &JsValue, name: &str) -> bool {
+    get(env, name).is_ok_and(|b| !b.is_undefined())
+}
+
 fn binding(env: &JsValue, name: &str, section: &str) -> CellResult<JsValue> {
     let binding = get(env, name)?;
     if binding.is_undefined() {

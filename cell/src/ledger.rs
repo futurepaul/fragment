@@ -6,11 +6,12 @@
 //!
 //! The head (plan, seat, balance, holds, price book) is kept whole as one
 //! JSON row, small and bounded; what grows with use (references, batches,
-//! commands, each fragment's spend by month, caps) is in tables, read and
-//! written through `SqlStore`. Each route is one `transactionSync` over
-//! both: the core decides before it writes, so a refusal changes nothing
-//! but the month it rolled to, and a store that failed rolls the whole
-//! route back. Its alarm runs `sweep` at the head's `next_sweep_ms`.
+//! commands, each fragment's spend by month, caps, own hardware's use by
+//! month) is in tables, read and written through `SqlStore`. Each route is
+//! one `transactionSync` over both: the core decides before it writes, so a
+//! refusal changes nothing but the month it rolled to, and a store that
+//! failed rolls the whole route back. Its alarm runs `sweep` at the head's
+//! `next_sweep_ms`.
 //!
 //! Inner routes (platform code only, through `ask`): each is a POST of a
 //! `Route`'s request (the core's types, or proto's), answered with its
@@ -43,6 +44,7 @@ CREATE INDEX IF NOT EXISTS batches_at ON batches (at_ms);
 CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, command TEXT NOT NULL, at_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment));
 CREATE TABLE IF NOT EXISTS caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS own_hardware (month INTEGER PRIMARY KEY, list_micros INTEGER NOT NULL);
 ";
 
 /// The person a ledger call is for; only platform code sets it, and the
@@ -434,6 +436,23 @@ impl Store for SqlStore {
         }
     }
 
+    fn own_hardware(&self, month: Month) -> i64 {
+        #[derive(Deserialize)]
+        struct Row {
+            list_micros: i64,
+        }
+        self.rows::<Row>("SELECT list_micros FROM own_hardware WHERE month = ?", vec![SqlStorageValue::Integer(month.0.into())]).first().map_or(0, |r| r.list_micros)
+    }
+
+    fn add_own_hardware(&mut self, month: Month, list_micros: i64) {
+        assert!(list_micros > 0, "only a list price adds to own hardware's month");
+        self.exec(
+            "INSERT INTO own_hardware (month, list_micros) VALUES (?, ?)
+             ON CONFLICT (month) DO UPDATE SET list_micros = list_micros + excluded.list_micros",
+            vec![SqlStorageValue::Integer(month.0.into()), SqlStorageValue::Integer(list_micros)],
+        );
+    }
+
     fn prune(&mut self, before_ms: i64, before_month: Month) -> u64 {
         let before = SqlStorageValue::Integer(before_ms);
         // the sweep expired every hold past HOLD_MAX_MS first: one older
@@ -449,6 +468,7 @@ impl Store for SqlStore {
         self.exec("DELETE FROM entries WHERE at_ms < ?", vec![before.clone()]);
         self.exec("DELETE FROM batches WHERE at_ms < ?", vec![before]);
         self.exec("DELETE FROM spend WHERE month < ?", vec![SqlStorageValue::Integer(before_month.0.into())]);
+        self.exec("DELETE FROM own_hardware WHERE month < ?", vec![SqlStorageValue::Integer(before_month.0.into())]);
         forgotten
     }
 }

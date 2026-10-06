@@ -10,13 +10,58 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
 import { handleS3 } from "./storage.mjs";
+import { NodeContainer, Placements, health, isPaired, nodeEgress, nodeFor, nodeStatus, nodesOf, probe, routeNodeEgress, take } from "./node.mjs";
+import { Uplink, routeNodeUplink } from "./uplink.mjs";
+import { withSecrets } from "./secrets.mjs";
+
+// The last `arm` of a computer on a node, its isolate's to repeat.
+const NODE_ARM = "node/arm";
+// The meta row computer.rs keeps the node a computer is placed on in.
+const NODE_META = "node";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
-export default rs.default;
+// Every class here takes its env through `withSecrets` (secrets.mjs) before
+// anything reads it: where the runtime has no Secrets Store (celld), the
+// deployment's secrets are stand-ins of the store's bindings there, and the
+// Rust reads them as it reads the store's (docs/self-host.md, seam 12).
+// Where it has one, the env is as it came.
+
+// A computer on nodes that has not been placed: nothing runs.
+const UNPLACED = Object.freeze({ running: false, images: {} });
+
+// The router is Rust's, but for two routes of a sandcastle node's, on the
+// platform's own host: its intercepts (node.mjs), which go to their
+// computer's object as they came, and its uplink (uplink.mjs), which goes
+// to its `Node` object.
+function routed(request, env, rust) {
+  const url = new URL(request.url);
+  const platform = env.FRAGMENT_PLATFORM_URL ? new URL(env.FRAGMENT_PLATFORM_URL).host : url.host;
+  if (url.pathname === "/api/nodes/egress" && url.host === platform && nodesOf(env)) return routeNodeEgress(request, env);
+  if (url.pathname === "/api/nodes/uplink" && url.host === platform && nodesOf(env)) return routeNodeUplink(request, env);
+  return rust();
+}
+
+const Rust = rs.default;
+export default typeof Rust === "function"
+  ? class extends Rust {
+      constructor(ctx, env) {
+        super(ctx, withSecrets(env));
+      }
+      fetch(request) {
+        return routed(request, this.env, () => super.fetch(request));
+      }
+    }
+  : Object.fromEntries(
+      Object.entries({ ...Rust, fetch: (request, env, ctx) => routed(request, env, () => Rust.fetch(request, env, ctx)) }).map(([name, handler]) => [
+        name,
+        typeof handler === "function" ? (event, env, ctx) => handler.call(Rust, event, withSecrets(env), ctx) : handler,
+      ]),
+    );
 
 export class Fragment extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.FragmentCell(ctx, env);
   }
@@ -29,6 +74,7 @@ export class Fragment extends DurableObject {
 
 export class Principal extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.PrincipalCell(ctx, env);
   }
@@ -37,6 +83,7 @@ export class Principal extends DurableObject {
 
 export class Ledger extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.LedgerCell(ctx, env);
   }
@@ -46,6 +93,7 @@ export class Ledger extends DurableObject {
 
 export class Registry extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
     this.rs = new rs.RegistryCell(ctx, env);
   }
@@ -59,6 +107,10 @@ export class Registry extends DurableObject {
 // `rs.InternalRoute.request` (routed.rs), which marks the request as that route
 // expects: the JavaScript names no header.
 export class Files extends WorkerEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   async #ask(op, body) {
     const { fragment } = this.ctx.props;
     return this.env.FRAGMENT.getByName(fragment).fetch(rs.InternalRoute.request(`cap/files/${op}`, JSON.stringify(body)));
@@ -90,6 +142,10 @@ export class Files extends WorkerEntrypoint {
 // when its retries run out, the next advance carries its error, and the job
 // sees it and may catch it.
 export class Job extends WorkflowEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   async run(event, step) {
     const { fragment, incarnation, run, attempt } = event.payload;
     const delay = Math.max(1, Number(this.env.FRAGMENT_JOB_RETRY_DELAY_S) || 10);
@@ -134,34 +190,132 @@ export class Job extends WorkflowEntrypoint {
 // runtime call and its plumbing. Every call that touches the container
 // names the start it is for (its generation): a late call for an earlier
 // start (a sleep that finishes after a wake started another) touches
-// nothing.
+// nothing. The container is the runtime's (`ctx.container`), or, when the
+// deployment places computers on sandcastle nodes (FRAGMENT_NODES), the
+// node's it is placed on (`NodeContainer`, node.mjs: the same API).
+// Placing it is computer.rs's (`place`), through `probe`, `take` and `pin`.
 class ContainerHost {
   #ctx;
   #env;
   #report;
   #generation = 0;
-  #backups;
+  #backups = null;
+  // the deployment's nodes (null: the runtime's containers), and this
+  // computer's container on the one it is placed on (null: not yet placed),
+  // and that node (the deployment's, or a person's own: node.mjs `nodeFor`)
+  #nodes;
+  #node = null;
+  #def = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
+    this.#nodes = nodesOf(env);
+    if (!this.#nodes) this.#backups = this.#backupsOf(ctx.container);
+  }
+
+  #backupsOf(container) {
+    return new DirectoryBackup(container, this.#ctx.exports.DirectoryBackupGateway, {
       binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+      prefix: `computers/${this.#ctx.id}/backups/`,
     });
   }
 
+  // The container: the runtime's, or its node's. Before a computer on
+  // nodes is placed, nothing runs and nothing may be started.
   get #c() {
-    return this.#ctx.container;
+    if (!this.#nodes) return this.#ctx.container;
+    return this.#node || UNPLACED;
   }
 
-  running() {
+  // A new isolate's first look, before any request: the node computer.rs
+  // placed the computer on (its meta row; the schema is applied before
+  // this runs), and what that node says of its container.
+  // A person's own node is the registry's to name (node.mjs `pairedNode`):
+  // when it does not answer, the computer is pinned at its next call instead.
+  async refresh() {
+    if (!this.#nodes) return;
+    try {
+      await this.#repin();
+    } catch (e) {
+      console.log(JSON.stringify({ computer: this.#ctx.id.toString(), pin: String((e && e.message) || e) }));
+    }
+    if (this.#node) await this.#node.refresh();
+  }
+
+  // Pins this isolate to the node computer.rs placed the computer on, if
+  // it has not yet.
+  async #repin() {
+    if (!this.#nodes || this.#node) return;
+    const row = [...this.#ctx.storage.sql.exec("SELECT value FROM meta WHERE key = ?", NODE_META)][0];
+    if (row) await this.pin(row.value);
+  }
+
+  // Whether computers run on sandcastle nodes here.
+  nodes() {
+    return this.#nodes !== null;
+  }
+
+  // Each node as placing a computer needs it (node.mjs `probe`): the
+  // deployment's, and `own`, the person's own node they chose ([{id}]).
+  probe(own) {
+    return probe(this.#env, this.#nodes, own || []);
+  }
+
+  // Whether node `id` takes `computer`, with room for `capacity` (its
+  // object counts what it holds).
+  take(id, computer, capacity) {
+    return take(this.#env, id, computer, capacity);
+  }
+
+  // This computer runs on node `id`, which computer.rs recorded, from now
+  // on: a node FRAGMENT_NODES no longer lists answers every call NodeDown,
+  // and a person's own node they revoked, NodeRevoked.
+  async pin(id) {
+    if (this.#node) {
+      if (this.#node.node !== id) throw new Error(`placed on ${this.#node.node}, never ${id}`);
+      return;
+    }
+    const node = await nodeFor(this.#env, this.#nodes, id);
+    if (this.#node) return;
+    this.#def = node;
+    this.#node = new NodeContainer(node, this.#ctx.id.toString());
+    this.#backups = this.#backupsOf(this.#node);
+  }
+
+  // An intercepted request from the node (node.mjs). An isolate that
+  // started after its container has no bindings: it sets them again from
+  // the last `arm`, kept for this.
+  // A person's own node they revoked hands nothing on: its object says so.
+  async nodeEgress(request) {
+    const rearm = async () => {
+      const a = await this.#ctx.storage.get(NODE_ARM);
+      const adopted = !!a && (await this.adopt(a.generation));
+      if (adopted) await this.arm(a.generation, a.computer, a.idleMs, a.swapHosts);
+      console.log(JSON.stringify({ nodeEgress: "rearm", generation: a?.generation ?? null, adopted }));
+    };
+    const node = this.#node ? this.#def : null;
+    if (node?.own && (await nodeStatus(this.#env, node.id)).revoked) {
+      console.log(JSON.stringify({ nodeEgress: "refused", node: node.id, status: 403, error: "its node was revoked" }));
+      return Response.json({ error: "node_revoked", message: `the node ${node.id} was revoked by its owner` }, { status: 403 });
+    }
+    return nodeEgress(request, node, this.#node, rearm);
+  }
+
+  // Whether its container runs: a node's that could not say as this
+  // isolate began (it was dialing again) is asked again first.
+  async running() {
+    await this.#repin();
+    if (this.#node) await this.#node.known();
     return this.#c.running;
   }
 
-  // The images the deployment declares (wrangler.jsonc `containers`).
+  // The images a computer may be pinned to: the deployment's (wrangler.jsonc
+  // `containers`), or, on nodes, FRAGMENT_NODES' that its node can run
+  // (every one, before it is placed).
   images() {
+    if (this.#nodes && !this.#node) return this.#nodes.images;
     return Object.keys(this.#c.images || {});
   }
 
@@ -175,8 +329,8 @@ class ContainerHost {
   // A new isolate finds the container of start `generation` (lesson 6):
   // when it runs, this isolate takes it, watching its exit again. Answers
   // whether it runs.
-  adopt(generation) {
-    if (!this.#c.running) return false;
+  async adopt(generation) {
+    if (!(await this.running())) return false;
     this.#generation = generation;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
@@ -188,15 +342,20 @@ class ContainerHost {
   // Starts `image` (or a snapshot of it), then watches it: its exit, for
   // any reason, is reported as `computer/exited` for this generation.
   start(generation, image, snapshot, env, instance) {
+    if (this.#nodes && !this.#node) throw new Error("a computer on nodes is placed before it starts (computer.rs `place`)");
+    // a node it can no longer reach says why, not that it lacks the image
+    if (this.#def?.error) throw this.#def.error();
     this.#generation = generation;
     const opts = { env, enableInternet: true };
     if (instance) opts.instance = instance;
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
+    else if (this.#node) throw new Error(`its node ${this.#node.node} has no ${image} image for its architecture (FRAGMENT_NODES' images)`);
     this.#c.start(opts);
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
-      (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
+      // a start that failed is reported as that, by the start (computer.rs)
+      (e) => e?.startFailed || this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
     );
   }
 
@@ -234,6 +393,7 @@ class ContainerHost {
     }
     await this.#settled(() => this.#backups.intercept());
     await this.#settled(() => c.setInactivityTimeout(idleMs));
+    if (this.#node) await this.#ctx.storage.put(NODE_ARM, { generation, computer, idleMs, swapHosts });
     return true;
   }
 
@@ -351,6 +511,7 @@ class ContainerHost {
   // server's version, the screen's control socket's holder), whose first
   // word the report's await used to lose.
   async port(port, request) {
+    if (this.#nodes && !this.#node) throw new Error("a computer that has never started has no ports");
     const resp = await this.#c.getTcpPort(port).fetch(request);
     const upstream = resp.webSocket;
     if (!upstream) return resp;
@@ -381,16 +542,87 @@ class ContainerHost {
 
 export class Computer extends DurableObject {
   constructor(ctx, env) {
+    env = withSecrets(env);
     super(ctx, env);
-    const report = (path, body) => this.rs.fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
-    Object.defineProperty(ctx, "computerHost", { value: new ContainerHost(ctx, env, report) });
+    // What befell its container (its exit, a tab's socket) comes back in as
+    // a request of its own, through the object's namespace: never as a
+    // continuation of the call that started the container, long answered by
+    // then. A runtime may tie what such a continuation opens to that call:
+    // celld closes its WebSockets at once, so the start an exit's report
+    // made took no exec (docs/self-host.md, found 21).
+    const self = env.COMPUTER.idFromString(ctx.id.toString());
+    const report = (path, body) => env.COMPUTER.get(self).fetch(rs.InternalRoute.request(path, JSON.stringify(body)));
+    const host = new ContainerHost(ctx, env, report);
+    Object.defineProperty(ctx, "computerHost", { value: host });
     this.rs = new rs.ComputerCell(ctx, env);
+    ctx.blockConcurrencyWhile(() => host.refresh());
   }
-  fetch(request) { return this.rs.fetch(request); }
+  fetch(request) {
+    if (new URL(request.url).pathname === "/__node/egress") return this.ctx.computerHost.nodeEgress(request);
+    return this.rs.fetch(request);
+  }
   alarm(info) { return this.rs.alarm(info); }
   webSocketMessage(ws, message) { return this.rs.webSocketMessage(ws, message); }
   webSocketClose(ws, code, reason, clean) { return this.rs.webSocketClose(ws, code, reason, clean); }
   webSocketError(ws, error) { return this.rs.webSocketError(ws, error); }
+}
+
+// A sandcastle node's object (node.mjs, uplink.mjs): one per node id. It
+// counts the computers placed on the node, and, when the node dials in,
+// holds its uplink, through which `NodeContainer` calls it. It says whether
+// the node is up (`/__node/status`, for its owner's settings), and, a
+// person's own node, that its owner revoked it (`/__node/revoke`): its
+// uplink is cut, and every dial and call after is refused, typed.
+const REVOKED = "revoked";
+export class Node extends DurableObject {
+  constructor(ctx, env) {
+    env = withSecrets(env);
+    super(ctx, env);
+    this.uplink = new Uplink(ctx, env);
+    this.placements = new Placements(ctx);
+    this.revoked = false;
+    ctx.blockConcurrencyWhile(async () => {
+      this.revoked = (await ctx.storage.get(REVOKED)) === true;
+    });
+  }
+  async fetch(request) {
+    const path = new URL(request.url).pathname;
+    if (path === "/__node/status" || path === "/__node/revoke") {
+      const { id } = await request.json().catch(() => ({}));
+      // this object is that node's alone
+      if (!id || this.ctx.id.toString() !== this.env.NODE.idFromName(id).toString()) return Response.json({ error: "invalid_request", message: "name this node's id" }, { status: 400 });
+      if (path === "/__node/revoke") {
+        if (!isPaired(id)) return Response.json({ error: "forbidden", message: "only a person's own node is revoked" }, { status: 403 });
+        this.revoked = true;
+        await this.ctx.storage.put(REVOKED, true);
+        this.uplink.revoke(`the node ${id} was revoked by its owner`);
+        return Response.json({ revoked: true });
+      }
+      return Response.json(await this.#status(id));
+    }
+    if (path.startsWith("/__node/")) return this.placements.fetch(request);
+    if (this.revoked) {
+      const message = `the node was revoked by its owner: pair the machine again`;
+      return Response.json({ error: "node_revoked", message }, { status: path === "/__uplink/dial" ? 403 : 410 });
+    }
+    return this.uplink.fetch(request);
+  }
+  // Up or down now: one that dials in is up while its uplink is open; one
+  // the platform calls, while its health answers (as placing probes it).
+  async #status(id) {
+    if (this.revoked) return { revoked: true, up: false };
+    const nodes = nodesOf(this.env);
+    const listed = nodes?.byId.get(id);
+    if (listed && !listed.uplink) {
+      const h = await health(listed);
+      return { revoked: false, up: !h.down, why: h.down || null };
+    }
+    const up = this.uplink.connected();
+    return { revoked: false, up, why: up ? null : "its uplink is not open" };
+  }
+  webSocketMessage(ws, message) { return this.uplink.webSocketMessage(ws, message); }
+  webSocketClose(ws, code, reason, clean) { return this.uplink.webSocketClose(ws, code, reason, clean); }
+  webSocketError(ws, error) { return this.uplink.webSocketError(ws, error); }
 }
 
 // Every intercepted request a computer's guest makes (docs/computers.md):
@@ -398,6 +630,10 @@ export class Computer extends DurableObject {
 // computer, both set by the Computer DO, never by the guest. Storage is
 // answered here; the rest is Rust's (`ComputerEgress.handle`).
 export class ComputerEgress extends WorkerEntrypoint {
+  constructor(ctx, env) {
+    super(ctx, withSecrets(env));
+  }
+
   fetch(request) {
     const { computer, route } = this.ctx.props;
     if (route === "storage") {

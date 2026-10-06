@@ -214,9 +214,15 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
     let call = s.ai.calls().last().cloned();
+    // the binding takes its input less the model; an OpenAI-compatible
+    // server, the model by its own name (the run maps each id to itself)
+    let named = |c: &fragment_fakes::workers_ai::AiCall| match s.openai_models() {
+        true => c.body["model"] == c.model.as_str(),
+        false => c.body.get("model").is_none(),
+    };
     s.ok(
         "the model route sent its input bounded: the job's reasoning effort as given (high is one GLM takes), its tokens capped",
-        call.as_ref().is_some_and(|c| c.model == "@cf/zai-org/glm-5.3" && c.body["reasoning_effort"] == "high" && c.body["max_tokens"] == 16_384 && c.body.get("model").is_none()),
+        call.as_ref().is_some_and(|c| c.model == "@cf/zai-org/glm-5.3" && c.body["reasoning_effort"] == "high" && c.body["max_tokens"] == 16_384 && named(c)),
         format!("{call:?}"),
     );
     let r = run("t-high", "summarize_high", json!({ "text": "the high tier" }))?;
@@ -225,7 +231,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run("i1", "draw", json!({ "prompt": "a lighthouse", "path": "art/lighthouse.jpg" }))?;
     s.ok(
         "an image step writes the model's JPEG to main",
-        r["output"]["path"] == "art/lighthouse.jpg" && r["output"]["mediaType"] == "image/jpeg" && s.fake.file_at(&repo, "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse")),
+        r["output"]["path"] == "art/lighthouse.jpg" && r["output"]["mediaType"] == "image/jpeg" && s.file_at(&repo, "main", "art/lighthouse.jpg") == Some(image_bytes("a lighthouse")),
         &r,
     );
     let call = images(s).last().cloned();
@@ -238,12 +244,12 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run("i-mid", "draw", json!({ "prompt": "a mid harbour", "path": "art/harbour.jpg", "steps": 8 }))?;
     s.ok(
         "a 300 KiB image, past an app's write limit and under a blob's size, is kept in git (bug 1), drawn at the steps the job named",
-        r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/harbour.jpg") == Some(mid) && images(s).last().is_some_and(|c| c.body["steps"] == 8),
+        r["status"] == "succeeded" && s.file_at(&repo, "main", "art/harbour.jpg") == Some(mid) && images(s).last().is_some_and(|c| c.body["steps"] == 8),
         &r,
     );
     let big = image_bytes("a large mural");
     let r = run("i2", "draw", json!({ "prompt": "a large mural", "path": "art/mural.jpg" }))?;
-    let pointer = fragment_core::blob::parse(&s.fake.file_at(&repo, "main", "art/mural.jpg").unwrap_or_default());
+    let pointer = fragment_core::blob::parse(&s.file_at(&repo, "main", "art/mural.jpg").unwrap_or_default());
     s.ok(
         "a large image is a blob, its pointer in git",
         r["status"] == "succeeded" && pointer.as_ref().is_some_and(|p| p.sha256 == fragment_core::blob::sha256_hex(&big) && p.size == big.len() as u64),
@@ -274,7 +280,7 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
             && r["error"].as_str().is_some_and(|e| e.contains("video steps are off until they run on Cloudflare"))
             && cost(&r) == 0
             && s.ai.calls().len() == calls
-            && s.fake.file_at(&repo, "main", "video/waves.mp4").is_none(),
+            && s.file_at(&repo, "main", "video/waves.mp4").is_none(),
         &r,
     );
 
@@ -283,14 +289,14 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the model's 503 is retried", r["output"]["text"] == "echo: again", &r);
     s.ai.fail_next(&[503]);
     let r = run("i3", "draw", json!({ "prompt": "a harbour at dusk", "path": "art/dusk.jpg" }))?;
-    s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.fake.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);
+    s.ok("the image model's 503 is retried", r["status"] == "succeeded" && s.file_at(&repo, "main", "art/dusk.jpg") == Some(image_bytes("a harbour at dusk")), &r);
     s.ai.fail_next(&[400]);
     let r = run("i4", "draw", json!({ "prompt": "refused", "path": "art/none.jpg" }))?;
     s.ok("its refusal holds the run, saying so, and charges nothing", r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("the model answered 400")) && cost(&r) == 0, &r);
     let r = run("i5", "draw", json!({ "prompt": "a png", "path": "art/junk.jpg" }))?;
     s.ok(
         "an answer that is no JPEG is refused, saying why, and nothing is written; the call is charged",
-        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
+        r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
         &r,
     );
     Ok(())

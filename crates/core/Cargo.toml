@@ -21,6 +21,14 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 # No `std`: it enables rand_core's getrandom, which does not build for the
 # cell. ECDSA signing is deterministic (RFC 6979) and needs no randomness.
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
+# Sign-in's id_tokens (oidc.rs): RS256 verified with the provider's public
+# key only. No `std` (it enables getrandom through num-bigint-dig's rand).
+# RUSTSEC-2023-0071 (Marvin) is a timing leak of private-key operations;
+# verification uses none.
+rsa = { version = "=0.9.10", default-features = false, features = ["sha2"] }
 
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+# oidc.rs's tests make RSA keys, which takes a random source.
+rsa = { version = "=0.9.10", features = ["sha2"] }
+rand_core = { version = "=0.6.4", features = ["getrandom"] }

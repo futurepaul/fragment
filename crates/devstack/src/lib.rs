@@ -16,10 +16,52 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
+pub mod browser;
+mod browser_release;
+pub mod celld;
+pub mod codestore;
 pub mod node;
 mod node_release;
+pub mod rendering;
+pub mod sandcastle;
 pub mod store;
 pub mod summary;
+
+/// Held by each test that writes an executable and runs it (node.rs,
+/// browser.rs, rendering): a process another test forks meanwhile would
+/// hold the file open for writing, and running it would fail (ETXTBSY).
+#[cfg(test)]
+pub(crate) static TEST_EXEC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A running node, on either runtime.
+pub enum AnyNode {
+    Wrangler(Node),
+    Celld(celld::CelldNode),
+}
+
+impl AnyNode {
+    pub fn stop(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.stop(),
+            AnyNode::Celld(n) => n.stop(),
+        }
+    }
+
+    pub fn crash(self) -> Result<()> {
+        match self {
+            AnyNode::Wrangler(n) => n.crash(),
+            AnyNode::Celld(n) => n.crash(),
+        }
+    }
+
+    /// This boot's log.
+    pub fn log(&self) -> &Path {
+        match self {
+            AnyNode::Wrangler(n) => &n.log,
+            AnyNode::Celld(n) => &n.log,
+        }
+    }
+}
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -171,12 +213,17 @@ pub fn local_config(project: &Path) -> PathBuf {
 /// The project's config as a local node runs it (`local_config`): less the
 /// remote-only bindings, and its secrets bound by name (`secrets`, each a
 /// binding and its secret's name) in wrangler's local store, as a deploy
-/// binds them in the account's.
-fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<PathBuf> {
+/// binds them in the account's. Without `containers`, computers run on a
+/// sandcastle node (docs/self-host.md, seam 2), or nowhere: the runtime's
+/// own containers, and Docker for them, go unused.
+fn write_local_config(project: &Path, secrets: &[(String, &str)], containers: bool) -> Result<PathBuf> {
     let mut config = read_config(project)?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for b in REMOTE_ONLY_BINDINGS {
         obj.remove(b);
+    }
+    if !containers {
+        obj.remove("containers");
     }
     anyhow::ensure!(!obj.contains_key("secrets_store_secrets"), "{} binds no secrets of its own: the fleet's are bound here", project.join("wrangler.jsonc").display());
     obj.insert("secrets_store_secrets".into(), store::bindings_json(store::LOCAL_STORE_ID, secrets));
@@ -189,21 +236,24 @@ fn write_local_config(project: &Path, secrets: &[(String, &str)]) -> Result<Path
 /// queues, and the local store's secrets): before its fleet is configured,
 /// which seeds the store again.
 pub fn clear_state(project: &Path) -> Result<()> {
-    let state = state_dir(project);
-    if state.exists() {
-        fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+    // either runtime's: wrangler's, and celld's (docs/self-host.md, seam 1)
+    for state in [state_dir(project), celld::state_dir(project)] {
+        if state.exists() {
+            fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
+        }
     }
     Ok(())
 }
 
 /// A copy of the built agent project at `dir`.
 pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
-    stage(&agent_dir(), dir, &[])
+    // celld.mjs: its entry on celld (docs/self-host.md, seam 12)
+    stage(&agent_dir(), dir, &["celld.mjs"])
 }
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs", "node.mjs", "uplink.mjs", "secrets.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.
@@ -273,14 +323,28 @@ pub fn write_dev_vars(project: &Path, vars: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+/// Where a local node's secrets are, for the bindings the cell reads them
+/// through (cell/src/keys.rs: `await env.<BINDING>.get()`, either way).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Secrets {
+    /// wrangler's local Secrets Store in the node's state directory, bound
+    /// by name as a deploy binds the account's (`wrangler dev`).
+    Store,
+    /// The cell's stand-ins for the store's bindings (cell/secrets.mjs;
+    /// docs/self-host.md, seam 12), backed by Worker variables of the
+    /// bindings' names in `.dev.vars`: a runtime with no Secrets Store
+    /// (celld).
+    Shim,
+}
+
 /// What a local deployment is configured with. The cell reads its
-/// settings as Worker variables, from `.dev.vars` (mode 600) under
-/// `wrangler dev`, and its keys from Secrets Store bindings
-/// (cell/src/keys.rs), which a local node reads from wrangler's local
-/// store in its state directory: `configure` seeds it with these values,
-/// under the names `store::Bound::conventional` gives them, and binds
-/// them as a deploy does. A dev or test deployment points code.storage at
-/// the fake in `crates/fakes`.
+/// settings as Worker variables, from `.dev.vars` (mode 600), and its keys
+/// from Secrets Store bindings (cell/src/keys.rs): under `wrangler dev`
+/// from wrangler's local store in its state directory, which `configure`
+/// seeds with these values, under the names `store::Bound::conventional`
+/// gives them, and binds as a deploy does; on celld from the cell's
+/// stand-ins for them (`Secrets::Shim`). A dev or test deployment points
+/// code.storage at the fake in `crates/fakes`.
 pub struct Fleet {
     pub host_secret: String,
     pub codestorage_org: String,
@@ -312,8 +376,12 @@ pub struct Fleet {
     /// The wait before a delivery is retried, every time (`None`: the
     /// cell's, 10 s growing with the delivery's age to an hour).
     pub delivery_retry_s: Option<u32>,
-    /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
+    /// WorkOS, for Pipes' connections (the real one, or the fake in
+    /// `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Sign-in (docs/self-host.md, seam 4): an OpenID Connect provider,
+    /// WorkOS AuthKit's (`OidcVars::authkit`) or another.
+    pub oidc: Option<OidcVars>,
     /// The platform's origin (sign-in, the platform session), when it is
     /// not the hostname suffix itself.
     pub platform_url: Option<String>,
@@ -339,9 +407,90 @@ pub struct Fleet {
     pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// A self-hosted model upstream (docs/self-host.md, seam 3), in place
+    /// of `ai_url` and the gateway.
+    pub model_upstream: Option<ModelUpstreamVars>,
+    /// The sandcastle nodes computers are placed on (docs/self-host.md,
+    /// seam 2), in place of the runtime's containers.
+    pub nodes: Option<sandcastle::NodesVars>,
+    /// The runtime's own containers (Docker under `wrangler dev`): `false`
+    /// when computers run on sandcastle nodes instead, or nowhere.
+    pub containers: bool,
+    /// Whether its people may pair nodes of their own (`FRAGMENT_BYOC=on`;
+    /// docs/self-host.md, seam 2, Bring your own computer). Needs `nodes`.
+    pub byoc: bool,
+    /// Where preview cards are shot when the runtime has no `BROWSER`
+    /// binding (`FRAGMENT_BROWSER_URL`: the renderer, rendering.rs;
+    /// docs/self-host.md, seam 7).
+    pub browser_url: Option<String>,
+    /// Where its secrets are (`Secrets`): the runtime's.
+    pub secrets: Secrets,
 }
 
-/// A WorkOS environment as the cell reads it.
+/// An OpenAI-compatible model server as the cell reads it.
+pub struct ModelUpstreamVars {
+    /// Its base, with its `/v1`.
+    pub url: String,
+    /// `FRAGMENT_MODELS`' JSON: catalog id to the server's model.
+    pub models: String,
+    /// Its key, bound as `MODEL_KEY` (`Fleet::bound`), when it takes one.
+    pub key: Option<String>,
+}
+
+/// An OpenID Connect provider as the cell reads it (`FRAGMENT_OIDC_*`).
+#[derive(Clone, Debug)]
+pub struct OidcVars {
+    /// Its issuer, exactly as its id_tokens say it.
+    pub issuer: String,
+    pub client_id: String,
+    /// Bound as `OIDC_CLIENT_SECRET` (`Fleet::bound`); `None`: a public
+    /// client (PKCE alone).
+    pub client_secret: Option<String>,
+    /// `FRAGMENT_OIDC_SCOPES`, `FRAGMENT_OIDC_CLAIMS` (JSON),
+    /// `FRAGMENT_OIDC_AUTH` and `FRAGMENT_OIDC_KEYED_AS`; `None`: the
+    /// cell's defaults.
+    pub scopes: Option<String>,
+    pub claims: Option<String>,
+    pub auth: Option<String>,
+    pub keyed_as: Option<String>,
+}
+
+impl OidcVars {
+    /// WorkOS AuthKit's provider at `issuer` (the AuthKit domain), for an
+    /// OAuth application (`client_id`, its secret `client_secret`: the
+    /// value, or `None` where a deploy binds it by its store name) of the
+    /// WorkOS environment bound beside it (docs/self-host.md, seam 4): the
+    /// client in the token request's body, as WorkOS's reference has it,
+    /// and the people keyed as the environment's (`workos`: the cell names
+    /// them `workos:<its client id>`, the name they had before sign-in was
+    /// OpenID Connect, which Pipes reads them by). The one place a WorkOS
+    /// deployment's sign-in is spelled out.
+    pub fn authkit(issuer: &str, client_id: &str, client_secret: Option<&str>) -> OidcVars {
+        OidcVars {
+            issuer: issuer.to_string(),
+            client_id: client_id.to_string(),
+            client_secret: client_secret.map(str::to_string),
+            scopes: None,
+            claims: None,
+            auth: Some("client_secret_post".into()),
+            keyed_as: Some(fragment_core::oidc::KEYED_AS_WORKOS.into()),
+        }
+    }
+
+    /// Its Worker variables, its secret apart (`client_secret`, a store
+    /// secret).
+    pub fn vars(&self) -> Vec<(&'static str, &str)> {
+        let mut vars = vec![("FRAGMENT_OIDC_ISSUER", self.issuer.as_str()), ("FRAGMENT_OIDC_CLIENT_ID", self.client_id.as_str())];
+        for (k, v) in [("FRAGMENT_OIDC_SCOPES", &self.scopes), ("FRAGMENT_OIDC_CLAIMS", &self.claims), ("FRAGMENT_OIDC_AUTH", &self.auth), ("FRAGMENT_OIDC_KEYED_AS", &self.keyed_as)] {
+            if let Some(v) = v {
+                vars.push((k, v.as_str()));
+            }
+        }
+        vars
+    }
+}
+
+/// A WorkOS environment as the cell reads it: Pipes'.
 pub struct WorkOsVars {
     pub client_id: String,
     pub api_key: String,
@@ -353,16 +502,18 @@ impl Fleet {
     /// The store secrets its Workers are bound to, by name.
     pub fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        store::Bound::conventional(self.workos.is_some(), &providers)
+        let mut bound = store::Bound::conventional(self.workos.is_some(), &providers);
+        if self.model_upstream.as_ref().is_some_and(|m| m.key.is_some()) {
+            bound.model_key = Some("fragment-model-key".into());
+        }
+        if self.oidc.as_ref().is_some_and(|o| o.client_secret.is_some()) {
+            bound.oidc_client_secret = Some("fragment-oidc-client-secret".into());
+        }
+        bound
     }
 
-    /// Renders the deployment for a node on `project`: its settings into
-    /// the project's `.dev.vars`, its secrets into wrangler's local store
-    /// in the project's state directory (`store::seed_local`, which skips
-    /// values it holds already), and their bindings into its local config
-    /// (`local_config`). Clear the state first (`clear_state`), not after.
-    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
-        let bound = self.bound();
+    /// Each store secret's name, and its value.
+    fn values<'a>(&'a self, bound: &'a store::Bound) -> Vec<(&'a str, &'a str)> {
         let mut values: Vec<(&str, &str)> = vec![(bound.host_secret.as_str(), self.host_secret.as_str()), (bound.codestorage_key.as_str(), self.codestorage_key_pem.as_str())];
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
@@ -371,9 +522,46 @@ impl Fleet {
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
         }
+        if let (Some(name), Some(key)) = (&bound.model_key, self.model_upstream.as_ref().and_then(|m| m.key.as_ref())) {
+            values.push((name.as_str(), key.as_str()));
+        }
+        if let (Some(name), Some(secret)) = (&bound.oidc_client_secret, self.oidc.as_ref().and_then(|o| o.client_secret.as_ref())) {
+            values.push((name.as_str(), secret.as_str()));
+        }
         assert_eq!(values.len(), bound.cell().len(), "every binding has its value");
-        store::seed_local(tools, &state_dir(project), &values).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
-        write_local_config(project, &bound.cell())?;
+        values
+    }
+
+    /// The shim's variables (`Secrets::Shim`) for `bindings` (each a
+    /// binding and its secret's name): `FRAGMENT_SECRETS`, naming them and
+    /// their backend, and each value as the variable of its binding's name.
+    fn shim_vars<'a>(&'a self, bound: &'a store::Bound, bindings: &[(String, &'a str)]) -> Vec<(String, String)> {
+        assert_eq!(self.secrets, Secrets::Shim, "only the shim's secrets are variables");
+        let values = self.values(bound);
+        let value = |name: &str| values.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()).expect("every bound secret has its value");
+        let secrets: Vec<serde_json::Value> = bindings.iter().map(|(binding, name)| serde_json::json!({ "binding": binding, "secret_name": name })).collect();
+        let mut vars = vec![("FRAGMENT_SECRETS".to_string(), serde_json::json!({ "backend": "vars", "secrets": secrets }).to_string())];
+        vars.extend(bindings.iter().map(|(binding, name)| (binding.clone(), value(name))));
+        vars
+    }
+
+    /// Renders the deployment for a node on `project`: its settings into
+    /// the project's `.dev.vars`, and its secrets where `secrets` says:
+    /// into wrangler's local store in the project's state directory
+    /// (`store::seed_local`, which skips values it holds already), their
+    /// bindings into its local config (`local_config`); or, for the shim,
+    /// into `.dev.vars` too. Clear the state first (`clear_state`), not
+    /// after.
+    pub fn configure(&self, tools: &Tools, project: &Path) -> Result<()> {
+        let bound = self.bound();
+        let shim = match self.secrets {
+            Secrets::Store => {
+                store::seed_local(tools, &state_dir(project), &self.values(&bound)).map_err(|e| anyhow::anyhow!("seed the local Secrets Store: {e}"))?;
+                write_local_config(project, &bound.cell(), self.containers)?;
+                vec![]
+            }
+            Secrets::Shim => self.shim_vars(&bound, &bound.cell()),
+        };
         let poll = self.poll_interval_s.to_string();
         let retry = self.job_retry_delay_s.to_string();
         let mut vars = vec![
@@ -415,6 +603,10 @@ impl Fleet {
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
         }
+        if let Some(o) = &self.oidc {
+            // its client secret is a store secret (`Fleet::bound`)
+            vars.extend(o.vars());
+        }
         if let Some(p) = &self.platform_url {
             vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
         }
@@ -440,6 +632,24 @@ impl Fleet {
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
         }
+        if let Some(m) = &self.model_upstream {
+            vars.push(("FRAGMENT_MODEL_URL", m.url.as_str()));
+            vars.push(("FRAGMENT_MODELS", m.models.as_str()));
+        }
+        if self.byoc {
+            anyhow::ensure!(self.nodes.is_some(), "FRAGMENT_BYOC=on needs the nodes' list (FRAGMENT_NODES_FILE): its images are what a person's own node runs");
+            vars.push(("FRAGMENT_BYOC", "on"));
+        }
+        if let Some(n) = &self.nodes {
+            vars.push(("FRAGMENT_NODES", n.nodes.as_str()));
+            for (name, secret) in &n.secrets {
+                vars.push((name.as_str(), secret.as_str()));
+            }
+        }
+        if let Some(u) = &self.browser_url {
+            vars.push(("FRAGMENT_BROWSER_URL", u.as_str()));
+        }
+        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
@@ -460,13 +670,22 @@ pub struct AgentFleet {
 
 impl AgentFleet {
     /// Renders the fleet into the project's `.dev.vars`, and its bindings
-    /// (`bound.agent()`, the platform fleet's names) into its local config.
-    pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
-        write_local_config(project, &bound.agent())?;
+    /// (`bound.agent()`, the platform fleet's names: `fleet`'s) as `fleet`
+    /// keeps its own: into its local config, or the shim's variables.
+    pub fn configure(&self, project: &Path, fleet: &Fleet) -> Result<()> {
+        let bound = fleet.bound();
+        let shim = match fleet.secrets {
+            Secrets::Store => {
+                write_local_config(project, &bound.agent(), true)?;
+                vec![]
+            }
+            Secrets::Shim => fleet.shim_vars(&bound, &bound.agent()),
+        };
         let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
         if self.test_hooks {
             vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
+        vars.extend(shim.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         write_dev_vars(project, &vars)
     }
 }
@@ -524,7 +743,7 @@ pub const BOOT_LOGS_MAX: u32 = 10_000;
 /// boot number `dir` has no log for. A node started again on its port (the
 /// e2e's restarts) never truncates the log of the one before, which a
 /// crash leaves there, and its own `Ready on` is the only one in its file.
-fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
+pub(crate) fn boot_log(dir: &Path, port: u16) -> Result<(PathBuf, fs::File)> {
     fs::create_dir_all(dir)?;
     for boot in 1..=BOOT_LOGS_MAX {
         let path = dir.join(format!("node-{port}-{boot}.log"));

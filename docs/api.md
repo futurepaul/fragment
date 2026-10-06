@@ -32,11 +32,19 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
 | `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
+| `FRAGMENT_SECRETS` | where the runtime has no Secrets Store (celld; docs/self-host.md, seam 12): the deployment's secrets as `{"backend": "vars", "secrets": [{"binding", "secret_name"}, …]}`, the pairs `secrets_store_secrets` binds elsewhere; the cell's shim (cell/secrets.mjs) stands in for each binding, and the `vars` backend answers the Worker variable of the binding's name. Unset (Cloudflare, `wrangler dev`), the bindings are the store's |
+| `FRAGMENT_BROWSER_URL` | where preview cards are shot instead of the `BROWSER` binding (docs/self-host.md, seam 7): a service answering the binding's routes (`/v1/devtools/browser…`) under this base, reached with `fetch`; set, it wins over the binding. A self-hosted deployment's renderer (`crates/devstack/src/rendering`) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
-| `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
+| `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake), for Pipes' connections, on where the `WORKOS_CLIENT` secret is bound (below); its people are keyed `workos:<its client id>` |
+| `FRAGMENT_OIDC_ISSUER` | who signs people in (docs/self-host.md, seam 4): an OpenID Connect provider's issuer URL, exactly as its id_tokens' `iss` (https; http only on loopback), its metadata at `<issuer>/.well-known/openid-configuration`. WorkOS's is its AuthKit domain, `https://<authkit domain>`. Unset, sign-in answers 500 |
+| `FRAGMENT_OIDC_CLIENT_ID` | its client (required with the issuer): WorkOS's is an OAuth application's, not the environment's; its secret, when it has one, is bound as `OIDC_CLIENT_SECRET` (below) |
+| `FRAGMENT_OIDC_KEYED_AS` | the issuer people are keyed under (default `FRAGMENT_OIDC_ISSUER`; required beside a `WORKOS_CLIENT` binding, where the default would make WorkOS's people new): `workos` keys them as the bound WorkOS environment's, `workos:<its client id>`, as before sign-in was OpenID Connect (its client id is read from the binding at the exchange); a `workos:` name spelled out is refused as the isolate starts |
+| `FRAGMENT_OIDC_SCOPES` | the scopes asked for (default `openid email profile`; `openid` must be among them) |
+| `FRAGMENT_OIDC_CLAIMS` | which claims name the person (JSON, each field optional): `{"email": "email", "name": "name", "username": ["preferred_username", "upn"]}`, the defaults. No email is assumed: a sign-in is shown by its email, else its first username claim, else its `sub` |
+| `FRAGMENT_OIDC_AUTH` | how the client authenticates at the token endpoint: `client_secret_basic`, `client_secret_post`, or `none` (default: with a secret, the first of the two the provider lists; without, `none`, PKCE alone) |
 | `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
@@ -57,6 +65,8 @@ platform builds, so no author code can name one:
 | `CODESTORAGE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
 | `WORKOS_CLIENT` | sign-in: fragment's WorkOS environment's client id; unbound, sign-in answers 500 |
 | `WORKOS_KEY` | WorkOS's API key, for its code exchange and Pipes |
+| `OIDC_CLIENT_SECRET` | the OpenID Connect client's secret, for its code exchange (docs/self-host.md, seam 4; a public client has none) |
+| `MODEL_KEY` | a self-hosted model upstream's key, when it takes one (docs/self-host.md, seam 3) |
 | `OPERATOR_KEY_<NAME>` | an operator key of the catalog (`perplexity` is `OPERATOR_KEY_PERPLEXITY`, `google-places` `OPERATOR_KEY_GOOGLE_PLACES`), the store secret its row's `key` names |
 
 One Worker secret is left, the platform Worker's:
@@ -83,13 +93,13 @@ registry's are no route (404); a local fleet's reach everything.
 
 | Route | Body → answer |
 |---|---|
-| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone WorkOS signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls and AI steps, each a reservation) at `paidCalls` from now: 0 unless asked, at most 200; their ledger refuses the one past it (402 `budget_used_up`). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
+| `POST /api/test/signin` | `{email, paidCalls?}` → `{session, identity, created, paidCalls}`: an e2e person's platform session (the `fragment_session` cookie's value). `email` is `<name>@e2e.test` (a name of 1-64 of `[a-z0-9._-]`; any other is 400); its person is keyed by it under the issuer `e2e.test`, which no real sign-in has, so they are never anyone a provider signs in. The first sign-in makes them (`created`), and each makes them a seat (one ledger command, `e2e-seat`) and caps their paid calls (model calls and AI steps, each a reservation) at `paidCalls` from now: 0 unless asked, at most 200; their ledger refuses the one past it (402 `budget_used_up`). On a branch a day (UTC) makes at most 1000 e2e people and lends them at most 2000 paid calls (429 past either) |
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their `e2e-…` fragments |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
 | `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign of an outside writer (a storage token, a webhook) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, and `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails |
 | `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (1 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
-| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
+| `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it), and `{person: {issuer, subject, email}}` makes a person as a sign-in keys them, without one (`{identity, created}`; not under `e2e.test`): the e2e's stand-in for people a sign-in made before it changed (docs/self-host.md, seam 4) |
 
 The agents' own test controls (`POST /api/a/{name}/test`, Agents below)
 are another Worker's, on with `AGENT_TEST_HOOKS=allow`, which only the
@@ -111,7 +121,8 @@ e2e set `FRAGMENT_AI_URL`. `BROWSER` runs locally under `wrangler dev`
 (its own local mode: a Chrome for Testing it downloads into its cache,
 `$XDG_CACHE_HOME/.wrangler/chrome`, on the first shot; dev and the e2e
 set `XDG_CACHE_HOME` to the repo's `target/cache`), a lower rung than
-Cloudflare's browsers.
+Cloudflare's browsers. A runtime without it (celld) shoots cards through
+`FRAGMENT_BROWSER_URL`, the same routes and the same CDP.
 
 
 ## Principals and access
@@ -227,7 +238,7 @@ the new key and meant it for this signer.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/identities` | a person | `{kind: "agent", proof}` → a new agent identity they own, holding the proof's key (FIN-11's trusted initial registration); again, the same one; a key someone else holds is 409; an agent owns no agents (403) |
-| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, linkedAt}]}`; anyone else 404 |
+| `GET /api/identities/{id\|me}` | the identity, or its owner | → `{id, kind, owner?, createdAt, keys: [{npub, addedAt, addedBy, revokedAt?}], agents: [id], subjects: [{issuer, email, name?, handle?, linkedAt}]}` (`name` and `handle`, an OpenID Connect sign-in's: its name, and its username, else its `sub`); anyone else 404 |
 | `POST /api/identities/{id\|me}/keys` | a person for themselves; an owner for their agent | `{proof}` → the identity with the key added (at most 64 keys, revoked ones included); a key someone else holds, or a revoked one, is 409 |
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
@@ -254,9 +265,31 @@ unsigned (an inbox, a webhook, a site) names it in full.
 
 ## Sign-in (phase 4 slice B)
 
-A person is keyed by their verified `(issuer, subject)`: the issuer is
-`workos:<client id>` (the environment), the subject WorkOS's user id. The
-email is an attribute, refreshed at each sign-in and never matched. The
+A person is keyed by their verified `(issuer, subject)`: one OpenID
+Connect provider signs people in (`FRAGMENT_OIDC_ISSUER`; docs/self-host.md,
+seam 4), WorkOS's AuthKit or another; the subject is the id_token's `sub`,
+and the issuer is as the deployment keys its people
+(`FRAGMENT_OIDC_KEYED_AS`): WorkOS's are `workos:<client id>` (the
+environment), their subject the WorkOS user id, as before sign-in was
+OpenID Connect; another provider's are its URL. The email, name and
+username are attributes, refreshed at each sign-in and never matched.
+
+`/auth/login` sends the browser to the provider's
+`authorization_endpoint` (from its metadata) with `response_type=code`,
+the scopes, a state, a nonce, and PKCE's S256 challenge; the registry keeps
+the verifier and the nonce with the state and never lets the verifier out.
+The callback spends the state first, then exchanges the code (form-encoded,
+the client authenticated as `FRAGMENT_OIDC_AUTH` says) and verifies the
+id_token: its signature by a key of the provider's JWKS (RS256 or ES256;
+never `none`, an HMAC, or a key the token names itself), `iss`, `aud` (and
+`azp`), `exp`, `iat` and `nbf` within two minutes, the nonce, and `sub`. A
+token that fails is 401, logged (`signin.refused`) with why. The metadata
+and the JWKS are kept an hour per isolate; a key the JWKS lacks fetches it
+again, at most once in 15 seconds. Logout sends the browser to the
+provider's `end_session_endpoint` with the session's id_token (kept sealed)
+as `id_token_hint`, the client, and `post_logout_redirect_uri`
+`<platform>/`, when the provider offers one; else it ends the sessions here
+alone. The
 platform holds no key for a person; browsers hold sessions, each looked up
 live in the registry on every request whose answer depends on who is
 asking (Principals and access, above; a 30-day lifetime; tokens are 32
@@ -265,10 +298,10 @@ random bytes, the registry keeps their SHA-256).
 | method & path (platform origin) | what |
 | --- | --- |
 | `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/settings` it opens its settings |
-| `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
+| `GET /auth/login?return=&login_hint=` | → the provider's authorization endpoint (above; `redirect_uri` `<platform>/auth/callback`); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
-| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
-| `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
+| `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a provider's `error` is shown (400); a sign-in already finished or past its ten minutes, or a code the provider refuses (a callback sent again), is 400 `invalid_request`; an id_token that does not verify is 401 |
+| `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to the provider's logout when it offers one (above), else home (AuthKit offers none: its own session stays); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
 | `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403, and so is every request on a fleet without a suffix |
@@ -947,8 +980,9 @@ credit first. What happened is always charged, past zero.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first) |
+| `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}], ownHardwarePoints}` (this month's spend, the largest 50 first; `ownHardwarePoints`: this month's use of the person's own machines, nodes they paired, in points of $0.001 at list, tracked and never charged: docs/self-host.md, seam 10) |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
+| `GET /api/ledger/{person}` | the deployment's operators | → that person's `LedgerStatus`: who used what |
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
 | `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}` |
 | `POST /api/ledger/{person}/seat` | the same | `SetSeat {id, seat: active \| past_due \| canceled, seq}` → `{}`: a change older (by `seq`) than the last applied changes nothing |
@@ -1472,10 +1506,10 @@ is docs/computers.md; the routes here are its owner's.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner) |
+| `POST /api/computers` | a person | → `{computer, owner, image, node?, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner). `node`, where computers run on sandcastle nodes (`FRAGMENT_NODES`; docs/self-host.md, seam 2): the node its first start placed it on, for its life |
 | `GET /api/computers` | a person | → `{computers: [ComputerView], defaultImage}`: `defaultImage` is the image a new computer is pinned to; one pinned to another may update to it (the shell asks) |
 | `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; anyone else 404 |
-| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
+| `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start; on sandcastle nodes, 503 `node_down` when its node does not answer (within seconds; it stays placed there), `no_node` when no node can take a new one (each node's reason in the message), and 410 `node_revoked` when it is placed on a node of its owner's they revoked (below). Once placed, the view's `placed` says how: `as its owner chose`, `by the deployment's rule`, or the rule and why their choice was passed over |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
@@ -1484,6 +1518,23 @@ is docs/computers.md; the routes here are its owner's.
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
 | `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+
+### A person's nodes (bring your own computer, experimental)
+
+Where people may pair sandcastle nodes of their own (`FRAGMENT_BYOC=on`;
+docs/self-host.md, seam 2, Bring your own computer). Off, a start is 403
+`forbidden`, saying so, and `GET /api/nodes` answers `byoc: false` with the
+deployment's nodes alone.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/nodes/pair` | anyone (a node; unsigned) | `{name, arch}` → `{userCode, deviceCode, verifyUrl, expiresInS, intervalS}`; 429 `rate_limited` past 32 waiting or 10 begun a minute |
+| `POST /api/nodes/pair/poll` | the node (its device code) | `{deviceCode}` → `{state: "pending" \| "slow_down", intervalS}`, `{state: "expired"}`, or once `{state: "approved", node, secret}`; after that, or for a code never made, 404 |
+| `GET /nodes/pair?code=` | a signed-in person (a page) | the node's name, architecture and code, and a button; signed out, sign-in first |
+| `POST /nodes/pair` | the same, from the platform's own origin | form `code` → the node is theirs (`paired-<16 hex>`); a wrong code 404 (five in ten minutes, then 429), used 400, expired 400 |
+| `GET /api/nodes` | a person | → `{byoc, prefer, nodes: [{id, name, kind: "deployment" \| "own", arch, state: "up" \| "down" \| "revoked", why?, computers, pairedAt?}]}` (proto's `NodesView`): the deployment's nodes, then theirs |
+| `PUT /api/nodes/prefer` | a person | `{node: id \| null}` → the same: where their new computers run (null: the deployment's rule). A node that is not one they may use is 404, a body without `node` 400 |
+| `DELETE /api/nodes/{id}` | its owner | → the same: revoked (its secret dropped, its uplink cut; its computers' wakes answer 410 `node_revoked`); anyone else's, or none, 404 |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
 sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by

@@ -186,10 +186,23 @@ pub struct AgentConnections {
 pub struct ComputerView {
     pub computer: String,
     pub owner: String,
-    /// The pinned image's name (the deployment's `containers` config).
+    /// The pinned image's name (the deployment's `containers` config, or
+    /// `FRAGMENT_NODES`' images).
     pub image: String,
+    /// The sandcastle node it is placed on, for its life (docs/self-host.md,
+    /// seam 2): absent where computers run in the runtime's own containers,
+    /// and before a computer's first start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// How its node was chosen, once it is placed: as its owner chose, by
+    /// the deployment's rule, or the rule because the node they chose
+    /// could not take it, and why (docs/self-host.md, seam 2, Bring your
+    /// own computer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<String>,
     pub phase: ComputerPhase,
-    /// Why it won't wake, or why a wake was refused (the owner's credit).
+    /// Why it won't wake, why a wake was refused (the owner's credit), or
+    /// why its last start found no node to run on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
     pub agents: Vec<ComputerAgent>,

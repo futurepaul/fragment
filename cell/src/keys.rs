@@ -1,13 +1,14 @@
 //! The deployment's keys, held in its Cloudflare Secrets Store and bound to
 //! the platform Worker by name (docs/secrets.md; the bindings' names are
 //! `fragment_core::secrets_store`'s): the host secret that seals values at
-//! rest, the code.storage org key, WorkOS's client id and API key, and the
-//! operator's keys a computer's swap sends; and what is derived from the
-//! host secret: the key placeholders' tags are made with (`tag_keys`).
-//! This file is the one place the cell reads them (`secret`), through a
-//! per-isolate cache that holds a value at most a minute
-//! (`secrets_store::CACHE_MS_MAX`), so a value set again in the store is in
-//! use everywhere within a minute, with no deploy.
+//! rest, the code.storage org key, WorkOS's client id and API key (Pipes'),
+//! the sign-in client's secret, and the operator's keys a computer's
+//! swap sends; and what is derived from the host secret: the key
+//! placeholders' tags are made with (`tag_keys`). This file is the one
+//! place the cell reads them (`secret`), through a per-isolate cache that
+//! holds a value at most a minute (`secrets_store::CACHE_MS_MAX`), so a
+//! value set again in the store is in use everywhere within a minute, with
+//! no deploy.
 //!
 //! Only the platform Worker's env holds the bindings. An app runs in an
 //! isolate of its own from the Worker Loader, with an env the platform
@@ -18,15 +19,19 @@
 use std::cell::RefCell;
 
 use fragment_core::codestorage::{Claims, OrgKey};
+use fragment_core::oidc::{self, Provider};
 use fragment_core::seal::{self, SealError};
 use fragment_core::secrets_store::{self as store, Cache};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
 use worker::{Env, Fetch, Headers, Method, Request, RequestInit, State};
 
-use crate::config::Config;
+use crate::config::{Config, OidcConfig};
 use crate::error::{CellError, CellResult};
 use crate::js;
+
+/// The largest answer read from a token endpoint.
+const TOKEN_ANSWER_MAX_BYTES: usize = 64 * 1024;
 
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
@@ -149,23 +154,26 @@ pub async fn codestorage_token(env: &Env, org: &str, repo: &str, sub: &str, scop
     Ok((token, (iat + ttl_s) * 1000))
 }
 
-/// The WorkOS environment this fleet signs people in with: its client id
-/// (bound as `WORKOS_CLIENT`) and its API's base (`WORKOS_API_URL`).
+/// The fleet's WorkOS environment, Pipes': its client id (bound as
+/// `WORKOS_CLIENT`) and its API's base (`WORKOS_API_URL`).
 pub struct WorkOs<'a> {
     pub client_id: String,
     pub api: &'a str,
 }
 
 impl WorkOs<'_> {
-    /// Who vouches for a person's subject: this environment. A person is
-    /// keyed by `(issuer, subject)`, so finite.computer's login (another
-    /// environment) is another issuer (docs/finite-integration.md).
+    /// The issuer this environment's people are keyed under, whose
+    /// subjects are its user ids, which Pipes takes. finite.computer's
+    /// login (another environment) is another issuer
+    /// (docs/finite-integration.md). Sign-in through AuthKit keys them so
+    /// (`FRAGMENT_OIDC_KEYED_AS=workos`), as they were before it was OpenID
+    /// Connect.
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
     }
 }
 
-/// The fleet's WorkOS environment, when sign-in is configured (`cfg.workos`).
+/// The fleet's WorkOS environment, when it is configured (`cfg.workos`).
 pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
     let api = &cfg.workos()?.api;
     let client_id = required(env, store::WORKOS_CLIENT).await?;
@@ -192,16 +200,32 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
     Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
 }
 
-/// WorkOS's code exchange with the API key added: (status, WorkOS's
-/// answer, its refresh token dropped: the platform keeps its own session).
-pub async fn workos_authenticate(env: &Env, api: &str, client_id: &str, code: &str) -> CellResult<(u16, Value)> {
-    let key = required(env, store::WORKOS_KEY).await?;
-    let payload = json!({ "client_id": client_id, "client_secret": key, "grant_type": "authorization_code", "code": code });
-    let (status, mut answer) = post_json(&format!("{api}/user_management/authenticate"), Method::Post, None, Some(&payload), "WorkOS").await?;
-    if let Some(o) = answer.as_object_mut() {
-        o.remove("refresh_token");
+/// The OpenID Connect code exchange (RFC 6749 4.1.3, with PKCE's
+/// verifier), the client authenticated with its secret as the deployment
+/// or the provider says (`Provider::client_auth`): (status, the answer's
+/// bytes, at most `TOKEN_ANSWER_MAX_BYTES`). The answer holds tokens: it is
+/// read for its id_token and dropped, never logged.
+pub async fn oidc_token(env: &Env, provider: &Provider, cfg: &OidcConfig, code: &str, redirect_uri: &str, verifier: &str) -> CellResult<(u16, Vec<u8>)> {
+    // a public client has none, and proves itself with PKCE alone
+    let secret = secret(env, store::OIDC_CLIENT_SECRET).await?;
+    let auth = provider.client_auth(cfg.auth, secret.is_some()).map_err(|e| CellError::host(e.to_string()))?;
+    let request = oidc::token_request(auth, &cfg.client_id, secret.as_deref(), code, redirect_uri, verifier);
+    let headers = Headers::new();
+    headers.set("content-type", "application/x-www-form-urlencoded")?;
+    headers.set("accept", "application/json")?;
+    if let Some(a) = &request.authorization {
+        headers.set("authorization", a)?;
     }
-    Ok((status, answer))
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_headers(headers).with_body(Some(request.body.into()));
+    let req = Request::new_with_init(&provider.token_endpoint, &init)?;
+    let failed = |e: worker::Error| CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token endpoint did not answer: {e}"));
+    let mut resp = Fetch::Request(req).send().await.map_err(failed)?;
+    let bytes = resp.bytes().await.map_err(failed)?;
+    if bytes.len() > TOKEN_ANSWER_MAX_BYTES {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the sign-in provider's token answer is over {TOKEN_ANSWER_MAX_BYTES} bytes")));
+    }
+    Ok((resp.status_code(), bytes))
 }
 
 /// A WorkOS Pipes access token for `user`'s account at `provider`
@@ -269,4 +293,10 @@ pub async fn tag_keys(env: &Env) -> CellResult<Vec<fragment_core::swap::TagKey>>
         return Err(sealing(SealError::WeakHostSecret));
     }
     Ok(hosts.iter().map(|h| fragment_core::swap::TagKey::derive(h)).collect())
+}
+
+/// The self-hosted model upstream's key (bound as `MODEL_KEY`), when it
+/// takes one (docs/self-host.md, seam 3).
+pub async fn model_key(env: &Env) -> CellResult<Option<String>> {
+    secret(env, store::MODEL_KEY).await
 }

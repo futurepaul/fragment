@@ -20,6 +20,11 @@
 //! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
 //! A job's image step calls its model on the same transport (`run`).
+//! A self-hosted deployment sets `FRAGMENT_MODEL_URL` (docs/self-host.md,
+//! seam 3): the bounded input, already OpenAI's, goes to an
+//! OpenAI-compatible server as a chat completion, its `model` the server's
+//! name for the catalog id (`FRAGMENT_MODELS`), the id staying the price
+//! book's label.
 //!
 //! Who calls: the agents' Worker, `POST /api/models/v1/chat/completions`
 //! (`route`), signed by the agent, `for` naming whom it acts for and
@@ -348,6 +353,26 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         Some(agent) => json!({ "x-session-affinity": agent }),
         None => json!({}),
     };
+    // a self-hosted model server's (docs/self-host.md, seam 3), for the
+    // models it maps: the bounded input is already OpenAI's, less its model.
+    // A model it does not map goes on as before (an image step to the
+    // binding, or to the dev fake).
+    if let Some((upstream, name)) = cfg.model_upstream.as_ref().and_then(|u| u.models.get(model).map(|n| (u, n))) {
+        let mut body = input.clone();
+        body["model"] = json!(name);
+        let h = Headers::new();
+        h.set("content-type", "application/json")?;
+        if let Some(key) = crate::keys::model_key(env).await? {
+            h.set("authorization", &format!("Bearer {key}"))?;
+        }
+        if let Some(agent) = &meta.agent_id {
+            h.set("x-session-affinity", agent)?;
+        }
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post).with_headers(h).with_body(Some(body.to_string().into()));
+        let req = Request::new_with_init(&format!("{}/chat/completions", upstream.url), &init)?;
+        return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
+    }
     if let Some(url) = &cfg.ai_url {
         // the lower rung: the binding's input, to a fake at the vendor boundary
         let h = Headers::new();
@@ -362,7 +387,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         return Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {e}")));
     }
     let Some(gateway) = &cfg.ai_gateway_id else {
-        return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
+        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("this deployment has no route to {model}: AI_GATEWAY_ID (its AI Gateway), or a model server that maps it (FRAGMENT_MODELS)")));
     };
     let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
     js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))

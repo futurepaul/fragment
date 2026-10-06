@@ -19,12 +19,29 @@
 //! a branch deployment on real vendors: each section says what it needs
 //! (needs.rs), and one that needs what a preview lacks (a fake, the node,
 //! the whole deployment, local Docker) is a skip that says why.
+//!
+//! A local run's git may live outside it (`FRAGMENT_E2E_CODESTORE`,
+//! store.rs): a code store already running, or macrofiche started for the
+//! run. The lanes then read it through its REST API, and a check that pulls
+//! one of the code.storage fake's levers is a skip that says which.
+//!
+//! A local run's computers may run on sandcastle nodes it starts
+//! (`FRAGMENT_E2E_NODES=two`, `SANDCASTLE_DIR`: docs/self-host.md, seam 2):
+//! one that listens and one that dials in (its uplink), each in front of
+//! sandcastle's Docker engine double, the stub image built for them. The
+//! computers sections run on them, on either runtime, and the placement
+//! section stops and starts them. `FRAGMENT_E2E_NODES=real` runs them on
+//! the machine's real engine instead (`SANDCASTLE_ENGINE_DIR`, default
+//! /var/lib/sandcastle): one node in front of it, the images loaded into it,
+//! every computer a jailed microVM (the placement section, which needs two
+//! nodes, is a skip).
 
 mod api;
 mod browser;
 mod hosted;
 mod lanes;
 mod needs;
+mod store;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -73,9 +90,15 @@ pub const SIGNINS_PENDING_MAX: u64 = 200;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
-/// The WorkOS fake's environment.
-const WORKOS_CLIENT: &str = "client_fragment_e2e";
+/// The WorkOS fake's environment, and its OAuth application, whose
+/// AuthKit signs people in.
+pub const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+pub const WORKOS_APP: &str = "client_fragment_e2e_app";
+const WORKOS_APP_SECRET: &str = "sk_app_fragment_e2e";
+/// The OpenID Connect fake's client (`FRAGMENT_E2E_SIGNIN=oidc`).
+pub const OIDC_CLIENT: &str = "fragment-e2e";
+const OIDC_SECRET: &str = "oidc-secret-fragment-e2e";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
@@ -146,9 +169,21 @@ impl<T> Deref for Fake<T> {
     fn deref(&self) -> &T {
         match (&self.fake, self.lanes) {
             (Some(fake), true) => fake,
+            (_, false) if self.what == "code.storage" => {
+                panic!("the code.storage fake is not the lanes' on this run (hosted, or an external code store): a section that uses it declares Need::Fakes, and a check that pulls one of its levers asks Suite::store_levers first")
+            }
             _ => panic!("the {} fake on the hosted lane: a section that uses it declares Need::Fakes", self.what),
         }
     }
+}
+
+/// Where a repo's main stood, to count the commits it took after
+/// (`Suite::commits_since`).
+pub enum Mark {
+    /// The commit packs the fake was sent for the repo.
+    Packs(u32),
+    /// main's head on an external store (`None`: no main yet).
+    Head(Option<String>),
 }
 
 /// One section as a dry run plans it: what it needs, and why it would be
@@ -209,11 +244,38 @@ pub struct Suite {
     chrome: browser::Shared,
     /// The local node's tools (`None`: a hosted run, which starts no node).
     tools: Option<devstack::Tools>,
-    node: Option<devstack::Node>,
+    node: Option<devstack::AnyNode>,
+    /// celld's tools when the node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
+    celld: Option<devstack::celld::CelldTools>,
+    /// Where a node without the `BROWSER` binding (celld) shoots preview
+    /// cards: the renderer over the pinned chrome-headless-shell, its
+    /// pages let reach this run's fragments alone (docs/self-host.md, seam 7).
+    renderer: Option<devstack::rendering::Rendering>,
+    /// The sandcastle nodes the run started, in `FRAGMENT_NODES`' order
+    /// (empty: computers run in the runtime's own containers), and the
+    /// images they hold, by name (`FRAGMENT_NODES`' `images`).
+    nodes: Vec<devstack::sandcastle::SandcastleNode>,
+    node_images: Value,
+    /// The binaries a node is made of, for a section's own (a person's
+    /// node it pairs: lanes/pairing.rs).
+    sandcastle: Option<devstack::sandcastle::Tools>,
+    /// Whether the run's people may pair nodes of their own
+    /// (`FRAGMENT_BYOC`): on wherever the run has nodes, but while a
+    /// section turns it off.
+    byoc: bool,
+    /// The image tags built for the nodes, removed as the run ends.
+    image_tags: Vec<String>,
     port: u16,
     /// Distinguishes this run's fragment names from any earlier state.
     run: String,
     pub fake: Fake<CodeStorage>,
+    /// The code store outside the run, when the node's git lives there
+    /// (`None`: the fake, or a hosted run's own vendor).
+    store: Option<store::External>,
+    /// macrofiche, when the run started it: stopped at the run's end.
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+    /// The code store's org: every token's `iss`.
+    org: String,
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
@@ -221,9 +283,13 @@ pub struct Suite {
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
     test_secret: String,
-    /// Sign-in's stand-in: people sign in through it (`Api::person`), and
-    /// Pipes', which hands out connections' tokens.
+    /// WorkOS's stand-in: its AuthKit signs people in (`Api::person`), and
+    /// its Pipes hands out connections' tokens.
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
+    /// A strict OpenID Connect provider: people sign in through it in
+    /// AuthKit's place when the run says so (`oidc_signin`); WorkOS then
+    /// serves Pipes, to no one.
+    pub oidc: Fake<fragment_fakes::oidc::Oidc>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
@@ -250,6 +316,8 @@ impl Suite {
             // a line of the PEM's body: found however the PEM was escaped
             ("code.storage key", self.org_key.lines().find(|l| !l.starts_with("-----") && !l.trim().is_empty()).unwrap_or_default().trim().to_string()),
             ("WorkOS API key", WORKOS_KEY.into()),
+            ("AuthKit client secret", WORKOS_APP_SECRET.into()),
+            ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
     }
@@ -259,6 +327,111 @@ impl Suite {
     /// vendor or the deployment's own image answers.
     pub fn hosted(&self) -> bool {
         self.hosted_rules
+    }
+
+    /// Whether people sign in through the strict OpenID Connect fake
+    /// (`FRAGMENT_E2E_SIGNIN=oidc`: docs/self-host.md, seam 4), not
+    /// WorkOS's AuthKit.
+    pub fn oidc_signin(&self) -> bool {
+        std::env::var("FRAGMENT_E2E_SIGNIN").as_deref() == Ok("oidc")
+    }
+
+    /// The provider people sign in through: the WorkOS fake's AuthKit, or
+    /// the strict fake. Either is one issuer to the cell, and its levers
+    /// are the same.
+    pub fn idp(&self) -> &fragment_fakes::oidc::Oidc {
+        match self.oidc_signin() {
+            true => &self.oidc,
+            false => &self.workos.authkit,
+        }
+    }
+
+    /// Whether the text models go through an OpenAI-compatible server's
+    /// route (`FRAGMENT_E2E_MODELS=openai`: docs/self-host.md, seam 3), not
+    /// the binding's through the gateway.
+    pub fn openai_models(&self) -> bool {
+        std::env::var("FRAGMENT_E2E_MODELS").as_deref() == Ok("openai")
+    }
+
+    /// Whether a job's sleep outlives a crash of the node: celld's
+    /// Workflows keep it (each instance a cell, its sleep an alarm); local
+    /// workerd's hold it as a timer in the process.
+    pub fn durable_workflows(&self) -> bool {
+        matches!(self.rung, needs::Rung::Celld { .. })
+    }
+
+    /// Whether the run's one node fronts the machine's real engine
+    /// (`FRAGMENT_E2E_NODES=real`).
+    pub fn real_engine(&self) -> bool {
+        self.nodes.iter().any(|n| n.is_real())
+    }
+
+    /// Whether the run's computers are placed on sandcastle nodes it started.
+    pub fn has_nodes(&self) -> bool {
+        !self.nodes.is_empty()
+    }
+
+    /// The nodes' ids, in `FRAGMENT_NODES`' order: the first listens, the
+    /// second dials in.
+    pub fn node_ids(&self) -> Vec<String> {
+        self.nodes.iter().map(|n| n.id.clone()).collect()
+    }
+
+    /// How the platform reaches node `id`: `"listens"` or `"dials in"`.
+    pub fn node_reach(&self, id: &str) -> &'static str {
+        match self.nodes.iter().find(|n| n.id == id).map(|n| n.reach) {
+            Some(devstack::sandcastle::Reach::Listen(_)) => "listens",
+            Some(devstack::sandcastle::Reach::Uplink) => "dials in",
+            None => "is not one of the run's",
+        }
+    }
+
+    /// Node `id`'s process stops: to the platform it is down. Its engine,
+    /// and any container on it, stay.
+    pub fn node_down(&mut self, id: &str) -> Result<()> {
+        self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.down()
+    }
+
+    /// Node `id`'s process starts again.
+    pub fn node_up(&mut self, id: &str) -> Result<()> {
+        self.nodes.iter_mut().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.up()
+    }
+
+    /// The containers running on node `id`'s engine that started at or
+    /// after `since_ms` (devstack's `sandcastle::now_ms`), by name.
+    pub fn node_running_since(&self, id: &str, since_ms: u64) -> Result<Vec<String>> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.running_since(since_ms)
+    }
+
+    /// Container `name` on node `id` killed, behind the platform's back.
+    pub fn node_kill(&self, id: &str, name: &str) -> Result<()> {
+        self.nodes.iter().find(|n| n.id == id).with_context(|| format!("no node {id}"))?.kill(name)
+    }
+
+    /// A node of a person's own, for them to pair (lanes/pairing.rs): its
+    /// engine double started, its label `label` until it is paired.
+    pub fn node_to_pair(&self, label: &str) -> Result<devstack::sandcastle::SandcastleNode> {
+        let tools = self.sandcastle.as_ref().context("a run with nodes locates sandcastle's binaries")?;
+        let spec = devstack::sandcastle::NodeSpec {
+            id: label.into(),
+            reach: devstack::sandcastle::Reach::Uplink,
+            engine: devstack::sandcastle::Engine::Double,
+            dir: self.scratch.join("n").join(label),
+            platform: self.platform(),
+            capacity: 1,
+            log_dir: self.scratch.clone(),
+        };
+        devstack::sandcastle::SandcastleNode::start_to_pair(tools, &spec)
+    }
+
+    /// The local node's platform origin.
+    pub fn platform(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// Whether the next node start lets people pair their own nodes.
+    pub fn set_byoc(&mut self, on: bool) {
+        self.byoc = on;
     }
 
     /// A heavy section runs only when `--only` names it (the real-Hermes
@@ -388,6 +561,11 @@ impl Suite {
         }
         self.ai.clear_script();
         self.shape = Shape::Plain;
+        self.byoc = true;
+        // a node a lane left down is up again
+        for n in self.nodes.iter_mut().filter(|n| !n.is_up()) {
+            n.up()?;
+        }
         if let Some(node) = self.node.take() {
             // one that does not stop in time is killed, and starts all the same
             if let Err(e) = node.stop() {
@@ -455,9 +633,9 @@ impl Suite {
         }
         let fleet = devstack::Fleet {
             host_secret: self.host_secret.clone(),
-            codestorage_org: ORG.into(),
+            codestorage_org: self.org.clone(),
             codestorage_key_pem: self.org_key.clone(),
-            codestorage_url: self.fake.node().url.clone(),
+            codestorage_url: self.store_url(),
             host_suffix: suffix.then(|| self.suffix().to_string()),
             legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
             // a rehearsal's node is shaped as a branch deployment, whose
@@ -477,6 +655,20 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
+            oidc: Some(match self.oidc_signin() {
+                // beside WorkOS (Pipes), whom sign-in keys people as is said
+                true => devstack::OidcVars {
+                    issuer: self.oidc.node().url.clone(),
+                    client_id: OIDC_CLIENT.into(),
+                    client_secret: Some(OIDC_SECRET.into()),
+                    scopes: None,
+                    claims: None,
+                    auth: None,
+                    keyed_as: Some(self.oidc.node().url.clone()),
+                },
+                // WorkOS's sign-in, as a deployment spells it out
+                false => devstack::OidcVars::authkit(&self.workos.node().authkit.url, WORKOS_APP, Some(WORKOS_APP_SECRET)),
+            }),
             platform_url: Some(match (self.shape, suffix) {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
@@ -490,6 +682,25 @@ impl Suite {
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
+            // FRAGMENT_E2E_MODELS=openai: the text models through an
+            // OpenAI-compatible server's route (docs/self-host.md, seam 3),
+            // the same fake answering in OpenAI's shape; images go on to it
+            // as the binding's input
+            model_upstream: (std::env::var("FRAGMENT_E2E_MODELS").as_deref() == Ok("openai")).then(|| devstack::ModelUpstreamVars {
+                url: format!("{}/v1", self.ai.node().url),
+                models: json!({ fragment_core::models::CHEAP_MODEL: fragment_core::models::CHEAP_MODEL, fragment_core::models::MEDIUM_MODEL: fragment_core::models::MEDIUM_MODEL }).to_string(),
+                key: None,
+            }),
+            nodes: match self.nodes.is_empty() {
+                true => None,
+                false => Some(devstack::sandcastle::vars(&self.nodes.iter().collect::<Vec<_>>(), &self.node_images)?),
+            },
+            // on nodes, the runtime's own containers go unused
+            containers: self.nodes.is_empty(),
+            byoc: self.byoc && !self.nodes.is_empty(),
+            browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
+            // celld has no Secrets Store: the cell's shim stands in (seam 12)
+            secrets: if self.celld.is_some() { devstack::Secrets::Shim } else { devstack::Secrets::Store },
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -498,7 +709,7 @@ impl Suite {
         // router hands it /api/agents and /api/a/*, its inboxes included;
         // it is bound to the platform's host secret
         devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{}", self.port), agent_url: format!("http://127.0.0.1:{}", self.port), test_hooks: true }
-            .configure(&self.agents_project, &fleet.bound())?;
+            .configure(&self.agents_project, &fleet)?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,
@@ -510,7 +721,13 @@ impl Suite {
             // a crash kills wrangler and workerd as one
             own_group: true,
         };
-        let (node, _) = devstack::Node::start(tools, &opts)?;
+        let node = match &self.celld {
+            None => devstack::AnyNode::Wrangler(devstack::Node::start(tools, &opts)?.0),
+            Some(celld) => {
+                let copts = devstack::celld::CelldOptions { project: opts.project, with: opts.with, port: opts.port, log_dir: opts.log_dir, extra_ca_file: None, own_group: true };
+                devstack::AnyNode::Celld(devstack::celld::CelldNode::start(celld, &copts)?.0)
+            }
+        };
         self.node = Some(node);
         Ok(Api::new(self.port, suffix.then_some(self.suffix()), &self.shared))
     }
@@ -546,15 +763,21 @@ impl Suite {
         self.node.take().expect("a running node").crash()
     }
 
-    /// Registers the fragment's push webhook with the fake (the dashboard
-    /// registration the real service has), so git moves reach the cell.
-    /// Hosted, nothing: the run's commits and deploys go through the API
-    /// (`commit`, `deploy`), which moves the pins itself.
-    pub fn hook(&self, api: &Api, created: &Value) {
-        if self.hosted() {
+    /// Records `owner` as the fragment's (a write the harness makes as
+    /// another writer is followed by their `refresh` on an external store,
+    /// and made as theirs hosted), and registers its push webhook with the
+    /// fake (the dashboard registration the real service has), so git moves
+    /// reach the cell. Hosted, nothing more: the run's commits and deploys
+    /// go through the API (`commit`, `deploy`), which moves the pins itself.
+    /// On an external store, nothing more either: none registers the cell's
+    /// webhook (macrofiche's contract, question 2), so `refresh` and the
+    /// poll move the pins, as on the hosted fleet.
+    pub fn hook(&self, api: &Api, owner: &Keys, created: &Value) {
+        let name = created["name"].as_str().expect("created.name");
+        self.owners.borrow_mut().insert(name.to_string(), owner.clone());
+        if self.hosted() || self.store.is_some() {
             return;
         }
-        let name = created["name"].as_str().expect("created.name");
         let repo = created["repo"].as_str().expect("created.repo");
         let secret = created["webhookSecret"].as_str().expect("created.webhookSecret");
         self.fake.register_webhook(repo, &format!("{}/api/f/{name}/webhook", api.base), secret);
@@ -566,18 +789,25 @@ impl Suite {
         if r.status != 200 {
             bail!("create {name}: {r}");
         }
-        self.hook(api, &r.body);
-        let full = r.body["name"].as_str().context("a create answers the fragment's name")?;
-        self.owners.borrow_mut().insert(full.to_string(), keys.clone());
+        r.body["name"].as_str().context("a create answers the fragment's name")?;
+        self.hook(api, keys, &r.body);
         Ok(r.body)
     }
 
     /// A commit on main by another writer, announced by webhook. Hosted,
     /// its owner's commit through the files route (`POST /api/f/{name}/files`:
-    /// one commit, main moved at once), since a preview's git is real.
+    /// one commit, main moved at once), since a preview's git is real. On
+    /// an external store, a commit pack through its API, then the owner's
+    /// `refresh`, as the CLI follows its own.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            return self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            let repo = created["repo"].as_str().expect("created.repo");
+            let Some(store) = &self.store else {
+                return self.fake.external_commit(repo, "main", changes, "e2e commit");
+            };
+            let (_, sha) = store.commit(repo, "main", changes, "e2e commit").unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}"));
+            self.as_owner(created, "refresh", &json!({}));
+            return sha;
         }
         let files: Vec<Value> = changes
             .iter()
@@ -591,18 +821,165 @@ impl Suite {
         r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
+    /// A commit on main that nothing announces (a lost webhook): only the
+    /// owner's `refresh` or the poll finds it. On an external store, any
+    /// commit the harness makes and does not follow with a refresh.
+    pub fn silent_commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
+        let repo = created["repo"].as_str().expect("created.repo");
+        match &self.store {
+            None => self.fake.silent_commit(repo, "main", changes, "silent"),
+            Some(store) => store.commit(repo, "main", changes, "silent").unwrap_or_else(|e| panic!("a commit on {repo}: {e:#}")).1,
+        }
+    }
+
     /// Moves live to main's tip (what `fragment deploy` does), announced.
     /// Hosted, its owner's deploy (`POST /api/f/{name}/deploy`), which
-    /// installs the app at once.
+    /// installs the app at once. On an external store, live created at
+    /// main's tip or merged to it through its API, then the owner's
+    /// `refresh`, as the CLI's deploy.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
             let repo = created["repo"].as_str().expect("created.repo");
-            let tip = self.fake.branch(repo, "main").expect("main has a commit");
-            self.fake.set_branch(repo, "live", &tip);
-            return tip;
+            let Some(store) = &self.store else {
+                let tip = self.fake.branch(repo, "main").expect("main has a commit");
+                self.fake.set_branch(repo, "live", &tip);
+                return tip;
+            };
+            let (_, live) = store.go_live(repo, "deploy (e2e)").unwrap_or_else(|e| panic!("a deploy of {repo}: {e:#}"));
+            self.as_owner(created, "refresh", &json!({}));
+            return live;
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
+    }
+
+    /// The code store outside the run, when the node's git lives in one.
+    pub fn external_store(&self) -> Option<&store::External> {
+        self.store.as_ref()
+    }
+
+    /// Whether the section `name`, which probes a code store outside the
+    /// run, runs: only on one (`FRAGMENT_E2E_CODESTORE`). Elsewhere it is a
+    /// skip that says so: the fake in the process is the contract's
+    /// reference, and a preview's git is code.storage itself.
+    pub fn store_section(&mut self, name: &str) -> bool {
+        if self.store.is_some() {
+            return self.section(name, &[]);
+        }
+        self.asked.push(name.to_string());
+        if self.selected(name) {
+            // what the rung lacks first (a hosted run without its secret runs nothing)
+            let why = match needs::unmet(&[], self.rung) {
+                Some((need, missing)) => format!("{missing} ({})", need.name()),
+                None => format!("it probes a code store outside the run, and this run's git is {} ({}=external or macrofiche)", if self.hosted() { "the deployment's own" } else { "the fake, the contract's reference" }, store::CODESTORE_VAR),
+            };
+            match &mut self.plan {
+                Some(plan) => plan.push(Planned { section: name.into(), needs: vec![], skip: Some(why) }),
+                None => self.skip(&format!("the {name} section"), &why),
+            }
+        }
+        false
+    }
+
+    /// Whether the code.storage fake's levers are the lanes': a local run
+    /// whose git is the fake in this process. Its levers are an outage, a
+    /// sabotaged commit, a count of the requests it answered, and its refs'
+    /// flags; on an external store a check that pulls one is a skip that
+    /// says which (`skip_lever`).
+    pub fn store_levers(&self) -> bool {
+        self.store.is_none()
+    }
+
+    /// A check that pulls the fake's `lever`, on an external store: a skip.
+    pub fn skip_lever(&mut self, label: &str, lever: &str) {
+        let store = self.store.as_ref().map_or_else(|| "the code store".to_string(), |s| s.label.clone());
+        self.skip(label, &format!("it pulls the code.storage fake's {lever}, and the node's git is {store} ({}; docs/self-host.md, seam 5)", store::CODESTORE_VAR));
+    }
+
+    /// The code store's API base, as the node and the CLI reach it.
+    pub fn store_url(&self) -> String {
+        match &self.store {
+            Some(store) => store.url.clone(),
+            None => self.fake.node().url.clone(),
+        }
+    }
+
+    /// A file's bytes on a branch of `repo` (its url form), as the store
+    /// holds them.
+    pub fn file_at(&self, repo: &str, branch: &str, path: &str) -> Option<Vec<u8>> {
+        match &self.store {
+            None => self.fake.file_at(repo, branch, path),
+            Some(store) => store.file(repo, branch, path).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// A branch's head in `repo`, as the store holds it.
+    pub fn head(&self, repo: &str, branch: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.branch(repo, branch),
+            Some(store) => store.head(repo, branch).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// An ephemeral branch's head (a preview), as an external store's API
+    /// reads one: with `ephemeral=true` (macrofiche's contract, 5.9).
+    pub fn head_ephemeral(&self, repo: &str, branch: &str) -> Option<String> {
+        let store = self.store.as_ref().expect("an external store: the fake's own refs say which are ephemeral");
+        store.head_ephemeral(repo, branch).unwrap_or_else(|e| panic!("{e:#}"))
+    }
+
+    /// The url form of the repo named `name`, as the store lists it.
+    pub fn repo_url(&self, name: &str) -> Option<String> {
+        match &self.store {
+            None => self.fake.repo_url(name),
+            Some(store) => store.repo_url(name).unwrap_or_else(|e| panic!("{e:#}")),
+        }
+    }
+
+    /// `n` empty repos made after every existing one (a busy org, so a
+    /// lookup by name must page). On an external store, made as the cell
+    /// makes one, named for the run.
+    pub fn seed_filler(&self, n: usize) {
+        let Some(store) = &self.store else { return self.fake.seed_filler(n) };
+        for i in 0..n {
+            store.create_repo(&format!("filler-{}-{i}", self.run)).unwrap_or_else(|e| panic!("{e:#}"));
+        }
+    }
+
+    /// The requests to `repo` on one route (`"GET branch"`) the store has
+    /// answered, from every caller: the fake counts them; an external
+    /// store's are not counted here (`None`).
+    pub fn requests(&self, repo: &str, route: &str) -> Option<u32> {
+        self.store.is_none().then(|| self.fake.requests(repo, route))
+    }
+
+    /// Where `repo`'s main stands now, to count the commits after it.
+    pub fn mark(&self, repo: &str) -> Mark {
+        match &self.store {
+            None => Mark::Packs(self.fake.requests(repo, "POST commit-pack")),
+            Some(_) => Mark::Head(self.head(repo, "main")),
+        }
+    }
+
+    /// The commits `repo` took since `mark`: the commit packs it was sent
+    /// (the fake), or the commits on main past the marked head (an
+    /// external store, which counts no requests).
+    pub fn commits_since(&self, repo: &str, mark: &Mark) -> u64 {
+        match (mark, &self.store) {
+            (Mark::Packs(n), None) => u64::from(self.fake.requests(repo, "POST commit-pack") - n),
+            (Mark::Head(marked), Some(store)) => {
+                if self.head(repo, "main").is_none() {
+                    return 0;
+                }
+                let history = store.history(repo, "main").unwrap_or_else(|e| panic!("{e:#}"));
+                let at = match marked {
+                    None => Some(history.len()),
+                    Some(sha) => history.iter().position(|c| c == sha),
+                };
+                at.unwrap_or_else(|| panic!("{repo}'s main moved more than {} commits past {marked:?}", store::HISTORY_MAX)) as u64
+            }
+            _ => unreachable!("a mark is the store's that made it"),
+        }
     }
 
     /// A hosted run's `POST /api/f/{name}/{route}`, signed by the owner
@@ -792,11 +1169,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let root = devstack::repo_root();
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
-    let org_key = fake::generate_org_key_pem();
-    let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     std::fs::create_dir_all(&scratch)?;
+    let hidden = rehearse.is_some();
+    let codestore = codestore(hidden, &scratch)?;
+    println!("code store: {}", codestore.said);
     let project = devstack::stage_project(&scratch.join("cell"))?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
@@ -805,14 +1183,41 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let test_secret = devstack::random_hex(32);
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
+    // the runtime: wrangler dev's workerd, or celld (docs/self-host.md)
+    let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
+        Err(_) | Ok("wrangler") => None,
+        Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
+        Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
+    };
+    // who signs people in: the WorkOS fake, or the OpenID Connect fake (docs/self-host.md, seam 4)
+    if let Some(other) = std::env::var("FRAGMENT_E2E_SIGNIN").ok().filter(|s| s != "workos" && s != "oidc") {
+        bail!("FRAGMENT_E2E_SIGNIN is workos or oidc, not {other}");
+    }
+    let port = devstack::free_port()?;
+    let renderer = match &celld {
+        Some(_) => Some(renderer(&scratch, port)?),
+        None => None,
+    };
+    // where computers run: the runtime's containers, or sandcastle nodes (docs/self-host.md, seam 2)
+    let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
+        Err(_) => None,
+        Ok("two") if rehearse.is_none() => Some((devstack::sandcastle::Tools::locate(false)?, None)),
+        Ok("real") if rehearse.is_none() => {
+            let dir = std::env::var_os("SANDCASTLE_ENGINE_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/sandcastle"));
+            Some((devstack::sandcastle::Tools::locate(true)?, Some(dir)))
+        }
+        Ok("two" | "real") => bail!("FRAGMENT_E2E_NODES is a local run's: a rehearsal keeps a preview's rules"),
+        Ok(other) => bail!("FRAGMENT_E2E_NODES is two (one node that listens, one that dials in) or real (one node in front of the machine's engine), not {other}"),
+    };
+    let nodes = sandcastle.is_some();
     let (rung, shared) = match rehearse {
-        None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
+        None if celld.is_some() => (needs::Rung::Celld { nodes }, api::Run::new(test_secret.clone(), 0)),
+        None => (needs::Rung::Local { nodes }, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some() };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
-    let hidden = rehearse.is_some();
     let mut s = Suite {
         only,
         except,
@@ -837,15 +1242,26 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         chrome: browser::Shared::new(&scratch),
         tools: Some(tools),
         node: None,
-        port: devstack::free_port()?,
+        celld,
+        renderer,
+        nodes: vec![],
+        node_images: Value::Null,
+        sandcastle: sandcastle.as_ref().map(|(tools, _)| tools.clone()),
+        byoc: true,
+        image_tags: vec![],
+        port,
         run,
-        fake: Fake::of(hidden, "code.storage", fake),
+        fake: codestore.fake,
+        store: codestore.store,
+        macrofiche: codestore.macrofiche,
+        org: codestore.org,
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
-        org_key,
+        org_key: codestore.org_key,
         host_secret: devstack::random_hex(32),
         test_secret,
-        workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
+        workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY, WORKOS_APP, WORKOS_APP_SECRET)?),
+        oidc: Fake::of(hidden, "OpenID Connect", fragment_fakes::oidc::Oidc::start(OIDC_CLIENT, OIDC_SECRET)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
         operator: Keys::generate(),
         cli,
@@ -857,11 +1273,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if let Some(shard) = s.shard {
         println!("shard {shard}: {}", lanes::SHARDS[shard.k as usize - 1].join(", "));
     }
+    if let Some((tools, real)) = &sandcastle {
+        start_nodes(&mut s, tools, real.as_deref())?;
+    }
     let t0 = Instant::now();
     s.start(true, true)?;
     // wrangler builds the computer images as it boots: built ahead (xtask's
     // build), every step is a cache hit, and the boot takes seconds
-    let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
+    let log = s.node.as_ref().map(|n| std::fs::read_to_string(n.log()).unwrap_or_default()).unwrap_or_default();
     let cached = log.lines().filter(|l| l.starts_with('#') && l.ends_with(" CACHED")).count();
     println!("the node is ready in {:.1?} (its image builds: {cached} steps cached)", t0.elapsed());
     lanes::run(&mut s);
@@ -872,6 +1291,121 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The renderer a celld node shoots preview cards with: the pinned
+/// chrome-headless-shell (fetched into `target/tools` on first use), its
+/// pages let through to the run's fragments' hosts (both sites' suffixes)
+/// on the node's port, and to nothing else.
+fn renderer(scratch: &Path, port: u16) -> Result<devstack::rendering::Rendering> {
+    let browser = devstack::browser::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let upstream = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let origins = devstack::rendering::Origins::new(&[SUFFIX, BOATS], port, upstream);
+    let opts = devstack::rendering::Options { browser: browser.bin, state: scratch.join("renderer"), origins, ca_file: None, port: 0 };
+    let r = devstack::rendering::Rendering::start(opts)?;
+    println!("cards: {} (the renderer at {}; its pages reach this run's fragments alone)", browser.version, r.url);
+    Ok(r)
+}
+
+/// The run's two sandcastle nodes (`FRAGMENT_E2E_NODES=two`), in the
+/// order `FRAGMENT_NODES` lists them: `direct`, which listens, and
+/// `uplink`, which dials the platform; each holds the staged cell's images
+/// (the Hermes images among them when its lane runs: `stage_images`),
+/// built here for the run and tagged with its name. With a real engine
+/// (`FRAGMENT_E2E_NODES=real`), one node, `box`, which listens in front of
+/// it, the images loaded into it.
+fn start_nodes(s: &mut Suite, tools: &devstack::sandcastle::Tools, real: Option<&Path>) -> Result<()> {
+    let t0 = Instant::now();
+    let mut images = serde_json::Map::new();
+    for (name, tag) in devstack::sandcastle::build_cell_images(&s.project, &s.run)? {
+        s.image_tags.push(tag.clone());
+        images.insert(name, json!(format!("docker.io/library/{tag}")));
+    }
+    s.node_images = Value::Object(images);
+    println!("      (the nodes' images built in {:.1?})", t0.elapsed());
+    let platform = format!("http://127.0.0.1:{}", s.port);
+    if let Some(dir) = real {
+        devstack::sandcastle::load_images(dir, &s.image_tags, &s.scratch.join("images"))?;
+        let spec = devstack::sandcastle::NodeSpec {
+            id: "box".into(),
+            reach: devstack::sandcastle::Reach::Listen(devstack::free_port()?),
+            engine: devstack::sandcastle::Engine::Real(dir.to_path_buf()),
+            dir: s.scratch.join("n").join("box"),
+            platform: platform.clone(),
+            capacity: devstack::sandcastle::real_engine_vms(dir)?,
+            log_dir: s.scratch.clone(),
+        };
+        s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
+        println!("nodes: box at {}, in front of the real engine in {}, its images {} loaded (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), dir.display(), s.node_images, t0.elapsed());
+        return Ok(());
+    }
+    for (id, reach) in [("direct", devstack::sandcastle::Reach::Listen(devstack::free_port()?)), ("uplink", devstack::sandcastle::Reach::Uplink)] {
+        let spec = devstack::sandcastle::NodeSpec {
+            id: id.into(),
+            reach,
+            engine: devstack::sandcastle::Engine::Double,
+            // short: the engine's sockets live under it (a unix socket's path is at most 108 bytes)
+            dir: s.scratch.join("n").join(id),
+            platform: platform.clone(),
+            capacity: NODE_CAPACITY,
+            log_dir: s.scratch.clone(),
+        };
+        s.nodes.push(devstack::sandcastle::SandcastleNode::start(tools, &spec)?);
+    }
+    println!("nodes: direct at {}, uplink dialing {platform}, their images {} (ready in {:.1?})", s.nodes[0].url().unwrap_or_default(), s.node_images, t0.elapsed());
+    Ok(())
+}
+
+/// The computers each of the run's nodes holds: room for every section's.
+const NODE_CAPACITY: u32 = 64;
+
+/// A local run's code store, as `codestore` started or found it.
+struct RunStore {
+    fake: Fake<CodeStorage>,
+    store: Option<store::External>,
+    macrofiche: Option<devstack::codestore::Macrofiche>,
+    org: String,
+    org_key: String,
+    /// What the run's first line says it is.
+    said: String,
+}
+
+/// The node's code store (`FRAGMENT_E2E_CODESTORE`, store.rs): the fake in
+/// this process (`hidden` from the lanes on a rehearsal), a store already
+/// running, or macrofiche, started on the run's scratch with an org key
+/// made for the run (its log beside the node's).
+fn codestore(hidden: bool, scratch: &Path) -> Result<RunStore> {
+    match store::Choice::from_env()? {
+        store::Choice::Fake => {
+            let org_key = fake::generate_org_key_pem();
+            let fake = CodeStorage::start(fake::Options { org: ORG.into(), org_key_pem: Some(org_key.clone()), ..Default::default() })?;
+            let said = format!("{} (the code.storage fake, in this process)", fake.url);
+            Ok(RunStore { fake: Fake::of(hidden, "code.storage", fake), store: None, macrofiche: None, org: ORG.into(), org_key, said })
+        }
+        store::Choice::External => {
+            let x = devstack::codestore::ExternalStore::from_env()?;
+            let label = format!("the external store at {}", x.url);
+            let store = store::External::new(&x.url, &x.org, &x.key_pem, label.clone())?;
+            let said = format!("{label}, org {} ({}=external)", x.org, store::CODESTORE_VAR);
+            Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(store), macrofiche: None, org: x.org, org_key: x.key_pem, said })
+        }
+        store::Choice::Macrofiche => {
+            let bin = devstack::codestore::macrofiche_bin()?;
+            let org_key = fake::generate_org_key_pem();
+            let opts = devstack::codestore::MacroficheOptions {
+                dir: scratch.join("macrofiche"),
+                port: devstack::free_port()?,
+                org: ORG.into(),
+                key_pem: org_key.clone(),
+                log_dir: scratch.to_path_buf(),
+            };
+            let m = devstack::codestore::Macrofiche::start(&bin, &opts)?;
+            let mut store = store::External::new(&m.url, ORG, &org_key, "macrofiche".into())?;
+            store.service = true;
+            let said = format!("{} (macrofiche, {}; its log {})", m.url, bin.display(), m.log.display());
+            Ok(RunStore { fake: Fake::absent("code.storage"), store: Some(store), macrofiche: Some(m), org: ORG.into(), org_key, said })
+        }
+    }
 }
 
 /// A run's end: a name `--only` or `--except` gave that no section has
@@ -896,6 +1430,23 @@ fn finish(s: &mut Suite) -> Result<()> {
         }
         println!("      (the node stopped in {:.1?})", t0.elapsed());
     }
+    // the sandcastle nodes after the platform (each engine removes its
+    // containers), then the image tags built for them
+    for n in std::mem::take(&mut s.nodes) {
+        let id = n.id.clone();
+        if let Err(e) = n.stop() {
+            s.fail(&format!("the node {id} stops at the end of the run"), format!("{e:#}"));
+        }
+    }
+    for tag in std::mem::take(&mut s.image_tags) {
+        let _ = std::process::Command::new("docker").args(["image", "rm", &tag]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    }
+    // the code store the run started stops after the node that wrote to it
+    if let Some(m) = s.macrofiche.take() {
+        if let Err(e) = m.stop() {
+            s.fail("macrofiche stops at the end of the run", format!("{e:#}"));
+        }
+    }
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
@@ -907,7 +1458,7 @@ fn finish(s: &mut Suite) -> Result<()> {
             s.fail("the run writes its summary", format!("{}: {e:#}", path.display()));
         }
     }
-    let skipped = match s.hosted() {
+    let skipped = match s.hosted() || s.store.is_some() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
     };

@@ -50,6 +50,7 @@ macro_rules! username_join {
 }
 
 pub(crate) mod calls;
+mod nodes;
 mod signin;
 use calls::{
     Hold, SubjectOf,
@@ -104,6 +105,7 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
+        state.storage().sql().exec(nodes::SCHEMA, None).expect("the nodes' schema applies");
         signin::migrate(&state.storage().sql());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
@@ -660,6 +662,7 @@ impl RegistryCell {
             TestHook::Signins(hook) => Ok(json!(self.signins_hook(hook).await?)),
             TestHook::E2eSignIn(asked) => Ok(json!(self.e2e_sign_in(&asked.email, asked.paid_calls)?)),
             TestHook::E2ePeople(page) => Ok(json!(self.e2e_people(page.after.as_deref())?)),
+            TestHook::Person(kept) => Ok(json!(self.kept_person(kept)?)),
             TestHook::E2eIs(identity) => Ok(json!({ "e2e": self.is_e2e(&identity)? })),
         }
     }
@@ -701,10 +704,19 @@ impl RegistryCell {
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),
             Session::PATH => reply::<Session>(self.session(body(&bytes)?)),
             EndSession::PATH => reply::<EndSession>(self.end_site_session(body(&bytes)?)),
-            Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?)),
+            Logout::PATH => reply::<Logout>(self.logout(body(&bytes)?).await),
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            calls::PairBegin::PATH => reply::<calls::PairBegin>(self.pair_begin(body(&bytes)?)),
+            calls::PairShow::PATH => reply::<calls::PairShow>(self.pair_show(body(&bytes)?)),
+            calls::PairApprove::PATH => reply::<calls::PairApprove>(self.pair_approve(body(&bytes)?).await),
+            calls::PairPoll::PATH => reply::<calls::PairPoll>(self.pair_poll(body(&bytes)?).await),
+            calls::OwnNodes::PATH => reply::<calls::OwnNodes>(self.own_nodes_of(body(&bytes)?)),
+            calls::PairedNode::PATH => reply::<calls::PairedNode>(self.paired_node(body(&bytes)?).await),
+            calls::RevokeNode::PATH => reply::<calls::RevokeNode>(self.revoke_node(body(&bytes)?)),
+            calls::PreferNode::PATH => reply::<calls::PreferNode>(self.prefer_node(body(&bytes)?)),
+            calls::ChoiceOf::PATH => reply::<calls::ChoiceOf>(self.choice_of(body(&bytes)?).await),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }
