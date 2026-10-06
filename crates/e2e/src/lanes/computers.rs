@@ -506,9 +506,12 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let seq = records(api, &owner, &chat_name, "chat").last().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
         page.send(&json!({ "type": "subscribe", "channel": "chat", "after": seq }))?;
         page.until("subscribed", 20)?;
-        say(10, "slow, for the page")?;
-        let draft = page.until("draft", 200);
-        let reply = page.until("record", 200);
+        let r = say(10, "slow, for the page")?;
+        // the turn before may still be heard (its draft cleared after its
+        // reply, under load after this subscribe): this turn's frames
+        let turn = turn_of(&agent_name, &chat_name, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let draft = page.until_where("draft", 200, |d| d["turn"] == turn.as_str() && d["text"].is_string());
+        let reply = page.until_where("record", 200, |r| r["body"]["turn"] == turn.as_str());
         let drafted = draft.as_ref().is_ok_and(|d| d["principal"] == identity.as_str() && d["text"].as_str().is_some_and(|t| !t.is_empty()));
         let replaced = matches!((&draft, &reply), (Ok(d), Ok(r)) if r["body"]["turn"] == d["turn"] && r["principal"] == identity.as_str());
         s.ok("a page sees the reply's draft live, as the agent", drafted, format!("{draft:?}"));
