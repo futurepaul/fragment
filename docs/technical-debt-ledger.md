@@ -660,6 +660,32 @@ fragment.club until cutover (decisions 34–35).
   their like) to Relay connectors other than Slack's, and the relay
   runtime maps them, proven by the real-Hermes lane's step assertions.
 
+## A quick tool's step can be lost in Hermes
+
+- **Observed:** the Docker rung's `the_hermes_image`, twice, warm.
+  Hermes v0.21.5's progress sender (`gateway/run_turn_runner.py`,
+  `TurnRunner.send_progress_messages`) takes a tool's progress line from
+  its queue every 0.3 s; when the turn's cleanup cancels it, it edits a
+  progress message it already sent but never sends a first one. A turn
+  that ends before the sender's next poll after its tool starts sends no
+  progress line at all, as a message or in a draft (its one draft is the
+  answer's), so the relay runtime has no step to record; a probe of that
+  code in the image lost 21 of 48 lines whose turns ended within 0.35 s
+  of their tool's start. The scripted model answers at once and `echo` is
+  quick: the failing turns took about 350 ms, and a passing one sent its
+  line 65 ms before its answer. So the rung's terminal command sleeps 2 s
+  first (`images/bridge/tests/support/model.rs`). The e2e's `hermes` lane
+  runs `run: echo tool-ran` through the Workers AI fake and has the same
+  race, so far unseen.
+- **Risk:** a real turn whose tool and next model call take under 0.3 s
+  together shows its answer with no step. Rare with a real model, whose
+  next call alone is slower.
+- **First proof:** a Hermes turn with a tool call in its session and no
+  `turn.step` on work.
+- **Delete when:** Hermes sends what its progress queue holds when its
+  sender is cancelled (or the entry above goes), proven by the Docker
+  rung with an instant command.
+
 ## The screen's Take over is the image's, not Hermes'
 
 - **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen

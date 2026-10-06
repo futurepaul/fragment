@@ -370,7 +370,11 @@ async fn the_hermes_image() {
     fake.until(120_000, "the second reply", |w| answered(w, &t2).is_some()).await;
     eprintln!("hermes: warm message to reply: {} ms", warm.elapsed().as_millis());
 
-    // A tool call: Hermes' progress line is a step, then its answer.
+    // A tool call: Hermes' progress line is a step, then its answer. The
+    // command sleeps 2 s first: a turn that ends before Hermes' progress
+    // sender next polls (every 0.3 s) after its tool starts sends no
+    // progress line (the debt ledger, "A quick tool's step can be lost in
+    // Hermes").
     let third = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal" }));
     let t3 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", third["seq"].as_u64().unwrap());
     fake.until(120_000, "the tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t3)).await;
