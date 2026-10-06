@@ -247,6 +247,10 @@ pub struct Suite {
     node: Option<devstack::AnyNode>,
     /// celld's tools when the node runs on celld (`FRAGMENT_E2E_RUNTIME=celld`).
     celld: Option<devstack::celld::CelldTools>,
+    /// OpenBao, the cell's secrets behind its shim on celld (the default;
+    /// `FRAGMENT_E2E_SECRETS=vars` for the shim's variables: docs/self-host.md,
+    /// seam 12), its state and audit log in the run's scratch.
+    openbao: Option<devstack::openbao::OpenBao>,
     /// Where a node without the `BROWSER` binding (celld) shoots preview
     /// cards: the renderer over the pinned chrome-headless-shell, its
     /// pages let reach this run's fragments alone (docs/self-host.md, seam 7).
@@ -335,6 +339,30 @@ impl Suite {
             ("OpenID Connect client secret", OIDC_SECRET.into()),
             ("test secret", self.test_secret.clone()),
         ]
+        .into_iter()
+        // the cell's OpenBao token: secret zero, the one given outside it
+        .chain(self.openbao.as_ref().and_then(|b| std::fs::read_to_string(b.layout().cell_token()).ok()).map(|t| ("OpenBao token", t.trim().to_string())))
+        .collect()
+    }
+
+    /// Whether the cell's secrets are OpenBao's, behind its shim.
+    pub fn has_openbao(&self) -> bool {
+        self.openbao.is_some()
+    }
+
+    /// OpenBao stops: to the cell, its secrets' service is down.
+    pub fn openbao_down(&mut self) -> Result<()> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.down()?)
+    }
+
+    /// OpenBao starts again on its state: unsealed by its static seal.
+    pub fn openbao_up(&mut self) -> Result<Duration> {
+        Ok(self.openbao.as_mut().context("the run's secrets are OpenBao's")?.up()?)
+    }
+
+    /// How many times the run's OpenBao initialised its state.
+    pub fn openbao_initialisations(&self) -> Result<usize> {
+        Ok(devstack::openbao::initialisations(self.openbao.as_ref().context("the run's secrets are OpenBao's")?.layout())?)
     }
 
     /// Whether the run keeps the hosted lane's rules (on a preview, or its
@@ -714,8 +742,13 @@ impl Suite {
             containers: self.nodes.is_empty(),
             byoc: self.byoc && !self.nodes.is_empty(),
             browser_url: self.renderer.as_ref().map(|r| r.url.clone()),
-            // celld has no Secrets Store: the cell's shim stands in (seam 12)
-            secrets: if self.celld.is_some() { devstack::Secrets::Shim } else { devstack::Secrets::Store },
+            // celld has no Secrets Store: the cell's shim stands in (seam 12),
+            // backed by OpenBao or by its variables
+            secrets: match (&self.celld, &self.openbao) {
+                (None, _) => devstack::Secrets::Store,
+                (Some(_), None) => devstack::Secrets::Shim,
+                (Some(_), Some(bao)) => devstack::Secrets::OpenBao(bao.target()),
+            },
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -1236,6 +1269,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Some(_) => Some(renderer(&scratch, port)?),
         None => None,
     };
+    // the cell's secrets on celld: OpenBao behind its shim, or the shim's variables
+    let openbao = match (std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref(), &celld) {
+        (None | Some("openbao"), Some(_)) => Some(openbao(&scratch)?),
+        (Some("vars"), Some(_)) => None,
+        (None, None) => None,
+        (Some(_), None) => bail!("FRAGMENT_E2E_SECRETS is celld's (FRAGMENT_E2E_RUNTIME=celld): wrangler dev keeps the secrets in its own store"),
+        (Some(other), Some(_)) => bail!("FRAGMENT_E2E_SECRETS is openbao or vars, not {other}"),
+    };
     // where computers run: the runtime's containers, or sandcastle nodes (docs/self-host.md, seam 2)
     let sandcastle = match std::env::var("FRAGMENT_E2E_NODES").as_deref() {
         Err(_) => None,
@@ -1281,6 +1322,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         tools: Some(tools),
         node: None,
         celld,
+        openbao,
         renderer,
         nodes: vec![],
         node_images: Value::Null,
@@ -1330,6 +1372,27 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         });
     }
     finish(&mut s)
+}
+
+/// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
+/// state in the run's scratch, on a free loopback port, every request in
+/// its audit log (read at the run's end: `openbao_reads`).
+fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
+    let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
+    let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
+    let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
+    println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret behind the cell's shim)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
+    Ok(bao)
+}
+
+/// What the run asked of OpenBao, from its audit log: the cell's reads of
+/// the secrets, and the log's size.
+fn openbao_reads(s: &Suite) {
+    let Some(bao) = &s.openbao else { return };
+    match devstack::openbao::audited(bao.layout()) {
+        Ok(a) => println!("      (OpenBao: {} reads of the secrets by the cell's token, {} requests in all, {} KiB of audit log)", a.cell_reads, a.requests, a.bytes / 1024),
+        Err(e) => println!("      (OpenBao's audit log: {e})"),
+    }
 }
 
 /// The renderer a celld node shoots preview cards with: the pinned
@@ -1497,6 +1560,12 @@ fn finish(s: &mut Suite) -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
+    openbao_reads(s);
+    if let Some(mut bao) = s.openbao.take() {
+        if let Err(e) = bao.down() {
+            s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
+        }
+    }
     s.outside = s.outside + s.counts().since(before);
     if let Some(path) = s.summary.clone() {
         // written before the counts are printed: a red run's summary too

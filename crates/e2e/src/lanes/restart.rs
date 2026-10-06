@@ -313,6 +313,46 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
     s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
+    openbao_restart(s)
+}
+
+/// The checks of OpenBao behind the cell's secrets, across its stop and
+/// start (docs/self-host.md, seam 12).
+const OPENBAO: [&str; 2] = [
+    "with OpenBao down, a sign-in's callback fails at once, naming OpenBao: the cell's read of the client's secret is an error, never a hang",
+    "OpenBao started again unseals itself from its key file, initialised once, and the next sign-in reads the secret: the cell not restarted",
+];
+
+/// A sign-in through the provider, to its callback's answer.
+fn callback(api: &Api, email: &str) -> Result<crate::api::Reply> {
+    let start = api.unsigned("GET", &format!("/auth/login?return=/&login_hint={}", crate::api::url_enc(email)), None)?;
+    let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login=")).unwrap_or_default();
+    let back = api.external(&start.header("location"))?;
+    anyhow::ensure!(start.status == 302 && back.status == 302, "a sign-in begun: {start} / {back}");
+    api.call(Call { method: "GET", url: back.header("location"), cookie: Some(bound), ..Call::default() })
+}
+
+/// OpenBao down, then up, under a node started fresh: no isolate holds the
+/// sign-in client's secret, which only a sign-in's code exchange reads.
+fn openbao_restart(s: &mut Suite) -> Result<()> {
+    if !s.has_openbao() {
+        for label in OPENBAO {
+            s.skip(label, "the run's secrets are not OpenBao's (FRAGMENT_E2E_SECRETS=vars, or wrangler's own store)");
+        }
+        return Ok(());
+    }
+    s.stop()?;
+    let api = s.start(false, true)?;
+    s.openbao_down()?;
+    let t0 = std::time::Instant::now();
+    let r = callback(&api, "openbao-down@e2e.test")?;
+    let took = t0.elapsed();
+    s.ok(OPENBAO[0], r.status >= 500 && r.text.contains("OpenBao") && r.text.contains("is not answering") && took < Duration::from_secs(10), format!("{r} in {took:?}"));
+    let up = s.openbao_up()?;
+    let r = callback(&api, "openbao-up@e2e.test")?;
+    let signed = r.cookies().into_iter().any(|c| c.starts_with("fragment_session=") && c.len() > "fragment_session=".len() + 1);
+    let once = s.openbao_initialisations()?;
+    s.ok(OPENBAO[1], r.status == 302 && signed && once == 1, format!("{r} (OpenBao up again in {up:?}, initialised {once} time(s))"));
     Ok(())
 }
 
