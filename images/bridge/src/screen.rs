@@ -344,8 +344,8 @@ impl Unframed {
     }
 }
 
-/// The longest clipboard a viewer may send: Xvnc's `-MaxCutText`, as Hermes'
-/// desktop launcher sets it.
+/// The longest clipboard a viewer may send: Xvnc's `-MaxCutText` as a
+/// desktop sets it.
 pub const CUT_TEXT_MAX: usize = 256 * 1024;
 
 impl InputGate {

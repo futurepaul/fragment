@@ -71,7 +71,7 @@
 //!   on its card (at most the card's life), so a card expires with its
 //!   runtime there and its turn ends as the runtime ends it, never cut by an
 //!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
-//!   one left Hermes to meet the next message with the cut request).
+//!   one left its runtime to meet the next message with the cut request).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -971,8 +971,8 @@ impl Engine {
                     return;
                 }
                 t.stop_requested = true;
-                // a Stop is its question's answer too (Relay says "Stop." to
-                // a clarify waiting on words): the next message is a turn
+                // a Stop is its question's answer too: the next message is a
+                // turn
                 t.asking = false;
                 let open: Vec<String> = t.prompts.iter().filter(|p| !p.closed).map(|p| p.id.clone()).collect();
                 for p in t.prompts.iter_mut() {

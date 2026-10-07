@@ -1,10 +1,9 @@
-# The computer images' Rust (docs/computers.md): the bridge every image runs,
-# and the Hermes image's boot tool. Its own workspace and lock, apart from the
-# repo's root workspace, so an image's build context is `images/` alone and
-# its dependencies are only these (no TLS, no async runtime but tokio).
+# The computer images' Rust (docs/computers.md): the bridge every image runs.
+# Its own workspace and lock, apart from the repo's root workspace, so the
+# bridge's dependencies are only these (no TLS, no async runtime but tokio).
 [workspace]
 resolver = "2"
-members = ["bridge", "hermes/boot"]
+members = ["bridge"]
 
 [workspace.package]
 edition = "2021"

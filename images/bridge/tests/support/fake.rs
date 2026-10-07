@@ -3,8 +3,8 @@
 //! depends on them: channels with seq, idempotent posts by id (409 for
 //! another body), drafts fanned out on `__live`, `__live` paging from a
 //! cursor, wake subscriptions, members, `GET /api/computer`, the keepalive
-//! socket, blobs, and a fragment's files. Levers drop every socket (a
-//! deploy), take the API down, and fail posts.
+//! socket, blobs, and a fragment's operations (its `view`). Levers drop every
+//! socket (a deploy), take the API down, and fail posts.
 //!
 //! A request acts as the agent its `x-fragment-agent` names (the intercept's
 //! job, faked): one not assigned to the computer is refused.
@@ -50,8 +50,9 @@ pub struct Frag {
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
     pub blobs: HashMap<String, (String, Bytes)>,
-    pub files: BTreeMap<String, Bytes>,
-    pub commits: Vec<Value>,
+    /// What its `view` operation answers (`{text}`); none, it has no such
+    /// operation (404 `unknown_operation`, as a chat's).
+    pub view: Option<String>,
 }
 
 struct LiveSock {
@@ -230,21 +231,6 @@ impl Fake {
             }
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
-            w.fragments.insert(name.clone(), f);
-        });
-        name
-    }
-
-    /// paul's skills fragment `<label>.paul` (the blessed `skills`
-    /// template's: its agents reach it acting for paul), holding `files`.
-    pub fn skills(&self, label: &str, files: &[(&str, &str)]) -> String {
-        let name = format!("{label}.paul");
-        self.with(|w| {
-            let mut f = Frag { kind: "skills".into(), ..Frag::default() };
-            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
-            for (path, text) in files {
-                f.files.insert(path.to_string(), Bytes::from(text.to_string()));
-            }
             w.fragments.insert(name.clone(), f);
         });
         name
@@ -548,35 +534,13 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
             None => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
-        (Method::GET, ["files"]) => {
-            // a file's version moves with its bytes, as a commit's does
-            let version = |b: &Bytes| format!("c{}", &fragment_bridge::records::hex(&<sha2::Sha256 as sha2::Digest>::digest(b))[..12]);
-            let list: Vec<Value> = f.files.iter().map(|(p, b)| json!({ "path": p, "size": b.len(), "mode": "100644", "lastCommitSha": version(b), "machinery": false })).collect();
-            answer(StatusCode::OK, json!({ "ref": "main", "files": list }))
-        }
-        (Method::GET, ["file"]) => {
-            let path = query(&q, "path").into_iter().next().unwrap_or_default();
-            match f.files.get(&path) {
-                Some(b) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
-                None => refuse(StatusCode::NOT_FOUND, "no such file"),
-            }
-        }
-        (Method::POST, ["files"]) => {
+        (Method::POST, ["ops", "view"]) => {
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            let files = w.fragments.get_mut(&fragment).unwrap();
-            for c in v["files"].as_array().cloned().unwrap_or_default() {
-                let path = c["path"].as_str().unwrap_or("").to_string();
-                if c["delete"] == json!(true) {
-                    files.files.remove(&path);
-                } else if let Some(t) = c["text"].as_str() {
-                    files.files.insert(path, Bytes::from(t.to_string()));
-                } else if let Some(b) = c["base64"].as_str() {
-                    use base64::Engine;
-                    files.files.insert(path, Bytes::from(base64::engine::general_purpose::STANDARD.decode(b).unwrap_or_default()));
-                }
+            match (&f.view, v["id"].as_str()) {
+                (_, None) => refuse(StatusCode::BAD_REQUEST, "an operation's call names its id"),
+                (Some(text), Some(_)) => answer(StatusCode::OK, json!({ "result": { "text": text, "bytes": text.len(), "settled": true }, "replayed": false })),
+                (None, Some(_)) => net::refusal(StatusCode::NOT_FOUND, "unknown_operation", "no such operation"),
             }
-            files.commits.push(v);
-            answer(StatusCode::OK, json!({ "commit": format!("c{}", files.commits.len()) }))
         }
         _ => refuse(StatusCode::NOT_FOUND, "no such route"),
     }

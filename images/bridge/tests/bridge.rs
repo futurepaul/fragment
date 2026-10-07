@@ -198,8 +198,8 @@ async fn an_approval_expired() {
     bridge.stop().await;
 }
 
-/// Goal: a turn that asks its asker something in words (Hermes' open
-/// clarify) posts the question, and the asker's next message is its
+/// Goal: a turn that asks its asker something in words (an open clarify)
+/// posts the question, and the asker's next message is its
 /// answer, mid-turn: the turn ends saying it, and the message starts no
 /// turn of its own. Someone else's message meanwhile waits its turn.
 #[tokio::test]

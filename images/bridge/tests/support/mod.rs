@@ -1,5 +1,5 @@
 //! What the bridge's integration tests share: the fake fragment API, the
-//! scripted Hermes, and a bridge run in process (stopped and started again
+//! scripted model, and a bridge run in process (stopped and started again
 //! over the same state, as a restart does; or killed, as a crash does).
 //!
 //! The tools of the failure cases (docs/explorations/pi-durable.md,
@@ -19,9 +19,7 @@
 #![allow(dead_code)]
 
 pub mod fake;
-pub mod hermes;
 pub mod model;
-pub mod rfb;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

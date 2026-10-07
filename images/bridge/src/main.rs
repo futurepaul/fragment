@@ -2,7 +2,7 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script)
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=script)
 //! fragment-bridge screen   only the screen on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
-use fragment_bridge::runtime::relay::{Relay, RelayConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
 use fragment_bridge::{ev, limits, screen};
@@ -42,24 +41,9 @@ fn parse_ms(name: &str, default: u64) -> u64 {
 }
 
 fn runtime() -> Box<dyn Runtime> {
-    match env_or("BRIDGE_RUNTIME", "relay").as_str() {
-        "relay" => {
-            let listen: SocketAddr = env_or("BRIDGE_RELAY_LISTEN", "127.0.0.1:8650").parse().unwrap_or_else(|_| fail("BRIDGE_RELAY_LISTEN is not host:port"));
-            let secret_file = env("BRIDGE_RELAY_SECRET_FILE").unwrap_or_else(|| fail("BRIDGE_RELAY_SECRET_FILE names the Relay secret's file"));
-            let secret = std::fs::read_to_string(&secret_file).unwrap_or_else(|e| fail(&format!("{secret_file}: {e}"))).trim().to_string();
-            if secret.len() < 32 {
-                fail("the Relay secret is at least 32 characters");
-            }
-            let config = RelayConfig {
-                listen,
-                gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
-                secret,
-                media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
-            };
-            Box::new(Relay { config })
-        }
+    match env_or("BRIDGE_RUNTIME", "script").as_str() {
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
-        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
+        other => fail(&format!("BRIDGE_RUNTIME {other:?} is not script")),
     }
 }
 

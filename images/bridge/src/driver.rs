@@ -267,7 +267,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let (keep_tx, keep_rx) = watch::channel(false);
     let shared = Arc::new(Shared::default());
 
-    // The runtime starts at once (Hermes dials it while the bridge reads the
+    // The runtime starts at once (goose starts while the bridge reads the
     // platform), and its events go to the inbox.
     let name = runtime.name();
     let mut runtime_task = tokio::spawn(runtime.run(RuntimeIo { commands: cmd_rx, events: event_tx, shutdown: stop.clone() }));
