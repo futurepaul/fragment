@@ -607,7 +607,49 @@ settings and state):
   work, never Hermes' home (Paul, 2026-10-07). A hard cut: a profile's
   `home` that already had something in it is set aside in place as
   `home.before-work` (numbered when taken), unmoved, and the link made;
-  nothing is carried over or deleted (event `profile.home_set_aside`).
+  nothing is carried over or deleted (event `profile.set_aside`, `what`
+  naming it).
+  Its temp files are its work too (2026-10-07). Hermes v0.21.5 gives each
+  process it runs `TMPDIR`, `TMP` and `TEMP` pointing at the scratch
+  directory of the home it runs it under
+  (`hermes_constants.apply_subprocess_home_env`, then
+  `apply_scratch_tmp_env`), an agent's being its profile's
+  `cache/scratch`; the image makes that a link to
+  `/data/work/<profile>/tmp`, by the same hard cut as its home (set aside
+  as `cache/scratch.before-work`). An agent still sees Hermes' path in
+  `$TMPDIR`; what it writes there is in its work. A link, and no
+  `TMPDIR` of the image's, because:
+  - Hermes re-points the temp variables only while they hold a value it
+    set itself (its `HERMES_SCRATCH_DIR` marker), and passes any other as
+    it is. So a `TMPDIR` in the gateway's environment would reach every
+    agent's commands unchanged: one directory for all of them.
+  - A profile cannot give its terminal one. `terminal.env_passthrough`
+    reads `TMPDIR` from the gateway's process, never from the profile's
+    `.env` (Hermes keeps the name process-wide, `agent/secret_scope.py`'s
+    `_GLOBAL_ENV_EXACT`). An export in `shell_init_files` reaches the
+    terminal's snapshot, so its foreground commands, but not a background
+    process: that is a `bash -lic` of the gateway's environment
+    (`tools/process_registry.py`).
+  - Hermes' own path is what its every way of starting a command reads, so
+    the link needs nothing else to agree with it.
+
+  Hermes' own uses of the scratch work through the link: its prune of
+  entries idle 24 hours (it compares real paths), and a file it sends from a
+  reply's `MEDIA:` tag (any file it can read that its denylist does not
+  name: `validate_media_delivery_path`, strict mode off). The gateway's own
+  scratch, `/data/hermes/cache/scratch`, stays where Hermes puts it: it is
+  the gateway process's (its terminal's session snapshots, its browser's
+  sockets and Chromium's `TMPDIR`, execute_code's staging), and it is what
+  Hermes derives each profile's from. Kanban's "scratch" workspaces are not
+  this directory: they are `/data/hermes/kanban/workspaces/<task>`, one
+  board for every profile by Hermes' design, and unchanged. One way of
+  running misses: an execute_code script's temp files are in the gateway's
+  scratch, not its agent's, because Hermes' sandbox drops the marker
+  (docs/technical-debt-ledger.md, "An agent's execute_code makes its temp
+  files in Hermes' home"). The lower rung's `a_tools_temp_files_are_its_work`
+  asks each way: the terminal's `mktemp`, a background process's, and
+  execute_code's `tempfile` (pinned in the gateway's scratch), then a temp
+  file sent as `MEDIA:`.
   Its desktop browser's profile (`<profile>/bot-desktop/browser-profile`,
   where Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
 

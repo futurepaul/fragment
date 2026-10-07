@@ -665,6 +665,34 @@ fragment.club until cutover (decisions 34–35).
   ones Hermes does not keep, proven by the same check with no
   `credentials.sh`.
 
+## An agent's execute_code makes its temp files in Hermes' home
+
+- **Observed:** 2026-10-07, the Docker lane's
+  `a_tools_temp_files_are_its_work` (`images/hermes`; docs/computers.md,
+  "Our images"). An agent's terminal commands, foreground and background,
+  make their temp files in its work (`/data/work/<profile>/tmp`, through
+  its profile's linked `cache/scratch`), but an execute_code script makes
+  its own in the gateway's scratch, `/data/hermes/cache/scratch`. Hermes
+  v0.21.5 builds a script's environment with a scrub that keeps `TMPDIR`,
+  `TMP` and `TEMP` and drops every `HERMES_*` name it does not list, its
+  `HERMES_SCRATCH_DIR` marker among them (`tools/code_execution_env.py`,
+  `_scrub_child_env`). So its `apply_scratch_tmp_env`, run after, takes the
+  gateway's `TMPDIR` for one a user set, and keeps it. No profile setting
+  reaches it: Hermes resolves `TMPDIR` process-wide.
+- **Risk:** what a script leaves in its temp directory is saved with
+  Hermes' home, not its agent's work, and every agent's scripts share that
+  directory (Hermes prunes what is idle 24 hours). When the work moves to a
+  sandbox of its own (step 4 of docs/durable-computers.md), those files
+  stay behind.
+- **First proof:** before step 4, one agent's script reading a file
+  another's left in that directory; after it, a file a script left there
+  that its agent's terminal, in the sandbox, cannot find.
+- **Delete when:** our terminal backend runs execute_code's scripts (step
+  3: Hermes runs them through any backend but `local`), or Hermes keeps
+  its marker for them. Either fails the lane's check that pins the
+  script's temp file in the gateway's scratch, which then holds it to the
+  work with the rest.
+
 ## Own keys are kept by the person's computer
 
 - **Observed:** Paul, 2026-10-04 (`computer.rs` `own_keys`). A person's

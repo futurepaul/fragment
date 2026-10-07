@@ -64,6 +64,39 @@ file is the newer word, and decision 18 points here.
   (its terminal's `HOME`, its file tools' `~`) joined it on 2026-10-07
   (Paul: the whole `~`, not only the browser), a hard cut: what agents
   had written under `~` stayed where it was.
+- **An agent's temp files joined its work (2026-10-07).** Hermes v0.21.5
+  points `TMPDIR`, `TMP` and `TEMP` at `<home>/cache/scratch` for itself
+  and for each process it runs, derived again from the home it runs that
+  process under (`hermes_constants.apply_scratch_tmp_env`, which leaves
+  alone a value it did not set, knowing its own by its
+  `HERMES_SCRATCH_DIR` marker). An
+  agent's commands run under its profile's home, so a tool's temp file (a
+  `mktemp`, a build's, an install's) was in Hermes' home,
+  `/data/hermes/profiles/<profile>/cache/scratch` (seen in the Docker lane
+  while working on #225). That directory is now a link to
+  `/data/work/<profile>/tmp`, made as the link to its home is (a hard cut:
+  one with something in it is set aside, unmoved, as
+  `cache/scratch.before-work`). A link, not a `TMPDIR` of ours, because
+  nothing short of patching Hermes can give each agent one:
+  - a profile's `.env` cannot (`terminal.env_passthrough` reads `TMPDIR`
+    from the process, never from a profile's scope: Hermes keeps that name
+    process-wide);
+  - an export in the terminal's `shell_init_files` reaches its foreground
+    commands only, never a background process, which starts from the
+    gateway's environment;
+  - and one set for the gateway is passed to every child as it is (Hermes
+    re-points only its own), so every agent would share it.
+
+  Hermes' own path is what each way it starts a command reads, so the
+  link catches them all, and Hermes' own uses of it work through it (its
+  prune of entries idle 24 hours; a file it sends from a reply's `MEDIA:`
+  tag). Two kinds of temp files stay in Hermes' home. The gateway's own
+  (`/data/hermes/cache/scratch`: its terminal's snapshots, its browser's
+  sockets, execute_code's staging) are Hermes'. And execute_code's
+  scripts' are there too, because Hermes' sandbox drops the marker from
+  their environment: a debt-ledger entry, until our terminal backend
+  (step 3) runs them or Hermes keeps its marker. docs/computers.md, "Our
+  images"; the Docker lane's `a_tools_temp_files_are_its_work`.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The S3 endpoint it wrote through
   (`storage.fragment.internal`) went after it (#156): no image used it.
@@ -178,7 +211,8 @@ tests, each leaving master whole:
 3. **Our terminal backend.** Hermes runs its tools' commands through a
    terminal-backend plugin of ours, at first locally in the work
    directory of the same container. We then know when tools are busy,
-   which the save schedule can use instead of the keepalive.
+   which the save schedule can use instead of the keepalive. execute_code's
+   scripts then run through it too, so their temp files join the work.
 4. **E.** That backend runs commands in a separate Cloudflare Sandbox
    per computer, whose Durable Object starts every command and saves
    its disk when idle. The gateway's container keeps only Hermes' home.

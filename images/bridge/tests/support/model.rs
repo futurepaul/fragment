@@ -9,11 +9,14 @@
 //!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
 //!   the transcript, the answer names it; `run: <command>` runs that, and
 //!   `start: <command>` starts it as a background process (Hermes refuses
-//!   a foreground `&`), each answer quoting what the tool said;
+//!   a foreground `&`), each answer quoting what the tool said; `send:
+//!   <command>` runs that, and its answer sends the file the command names
+//!   (`made=<path>` in what it printed) as Hermes' `MEDIA:` tag;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
-//!   a `computer_use` capture, and `write: <path>` a `write_file` of one
-//!   line there (each through Hermes' `tool_call` bridge when it defers the
-//!   tool); their answers quote what the tool said;
+//!   a `computer_use` capture, `write: <path>` a `write_file` of one line
+//!   there, and `code: <python>` an `execute_code` of that line (each
+//!   through Hermes' `tool_call` bridge when it defers the tool); their
+//!   answers quote what the tool said;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked;
 //! - of a message with channel context before it (`[Recent channel
@@ -111,14 +114,22 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `start: <command>`: that command as Hermes' background process
     let start = last_user.lines().find_map(|l| l.split_once("start: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
+    // `send: <command>`: that command, then the file it names sent
+    let send = last_user.lines().find_map(|l| l.split_once("send: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
     let look = last_user.contains("look at your screen");
     // `write: <path>`: Hermes' write_file puts `WRITTEN` there
     let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
+    // `code: <python>`: Hermes' execute_code runs that line
+    let code = last_user.lines().find_map(|l| l.split_once("code: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     if let Some(result) = tool_result {
-        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() {
+        if send.is_some() {
+            let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
+            return (format!("scripted: sent\nMEDIA:{made}"), None);
+        }
+        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() || code.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -132,7 +143,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
         let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "background": true }).to_string() } });
         return (String::new(), Some(call));
     }
-    let command = if let Some(c) = run.as_deref() {
+    let command = if let Some(c) = run.as_deref().or(send.as_deref()) {
         Some(c)
     } else if last_user.contains("risky") {
         Some("rm -rf /tmp/fragment-risky && echo tool-ran")
@@ -163,6 +174,16 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "write_file", "arguments": args }] }))))
         } else {
             ("scripted: no write_file among my tools".into(), None)
+        };
+    }
+    if let Some(code) = code {
+        let args = json!({ "code": code });
+        return if offered("execute_code") {
+            (String::new(), Some(call("execute_code", args)))
+        } else if deferred("execute_code") {
+            (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "execute_code", "arguments": args }] }))))
+        } else {
+            ("scripted: no execute_code among my tools".into(), None)
         };
     }
     match (browse, look) {
@@ -237,6 +258,11 @@ fn answers_are_the_transcripts() {
     assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "skills.paul (editor)" }], "tools": tools }));
     assert_eq!(t, "scripted: the tool said: skills.paul (editor)");
+    // `send:` runs its command, and the answer sends the file it named
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] send: echo made=/t/a.txt" }], "tools": tools }));
+    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("echo made=/t/a.txt")));
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] send: echo made=/t/a.txt" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"output\": \"made=/t/a.txt\", \"exit_code\": 0}" }], "tools": tools }));
+    assert_eq!(t, "scripted: sent\nMEDIA:/t/a.txt");
     // the browser, and computer_use directly or behind Hermes' tool_search
     let browser = json!([{ "type": "function", "function": { "name": "browser_navigate" } }]);
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] browse: https://example.com" }], "tools": browser }));
@@ -263,6 +289,17 @@ fn answers_are_the_transcripts() {
     assert_eq!(t, "scripted: the tool said: {\"path\": \"/h/notes.txt\"}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no write_file among my tools", None));
+    // execute_code, directly or behind tool_search, and the answer quotes it
+    let code = json!([{ "type": "function", "function": { "name": "execute_code" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] code: print(1)" }], "tools": code }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "code": "print(1)" }).to_string());
+    let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… execute_code: Run a Python script …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] code: print(1)" }], "tools": bridged }));
+    assert!(call.is_some_and(|c| c["function"]["name"] == "tool_call" && c["function"]["arguments"].as_str().unwrap().contains("\"execute_code\"")));
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] code: print(1)" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"output\": \"1\\n\"}" }], "tools": code }));
+    assert_eq!(t, "scripted: the tool said: {\"output\": \"1\\n\"}");
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] code: print(1)" }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: no execute_code among my tools", None));
     // a note on a cut risky turn is context: the message after it is answered
     let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));
