@@ -45,8 +45,7 @@
 //!
 //! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
-//! use, never a `node` from PATH (crates/devstack/src/node.rs;
-//! FRAGMENT_NODE names another).
+//! use, never a `node` from PATH (crates/devstack/src/node.rs).
 //!
 //! fragment.club runs on celld from the `celld` branch (the tag celld-final)
 //! until the cutover (docs/cloudflare-v1.md, decision 35): `deploy` never
@@ -98,7 +97,7 @@ fn build() -> Result<()> {
 }
 
 fn dev(args: &[String]) -> Result<()> {
-    // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
+    // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
     build()?;
@@ -352,7 +351,7 @@ fn javascript_parses(root: &Path) -> Result<()> {
     let started = std::time::Instant::now();
     let files = js_syntax::files(root)?;
     js_syntax::check(&node, &root.join(devstack::CACHE_DIR), root, &files)?;
-    println!("JavaScript: {} files parse (node --check on Node {}, {:.1?})", files.len(), node.release, started.elapsed());
+    println!("JavaScript: {} files parse (node --check on Node v{}, {:.1?})", files.len(), devstack::node::NODE_VERSION, started.elapsed());
     Ok(())
 }
 
