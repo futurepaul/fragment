@@ -31,12 +31,6 @@ pub enum Mode {
 #[derive(Clone)]
 pub struct SyncOptions {
     pub mode: Mode,
-    /// overlay a read-only source folder into dir before each pass: new
-    /// and changed files copy in (source never written, nothing deleted —
-    /// dir can hold app code and drops alongside the mirrored content).
-    /// Non-git sources (fbrain) depend on this; git sources would collapse
-    /// to a fetch, but that is not the Brain case.
-    pub mirror_from: Option<PathBuf>,
     pub apply_mass_delete: bool,
     /// in pull mode, delete local files that were deleted remotely
     /// (pull never deletes without it; mirror always propagates)
@@ -50,7 +44,6 @@ impl Default for SyncOptions {
     fn default() -> Self {
         SyncOptions {
             mode: Mode::Mirror,
-            mirror_from: None,
             apply_mass_delete: false,
             prune: false,
             live: false,
@@ -301,13 +294,9 @@ impl Local {
     }
 }
 
-/// Reads the folder for a pass: the mirror source overlaid first (its new
-/// and changed files copy in), then the journal and a scan against it. No
+/// Reads the folder for a pass: the journal and a scan against it. No
 /// network.
-pub fn read_local(dir: &Path, name: &str, opts: &SyncOptions) -> Result<Local, SyncError> {
-    if let Some(src) = &opts.mirror_from {
-        mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
-    }
+pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (files, stats) = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
     Ok(Local { state, journal, files, stats })
@@ -320,10 +309,10 @@ pub(crate) struct LocalFile {
 }
 
 /// Whether a path in the folder (relative, `/`-separated) takes part in
-/// sync, in either direction. One rule for the scan, the watcher, the
-/// mirror source, and the repo's listing (a repo file that is out is never
-/// pulled, and never deleted for being absent here), checked on every
-/// segment, so a folder that is out takes everything under it:
+/// sync, in either direction. One rule for the scan, the watcher, and the
+/// repo's listing (a repo file that is out is never pulled, and never
+/// deleted for being absent here), checked on every segment, so a folder
+/// that is out takes everything under it:
 /// - dot files and folders: sync's own `.fragment/`, `.git/`, an editor's
 ///   workspace state (`.obsidian/`), `.DS_Store`, `.#` lock files;
 /// - the top-level `node_modules/`: the platform never loads or serves it
@@ -392,40 +381,6 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         out.insert(rel, LocalFile { sha256: sha, size, mtime_ns });
     }
     Ok((out, stats))
-}
-
-/// copy new/changed files from src into dir (never writes src, never
-/// deletes in dir); preserves mtimes so the scan shortcut stays valid.
-/// The target's own identity is never overlaid: a source folder carrying
-/// its own fragment.json must not stomp the corrected one.
-fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
-    let walker = walkdir::WalkDir::new(src).follow_links(false).into_iter().filter_entry(|e| e.depth() == 0 || syncable(&relative(src, e.path())));
-    for entry in walker {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = relative(src, entry.path());
-        if rel == "fragment.json" {
-            continue;
-        }
-        let target = dir.join(&rel);
-        let src_meta = fs::metadata(entry.path())?;
-        if let Ok(t) = fs::metadata(&target) {
-            if t.len() == src_meta.len() {
-                let sm = src_meta.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-                let tm = t.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-                if sm == tm {
-                    continue;
-                }
-            }
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(entry.path(), &target)?; // fs::copy preserves mtime
-    }
-    Ok(())
 }
 
 /// What one push pass wants to do, computed purely from (local, remote,
@@ -525,7 +480,7 @@ fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, ap
 /// the cell's pins when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
     let storage = CodeStorage::connect(client, name)?;
-    let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name, opts)?)?;
+    let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
         refresh_pins(client, name);
     }
@@ -999,24 +954,18 @@ mod tests {
         }
     }
 
-    /// Goal: the scan and the mirror source take what `syncable` takes.
-    /// Method: a folder with one file of each kind.
+    /// Goal: the scan takes what `syncable` takes. Method: a folder with
+    /// one file of each kind.
     #[test]
-    fn the_scan_and_the_mirror_source_share_the_rule() {
+    fn the_scan_takes_what_syncs() {
         let src = tmpdir("rule-src");
-        let dir = tmpdir("rule-dir");
         for (rel, bytes) in [("a.md", "a"), (".obsidian/workspace.json", "{}"), ("node_modules/x/index.js", "x"), ("b.md~", "b"), ("sub/.DS_Store", "d"), ("sub/c.md", "c")] {
             fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
             fs::write(src.join(rel), bytes).unwrap();
         }
         let (scanned, _) = scan_local(&src, None, true).unwrap();
         assert_eq!(scanned.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
-        mirror_overlay(&src, &dir).unwrap();
-        let (overlaid, _) = scan_local(&dir, None, true).unwrap();
-        assert_eq!(overlaid.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
-        assert!(!dir.join("node_modules").exists() && !dir.join(".obsidian").exists(), "the overlay copies only what syncs");
         fs::remove_dir_all(&src).ok();
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// Goal: a repo file that does not sync is left alone both ways: never
@@ -1524,27 +1473,6 @@ mod tests {
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn mirror_from_overlays_before_push() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
-        let c = client_for(&mock);
-        let src = tmpdir("mf-src");
-        fs::create_dir_all(src.join("notes")).unwrap();
-        fs::write(src.join("notes/x.md"), b"note body").unwrap();
-        fs::write(src.join("fragment.json"), b"{}").unwrap(); // never overlaid
-        let dir = tmpdir("mf");
-        fs::write(dir.join("app.mjs"), b"// app").unwrap();
-        let o = SyncOptions { mirror_from: Some(src.clone()), ..opts(Mode::Push) };
-        let report = sync_once(&c, "t", &dir, &o).unwrap();
-        assert_eq!(report.pushed.len(), 2); // app.mjs + notes/x.md
-        assert!(mock.file_at("t", "main", "notes/x.md").is_some());
-        assert!(mock.file_at("t", "main", "app.mjs").is_some());
-        assert!(mock.file_at("t", "main", "fragment.json").is_none(), "source fragment.json must not stomp the target's");
-        fs::remove_dir_all(&src).ok();
         fs::remove_dir_all(&dir).ok();
     }
 

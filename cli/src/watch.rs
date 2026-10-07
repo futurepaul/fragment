@@ -138,7 +138,7 @@ impl<'a> Watcher<'a> {
         if !(due.local || due.remote || due.sweep) {
             return Ok(Served::Nothing);
         }
-        let local = sync::read_local(self.dir, self.name, self.opts)?;
+        let local = sync::read_local(self.dir, self.name)?;
         let full = due.remote || !local.matches_journal() || (due.sweep && (!live_up || self.head_moved()?));
         if !full {
             return Ok(if due.sweep { Served::Checked } else { Served::Nothing });
