@@ -13,6 +13,7 @@ pub mod computer;
 pub mod cron;
 pub mod decide;
 pub mod ddl;
+pub mod drafts;
 pub mod effects;
 pub mod egress;
 pub mod facet;

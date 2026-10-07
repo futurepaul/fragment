@@ -212,7 +212,7 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             let mut asked = 0usize;
             for (principal, kind) in whom(facts) {
                 for (fragment, role) in list(env, &principal).await? {
-                    if role.is_none() || rules::whose(&fragment, facts.username.as_deref()) == Whose::Theirs {
+                    if role.is_none() || rules::whose(&fragment, facts.username.as_deref(), role) == Whose::Theirs {
                         continue;
                     }
                     if asked >= rules::FRAGMENTS_PER_CALL || js::now_ms() > deadline {
@@ -297,15 +297,16 @@ async fn list(env: &Env, principal: &str) -> CellResult<Vec<(String, Option<Role
     Err(CellError::host(format!("{principal}'s list holds more than {LIST_PAGES_MAX} pages")))
 }
 
-/// The fragments that are the person's (under their username) on their and
-/// their agents' lists (`live`: those a role still names; else every one,
-/// ended ones with their rows left), and the agent fragments the registry
-/// names: each once, sorted.
+/// The fragments that are the person's (under their username, or owned
+/// under another: a draft they claimed) on their and their agents' lists
+/// (`live`: those a role still names; else every one, ended ones with
+/// their rows left), and the agent fragments the registry names: each
+/// once, sorted.
 async fn theirs(env: &Env, facts: &WipeFacts, live: bool) -> CellResult<Vec<String>> {
     let mut names = facts.agent_fragments.clone();
     for (principal, _) in whom(facts) {
         for (fragment, role) in list(env, &principal).await? {
-            if (role.is_some() || !live) && rules::whose(&fragment, facts.username.as_deref()) == Whose::Theirs {
+            if (role.is_some() || !live) && rules::whose(&fragment, facts.username.as_deref(), role) == Whose::Theirs {
                 names.push(fragment);
             }
         }
@@ -345,7 +346,7 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
         for (fragment, role) in list(env, &principal).await? {
             lists += 1;
             let Some(role) = role else { continue };
-            match rules::whose(&fragment, facts.username.as_deref()) {
+            match rules::whose(&fragment, facts.username.as_deref(), Some(role)) {
                 Whose::Theirs => fragments.push(fragment),
                 Whose::Elsewhere => memberships.push(format!("{fragment} ({}, {principal})", role.as_str())),
             }

@@ -810,3 +810,17 @@ impl Call for Disconnect {
     const PATH: &'static str = "/oauth/disconnect";
     type Answer = ();
 }
+
+/// `POST /draft/start`: a key no one holds starts a draft from `address`
+/// (`fragment_core::drafts::address`), counted against the day's caps
+/// once per key (registry/drafts.rs).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StartDraft {
+    pub key: String,
+    pub address: String,
+}
+
+impl Call for StartDraft {
+    const PATH: &'static str = "/draft/start";
+    type Answer = ();
+}

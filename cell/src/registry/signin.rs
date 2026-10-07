@@ -202,7 +202,8 @@ fn alarm_at(at_ms: i64) -> ScheduledTime {
 
 impl RegistryCell {
     /// Deletes a batch of expired rows from each sign-in table (by their
-    /// indexed expiry); answers whether any table held more.
+    /// indexed expiry), and drafts' starts past their day (drafts.rs);
+    /// answers whether any table held more.
     fn sweep_signin(&self, now: i64) -> CellResult<bool> {
         let batch = SqlStorageValue::Integer(SWEEP_BATCH as i64);
         // only how many went matters: each deleted row is read as nothing
@@ -232,6 +233,7 @@ impl RegistryCell {
                 vec![SqlStorageValue::Integer(now), batch],
             )?
             .len(),
+            self.sweep_drafts(now, SWEEP_BATCH as i64)?,
         ];
         assert!(swept.iter().all(|n| *n as u64 <= SWEEP_BATCH), "a sweep deletes at most a batch from a table");
         Ok(swept.iter().any(|n| *n as u64 == SWEEP_BATCH))
@@ -248,7 +250,7 @@ impl RegistryCell {
                 vec![],
             )?
             .ok_or_else(|| CellError::host("the sweep's MIN answered no row"))?;
-        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session, r.code, r.connection].into_iter().flatten().min();
+        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session, r.code, r.connection, self.drafts_due()?].into_iter().flatten().min();
         Ok(earliest.map(|at| at + SWEEP_SLACK_MS))
     }
 

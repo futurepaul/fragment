@@ -53,6 +53,7 @@ macro_rules! username_join {
 }
 
 pub(crate) mod calls;
+mod drafts;
 mod oauth;
 mod signin;
 pub(crate) mod wipe;
@@ -60,7 +61,7 @@ use calls::{
     Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, Connected, Disconnect, EndSession, Exchange, FindClient, FindUsername, GrantCode,
     Holder, IssueTokens, ListConnections, Logout, Lookup, Mint, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, RegisterClient,
-    Released, ReleaseUsername, Resolve, RevokeKey, RevokeToken, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
+    Released, ReleaseUsername, Resolve, RevokeKey, RevokeToken, Session, SetPicture, StartDraft, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -110,6 +111,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(oauth::SCHEMA, None).expect("the connected clients' schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
+        state.storage().sql().exec(drafts::SCHEMA, None).expect("the drafts' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -728,6 +730,7 @@ impl RegistryCell {
             ListConnections::PATH => reply::<ListConnections>(self.list_connections(body(&bytes)?)),
             Disconnect::PATH => reply::<Disconnect>(self.disconnect(body(&bytes)?)),
             Connected::PATH => reply::<Connected>(self.connected(body(&bytes)?)),
+            StartDraft::PATH => reply::<StartDraft>(self.start_draft(body(&bytes)?).await),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),

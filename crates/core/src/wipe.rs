@@ -15,11 +15,13 @@
 //!   run named, so a username that changed hands between the two is never
 //!   the wrong person wiped;
 //! - **whose** a fragment on the person's lists is (`whose`): theirs (under
-//!   their username: every fragment there is theirs), or someone else's,
-//!   where only their membership goes;
+//!   their username: every fragment there is theirs; or one their list
+//!   says they own, a draft they claimed), or someone else's, where only
+//!   their membership goes;
 //! - **what a report shows** (`listed`): counts, and a bounded list of names.
 
 use fragment_proto::wipe::Listed;
+use fragment_proto::Role;
 use serde::{Deserialize, Serialize};
 
 /// The names of fragments a report lists (its counts are whole).
@@ -252,8 +254,9 @@ impl Progress {
 /// Whose a fragment on the wiped person's lists (or their agents') is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whose {
-    /// Under their username: theirs (only its holder makes fragments
-    /// under a username, an agent for its owner among them), ended with
+    /// Under their username (only its holder makes fragments under a
+    /// username, an agent for its owner among them), or theirs under
+    /// another name (a draft they claimed keeps its own): ended with
     /// everything in it.
     Theirs,
     /// Someone else's: only the membership goes.
@@ -261,10 +264,12 @@ pub enum Whose {
 }
 
 /// Whose `fragment` is, for a person whose username is `username` (`None`:
-/// they never chose one, so nothing is under it).
-pub fn whose(fragment: &str, username: Option<&str>) -> Whose {
+/// they never chose one, so nothing is under it), whose list (or an agent
+/// of theirs') holds it at `role`: an agent owns none.
+pub fn whose(fragment: &str, username: Option<&str>, role: Option<Role>) -> Whose {
     match (fragment_proto::split_fragment_name(fragment), username) {
         (Some((_, under)), Some(theirs)) if under == theirs => Whose::Theirs,
+        (Some(_), _) if role == Some(Role::Owner) => Whose::Theirs,
         _ => Whose::Elsewhere,
     }
 }
@@ -390,17 +395,23 @@ mod tests {
         }
     }
 
-    /// Goal: a fragment under the person's username is theirs, any other
-    /// someone else's (only their membership goes). Method: names under
-    /// theirs, another's, a look-alike, and a person with no username.
+    /// Goal: a fragment under the person's username is theirs, and so is
+    /// one they own under another name (a draft they claimed); any other
+    /// is someone else's (only their membership goes). Method: names under
+    /// theirs, another's, a look-alike, a person with no username, and a
+    /// claimed draft, owned and not.
     #[test]
     fn whose_a_listed_fragment_is() {
-        assert_eq!(whose("todo.paul", Some("paul")), Whose::Theirs);
-        assert_eq!(whose("juniper-chat.paul", Some("paul")), Whose::Theirs);
-        assert_eq!(whose("todo.bob", Some("paul")), Whose::Elsewhere);
-        assert_eq!(whose("todo.paula", Some("paul")), Whose::Elsewhere);
-        assert_eq!(whose("todo.paul", None), Whose::Elsewhere);
-        assert_eq!(whose("not a name", Some("paul")), Whose::Elsewhere);
+        let (owner, editor) = (Some(Role::Owner), Some(Role::Editor));
+        assert_eq!(whose("todo.paul", Some("paul"), owner), Whose::Theirs);
+        assert_eq!(whose("juniper-chat.paul", Some("paul"), editor), Whose::Theirs, "an agent's row, under its owner's username");
+        assert_eq!(whose("todo.bob", Some("paul"), editor), Whose::Elsewhere);
+        assert_eq!(whose("todo.paula", Some("paul"), editor), Whose::Elsewhere);
+        assert_eq!(whose("todo.paul", None, editor), Whose::Elsewhere);
+        assert_eq!(whose("not a name", Some("paul"), owner), Whose::Elsewhere);
+        assert_eq!(whose("k3x9aaaabbbb.draft", Some("paul"), owner), Whose::Theirs, "a draft they claimed");
+        assert_eq!(whose("k3x9aaaabbbb.draft", None, owner), Whose::Theirs, "claimed before they chose a username");
+        assert_eq!(whose("k3x9aaaabbbb.draft", Some("paul"), editor), Whose::Elsewhere, "someone else's draft");
     }
 
     /// Goal: a report counts every name and lists a bounded, sorted few.

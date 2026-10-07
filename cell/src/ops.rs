@@ -559,6 +559,14 @@ impl FragmentCell {
                 self.schedule().await?;
                 json!({ "due": due })
             }
+            Some("expire-draft") => {
+                // an unclaimed draft's end, now: its alarm ends it (drafts.rs)
+                let mut draft = self.draft()?.ok_or_else(|| CellError::invalid("expire-draft is an unclaimed draft's"))?;
+                draft.until = js::now_ms();
+                self.set_meta(MetaKey::Draft, &serde_json::to_string(&draft).expect("a draft serializes"))?;
+                self.schedule().await?;
+                json!({ "until": draft.until })
+            }
             Some("poll-now") => {
                 // the next alarm is a poll pass (the blob collection's), so a
                 // test need not wait a quiet fragment's day for one
@@ -568,7 +576,7 @@ impl FragmentCell {
                 json!({ "pollAt": now })
             }
             _ => return Err(CellError::invalid("op is fail-deliveries, fail-outbox, fail-triggers, drop-effects, fail-meter-acks, fail-after-paid, forget-steps,
- hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, or ended")),
+ hold-advances, advance-held, forget-live, age-live, drop-live, ledger, age, members, code-builds, alarm, age-outside, meter-now, meter, forget-standing, cron-now, poll-now, expire-draft, or ended")),
         })
     }
 }

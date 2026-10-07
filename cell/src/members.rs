@@ -131,8 +131,12 @@ fn invite_json(r: &Value) -> Invite {
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
     /// in the caller's turn, beside the membership write it mirrors. Their
-    /// search cursor follows it (search.rs).
+    /// search cursor follows it (search.rs). An unclaimed draft's maker has
+    /// no list: its claimer's gets the row (drafts.rs).
     pub(crate) fn index_change(&self, principal: &str, role: Option<Role>) -> CellResult<()> {
+        if self.draft()?.is_some_and(|d| fragment_core::drafts::maker(&d.key) == principal) {
+            return Ok(());
+        }
         let version: i64 = self.meta(MetaKey::IndexVersion)?.and_then(|v| v.parse().ok()).unwrap_or(0) + 1;
         self.set_meta(MetaKey::IndexVersion, &version.to_string())?;
         let stored = role.map_or(SqlStorageValue::Null, |r| r.as_str().into());
