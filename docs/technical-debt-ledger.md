@@ -289,7 +289,8 @@ fragment.club until cutover (decisions 34–35).
   (cell/src/registry.rs, `NAME`): one round trip each, never more, and
   none for a page or file anyone who may see the fragment gets alike
   (the signin and identities lanes count them). A CLI or agent call, a
-  model call, an operation, an app route, a socket's connect: 1 each (a
+  model call, an operation, an app route, a socket's connect, a
+  connected client's MCP request (its access token): 1 each (a
   `__live` socket 1 more a minute while it sends frames); a members-only
   fragment's page: 1 a file; the shell's load (cell/shell/shell.js
   `start`, `load`): 4, then up to 3 a chat (its members, its channels,
@@ -309,7 +310,8 @@ fragment.club until cutover (decisions 34–35).
   answers every chat under one resolved identity), which takes the 3 a
   chat away; then, if still near the line, sessions and keys move to
   objects named by what they resolve (a session by its token's hash, a
-  key by itself), written by the registry as they change, which keeps
+  key by itself, a connection by its access token's), written by the
+  registry as they change, which keeps
   only what must be unique (usernames, sign-in subjects, identities).
   Each lookup stays one live round trip: no cache outlives a revocation
   (rule 7).

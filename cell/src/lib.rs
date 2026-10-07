@@ -26,6 +26,10 @@
 //!
 //! The suffix's own name, when the platform is elsewhere, sends a browser
 //! to the platform.
+//!
+//! A fragment's `__mcp` (its MCP server, for a connected client) is
+//! mcp.rs's: a bearer token the registry resolves for that fragment
+//! alone, never a cookie.
 
 mod ai;
 mod auth;
@@ -48,6 +52,7 @@ mod ledger;
 mod levers;
 mod live;
 mod members;
+mod mcp;
 mod meter;
 mod models;
 mod oauth;
@@ -270,7 +275,7 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
     if acting_for.is_some() && (identity.kind != IdentityKind::Agent || identity.owner.is_none()) {
         return Err(CellError::new(ErrorCode::Forbidden, "only an agent acts for someone (`for`); a person acts as themselves"));
     }
-    Ok(Signed { identity, key, acting_for })
+    Ok(Signed { identity, key, acting_for, through: None })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -787,12 +792,12 @@ fn check_name(name: &str) -> CellResult<()> {
 
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
-struct Forward {
-    routed: Routed,
+pub(crate) struct Forward {
+    pub routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
-    inner: String,
+    pub inner: String,
     /// Headers this route passes on purpose (the inbox's token and hop count).
-    extra: Vec<(&'static str, String)>,
+    pub extra: Vec<(&'static str, String)>,
 }
 
 /// A blob upload declares its length, at most `limits::BLOB_MAX_BYTES`:
@@ -808,12 +813,12 @@ fn blob_length(req: &Request) -> CellResult<()> {
 }
 
 /// Bytes the router read, as a body to forward.
-fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
+pub(crate) fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
 }
 
 /// Hands a request to the fragment's supervisor.
-async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
+pub(crate) async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
     let cookies = fetched(req)?.site;
     for k in PASSED_HEADERS {
@@ -973,6 +978,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
+        // its MCP server, for a connected client: never a page's (mcp.rs)
+        if mcp::is_fragment_route(&rest) {
+            return mcp::fragment(req, env, cfg, &url, &name, &rest).await;
+        }
         return serve(req, env, cfg, &url, &name, &rest).await;
     }
     // a computer's own origin: its ports, for its owner (computer.rs)

@@ -761,6 +761,32 @@ impl Call for RevokeToken {
     type Answer = ();
 }
 
+/// `POST /oauth/connected`: whom an access token acts as, on `resource`
+/// (the canonical one the request arrived at): 401 when it is no live
+/// token, or another resource's.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Connected {
+    pub token: String,
+    pub resource: String,
+}
+
+/// A live connection: its person, its id, and its client's name.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LiveConnection {
+    #[serde(flatten)]
+    pub identity: Identity,
+    pub connection: String,
+    pub client: String,
+}
+
+impl Call for Connected {
+    const PATH: &'static str = "/oauth/connected";
+    type Answer = LiveConnection;
+    fn checked(answer: LiveConnection) -> CellResult<LiveConnection> {
+        Ok(LiveConnection { identity: identity_checked(answer.identity)?, ..answer })
+    }
+}
+
 /// `POST /oauth/connections`: the asker's connections, newest first.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ListConnections {

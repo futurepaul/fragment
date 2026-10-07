@@ -22,6 +22,8 @@ pub mod limits {
     pub const OP_ID_MAX_BYTES: usize = 128;
     /// An operation name: `^[a-z][a-z0-9_]{0,63}$`.
     pub const OP_NAME_MAX_BYTES: usize = 64;
+    /// An operation's `description` (its tool's, to a model), in characters.
+    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// Operation input is a request, not an upload.
     pub const INPUT_MAX_BYTES: usize = 256 * 1024;
     /// Operation results must fit a Workflows step result.
@@ -1022,6 +1024,9 @@ pub struct OpDecl {
     /// no replay (the same id runs again) and no effects (docs/MODEL.md).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// What it does, in words a model reads (its MCP tool's description).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A channel as `fragment.json` declares it (app channels), or a built-in.

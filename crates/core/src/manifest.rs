@@ -101,8 +101,8 @@ fn text(v: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
 
 fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
     let obj = v.as_object().ok_or_else(|| format!("operations.{name} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral")) {
-        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "kind" | "role" | "input" | "ephemeral" | "description")) {
+        return Err(format!("operations.{name} has an unknown key {k:?} (kind, role, input, ephemeral, description)"));
     }
     let kind = match obj.get("kind").and_then(Value::as_str) {
         Some("query") => OpKind::Query,
@@ -134,7 +134,12 @@ fn operation(name: &str, v: &Value) -> Result<OpDecl, String> {
         Some(Value::Bool(true)) => return Err(format!("operations.{name}.ephemeral is for a mutation: it keeps no ledger row")),
         Some(_) => return Err(format!("operations.{name}.ephemeral must be true or false")),
     };
-    Ok(OpDecl { kind, role, input, ephemeral })
+    let description = match obj.get("description") {
+        None => None,
+        Some(Value::String(d)) if !d.trim().is_empty() && d.chars().count() <= limits::OP_DESCRIPTION_MAX_CHARS => Some(d.clone()),
+        Some(_) => return Err(format!("operations.{name}.description is 1 to {} characters", limits::OP_DESCRIPTION_MAX_CHARS)),
+    };
+    Ok(OpDecl { kind, role, input, ephemeral, description })
 }
 
 /// One entry of `channels`: who reads it (default `viewer`), who may post
@@ -323,7 +328,7 @@ mod tests {
             "operations":{"list":{"kind":"query"},"add":{"kind":"mutation","input":{"type":"object"}},
             "sign":{"kind":"mutation","role":"public"}},"meta":{"title":"T"}}"#)
         .unwrap();
-        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false });
+        assert_eq!(m.operations["list"], OpDecl { kind: OpKind::Query, role: Role::Viewer, input: None, ephemeral: false, description: None });
         assert_eq!(m.operations["add"].role, Role::Editor);
         assert_eq!(m.operations["add"].input, Some(serde_json::json!({"type":"object"})));
         assert_eq!(m.operations["sign"].role, Role::Public);
@@ -331,6 +336,12 @@ mod tests {
         assert!(ops["frame"].ephemeral && !ops["add"].ephemeral, "a mutation may keep no ledger row");
         for bad in [&br#"{"operations":{"q":{"kind":"query","ephemeral":true}}}"#[..], br#"{"operations":{"j":{"kind":"job","ephemeral":true}}}"#, br#"{"operations":{"m":{"kind":"mutation","ephemeral":1}}}"#] {
             assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".ephemeral"), "only a mutation is ephemeral, with a boolean");
+        }
+        let said = parse(br#"{"operations":{"add":{"kind":"mutation","description":"Adds a todo."}}}"#).unwrap().operations;
+        assert_eq!(said["add"].description.as_deref(), Some("Adds a todo."));
+        let long = format!(r#"{{"operations":{{"add":{{"kind":"mutation","description":"{}"}}}}}}"#, "x".repeat(limits::OP_DESCRIPTION_MAX_CHARS + 1));
+        for bad in [&br#"{"operations":{"add":{"kind":"mutation","description":" "}}}"#[..], br#"{"operations":{"add":{"kind":"mutation","description":3}}}"#, long.as_bytes()] {
+            assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".description"), "a description is 1 to the limit's characters");
         }
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
@@ -343,7 +354,7 @@ mod tests {
             "triggers":[{"cron":"0 9 * * *","run":"digest"},{"channel":"inbox","run":"save"},{"channel":"chat","run":"digest"},
             {"files":"notes/**","run":"digest"}]}"#)
         .unwrap();
-        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false });
+        assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
         assert_eq!(m.triggers.len(), 4);
         assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));

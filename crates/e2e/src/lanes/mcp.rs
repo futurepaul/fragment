@@ -146,6 +146,8 @@ pub fn mcp(s: &mut Suite, api: &Api) -> Result<()> {
     s.owned(&r.body, &keys);
     let resource = api.site_url(&name, "__mcp");
     authorization_server(s, api, &session, &keys, &email, &resource)?;
+    fragment_server(s, api, &session, &keys, &name)?;
+    limits(s, api, &session, &keys, &resource)?;
     Ok(())
 }
 
@@ -312,7 +314,6 @@ fn authorization_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, em
 
     settings(s, api, session, keys, &client, resource)?;
     metadata_document(s, api, session, resource)?;
-    limits(s, api, session, keys, resource)?;
     Ok(())
 }
 
@@ -364,6 +365,174 @@ fn metadata_document(s: &mut Suite, api: &Api, session: &str, resource: &str) ->
     *doc.lock().expect("the document") = json!({ "client_id": "https://elsewhere.example/client.json", "client_name": "E2E Code", "redirect_uris": ["http://127.0.0.1/callback"] });
     let r = with_session(api, &client.authorize(resource, "s"), session)?;
     s.ok("a document that names another URL is refused, on a page", r.status == 400 && r.header("location").is_empty(), &r);
+    Ok(())
+}
+
+/// A JSON-RPC request to a fragment's `__mcp`, with `token` (when one),
+/// as a legacy client sends it (the version in a header after
+/// `initialize`), or a modern one (`modern`: the version in `_meta`, the
+/// method and the tool's name mirrored in headers).
+fn rpc(api: &Api, name: &str, token: Option<&str>, method: &str, params: Value, modern: bool) -> Result<Reply> {
+    let mut extra = vec![];
+    if let Some(token) = token {
+        extra.push(("authorization", format!("Bearer {token}")));
+    }
+    let mut params = params;
+    if modern {
+        params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "e2e", "version": "1" } });
+        extra.push(("mcp-protocol-version", "2026-07-28".into()));
+        extra.push(("mcp-method", method.to_string()));
+        if let Some(tool) = params["name"].as_str() {
+            extra.push(("mcp-name", tool.to_string()));
+        }
+    } else {
+        extra.push(("mcp-protocol-version", "2025-06-18".into()));
+    }
+    let id = if method.starts_with("notifications/") { Value::Null } else { json!(1) };
+    let mut body = json!({ "jsonrpc": "2.0", "method": method, "params": params });
+    if !id.is_null() {
+        body["id"] = id;
+    }
+    api.call(Call {
+        method: "POST",
+        url: api.site_url(name, "__mcp"),
+        body: Some(body.to_string().into_bytes()),
+        content_type: Some("application/json"),
+        extra: extra.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        ..Call::default()
+    })
+}
+
+/// A tool call's result, through `rpc`.
+fn call(api: &Api, name: &str, token: &str, tool: &str, arguments: Value) -> Result<Value> {
+    let r = rpc(api, name, Some(token), "tools/call", json!({ "name": tool, "arguments": arguments }), true)?;
+    anyhow::ensure!(r.status == 200, "tools/call {tool}: {r}");
+    Ok(r.body)
+}
+
+/// A fragment's operations as an MCP server at its own `__mcp`.
+fn fragment_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, name: &str) -> Result<()> {
+    let resource = api.site_url(name, "__mcp");
+    let metadata_url = api.site_url(name, ".well-known/oauth-protected-resource/__mcp");
+    let r = rpc(api, name, None, "tools/list", json!({}), false)?;
+    s.ok(
+        "without a token, a fragment's __mcp is 401, naming its protected resource's metadata",
+        r.status == 401 && r.header("www-authenticate") == format!("Bearer resource_metadata=\"{metadata_url}\""),
+        format!("{r} {}", r.header("www-authenticate")),
+    );
+    let r = api.call(Call { method: "GET", url: metadata_url, ..Call::default() })?;
+    s.ok(
+        "its metadata (RFC 9728) names the resource and the platform as its authorization server",
+        r.status == 200 && r.body["resource"] == resource.as_str() && r.body["authorization_servers"] == json!([api.base]),
+        &r,
+    );
+    let client = Client::register(api, "E2E Claude")?;
+    let tokens = client.connect(api, session, &resource)?;
+    let token = tokens["access_token"].as_str().unwrap_or_default().to_string();
+    let r = api.call(Call { method: "GET", url: resource.clone(), extra: vec![("authorization", format!("Bearer {token}"))], ..Call::default() })?;
+    s.ok("a GET is 405: it offers no stream", r.status == 405, &r);
+    let r = api.call(Call {
+        method: "POST",
+        url: resource.clone(),
+        body: Some(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.to_vec()),
+        content_type: Some("application/json"),
+        extra: vec![("authorization", format!("Bearer {token}")), ("origin", api.site_origin(name))],
+        ..Call::default()
+    })?;
+    s.ok("a page's call (an Origin) is 403, its own page's too", r.status == 403, &r);
+
+    // the legacy era: initialize, then the version in a header
+    let r = rpc(api, name, Some(&token), "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } }), false)?;
+    s.ok(
+        "a legacy client initializes: its version, the tools capability, and the fragment named",
+        r.status == 200 && r.body["result"]["protocolVersion"] == "2025-06-18" && r.body["result"]["capabilities"]["tools"].is_object() && r.body["result"]["serverInfo"]["title"] == name,
+        &r,
+    );
+    let r = rpc(api, name, Some(&token), "notifications/initialized", json!({}), false)?;
+    s.ok("its notification is taken (202)", r.status == 202, &r);
+    let r = rpc(api, name, Some(&token), "tools/list", json!({}), false)?;
+    let tools = r.body["result"]["tools"].as_array().cloned().unwrap_or_default();
+    let named = |n: &str| tools.iter().find(|t| t["name"] == n).cloned().unwrap_or(Value::Null);
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    s.ok(
+        "tools/list is the manifest's operations, by name: a query read-only, a mutation idempotent by the id it requires, each described",
+        names == ["add", "ingest", "list"]
+            && named("list")["annotations"]["readOnlyHint"] == true
+            && named("add")["annotations"]["idempotentHint"] == true
+            && named("add")["inputSchema"]["required"] == json!(["id", "input"])
+            && named("add")["inputSchema"]["properties"]["input"]["required"] == json!(["text", "source"])
+            && named("add")["description"].as_str().is_some_and(|d| d.starts_with("Adds an item")),
+        &r,
+    );
+
+    // the modern era: no handshake, its version and headers on each request
+    let r = rpc(api, name, Some(&token), "server/discover", json!({}), true)?;
+    s.ok(
+        "a modern client discovers it: its versions, complete",
+        r.status == 200 && r.body["result"]["resultType"] == "complete" && r.body["result"]["supportedVersions"].as_array().is_some_and(|v| v.contains(&json!("2026-07-28"))),
+        &r,
+    );
+    let r = api.call(Call {
+        method: "POST",
+        url: resource.clone(),
+        body: Some(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        extra: vec![("authorization", format!("Bearer {token}")), ("mcp-protocol-version", "2026-07-28".into())],
+        ..Call::default()
+    })?;
+    s.ok("a modern request without its Mcp-Method header is 400 (header mismatch)", r.status == 400 && r.body["error"]["code"] == -32020, &r);
+    let r = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "from a client", "source": "e2e" } }))?;
+    s.ok(
+        "tools/call on a mutation runs it through __op's path: its result, not replayed",
+        r["result"]["isError"] == false && r["result"]["structuredContent"]["replayed"] == false && r["result"]["structuredContent"]["result"]["id"].is_i64() && r["result"]["resultType"] == "complete",
+        &r,
+    );
+    let again = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "from a client", "source": "e2e" } }))?;
+    s.ok("the same id again is a replay: the first result, nothing run", again["result"]["structuredContent"]["replayed"] == true && again["result"]["structuredContent"]["result"] == r["result"]["structuredContent"]["result"], &again);
+    let r = call(api, name, &token, "add", json!({ "id": "m1", "input": { "text": "something else", "source": "e2e" } }))?;
+    s.ok("another input under it is the call's error, for the model to read", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("conflicting_body")), &r);
+    let r = call(api, name, &token, "add", json!({ "id": "m2", "input": { "text": 3, "source": "e2e" } }))?;
+    s.ok("an input its schema refuses is the call's error", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("invalid_request")), &r);
+    let r = call(api, name, &token, "list", json!({ "input": {} }))?;
+    let items = r["result"]["structuredContent"]["result"]["items"].as_array().cloned().unwrap_or_default();
+    s.ok("tools/call on a query reads what the mutation wrote", items.len() == 1 && items[0]["text"] == "from a client", &r);
+    let r = call(api, name, &token, "nope", json!({}))?;
+    s.ok("an operation it lacks is an unknown tool (-32602)", r["error"]["code"] == -32602, &r);
+    let r = call(api, name, &token, "add", json!({ "text": "x" }))?;
+    s.ok("arguments that are not {id, input} are invalid params (-32602)", r["error"]["code"] == -32602, &r);
+    let events = api.signed(keys, "GET", &format!("/api/f/{name}/events?tail=50"), None)?;
+    let me = api.identity(keys)?;
+    let called: Vec<&Value> = events.body["events"].as_array().map(|e| e.iter().filter(|e| e["kind"] == "client.called").collect()).unwrap_or_default();
+    s.ok(
+        "events say which client acted, once for the mutation (its replay says nothing)",
+        called.len() == 1 && called[0]["data"]["client"] == "E2E Claude" && called[0]["data"]["op"] == "add" && called[0]["data"]["principal"] == me.as_str(),
+        &events,
+    );
+
+    // a viewer's connection: the tools they may call, and a refusal of the rest
+    let (viewer_session, viewer, _) = person(api)?;
+    let r = api.signed(keys, "PUT", &format!("/api/f/{name}/members/{}", viewer.pubkey_hex()), Some(&json!({ "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200, "adding a viewer: {r}");
+    let theirs = client.connect(api, &viewer_session, &resource)?;
+    let viewer_token = theirs["access_token"].as_str().unwrap_or_default();
+    let r = rpc(api, name, Some(viewer_token), "tools/list", json!({}), true)?;
+    let names: Vec<&str> = r.body["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+    s.ok("a viewer's client lists only what a viewer may call", names == ["list"], &r);
+    let r = call(api, name, viewer_token, "add", json!({ "id": "v1", "input": { "text": "x", "source": "e2e" } }))?;
+    s.ok("and a mutation needing an editor is the call's refusal (forbidden)", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("forbidden")), &r);
+
+    // a token is its fragment's alone, and an ended connection's is refused
+    let other = s.named(api, keys, "mcp-b")?;
+    let r = api.create_with(keys, json!({ "name": other, "template": "inbox" }))?;
+    anyhow::ensure!(r.status == 200, "create {other}: {r}");
+    s.owned(&r.body, keys);
+    let r = rpc(api, &other, Some(&token), "tools/list", json!({}), true)?;
+    s.ok("a token for one fragment is refused at another (401, invalid_token)", r.status == 401 && r.header("www-authenticate").contains("invalid_token"), &r);
+    let listed = api.signed(keys, "GET", "/api/oauth/connections", None)?;
+    let id = listed.body["connections"][0]["id"].as_str().unwrap_or_default().to_string();
+    api.signed(keys, "DELETE", &format!("/api/oauth/connections/{id}"), None)?;
+    let r = rpc(api, name, Some(&token), "tools/list", json!({}), true)?;
+    s.ok("an ended connection's access token is refused at once (401)", r.status == 401, &r);
     Ok(())
 }
 

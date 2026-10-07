@@ -3,6 +3,7 @@
   "operations": {
     "add": {
       "kind": "mutation",
+      "description": "Adds a todo with this text at the end of the list; everyone with it open sees it at once.",
       "role": "public",
       "input": {
         "type": "object",
@@ -13,6 +14,7 @@
     },
     "toggle": {
       "kind": "mutation",
+      "description": "Marks the todo with this id done, or not done again.",
       "role": "public",
       "input": {
         "type": "object",
@@ -23,6 +25,7 @@
     },
     "remove": {
       "kind": "mutation",
+      "description": "Removes the todo with this id.",
       "role": "public",
       "input": {
         "type": "object",
@@ -31,7 +34,7 @@
         "properties": { "id": { "type": "integer", "minimum": 1 } }
       }
     },
-    "list": { "kind": "query", "role": "public", "input": { "type": "object", "additionalProperties": false } }
+    "list": { "kind": "query", "role": "public", "description": "The newest todos, oldest first: {todos: [{id, text, done}]}.", "input": { "type": "object", "additionalProperties": false } }
   },
   "channels": { "activity": { "read": "public" } },
   "meta": { "title": "Todo", "description": "A shared todo list, live for everyone who has it open." }

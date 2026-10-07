@@ -17,7 +17,9 @@ use fragment_core::oauth::{self, Client, Error, Grant, Refused, Tokens};
 use fragment_proto::{Connection, Connections};
 use serde::de::IgnoredAny;
 
-use super::calls::{ClientRegistered, Disconnect, FindClient, GrantCode, Granted, IssueTokens, Issued, ListConnections, RegisterClient, RevokeToken};
+use super::calls::{
+    ClientRegistered, Connected, Disconnect, FindClient, GrantCode, Granted, IssueTokens, Issued, ListConnections, LiveConnection, RegisterClient, RevokeToken,
+};
 use super::signin::{fresh_token, sha};
 use super::*;
 
@@ -209,6 +211,40 @@ impl RegistryCell {
                 Ok(Issued::Tokens(Tokens::bearer(access, next)))
             }
         }
+    }
+
+    /// Whom a live access token acts as, on the resource it is bound to:
+    /// its connection and its person, read with their username in one
+    /// statement. Not live, or another resource's, is 401.
+    pub(super) fn connected(&self, b: Connected) -> CellResult<LiveConnection> {
+        const Q: &str = concat!(
+            "SELECT c.id, c.client, c.resource, c.identity, i.kind, i.owner, i.held, u.username FROM connections c ",
+            "LEFT JOIN identities i ON i.id = c.identity ",
+            username_join!(),
+            " WHERE c.access_hash = ? AND c.access_expires_at > ?"
+        );
+        #[derive(Deserialize)]
+        struct Row {
+            id: String,
+            client: String,
+            resource: String,
+            identity: String,
+            kind: Option<IdentityKind>,
+            owner: Option<String>,
+            held: Option<Role>,
+            username: Option<String>,
+        }
+        let refused = || CellError::new(ErrorCode::Unauthenticated, "this access token expired, ended, or is for another MCP server: the client gets another");
+        if !blob::valid_sha(&b.token) {
+            return Err(refused());
+        }
+        let row = self.row::<Row>(Q, vec![sha(&b.token).into(), SqlStorageValue::Integer(js::now_ms())])?.ok_or_else(refused)?;
+        if row.resource != b.resource {
+            return Err(refused());
+        }
+        let identity = joined_identity(row.identity, row.kind, row.owner, row.username, row.held, "a connection")?;
+        self.not_wiping(&identity)?;
+        Ok(LiveConnection { identity, connection: row.id, client: row.client })
     }
 
     /// The connection either of its tokens names ends, when `client_id` is
