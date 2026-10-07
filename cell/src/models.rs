@@ -373,19 +373,19 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
     js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
 }
 
-/// An answer's body, at most `ANSWER_MAX_BYTES`.
+/// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).
 async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
-    let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer: {e}")))?;
-    if bytes.len() > ANSWER_MAX_BYTES {
-        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes")));
+    match crate::cs::read_answer(resp, ANSWER_MAX_BYTES).await? {
+        (_, true) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes"))),
+        (bytes, false) => Ok(bytes),
     }
-    Ok(bytes)
 }
 
-/// A refusal's body as text, cut to what a client reads.
+/// A refusal's body as text, cut to what a client reads (and read no further).
 async fn bounded_text(resp: &mut Response) -> String {
-    let text = resp.text().await.unwrap_or_default();
-    text.chars().take(4096).collect()
+    const CHARS: usize = 4096;
+    let (bytes, _) = crate::cs::read_answer(resp, 4 * CHARS).await.unwrap_or_default();
+    String::from_utf8_lossy(&bytes).chars().take(CHARS).collect()
 }
 
 /// The answer a `whose` asks a fragment for: its owner, and whether the
