@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
+use fragment_core::body::LimitedBody;
 use fragment_core::codestorage::{self as core_cs, Promotion, TokenCache, TreeEntry};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
@@ -124,7 +125,7 @@ pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchFa
 pub struct Answer {
     pub status: u16,
     pub headers: Headers,
-    /// The body's first `max` bytes at most (`fetch_all`, `read_body`).
+    /// What came before the chunk that crossed `max` (`read_answer`), at most `max` bytes.
     pub body: Vec<u8>,
     /// The body went on past `max`, and was not read past it.
     pub cut: bool,
@@ -134,14 +135,14 @@ pub struct Answer {
 /// body read up to `max` bytes and no further. Past either the fetch is
 /// aborted: the limits bound the work, not only the answer. The cell reads
 /// every answer from a vendor or a job's upstream so (a binding's answer
-/// with `read_body`); one it cut is its caller's to refuse, as its status
+/// with `read_answer`); one it cut is its caller's to refuse, as its status
 /// says (a cut error page is still an error).
 pub async fn fetch_all(req: Request, deadline: Duration, max: usize) -> CellResult<Answer> {
     let ctrl = AbortController::default();
     let signal = ctrl.signal();
     let read = async {
         let mut resp = Fetch::Request(req).send_with_signal(&signal).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("fetch failed: {e}")))?;
-        let (body, cut) = read_body(&mut resp, max).await?;
+        let (body, cut) = read_answer(&mut resp, max).await?;
         Ok(Answer { status: resp.status_code(), headers: resp.headers().clone(), body, cut })
     };
     let timer = Delay::from(deadline);
@@ -157,26 +158,26 @@ pub async fn fetch_all(req: Request, deadline: Duration, max: usize) -> CellResu
     answer
 }
 
-/// A body's first `max` bytes at most, read as it streams, and whether it
-/// went on past them: no more than one chunk past `max` is ever held.
-pub async fn read_body(resp: &mut Response, max: usize) -> CellResult<(Vec<u8>, bool)> {
+/// An answer's body as it streams, measured as a request's is
+/// (`LimitedBody`): all of it, or what came before the chunk that crossed
+/// `max` (none, when its declared length is over), and whether it was cut
+/// there, where reading stops.
+pub async fn read_answer(resp: &mut Response, max: usize) -> CellResult<(Vec<u8>, bool)> {
     let failed = |e: worker::Error| CellError::new(ErrorCode::UpstreamFailed, format!("reading the answer: {e}"));
+    let declared = resp.headers().get("content-length").ok().flatten().and_then(|l| l.parse().ok());
+    let Ok(mut body) = LimitedBody::new(max, declared) else { return Ok((Vec::new(), true)) };
     let mut stream = match resp.body() {
         ResponseBody::Stream(_) => resp.stream().map_err(failed)?,
-        ResponseBody::Empty => return Ok((Vec::new(), false)),
+        ResponseBody::Empty => return Ok((body.finish(), false)),
         ResponseBody::Body(_) => unreachable!("an answer from the network or a binding streams its body"),
     };
-    let mut body = Vec::new();
-    // bounded: each chunk grows the body, and the read stops past `max`
+    // bounded: LimitedBody refuses the chunk that would cross `max`, and the read stops
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(failed)?;
-        if body.len() + chunk.len() > max {
-            body.extend_from_slice(&chunk[..max - body.len()]);
-            return Ok((body, true));
+        if body.push(&chunk.map_err(failed)?).is_err() {
+            return Ok((body.finish(), true));
         }
-        body.extend_from_slice(&chunk);
     }
-    Ok((body, false))
+    Ok((body.finish(), false))
 }
 
 impl<'a> Cs<'a> {

@@ -375,7 +375,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
 
 /// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).
 async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
-    match crate::cs::read_body(resp, ANSWER_MAX_BYTES).await? {
+    match crate::cs::read_answer(resp, ANSWER_MAX_BYTES).await? {
         (_, true) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes"))),
         (bytes, false) => Ok(bytes),
     }
@@ -384,7 +384,7 @@ async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
 /// A refusal's body as text, cut to what a client reads (and read no further).
 async fn bounded_text(resp: &mut Response) -> String {
     const CHARS: usize = 4096;
-    let (bytes, _) = crate::cs::read_body(resp, 4 * CHARS).await.unwrap_or_default();
+    let (bytes, _) = crate::cs::read_answer(resp, 4 * CHARS).await.unwrap_or_default();
     String::from_utf8_lossy(&bytes).chars().take(CHARS).collect()
 }
 
