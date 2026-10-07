@@ -331,7 +331,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a long job: each step's answer is kept by the cell, and the body
     // reads all of them back, in order, at every step
-    let (steps, _) = jobs_fragment(s, api, &owner, "jobsteps", |_| {})?;
+    let (steps, steps_c) = jobs_fragment(s, api, &owner, "jobsteps", |_| {})?;
     let r = api.op(&owner, &steps, "count_up", "fifty", json!({ "n": 50 }))?;
     let fifty = settle(api, &owner, &steps, started(&r), &["succeeded", "held"], Duration::from_secs(120));
     let published: Vec<i64> = (1..=45).collect();
@@ -372,6 +372,23 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "a run whose kept answers are lost is held (replay it), not run on without them",
         caught && held["status"] == "held" && held["attempt"] == 1 && held["error"].as_str().is_some_and(|e| e.contains("no kept answer")),
         format!("caught between steps: {caught}; {held}"),
+    );
+
+    // A deploy that changes the app's code while a run is between steps:
+    // its kept answers are the old code's, so it starts over, as its next
+    // attempt on the new code, with no one to replay it.
+    lever("hold-advances", json!({ "on": true }))?;
+    let r = api.op(&owner, &steps, "nap", "moved", json!({ "ms": 100 }))?;
+    let moved = started(&r);
+    let caught = s.eventually(Duration::from_secs(20), || lever("advance-held", json!({})).is_ok_and(|r| r.body["run"] == moved));
+    ship(s, &steps_c, &[JOBS_APP, b"\n// the next version\n".as_slice()].concat(), JOBS_JSON);
+    lever("hold-advances", json!({ "on": false }))?;
+    let again = settle(api, &owner, &steps, moved, &["succeeded", "held"], long);
+    let restarted = events(api, &owner, &steps).iter().any(|e| e["kind"] == "run.restarted" && e["data"]["run"] == moved && e["data"]["attempt"] == 2);
+    s.ok(
+        "a run whose app code changed between its steps starts over on the new code, and succeeds",
+        caught && restarted && again["status"] == "succeeded" && again["attempt"] == 2 && again["output"]["slept"] == 100,
+        format!("caught between steps: {caught}; run.restarted: {restarted}; {again}"),
     );
 
     // the CLI
