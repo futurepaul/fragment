@@ -22,7 +22,7 @@ use fragment_core::seal::{self, SealError};
 use fragment_core::secrets_store::{self as store, Cache};
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
-use worker::{Env, Fetch, Headers, Method, Request, RequestInit, State};
+use worker::{Env, Headers, Method, Request, RequestInit, State};
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
@@ -31,6 +31,10 @@ use crate::js;
 /// The longest code.storage token signed, as for an editor's storage token.
 const JWT_TTL_MAX_S: i64 = 900;
 const CODESTORAGE_SCOPES: [&str; 4] = ["git:read", "git:write", "repo:write", "org:read"];
+/// A WorkOS call's deadline, its answer read whole, and how much of it is
+/// read (its answers are a user, a token, or a link: a few KiB).
+const VENDOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const VENDOR_ANSWER_MAX_BYTES: usize = 64 * 1024;
 
 thread_local! {
     /// What each binding read last (`secrets_store::Cache`: a minute at most).
@@ -172,8 +176,9 @@ pub async fn workos<'a>(env: &Env, cfg: &'a Config) -> CellResult<WorkOs<'a>> {
     Ok(WorkOs { client_id, api })
 }
 
-/// POSTs `body` as JSON with a bearer key: (status, JSON answer or null).
-/// Not reaching the host is `UpstreamFailed`.
+/// POSTs `body` as JSON with a bearer key: (status, JSON answer or null),
+/// read whole within `VENDOR_TIMEOUT`. Not reaching the host in time is
+/// `UpstreamFailed`; an answer over `VENDOR_ANSWER_MAX_BYTES` is null.
 async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option<&Value>, host: &str) -> CellResult<(u16, Value)> {
     let headers = Headers::new();
     headers.set("content-type", "application/json")?;
@@ -186,10 +191,9 @@ async fn post_json(url: &str, method: Method, bearer: Option<&str>, body: Option
         init.with_body(Some(b.to_string().into()));
     }
     let req = Request::new_with_init(url, &init)?;
-    let mut resp = Fetch::Request(req).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")))?;
-    let status = resp.status_code();
-    let text = resp.text().await.unwrap_or_default();
-    Ok((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    let a = crate::cs::fetch_all(req, VENDOR_TIMEOUT, VENDOR_ANSWER_MAX_BYTES).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {}", e.message)))?;
+    let answer = if a.cut { Value::Null } else { serde_json::from_slice(&a.body).unwrap_or(Value::Null) };
+    Ok((a.status, answer))
 }
 
 /// WorkOS's code exchange with the API key added: (status, WorkOS's

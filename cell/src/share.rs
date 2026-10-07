@@ -225,7 +225,7 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
     let mut at = url.clone();
     at.set_query(None);
     let headers = Headers::new();
-    Routed { name: name.to_string(), url: at, mode: None, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
+    Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
     if body.is_some() {
         headers.set("content-type", "application/json")?;
     }

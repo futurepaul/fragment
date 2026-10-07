@@ -8,8 +8,8 @@
 //!   closed into a row once that minute has passed (`req:<f>@<life>:<minute>`);
 //! - dynamic workers: the first time a code version runs on a UTC day
 //!   (`dw:<f>@<life>:<version>:<day>`), the unit Cloudflare bills;
-//! - storage: a daily sample of its SQLite, its app's, and its blobs' bytes,
-//!   as byte-hours since the sample before (`store:<f>@<life>:<class>:<at>`).
+//! - storage: a daily sample of its SQLite and its blobs' bytes, as
+//!   byte-hours since the sample before (`store:<f>@<life>:<class>:<at>`).
 //!
 //! References carry the fragment's life (`@<incarnation>`), so a name made
 //! again never meets its earlier life's rows. The alarm flushes the outbox
@@ -175,25 +175,13 @@ impl FragmentCell {
         }
     }
 
-    /// The app facet's database size, from its platform code (it shares a
-    /// realm with the author's, so an app could understate it: by at most
-    /// `limits::APP_DB_MAX_BYTES`, its cap).
-    async fn app_db_bytes(&self) -> u64 {
-        let Ok(facet) = self.facet() else { return 0 };
-        match facet.call("__size", &[]).await {
-            Ok(v) => v.as_u64().unwrap_or(0).min(fragment_proto::limits::APP_DB_MAX_BYTES),
-            Err(e) => {
-                self.event("meter.size-failed", &format!("the app's database size: {}", e.message), json!({ "code": e.code }));
-                0
-            }
-        }
-    }
-
     /// A storage sample when one is due (`STORAGE_EVERY_MS` since the last,
-    /// or since the fragment was made), or now (`force`): its SQLite and its
-    /// app's as `sqlite`, its blobs as `r2`, each its bytes × the hours
-    /// since the last sample.
-    pub(crate) async fn sample_storage(&self, force: bool) -> CellResult<()> {
+    /// or since the fragment was made), or now (`force`): its SQLite as
+    /// `sqlite`, its blobs as `r2`, each its bytes × the hours since the
+    /// last sample. Its app facet's database is not sampled: only the
+    /// app's own realm can say its size, and asking would load its code
+    /// (a dynamic worker) every day (docs/technical-debt-ledger.md).
+    pub(crate) fn sample_storage(&self, force: bool) -> CellResult<()> {
         let [created, sampled] = self.metas([MetaKey::CreatedAt, MetaKey::StorageSampledAt])?;
         let Some(created) = created.and_then(|c| c.parse::<i64>().ok()) else { return Ok(()) };
         let since = sampled.and_then(|s| s.parse::<i64>().ok()).unwrap_or(created);
@@ -202,7 +190,7 @@ impl FragmentCell {
             return Ok(());
         }
         let elapsed = u128::try_from(now - since).unwrap_or(0);
-        let sqlite = self.sql().database_size() as u64 + self.app_db_bytes().await;
+        let sqlite = self.sql().database_size() as u64;
         let blobs = self.rows("SELECT COALESCE(SUM(size), 0) AS n FROM blobs", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
         let key = self.meter_key()?;
         for (class, name, bytes) in [(StorageClass::Sqlite, "sqlite", sqlite), (StorageClass::R2, "r2", blobs)] {

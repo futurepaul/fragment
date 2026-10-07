@@ -97,7 +97,6 @@ struct Repo {
     repo_id: String,
     created_at_ms: i64,
     branches: BTreeMap<String, String>,
-    ephemeral: BTreeSet<String>,
     commits: BTreeMap<String, Commit>,
     #[serde(with = "b64map")]
     blobs: BTreeMap<String, Vec<u8>>,
@@ -261,7 +260,6 @@ impl Repo {
             repo_id: repo_id.into(),
             created_at_ms: now_ms(),
             branches: BTreeMap::new(),
-            ephemeral: BTreeSet::new(),
             commits: BTreeMap::new(),
             blobs: BTreeMap::new(),
         }
@@ -791,9 +789,6 @@ fn branch_create(st: &mut State, url: &str, req: &Request, out: &mut Vec<Deliver
         return problem(409, &format!("branch already exists: {target}"));
     }
     let ephemeral = body["target_is_ephemeral"].as_bool().unwrap_or(false);
-    if ephemeral {
-        st.repos.get_mut(url).expect("known repo").ephemeral.insert(target.to_string());
-    }
     st.move_branch(url, target, &base, out);
     Response::json(
         201,
@@ -1084,10 +1079,6 @@ impl CodeStorage {
 
     pub fn branch(&self, repo: &str, branch: &str) -> Option<String> {
         self.with(|st| st.repo_by(repo)?.branches.get(branch).cloned())
-    }
-
-    pub fn is_ephemeral(&self, repo: &str, branch: &str) -> bool {
-        self.with(|st| st.repo_by(repo).is_some_and(|r| r.ephemeral.contains(branch)))
     }
 
     pub fn file_at(&self, repo: &str, branch: &str, path: &str) -> Option<Vec<u8>> {

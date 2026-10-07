@@ -30,13 +30,19 @@ pub struct Response {
     pub body: Vec<u8>,
     /// Close the connection without writing an answer.
     pub unanswered: bool,
+    /// After its head, the connection is this one's: a body's written as
+    /// it goes (`endless`).
+    pub upgrade: Option<Upgrade>,
 }
+
+/// What runs a connection its answer's head handed over.
+pub type Upgrade = Box<dyn FnOnce(TcpStream) + Send>;
 
 impl Response {
     /// No answer at all: the connection closes once the request is read (a
     /// request that was handled, and an answer lost on its way back).
     pub fn unanswered() -> Response {
-        Response { status: 0, headers: Vec::new(), body: Vec::new(), unanswered: true }
+        Response { status: 0, headers: Vec::new(), body: Vec::new(), unanswered: true, upgrade: None }
     }
 
     pub fn json(status: u16, v: &serde_json::Value) -> Response {
@@ -44,7 +50,17 @@ impl Response {
     }
 
     pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Response {
-        Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false }
+        Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false, upgrade: None }
+    }
+
+    /// A 200 whose chunked body never ends: written until its reader stops
+    /// reading, so a limit that counts a body only once it is whole is never met.
+    pub fn endless() -> Response {
+        const CHUNK: usize = 64 * 1024;
+        let chunk = format!("{CHUNK:x}\r\n{}\r\n", "x".repeat(CHUNK));
+        let write = move |mut s: TcpStream| while s.write_all(chunk.as_bytes()).is_ok() {};
+        let headers = vec![("content-type".into(), "text/plain".into()), ("transfer-encoding".into(), "chunked".into())];
+        Response { status: 200, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(write)) }
     }
 
     pub fn with_header(mut self, k: &str, v: &str) -> Response {
@@ -105,6 +121,18 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
         let _ = stream.shutdown(std::net::Shutdown::Both);
         return;
     }
+    if let Some(run) = resp.upgrade {
+        let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));
+        for (k, v) in &resp.headers {
+            out.push_str(&format!("{k}: {v}\r\n"));
+        }
+        out.push_str("\r\n");
+        if stream.write_all(out.as_bytes()).is_ok() {
+            let _ = stream.set_read_timeout(None);
+            run(stream);
+        }
+        return;
+    }
     let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));
     for (k, v) in &resp.headers {
         out.push_str(&format!("{k}: {v}\r\n"));
@@ -120,6 +148,7 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
 
 fn reason(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
         400 => "Bad Request",
