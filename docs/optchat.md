@@ -498,6 +498,15 @@ protocol 2025-06-18: `initialize`, `tools/list`, `tools/call`).
   - the compactor and suggestions run on `cheap` (GLM-5.3 Flash);
   - topics run on `clef-flash`;
   - goose runs on `medium`.
+- **The live check:** `cargo xtask e2e --hosted --config … --branch
+  claude-optchat --only mind-live` (crates/e2e/src/lanes/mind_live.rs).
+  It runs only by name, and only on a preview (`Need::RealModels`): a
+  local run's `mind` section checks the same loop on the fakes. An e2e
+  person's first run, as the shell makes it; a fact told in one thread
+  and recalled in a fresh one; a topic Clef sorts that thread into; and a
+  Builder hand-off that goose runs on a computer from cold. It takes up
+  to half an hour, lends its person 60 paid calls, and prints each
+  latency, the recall's zoom and search calls, and the paid calls made.
 
 ## Not in the spike
 

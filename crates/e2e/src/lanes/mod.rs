@@ -21,6 +21,7 @@ mod ledger;
 mod limits;
 mod members;
 mod mind;
+mod mind_live;
 mod notes;
 mod plane;
 mod posts;
@@ -98,6 +99,7 @@ const LANES: &[Lane] = &[
     computers::computers,
     chat::chat,
     mind::mind,
+    mind_live::mind_live,
     shell::shell_ui,
     wipe::wipe,
     sync::folder_sync,
@@ -107,7 +109,8 @@ const LANES: &[Lane] = &[
 /// The suite split for CI (`--shard k/n`): each shard runs on a runner of
 /// its own, with its own build and node, the sections it lists in the
 /// lanes' order. Every section is in exactly one shard (a test below), so
-/// the shards together run what one whole run does.
+/// the shards together run what one whole run does. `mind-live` runs only
+/// on a preview, by name (a skip anywhere else), so its shard says why.
 ///
 /// Balanced by measured time (each section's, as its shard's log prints
 /// it, on CI's runners; run 37534339123): `computers` alone is about 4
@@ -118,7 +121,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "mind"],
+    &["shell", "computers", "mind", "mind-live"],
     &["chat", "shell-ui", "wipe", "sync", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
