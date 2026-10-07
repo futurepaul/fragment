@@ -269,7 +269,7 @@ impl FragmentCell {
                 Some(Joined { agent, name: agent_name, channel: live.decl.channel.clone() })
             }
         };
-        let as_owner = Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), mode: None };
+        let as_owner = Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false };
         if let Some(before) = joined.filter(|j| Some(j) != wanted.as_ref()) {
             if wanted.as_ref().is_some_and(|w| w.agent == before.agent) {
                 self.exec("DELETE FROM subs WHERE principal = ? AND channel = ?", vec![before.agent.as_str().into(), before.channel.as_str().into()])?;

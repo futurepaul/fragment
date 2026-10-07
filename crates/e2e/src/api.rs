@@ -273,7 +273,7 @@ pub struct Api {
     http: reqwest::blocking::Client,
     pub base: String,
     pub port: u16,
-    pub suffix: Option<String>,
+    pub suffix: String,
     /// A branch's mark on its fragments' hosts (`--<branch>`), on a local
     /// node shaped as a branch deployment (the hosted lane's rehearsal).
     label_suffix: String,
@@ -282,10 +282,10 @@ pub struct Api {
 }
 
 impl Api {
-    /// The local node's API (`suffix`: fragments on their own hosts).
-    pub fn new(port: u16, suffix: Option<&str>, run: &Arc<Run>) -> Api {
+    /// The local node's API (`suffix`: where fragments have their hosts).
+    pub fn new(port: u16, suffix: &str, run: &Arc<Run>) -> Api {
         let base = format!("http://127.0.0.1:{port}");
-        Api { http: client(), base, port, suffix: suffix.map(str::to_string), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+        Api { http: client(), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
     }
 
     /// The local node's API, the node shaped as the branch `branch`.
@@ -297,7 +297,7 @@ impl Api {
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: Some(preview.zone.clone()), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
@@ -318,19 +318,15 @@ impl Api {
         self.run.levers_sign_in
     }
 
-    /// The URL of `path` on a fragment's own host (or its `/f/<name>/` path
-    /// when the fleet has no suffix).
-    /// A fragment's page: on its own host (`<label>--<username>.<suffix>`)
-    /// when the fleet has a suffix, else by path.
+    /// The URL of `path` on a fragment's own host (`<label>--<username>.<suffix>`).
     pub fn site_url(&self, name: &str, path: &str) -> String {
         let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
-        match (&self.target, &self.suffix) {
-            (Target::Hosted(preview), _) => match preview.fragment(name) {
+        match &self.target {
+            Target::Hosted(preview) => match preview.fragment(name) {
                 Some(origin) => format!("{origin}/{path}"),
                 None => format!("{}://{host}--{}.{}{}/{path}", preview.scheme, preview.branch, preview.zone, preview.port_part()),
             },
-            (Target::Local, Some(s)) => format!("http://{host}{}.{s}:{}/{path}", self.label_suffix, self.port),
-            (Target::Local, None) => format!("{}/f/{name}/{path}", self.base),
+            Target::Local => format!("http://{host}{}.{}:{}/{path}", self.label_suffix, self.suffix, self.port),
         }
     }
 
