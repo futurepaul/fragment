@@ -16,7 +16,7 @@ belongs in a template instead.
 | `__signin`, `__signout` | A fragment origin's own session, through a single-use redemption from the platform; `__signin` only as a navigation of a page, `__signout` a POST from the fragment's own page | Sessions are the platform's; a fragment's code must not mint them, and another page must not set them off |
 | `__live`, `__watch` | The live socket and the CLI's watch stream, taken only from the fragment's own page (`Origin`; a socket has no CORS) | Platform protocol |
 | `__people` | Profiles (usernames, pictures) by identity | Reads the registry |
-| `__files`, `__file`, `__tree` | The fragment's files, read through the platform; `__files` is a viewer (`__files.js`, `__files.css`): a tree beside a reader for markdown, text, and pictures | Reads git with the platform's token; the viewer renders any file on the fragment's origin, so a file's text becomes DOM as text only |
+| `__files`, `__file` | The fragment's files, read through the platform; `__files` is a viewer (`__files.js`, `__files.css`): a tree beside a reader for markdown, text, and pictures | Reads git with the platform's token; the viewer renders any file on the fragment's origin, so a file's text becomes DOM as text only |
 | `__sw.js`, `__preview.svg` | The push service worker, the link preview image | Platform assets |
 
 ## Served on the platform's origin

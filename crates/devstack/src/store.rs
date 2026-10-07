@@ -412,8 +412,7 @@ pub struct Bound {
 
 impl Bound {
     /// The names `deploy/example.jsonc` uses, which dev and the e2e bind in
-    /// wrangler's local store: `fragment-` and what the secret's file was
-    /// called before the store (docs/secrets.md, Migration).
+    /// wrangler's local store.
     pub fn conventional(workos: bool, operator_keys: &[&str]) -> Bound {
         Bound {
             host_secret: "fragment-host-secret".into(),

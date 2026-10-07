@@ -30,11 +30,12 @@ pub struct Response {
     pub body: Vec<u8>,
     /// Close the connection without writing an answer.
     pub unanswered: bool,
-    /// A `101`: after its head, the connection is this one's (a WebSocket).
+    /// After its head, the connection is this one's: a WebSocket's (a
+    /// `101`), or a body's written as it goes (`endless`).
     pub upgrade: Option<Upgrade>,
 }
 
-/// What runs a connection a `101` handed over.
+/// What runs a connection its answer's head handed over.
 pub type Upgrade = Box<dyn FnOnce(TcpStream) + Send>;
 
 impl Response {
@@ -63,6 +64,16 @@ impl Response {
             headers.push(("sec-websocket-protocol".into(), p.into()));
         }
         Response { status: 101, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(run)) }
+    }
+
+    /// A 200 whose chunked body never ends: written until its reader stops
+    /// reading, so a limit that counts a body only once it is whole is never met.
+    pub fn endless() -> Response {
+        const CHUNK: usize = 64 * 1024;
+        let chunk = format!("{CHUNK:x}\r\n{}\r\n", "x".repeat(CHUNK));
+        let write = move |mut s: TcpStream| while s.write_all(chunk.as_bytes()).is_ok() {};
+        let headers = vec![("content-type".into(), "text/plain".into()), ("transfer-encoding".into(), "chunked".into())];
+        Response { status: 200, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(write)) }
     }
 
     pub fn with_header(mut self, k: &str, v: &str) -> Response {
@@ -124,7 +135,7 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
         return;
     }
     if let Some(run) = resp.upgrade {
-        let mut out = "HTTP/1.1 101 Switching Protocols\r\n".to_string();
+        let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));
         for (k, v) in &resp.headers {
             out.push_str(&format!("{k}: {v}\r\n"));
         }
@@ -152,6 +163,7 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
 
 fn reason(status: u16) -> &'static str {
     match status {
+        101 => "Switching Protocols",
         200 => "OK",
         201 => "Created",
         400 => "Bad Request",

@@ -33,7 +33,7 @@
 
 use std::pin::Pin;
 
-use fragment_core::ledger::{Release, Reserve, Reserved, Settle, Spend};
+use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Named, Stream};
 use fragment_core::price::Usage;
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
@@ -45,7 +45,7 @@ use worker::*;
 
 use crate::config::Config;
 use crate::error::{CellError, CellResult};
-use crate::ledger::{self, FragmentOpen, LedgerError};
+use crate::ledger::{self, FragmentOpen};
 use crate::{js, read_body, routed};
 
 /// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
@@ -54,9 +54,6 @@ pub use fragment_core::models::MODEL_BODY_MAX_BYTES;
 /// An unstreamed answer, or a refusal, read whole: at most `MAX_TOKENS`
 /// of text and its JSON.
 const ANSWER_MAX_BYTES: usize = 8 * 1024 * 1024;
-/// A ledger call is tried this many times before the call is given up
-/// (a reservation) or left to expire at its worst case (a settle).
-const LEDGER_TRIES: usize = 3;
 
 /// The fragment a call is spent in: its name and owner, and whether the
 /// spender is that owner, or an agent of theirs acting for them (caps
@@ -127,42 +124,18 @@ impl Held {
     /// six hours: the money path fails closed.
     async fn settle(&self, usage: Option<Usage>, log_id: Option<String>) {
         let settle = Settle { reference: self.reference.clone(), usage };
-        let mut last = String::new();
-        for _ in 0..LEDGER_TRIES {
-            match ledger::ask(&self.env, &self.payer, &settle).await {
-                Ok(settled) => {
-                    // one line per event: `wrangler tail` drops lines (lesson 14)
-                    console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named.as_str(), "model": self.model, "charge": settled.charge, "basis": settled.basis }));
-                    return;
-                }
-                Err(e) => last = e.message,
-            }
+        match ledger::retried(&self.env, &self.payer, &settle).await {
+            // one line per event: `wrangler tail` drops lines (lesson 14)
+            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named.as_str(), "model": self.model, "charge": settled.charge, "basis": settled.basis })),
+            Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
-        console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": last }));
     }
 
     /// The call failed before it used anything: its reservation goes back.
     async fn release(&self, why: &str) {
-        let release = Release { reference: self.reference.clone() };
-        for _ in 0..LEDGER_TRIES {
-            if ledger::ask(&self.env, &self.payer, &release).await.is_ok() {
-                console_log!("{}", json!({ "event": "model.released", "ref": self.reference, "why": why }));
-                return;
-            }
-        }
-        console_error!("{}", json!({ "event": "model.release-failed", "ref": self.reference, "why": why }));
-    }
-}
-
-/// A ledger call tried again while it does not answer; a refusal answers.
-async fn retried<R: ledger::Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
-    let mut tries = 0;
-    // bounded: LEDGER_TRIES asks, then the last answer stands
-    loop {
-        tries += 1;
-        match ledger::ask(env, payer, request).await {
-            Err(e) if e.refused.is_none() && e.code == ErrorCode::HostFailed && tries < LEDGER_TRIES => continue,
-            answered => return answered,
+        match ledger::retried(&self.env, &self.payer, &Release { reference: self.reference.clone() }).await {
+            Ok(_) => console_log!("{}", json!({ "event": "model.released", "ref": self.reference, "why": why })),
+            Err(e) => console_error!("{}", json!({ "event": "model.release-failed", "ref": self.reference, "why": why, "message": e.message })),
         }
     }
 }
@@ -184,7 +157,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         Some(f) if f.owner == call.payer => (Some(f.name.to_string()), !f.by_owner),
         Some(f) => {
             if !f.by_owner {
-                retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
+                ledger::retried(env, f.owner, &FragmentOpen { fragment: f.name.to_string() }).await?;
             }
             (None, false)
         }
@@ -198,12 +171,8 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         agent: call.agent.map(str::to_string),
         capped,
     };
-    match retried(env, call.payer, &reserve).await? {
-        Reserved::Held { .. } => {}
-        // a reference of this call's own was never reserved before
-        other => return Err(CellError::host(format!("a fresh model call's reservation answered {other:?}"))),
-    }
-    let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, named: call.named };
+    ledger::hold(env, call.payer, &reserve).await?;
+    let held =Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, named: call.named };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
         Ok(r) => r,
@@ -373,19 +342,19 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
     js::ai_run(env.as_ref(), model, input, &options).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
 }
 
-/// An answer's body, at most `ANSWER_MAX_BYTES`.
+/// An answer's body, at most `ANSWER_MAX_BYTES` (read no further).
 async fn read_whole(resp: &mut Response) -> CellResult<Vec<u8>> {
-    let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer: {e}")))?;
-    if bytes.len() > ANSWER_MAX_BYTES {
-        return Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes")));
+    match crate::cs::read_answer(resp, ANSWER_MAX_BYTES).await? {
+        (_, true) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("the model's answer is over {ANSWER_MAX_BYTES} bytes"))),
+        (bytes, false) => Ok(bytes),
     }
-    Ok(bytes)
 }
 
-/// A refusal's body as text, cut to what a client reads.
+/// A refusal's body as text, cut to what a client reads (and read no further).
 async fn bounded_text(resp: &mut Response) -> String {
-    let text = resp.text().await.unwrap_or_default();
-    text.chars().take(4096).collect()
+    const CHARS: usize = 4096;
+    let (bytes, _) = crate::cs::read_answer(resp, 4 * CHARS).await.unwrap_or_default();
+    String::from_utf8_lossy(&bytes).chars().take(CHARS).collect()
 }
 
 /// The answer a `whose` asks a fragment for: its owner, and whether the

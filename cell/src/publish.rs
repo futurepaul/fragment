@@ -110,9 +110,10 @@ impl FragmentCell {
                 }
             };
             if let Some(tip) = moved {
-                // the pin follows now (the webhook and the poll would, later)
+                // the pin follows now; failing that, the webhook or the poll backstop
                 if let Err(e) = self.interpret(&["live"]).await {
                     self.event("deploy.refresh-failed", &e.message, json!({ "live": tip }));
+                    self.may_lag().await?;
                 }
                 return Ok(tip);
             }

@@ -21,7 +21,6 @@ pub mod node;
 mod node_release;
 pub mod signals;
 pub mod store;
-pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -33,9 +32,6 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// installs it). Moving it re-checks what containers.rs leans on in it
 /// and its workerd (docs/technical-debt-ledger.md).
 pub const WRANGLER_VERSION: &str = "4.145.0";
-/// Names another wrangler entry script (a `bin/wrangler.js`), run on the
-/// pinned Node all the same.
-pub const WRANGLER_BIN_VAR: &str = "WRANGLER_BIN";
 /// The pinned Node, unpacked (node.rs), under the repo root.
 pub const TOOLS_DIR: &str = "target/tools";
 /// The caches every JavaScript process keeps, under the repo root:
@@ -126,9 +122,7 @@ pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
     absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    for f in ["entry.mjs", "storage.mjs"] {
-        fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
-    }
+    fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
     let _ = fs::remove_dir_all(dir.join("build"));
     copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
     Ok(dir.to_path_buf())
@@ -202,29 +196,25 @@ pub fn clear_state(project: &Path) -> Result<()> {
 /// What the node runs on: the pinned Node and the wrangler it runs.
 pub struct Tools {
     pub node: node::Node,
-    /// wrangler's entry script: `WRANGLER_BIN`'s, or the pinned one npm
-    /// installed (`node_modules/wrangler/bin/wrangler.js`).
+    /// wrangler's entry script, the pinned one npm installed
+    /// (`node_modules/wrangler/bin/wrangler.js`).
     pub wrangler: PathBuf,
     /// `CACHE_DIR`, absolute.
     pub cache: PathBuf,
 }
 
 impl Tools {
-    /// The pinned Node (or `FRAGMENT_NODE`'s), fetched on first use;
-    /// node_modules from its own `npm ci` when missing or stale; and the
-    /// wrangler package.json pins, or `WRANGLER_BIN`'s, checked by version.
-    /// Nothing from PATH.
+    /// The pinned Node, fetched on first use; node_modules from its own
+    /// `npm ci` when missing or stale; and the wrangler package.json pins,
+    /// checked by version. Nothing from PATH.
     pub fn locate() -> Result<Tools> {
         let root = repo_root();
         let cache = root.join(CACHE_DIR);
         let node = node::locate(&root.join(TOOLS_DIR))?;
         node::ensure_modules(&node, &root, &root.join(TOOLS_DIR), &cache)?;
-        let wrangler = match std::env::var_os(WRANGLER_BIN_VAR) {
-            Some(p) => PathBuf::from(p),
-            None => root.join("node_modules/wrangler/bin/wrangler.js"),
-        };
+        let wrangler = root.join("node_modules/wrangler/bin/wrangler.js");
         if !wrangler.is_file() {
-            bail!("no wrangler entry script at {} ({WRANGLER_BIN_VAR} names one, a wrangler package's bin/wrangler.js; unset, it is the one npm ci installs)", wrangler.display());
+            bail!("no wrangler at {} (npm ci installs it: remove node_modules, and the next run installs it again)", wrangler.display());
         }
         let tools = Tools { node, wrangler, cache };
         let out = tools
@@ -279,8 +269,8 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>` when set.
-    pub host_suffix: Option<String>,
+    /// Fragments are served from `<label>--<username>.<suffix>`.
+    pub host_suffix: String,
     /// Where fragments were served before the suffix moved: a fragment's
     /// host there redirects to its host under the suffix.
     pub legacy_host_suffix: Option<String>,
@@ -396,9 +386,7 @@ impl Fleet {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
             vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
-        if let Some(s) = &self.host_suffix {
-            vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
-        }
+        vars.push(("FRAGMENT_HOST_SUFFIX", self.host_suffix.as_str()));
         if let Some(s) = &self.legacy_host_suffix {
             vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
         }
@@ -697,7 +685,7 @@ mod tests {
     fn wrangler_runs_on_the_pinned_node_with_repo_caches() {
         let root = repo_root();
         let bin = root.join(TOOLS_DIR).join("node-test/bin");
-        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js"), release: node::pinned_release() };
+        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js") };
         let tools = Tools { node, wrangler: root.join("node_modules/wrangler/bin/wrangler.js"), cache: root.join(CACHE_DIR) };
         let cmd = tools.wrangler().expect("a wrangler command");
         assert_eq!(cmd.get_program(), bin.join("node").as_os_str());

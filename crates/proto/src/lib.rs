@@ -564,8 +564,12 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
-    /// The live commit the code was read from; `None` when live has no `app.mjs`.
+    /// The live commit the code was installed from; `None` without app code.
     pub sha: Option<String>,
+    /// What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),
+    /// or `blessed:<template>@<release>` (the platform release's code, which
+    /// a fragment on a blessed template runs whatever its commit: decision 40).
+    pub id: Option<String>,
     pub operations: std::collections::BTreeMap<String, OpDecl>,
     /// Why the latest live commit's code was not installed, if it was not.
     pub error: Option<String>,
@@ -803,14 +807,12 @@ pub mod routed {
     pub const NAME: &str = "x-fragment-name";
     /// The URL the request arrived on.
     pub const URL: &str = "x-fragment-url";
-    /// How the site was addressed: `host` (its own origin) or `path` (`/f/<name>/`).
-    pub const MODE: &str = "x-fragment-mode";
     /// Who is asking (JSON: the identity and the key it signed with).
     pub const SIGNED: &str = "x-fragment-signed";
     /// Who is asking a site request, not yet resolved (JSON: the key a
     /// signature was verified for, or the origin's session token).
     pub const CREDENTIAL: &str = "x-fragment-credential";
-    pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
+    pub const ALL: [&str; 4] = [NAME, URL, SIGNED, CREDENTIAL];
 }
 
 /// `POST /api/identities`: register an agent the signer owns, with a key

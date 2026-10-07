@@ -229,15 +229,15 @@ speaking Cloudflare's APIs) returns once this product works.
     image waits for before its own init runs. The DO retries a
     "temporarily unavailable" start (spike S3b).
 
-    The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. It
-    stays the image's, for whatever it keeps outside `/data`. The agent's
-    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
-    it with Litestream, for disaster recovery, until step 1 of
-    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
-    Its replicas were never read, no restore drill existed, and a restore
-    would have put a `state.db` of seconds ago into a `/data` of the last
-    save. The saves themselves now carry Hermes' databases whole.)
+    The agent's self is in its fragment. (The Hermes image streamed
+    Hermes' SQLite with Litestream, for disaster recovery, to an S3
+    endpoint the platform gave every computer over its own R2 prefix,
+    until step 1 of docs/durable-computers.md cut it: P4 of
+    docs/explorations/pi-durable.md. Its replicas were never read, no
+    restore drill existed, and a restore would have put a `state.db` of
+    seconds ago into a `/data` of the last save. The saves themselves now
+    carry Hermes' databases whole. The endpoint went after it, #156: no
+    image used it.)
 
     *The design of record is now docs/durable-computers.md (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
@@ -427,7 +427,9 @@ speaking Cloudflare's APIs) returns once this product works.
       recovery semantics. An app's own model calls are its AI steps: the
       calories template reads what someone ate with a text step its
       channel's trigger runs. goose may come back later, as a
-      fragment-native alternative to Hermes.
+      fragment-native alternative to Hermes. A deployment made before
+      keeps an unbound `fragment-agent[-<branch>]` Worker that no deploy
+      or teardown touches: Paul's to remove (`wrangler delete --name …`).
     - Nothing on fragment.club migrates. People sign in again with the
       same WorkOS identity, and one seed carries usernames across.
 34. **Infra comes down after cutover**, one irreversible step at a
@@ -667,8 +669,8 @@ browser ── fragment.club (the shell) ─┐      ┌── <label>--<user>.f
                                      own SQLite)        + simplex-chat on $200 seats
  egress intercepts (generic, configured per computer):
    model route → AI Gateway (+ usage)   connections → WorkOS Pipes tokens
-   storage → its R2 prefix (S3)         fragment API → the computer's identity
- R2: blobs, site copies, screenshots, backups, replicas
+   fragment API → the computer's identity
+ R2: blobs, site copies, screenshots, backups
  code.storage: every fragment's git (apps, chats, agents, brains, skills)
  Queues: deliveries, push, ledger batches   Workflows: jobs and cron runs
 ```
@@ -1108,9 +1110,12 @@ What didn't help:
 What goes where:
 - **The Hermes image's boot list** (phase 4): bytecode with
   `unchecked-hash`, `plugins.disabled` for platforms and dashboard auth,
-  a gateway preloaded before the restore gate, setup gated on stamps,
-  the CA appended rather than regenerated, a readahead list, a
-  single-layer image, and the dashboard and screen lazy.
+  a gateway preloaded before the restore gate, the CA appended rather
+  than regenerated, a readahead list, a single-layer image, and the
+  dashboard and screen lazy. (Setup gated on stamps went on 2026-10-06,
+  issue 156: the image carries no bundled skills, so nothing syncs them,
+  and the config migration runs at every boot, a no-op of 0.07 s on a
+  desktop CPU.)
 - **Upstream Hermes:** load only the configured platforms, key the skills
   sync on the image revision, use lazy imports, and ship bytecode.
 - **The generic Computer DO:** snapshot-backed wakes (decision 18) and a

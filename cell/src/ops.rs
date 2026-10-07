@@ -186,15 +186,19 @@ impl FragmentCell {
     /// whether there is code: the facet table answers the running facet,
     /// and the loader's callbacks read the code when there is none.
     pub(crate) fn facet(&self) -> CellResult<js::Facet> {
-        let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
-        let Some(loader_id) = rows.first().and_then(|r| r["loader_id"].as_str()) else {
+        let Some(loader_id) = self.installed_code()? else {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
         };
         // the version the loader runs (installed_id less this fragment's
         // key, which is the same for every version of it): one dynamic worker a day
         self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+    }
 
+    /// The installed app code's identity (its stored loader id), when live has an app.
+    pub(crate) fn installed_code(&self) -> CellResult<Option<String>> {
+        let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
+        Ok(rows.first().map(|r| r["loader_id"].as_str().expect("code.loader_id is TEXT NOT NULL").to_string()))
     }
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.
@@ -214,7 +218,7 @@ impl FragmentCell {
         // site, `__op/channels/<channel>` with the body as the input, and so
         // its checks: JSON only, and a session or an anonymous principal.
         // No operation name has a `/`, so none is ever mistaken for one.
-        if let Some(channel) = op.strip_prefix(SITE_POST_PREFIX).filter(|_| caller.mode.is_some()) {
+        if let Some(channel) = op.strip_prefix(SITE_POST_PREFIX).filter(|_| caller.site) {
             let (record, replayed) = self.post(caller, facts, principal, link, channel, &body.id, &body.input).await?;
             let result = serde_json::value::to_raw_value(&record).expect("a record serializes");
             return Ok(Answered { result, replayed });
@@ -510,7 +514,7 @@ impl FragmentCell {
                 // the batch sent now (a waiting one again: the ledger
                 // answers a resend as before)
                 if body["sample"] != false {
-                    self.sample_storage(true).await?;
+                    self.sample_storage(true)?;
                 }
                 if body["resend"] == true {
                     self.exec("UPDATE meter_batches SET sent_at = NULL", vec![])?;

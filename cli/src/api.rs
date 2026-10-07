@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live?v=2", "/api/fragments", "/api/fragments?x=1"] {
+        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
             assert!(honors_for(yes), "{yes}");
         }
         for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {
