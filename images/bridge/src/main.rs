@@ -2,7 +2,7 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=script)
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=goose|script)
 //! fragment-bridge screen   only the screen on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
+use fragment_bridge::runtime::goose::{Goose, GooseConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
 use fragment_bridge::{ev, limits, screen};
@@ -41,9 +42,21 @@ fn parse_ms(name: &str, default: u64) -> u64 {
 }
 
 fn runtime() -> Box<dyn Runtime> {
-    match env_or("BRIDGE_RUNTIME", "script").as_str() {
+    match env_or("BRIDGE_RUNTIME", "goose").as_str() {
+        "goose" => Box::new(Goose::new(GooseConfig {
+            command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
+            args: ["acp", "--with-builtin", "developer"].map(String::from).to_vec(),
+            work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
+            home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
+            root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
+            api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
+            model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
+            tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
+            cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
+            ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+        })),
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
-        other => fail(&format!("BRIDGE_RUNTIME {other:?} is not script")),
+        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),
     }
 }
 

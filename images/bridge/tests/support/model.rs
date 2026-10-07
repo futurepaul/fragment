@@ -1,27 +1,17 @@
 //! A scripted model behind `FRAGMENT_MODEL` (lesson 13: a pure function of
-//! the transcript), in OpenAI's chat-completions shape, streamed or not:
+//! the transcript), in OpenAI's chat-completions shape, streamed or not.
+//! What it acts on is the last line of the last user message, a runtime's
+//! own context (goose's `<turn-context>`) left out:
 //!
-//! - the answer is `scripted: <the last user message's text>`;
-//! - a last user message asking to `use the terminal`, with no tool result
-//!   yet, is answered with a `terminal` tool call (`echo tool-ran` after
-//!   `sleep 2`; `use the terminal slowly`: after `sleep 8`; `use the
-//!   terminal twice`: `echo first-ran`, then that one), and one saying
-//!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
-//!   the transcript, the answer names it; `run: <command>` runs that, and
-//!   `start: <command>` starts it as a background process (Hermes refuses
-//!   a foreground `&`), each answer quoting what the tool said;
-//! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
-//!   a `computer_use` capture, and `write: <path>` a `write_file` of one
-//!   line there (each through Hermes' `tool_call` bridge when it defers the
-//!   tool); their answers quote what the tool said;
-//! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
-//!   asked;
-//! - of a message with channel context before it (`[Recent channel
-//!   messages]\n…\n\n[New message]\n…`, the platform's note after a cut
-//!   turn), only the message after `[New message]` is acted on.
+//! - `run: <command>` is a call of the shell tool offered (`shell`, or an
+//!   extension's `…__shell`) with that command;
+//! - `zoom: <id> <n>` is a call of the zoom tool offered (a mind's, through
+//!   `fragment mcp`);
+//! - once a tool's result is in the transcript, the answer quotes it:
+//!   `scripted: the tool said: <result>`;
+//! - anything else is answered `scripted: <the line>`.
 //!
-//! It records each request's `model` and `x-fragment-agent` (a screenshot's
-//! description comes as the route's `vision`: Hermes' auxiliary vision).
+//! It records each request's path, `model` and `x-fragment-agent`.
 
 #![allow(dead_code)]
 
@@ -68,128 +58,65 @@ impl Model {
     }
 }
 
-/// What `write: <path>` has Hermes' write_file put there.
-pub const WRITTEN: &str = "written by the agent\n";
-
-fn text_of(content: &Value) -> String {
+pub fn text_of(content: &Value) -> String {
     match content {
         Value::String(s) => s.clone(),
-        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
         _ => String::new(),
     }
+}
+
+/// A text with goose's `<turn-context>…</turn-context>` blocks left out.
+fn without_context(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    // bounded by the text: each pass removes one block or ends
+    while let Some(start) = rest.find("<turn-context>") {
+        out.push_str(&rest[..start]);
+        rest = match rest[start..].find("</turn-context>") {
+            Some(end) => &rest[start + end + "</turn-context>".len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The tool offered whose name is `name` or ends with `__<name>`.
+fn offered(body: &Value, name: &str) -> Option<String> {
+    let suffix = format!("__{name}");
+    body["tools"].as_array()?.iter().filter_map(|t| t["function"]["name"].as_str()).find(|n| *n == name || n.ends_with(&suffix)).map(str::to_string)
 }
 
 /// The answer for a transcript: `(text, tool call)`.
 pub fn answer(body: &Value) -> (String, Option<Value>) {
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
-    let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| text_of(&m["content"])).unwrap_or_default();
-    // Hermes renders an inbound's read-only context before the message it
-    // comes with (`[Recent channel messages]\n…\n\n[New message]\n[name]
-    // text`): the context is reference (the platform's note on a cut turn),
-    // the message what it answers. A message joined after a cut request
-    // (`[paul] do the risky thing\n\n[paul] good morning`) has no marker,
-    // and is answered whole.
-    let last_user = match last_user.rsplit_once("[New message]\n") {
-        Some((_, message)) => message.to_string(),
-        None => last_user,
-    };
+    let last_user = messages.iter().rev().find(|m| m["role"] == "user").map(|m| without_context(&text_of(&m["content"]))).unwrap_or_default();
+    let said = last_user.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("").to_string();
     let tool_result = messages.iter().rev().take_while(|m| m["role"] != "user").find(|m| m["role"] == "tool").map(|m| text_of(&m["content"]));
-    let offered = |name: &str| body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == name));
-    let has_terminal = offered("terminal");
-    // `use the terminal twice`: a quick command, then, at once, one that
-    // sleeps 2 s (the second's progress line comes within Hermes' 1.5 s edit
-    // interval of the first's, as a real model's quick second call does),
-    // then the answer
-    let results = messages.iter().rev().take_while(|m| m["role"] != "user").filter(|m| m["role"] == "tool").count();
-    if last_user.contains("use the terminal twice") && has_terminal && results < 2 {
-        let command = if results == 0 { "echo first-ran" } else { "sleep 2 && echo tool-ran" };
-        let call = json!({ "index": 0, "id": format!("call_{}", results + 1), "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
-        return (String::new(), Some(call));
-    }
-    // `run: <command>` on a line of what the user said: that command, and an
-    // answer that quotes what it printed
-    let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
-    // `start: <command>`: that command as Hermes' background process
-    let start = last_user.lines().find_map(|l| l.split_once("start: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
-    // `browse: <url>`: the browser tool goes there; `look at your screen`:
-    // computer_use captures it. Each answer quotes what its tool said.
-    let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
-    let look = last_user.contains("look at your screen");
-    // `write: <path>`: Hermes' write_file puts `WRITTEN` there
-    let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     if let Some(result) = tool_result {
-        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() {
-            return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
-        }
-        let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
-        return (format!("scripted: {ran}"), None);
+        return (format!("scripted: the tool said: {}", result.trim().chars().take(4000).collect::<String>()), None);
     }
-    // Hermes' smart-approval guardian asks for one word: a person decides.
-    if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
-        return ("ESCALATE".into(), None);
+    let call = |name: String, args: Value| json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": name, "arguments": args.to_string() } });
+    if let (Some(command), Some(shell)) = (said.strip_prefix("run: "), offered(body, "shell")) {
+        return (String::new(), Some(call(shell, json!({ "command": command }))));
     }
-    if let (Some(command), true) = (start.as_deref(), has_terminal) {
-        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "background": true }).to_string() } });
-        return (String::new(), Some(call));
+    if let (Some(at), Some(zoom)) = (said.strip_prefix("zoom: "), offered(body, "zoom")) {
+        let n: Vec<u64> = at.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+        return (String::new(), Some(call(zoom, json!({ "id": n.first().copied().unwrap_or(0), "n": n.get(1).copied().unwrap_or(1) }))));
     }
-    let command = if let Some(c) = run.as_deref() {
-        Some(c)
-    } else if last_user.contains("risky") {
-        Some("rm -rf /tmp/fragment-risky && echo tool-ran")
-    } else if last_user.contains("use the terminal slowly") {
-        Some("sleep 8 && echo tool-ran")
-    } else if last_user.contains("use the terminal") {
-        // Hermes sends a tool's progress line (its step) only if its turn
-        // runs on past its 0.3 s progress poll (docs/technical-debt-ledger.md,
-        // "A quick tool's step can be lost in Hermes")
-        Some("sleep 2 && echo tool-ran")
-    } else {
-        None
-    };
-    if let (Some(command), true) = (command, has_terminal) {
-        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command }).to_string() } });
-        return (String::new(), Some(call));
-    }
-    let call = |name: &str, args: Value| json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": name, "arguments": args.to_string() } });
-    // Hermes defers computer_use behind its tool_search bridge: listed in
-    // tool_search's description, invoked through tool_call
-    let deferred = |name: &str| offered("tool_call") && body["tools"].as_array().is_some_and(|t| t.iter().any(|t| t["function"]["name"] == "tool_search" && t["function"]["description"].as_str().is_some_and(|d| d.contains(name))));
-    let capture = json!({ "action": "capture", "mode": "vision", "app": "screen" });
-    if let Some(path) = write {
-        let args = json!({ "path": path, "content": WRITTEN });
-        return if offered("write_file") {
-            (String::new(), Some(call("write_file", args)))
-        } else if deferred("write_file") {
-            (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "write_file", "arguments": args }] }))))
-        } else {
-            ("scripted: no write_file among my tools".into(), None)
-        };
-    }
-    match (browse, look) {
-        (Some(url), _) if offered("browser_navigate") => return (String::new(), Some(call("browser_navigate", json!({ "url": url })))),
-        (Some(_), _) => return ("scripted: no browser_navigate among my tools".into(), None),
-        (None, true) if offered("computer_use") => return (String::new(), Some(call("computer_use", capture))),
-        (None, true) if deferred("computer_use") => return (String::new(), Some(call("tool_call", json!({ "calls": [{ "name": "computer_use", "arguments": capture }] })))),
-        (None, true) => return ("scripted: no computer_use among my tools".into(), None),
-        _ => {}
-    }
-    // The first line of what the user said: Hermes appends its own notes
-    // (a first contact's introduction) after it.
-    let said = last_user.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
     (format!("scripted: {said}"), None)
 }
 
 async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
-    if path.ends_with("/models") {
-        return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
-    }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone() });
-    if !path.ends_with("/chat/completions") {
+    // the platform's model route answers its completions alone (docs/computers.md, "Models")
+    if !path.ends_with("/v1/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
     let (text, tool) = answer(&v);
@@ -225,49 +152,19 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
 
 #[test]
 fn answers_are_the_transcripts() {
-    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] hi there" }] }));
-    assert_eq!((t.as_str(), call), ("scripted: [paul] hi there", None));
-    let tools = json!([{ "type": "function", "function": { "name": "terminal" } }]);
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "please use the terminal" }], "tools": tools }));
-    assert!(call.is_some());
-    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "please use the terminal" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "tool-ran\n" }], "tools": tools }));
-    assert_eq!((t.as_str(), call), ("scripted: the tool ran", None));
-    // `run:` runs its command, and the answer quotes what it printed
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list --json" }], "tools": tools }));
-    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
-    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "skills.paul (editor)" }], "tools": tools }));
-    assert_eq!(t, "scripted: the tool said: skills.paul (editor)");
-    // the browser, and computer_use directly or behind Hermes' tool_search
-    let browser = json!([{ "type": "function", "function": { "name": "browser_navigate" } }]);
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] browse: https://example.com" }], "tools": browser }));
-    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "url": "https://example.com" }).to_string());
-    let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… computer_use: Background desktop control …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": bridged }));
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "framing\n\nhi there" }] }));
+    assert_eq!((t.as_str(), call), ("scripted: hi there", None));
+    // goose's turn context is no part of what was said
+    let noted = json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hello\n<turn-context>\n<current-time>now</current-time>\n</turn-context>" }] }] });
+    assert_eq!(answer(&noted).0, "scripted: hello");
+    let tools = json!([{ "type": "function", "function": { "name": "developer__shell" } }, { "type": "function", "function": { "name": "mind__zoom" } }]);
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }], "tools": tools }));
     let call = call.unwrap();
-    assert!(call["function"]["name"] == "tool_call" && call["function"]["arguments"].as_str().unwrap().contains("\"computer_use\""), "{call}");
-    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools }));
-    assert_eq!((t.as_str(), call), ("scripted: no computer_use among my tools", None));
-    // `start:` is a background process, and the answer quotes what it said
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] start: chromium about:blank" }], "tools": tools }));
-    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "command": "chromium about:blank", "background": true }).to_string());
-    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] start: chromium" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"session_id\": \"proc_1\"}" }], "tools": tools }));
-    assert_eq!(t, "scripted: the tool said: {\"session_id\": \"proc_1\"}");
-    // write_file, directly or behind tool_search, and the answer quotes it
-    let files = json!([{ "type": "function", "function": { "name": "write_file" } }]);
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": files }));
-    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "path": "~/notes.txt", "content": WRITTEN }).to_string());
-    let bridged = json!([{ "type": "function", "function": { "name": "tool_search", "description": "… write_file: Write content …" } }, { "type": "function", "function": { "name": "tool_call" } }]);
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": bridged }));
-    assert!(call.is_some_and(|c| c["function"]["name"] == "tool_call" && c["function"]["arguments"].as_str().unwrap().contains("\"write_file\"")));
-    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"path\": \"/h/notes.txt\"}" }], "tools": files }));
-    assert_eq!(t, "scripted: the tool said: {\"path\": \"/h/notes.txt\"}");
-    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": tools }));
-    assert_eq!((t.as_str(), call), ("scripted: no write_file among my tools", None));
-    // a note on a cut risky turn is context: the message after it is answered
-    let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
-    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));
-    assert_eq!((t.as_str(), call), ("scripted: [paul] good morning", None));
-    // joined to the cut request, it is answered whole: the request is redone
-    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] do the risky thing\n\n[paul] good morning" }], "tools": tools }));
-    assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("rm -rf")));
+    assert_eq!((call["function"]["name"].as_str(), call["function"]["arguments"].as_str()), (Some("developer__shell"), Some(r#"{"command":"echo hi"}"#)));
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "zoom: 4 2" }], "tools": tools }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "id": 4, "n": 2 }).to_string());
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "hi\n" }], "tools": tools }));
+    assert_eq!((t.as_str(), call), ("scripted: the tool said: hi", None));
+    // no such tool offered: answered in words
+    assert_eq!(answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }] })).0, "scripted: run: echo hi");
 }

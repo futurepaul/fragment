@@ -155,6 +155,9 @@ fn a_reply_streams_then_posts() {
     let d = ev(&mut e, Event::Draft { turn: turn.clone(), text: "He".into() }, T0 + 2);
     assert_eq!(d.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: Some("He".into()) }]);
     assert!(!d.dirty, "drafts are never stored");
+    // an empty draft stops the draft (its words went to a step)
+    let stop = ev(&mut e, Event::Draft { turn: turn.clone(), text: String::new() }, T0 + 2);
+    assert_eq!(stop.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: None }]);
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
     let end = e.step(Input::Runtime(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);

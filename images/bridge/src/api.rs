@@ -360,6 +360,13 @@ impl Api {
         self.call(Method::GET, &format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256)), Some(agent), None, max).await
     }
 
+    /// `POST /api/f/{name}/ops/{op} {id, input}` → its `result` (a query's
+    /// answer; the same id answers the same call).
+    pub async fn op(&self, agent: &str, fragment: &str, op: &str, id: &str, input: &Value) -> Result<Value, ApiError> {
+        let v: Value = self.json(Method::POST, &format!("/api/f/{}/ops/{}", name(fragment)?, encode(op)), Some(agent), Some(json!({ "id": id, "input": input }))).await?;
+        Ok(v["result"].clone())
+    }
+
     /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;

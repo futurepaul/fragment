@@ -1053,7 +1053,10 @@ impl Engine {
             Event::Draft { turn, text } => {
                 let t = &self.state.turns[&turn];
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
-                self.draft(&agent, &fragment, &turn, Some(records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES)));
+                // an empty draft is none: the words it showed went elsewhere
+                // (a step's, as goose's before a tool call)
+                let text = (!text.is_empty()).then(|| records::cut_bytes(&text, limits::DRAFT_TEXT_MAX_BYTES));
+                self.draft(&agent, &fragment, &turn, text);
             }
             Event::Reply { turn, part, text } => self.reply(&turn, part, Some(text), None),
             Event::Attachment { turn, part, file } => self.reply(&turn, part, None, Some(file)),

@@ -1,7 +1,9 @@
 //! The runtime side of the bridge: whatever runs the agents. The bridge's
 //! core speaks only these commands and events; each runtime translates them
-//! into its own protocol. One ships here:
+//! into its own protocol. Two ship here:
 //!
+//! - `goose`: goose over ACP on its stdio, one `goose acp` per agent and a
+//!   fresh session per turn (docs/optchat.md; our goose image).
 //! - `script`: a deterministic scripted agent (the stub image), so the
 //!   platform's lanes run without any agent runtime at all.
 //!
@@ -16,6 +18,7 @@
 //! `turn.start`), and a turn is claimed only while the runtime says it can
 //! take one (`Event::Connected`).
 
+pub mod goose;
 pub mod script;
 
 use std::future::Future;
@@ -141,7 +144,7 @@ pub enum Event {
     /// starts.
     Connected(bool),
     /// The reply being written, its whole text so far (shown live, never
-    /// stored).
+    /// stored); empty, the draft stops.
     Draft { turn: String, text: String },
     /// Reply `part` (from 1, in order) of the turn, its whole text now. A
     /// later part, a step, a prompt, or the end posts it.

@@ -50,9 +50,10 @@ pub struct Frag {
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
     pub blobs: HashMap<String, (String, Bytes)>,
-    /// What its `view` operation answers (`{text}`); none, it has no such
-    /// operation (404 `unknown_operation`, as a chat's).
-    pub view: Option<String>,
+    /// Its operations: each one's declaration (as `status.code.operations`
+    /// lists it) and the result it answers every call with. One not here
+    /// is 404 `unknown_operation` (a chat has no `view`).
+    pub ops: BTreeMap<String, (Value, Value)>,
 }
 
 struct LiveSock {
@@ -232,6 +233,22 @@ impl Fake {
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
             w.fragments.insert(name.clone(), f);
+        });
+        name
+    }
+
+    /// A mind `<label>.paul` (docs/optchat.md): a chat whose `view` answers
+    /// `view`, with a `zoom` that answers `zoomed` whatever it is asked,
+    /// both described (so `fragment mcp` serves them).
+    pub fn mind(&self, label: &str, agents: &[&str], view: &str, zoomed: &str) -> String {
+        let name = self.chat(label, agents);
+        self.with(|w| {
+            let f = w.fragments.get_mut(&name).expect("the chat just made");
+            f.kind = "mind".into();
+            let object = |props: Value| json!({ "type": "object", "properties": props });
+            f.ops.insert("view".into(), (json!({ "kind": "query", "role": "viewer", "description": "The rendered view.", "input": object(json!({})) }), json!({ "text": view, "bytes": view.len(), "settled": true })));
+            let zoom = json!({ "kind": "query", "role": "viewer", "description": "Open a line of the view.", "input": object(json!({ "id": { "type": "integer" }, "n": { "type": "integer" } })) });
+            f.ops.insert("zoom".into(), (zoom, json!({ "text": zoomed })));
         });
         name
     }
@@ -534,11 +551,24 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             Some((ty, bytes)) => net::respond(StatusCode::OK, ty, bytes.clone()),
             None => refuse(StatusCode::NOT_FOUND, "no such blob"),
         },
-        (Method::POST, ["ops", "view"]) => {
+        // a fragment's status, as `fragment mcp` reads its operations
+        (Method::GET, ["status"]) => {
+            let operations: serde_json::Map<String, Value> = f.ops.iter().map(|(name, (decl, _))| (name.clone(), decl.clone())).collect();
+            answer(
+                StatusCode::OK,
+                json!({
+                    "name": fragment, "npub": "n", "owner": "id:paul", "role": role, "visibility": "members", "repo": "r",
+                    "pins": { "main": "a", "live": "a" }, "counts": { "files": 0, "events": 0, "members": f.members.len() },
+                    "code": { "sha": "a", "id": "app:x", "operations": operations, "error": null },
+                    "viewToken": null, "inboxToken": null, "urls": { "canonical": format!("https://{fragment}.x/"), "platform": "https://x" },
+                }),
+            )
+        }
+        (Method::POST, ["ops", op]) => {
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-            match (&f.view, v["id"].as_str()) {
+            match (f.ops.get(*op), v["id"].as_str()) {
                 (_, None) => refuse(StatusCode::BAD_REQUEST, "an operation's call names its id"),
-                (Some(text), Some(_)) => answer(StatusCode::OK, json!({ "result": { "text": text, "bytes": text.len(), "settled": true }, "replayed": false })),
+                (Some((_, result)), Some(_)) => answer(StatusCode::OK, json!({ "result": result, "replayed": false })),
                 (None, Some(_)) => net::refusal(StatusCode::NOT_FOUND, "unknown_operation", "no such operation"),
             }
         }

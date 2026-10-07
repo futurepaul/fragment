@@ -18,6 +18,7 @@
 
 #![allow(dead_code)]
 
+pub mod acp;
 pub mod fake;
 pub mod model;
 
