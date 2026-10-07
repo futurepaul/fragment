@@ -29,7 +29,6 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
-use crate::routed::Mode;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
@@ -61,14 +60,13 @@ pub(crate) fn eq_ct(a: &str, b: &str) -> bool {
 }
 
 struct Origin {
-    cookie_path: String,
     secure: bool,
 }
 
 impl Origin {
     fn cookie(&self, name: &str, value: &str, max_age_s: i64) -> String {
         let secure = if self.secure { "; Secure" } else { "" };
-        format!("{name}={value}; Path={}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{secure}", self.cookie_path)
+        format!("{name}={value}; Path=/; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{secure}")
     }
 }
 
@@ -142,10 +140,7 @@ impl FragmentCell {
         let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)
         let url = caller.url.clone();
-        let origin = Origin {
-            cookie_path: if caller.mode == Some(Mode::Host) { "/".into() } else { format!("/f/{name}/") },
-            secure: caller.url.scheme() == "https",
-        };
+        let origin = Origin { secure: caller.url.scheme() == "https" };
         let cookies = req.headers().get("cookie")?.unwrap_or_default();
         let via_query = url.query_pairs().any(|(k, v)| k == "view" && eq_ct(&v, &facts.view_token));
         let via_cookie = site::cookie(&cookies, VIEW_COOKIE).is_some_and(|v| eq_ct(v, &facts.view_token));

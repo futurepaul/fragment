@@ -38,7 +38,7 @@ pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
     let result = run(s, &api);
     drop(api);
     s.stop()?;
-    s.start(false, true)?;
+    s.start(false)?;
     result
 }
 

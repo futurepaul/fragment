@@ -72,7 +72,7 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::routed::{Credential, Mode, Routed, Signed};
+use crate::routed::{Credential, Routed, Signed};
 
 /// How long a create in progress holds its name.
 pub(crate) const CLAIM_TTL_MS: i64 = 120_000;
@@ -312,8 +312,8 @@ pub struct Caller {
     /// The URL the request arrived on: canonical URLs, cookies, and the
     /// query string derive from it.
     pub url: url::Url,
-    /// How a site request addressed the fragment (`None` off the site).
-    pub mode: Option<Mode>,
+    /// A site request (`/serve/…`): its page's, not the API's.
+    pub site: bool,
 }
 
 impl Caller {
@@ -833,7 +833,7 @@ impl FragmentCell {
     pub(crate) async fn identified<'a>(&self, caller: &'a Caller, name: &str) -> CellResult<Cow<'a, Caller>> {
         let Some(credential) = &caller.unresolved else { return Ok(Cow::Borrowed(caller)) };
         let signed = credential.clone().resolve(&self.env, name).await?;
-        Ok(Cow::Owned(Caller { signed, unresolved: None, url: caller.url.clone(), mode: caller.mode }))
+        Ok(Cow::Owned(Caller { signed, unresolved: None, url: caller.url.clone(), site: caller.site }))
     }
 
     /// The caller of a read that answers alike for everyone who may see
@@ -944,8 +944,8 @@ impl FragmentCell {
             return self.cap_files(&op, &body).await;
         }
         // Every route below is the router's: decoded once, from headers only it sets.
-        let Routed { name: routed_name, url, mode, signed, credential } = Routed::from_headers(req.headers())?;
-        let caller = Caller { signed, unresolved: credential, url, mode };
+        let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
+        let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
         self.meter_soon().await;
