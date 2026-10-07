@@ -37,11 +37,6 @@ pub struct Config {
     /// `FRAGMENT_HOST_SUFFIX`: fragments are served from
     /// `<label>--<username>.<suffix>`. Every deployment names one.
     pub host_suffix: String,
-    /// `FRAGMENT_LEGACY_HOST_SUFFIX`: where fragments were served before the
-    /// suffix changed (fragment.club, before fragment.boats): a fragment's
-    /// host under it sends a browser to its host under the suffix. It counts
-    /// only beside a suffix, and one that differs from it.
-    legacy_host_suffix: Option<String>,
     /// `FRAGMENT_HOST_LABEL_SUFFIX` (`--<branch>`): a branch deployment's
     /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
     /// other branches' in one zone.
@@ -202,7 +197,6 @@ impl Config {
         let pinned_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1);
         let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
         let host_suffix = suffix("FRAGMENT_HOST_SUFFIX").expect("FRAGMENT_HOST_SUFFIX names where fragments are served");
-        let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| *l != host_suffix);
         // a branch deployment's fragments share its zone with other branches'
         let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
         assert!(
@@ -230,7 +224,6 @@ impl Config {
                 CodeStorageConfig { org, api, repo_prefix }
             },
             host_suffix,
-            legacy_host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
@@ -349,17 +342,10 @@ impl Config {
         Some(format!("{}://{label}{}.{suffix}{port}", platform.scheme(), self.host_label_suffix()))
     }
 
-    /// The fragment an old host names (`<label>--<username>.<legacy
-    /// suffix>`): it is served under the suffix now.
-    pub fn fragment_of_legacy_host(&self, host: &str) -> Option<String> {
-        from_flat_name(&label_under(host, self.legacy_host_suffix.as_deref()?)?)
-    }
-
-    /// The label a host has under the suffix or the old one (`x` of
-    /// `x.<suffix>`), if it is one: such a host is a fragment's or no one's,
-    /// never the platform's.
+    /// The label a host has under the suffix (`x` of `x.<suffix>`), if it
+    /// is one: such a host is a fragment's or no one's, never the platform's.
     pub fn subdomain(&self, host: &str) -> Option<String> {
-        [Some(&self.host_suffix), self.legacy_host_suffix.as_ref()].into_iter().flatten().find_map(|s| label_under(host, s))
+        label_under(host, &self.host_suffix)
     }
 
     /// Where a fragment is served, given the URL a request arrived on (its

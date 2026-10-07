@@ -288,9 +288,6 @@ pub struct Fleet {
     pub codestorage_url: String,
     /// Fragments are served from `<label>--<username>.<suffix>`.
     pub host_suffix: String,
-    /// Where fragments were served before the suffix moved: a fragment's
-    /// host there redirects to its host under the suffix.
-    pub legacy_host_suffix: Option<String>,
     /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
     /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
     /// test levers to the e2e's own things (the hosted lane's rehearsal).
@@ -404,9 +401,6 @@ impl Fleet {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
         }
         vars.push(("FRAGMENT_HOST_SUFFIX", self.host_suffix.as_str()));
-        if let Some(s) = &self.legacy_host_suffix {
-            vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
-        }
         if let Some(s) = &self.host_label_suffix {
             vars.push(("FRAGMENT_HOST_LABEL_SUFFIX", s.as_str()));
         }

@@ -19,10 +19,9 @@ the deployment's secrets are Worker secrets (below).
 |---|---|
 | `CODESTORAGE_ORG` | the code.storage org (required) |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
-| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below). Every deployment names one: an isolate without it does not start |
+| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Hosts, below). Every deployment names one: an isolate without it does not start |
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
-| `FRAGMENT_LEGACY_HOST_SUFFIX` | where fragments were served before the suffix moved: a fragment's host under it redirects to its host under the suffix (Moved hosts, below); counted only beside a different suffix. fragment.club's is `fragment.club`, its suffix `fragment.boats` |
 | `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses, and takes a connection's http:// consent URL (dev and e2e fakes); never on a shared fleet. It also makes a fleet local for its test levers (Test levers, below) |
@@ -1202,24 +1201,14 @@ Linux), `fragment
 post <name> <channel> --body '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
 
-### Moved hosts (docs/fragment-boats.md, slice 2)
+### Hosts
 
-fragment.club's fragments moved to `fragment.boats` (ROADMAP decision
-23); the platform stayed on `fragment.club`. The router takes a host in
-this order: the platform's own host (even under the suffix); a
-fragment's host; the suffix's own name (`fragment.boats`), which
+The router takes a host in this order: the platform's own host (even
+under the suffix); a fragment's host; the suffix's own name, which
 answers `308` to the same path and query on the platform, when the
-platform is elsewhere; a fragment's old host
-(`<label>--<username>.<FRAGMENT_LEGACY_HOST_SUFFIX>`), which answers a
-GET or HEAD `308` to the same path and query on its new host, and
-anything else there (a write, a socket) `410` `moved`, whose message
-names that URL; any other name under either suffix, 404; anything else,
-the platform. Neither redirect checks that the fragment exists, and both
-answer `Cache-Control: no-store`, so the move can be undone. Old links
-keep working through them (a share link's `?view=` rides along); a
-browser's cookies and storage on the old host stay there, so each person
-signs in once more on each fragment, and a page loaded before the move
-has its calls refused until it is reloaded onto the new host.
+platform is elsewhere (`Cache-Control: no-store`, so the platform can
+still move); any other name under the suffix, 404; anything else, the
+platform.
 
 ## Agents (`agent/`, phase 5; co-hosted since phase 6)
 
