@@ -402,6 +402,38 @@ fragment.club until cutover (decisions 34–35).
   already lists them), with an e2e check; or every socket re-resolves
   its key on a timer, not only at a frame it sends.
 
+## The registry is one Durable Object for the fleet
+
+- **Observed:** #156 (problem 8). Every request whose answer depends on
+  who asks resolves its key or session live in the one `Registry` cell
+  (cell/src/registry.rs, `NAME`): one round trip each, never more, and
+  none for a page or file anyone who may see the fragment gets alike
+  (the signin and identities lanes count them). A CLI or agent call, a
+  model call, an operation, an app route, a socket's connect: 1 each (a
+  `__live` socket 1 more a minute while it sends frames); a members-only
+  fragment's page: 1 a file; the shell's load (cell/shell/shell.js
+  `start`, `load`): 4, then up to 3 a chat (its members, its channels,
+  its newest message) and 1 an app (its card), then the open chat's
+  frame (a mint, a redemption, its files and its socket).
+- **Risk:** throughput, and where it lives. Cloudflare puts one object at
+  500–1,000 simple requests a second: a person with 50 chats and 10 apps
+  asks it about 170 times a shell load, so a few such loads a second
+  fill it. A person far from it pays a round trip there for each signed
+  request, and while it restarts (a deploy) every signed request waits.
+- **First proof:** the `Registry` namespace's requests a second
+  (Workers analytics) sustained past 200, or its wall time's p99 past
+  20 ms.
+- **Delete when:** BANKS answers instead (docs/finite-integration.md,
+  FIN-11); or, if the load comes first: the shell reads its sidebar in
+  one request (its list's rows carry what a row shows, or one call
+  answers every chat under one resolved identity), which takes the 3 a
+  chat away; then, if still near the line, sessions and keys move to
+  objects named by what they resolve (a session by its token's hash, a
+  key by itself), written by the registry as they change, which keeps
+  only what must be unique (usernames, sign-in subjects, identities).
+  Each lookup stays one live round trip: no cache outlives a revocation
+  (rule 7).
+
 ## Video steps are off
 
 - **Observed:** 2026-10-03, when OpenRouter was cut (Paul: "I thought we
