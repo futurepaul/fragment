@@ -440,6 +440,10 @@ pub struct Stream {
     lines: u64,
     /// The answer so far, when one is read (`answering`).
     answer: Option<Answer>,
+    /// `[DONE]` was read: the answer and its usage are whole, whether or
+    /// not the connection stays open after it (the gateway's may, for
+    /// minutes).
+    done: bool,
 }
 
 impl Stream {
@@ -499,6 +503,11 @@ impl Stream {
         self.lines
     }
 
+    /// Whether `[DONE]` was read: a reader stops there.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+
     fn take_line(&mut self, line: &[u8], out: Option<&mut Vec<u8>>) {
         self.lines += 1;
         let rewritten = self.read_line(line);
@@ -513,6 +522,7 @@ impl Stream {
         let text = std::str::from_utf8(line).ok()?;
         let data = text.strip_prefix("data:")?.trim();
         if data == "[DONE]" {
+            self.done = true;
             return None;
         }
         let Ok(Value::Object(mut chunk)) = serde_json::from_str::<Value>(data) else { return None };
@@ -725,6 +735,20 @@ mod tests {
             .filter(|d| *d != "[DONE]")
             .map(|d| serde_json::from_str(d).unwrap())
             .collect()
+    }
+
+    /// Goal: a reader can stop at `[DONE]` with the answer and its usage
+    /// whole (the gateway held a step's stream open for minutes after it,
+    /// 2026-10-07). Method: S4's stream up to its last line, then that line.
+    #[test]
+    fn a_stream_is_done_at_its_done_line_with_its_usage() {
+        let (body, done) = S4_STREAM.split_at(S4_STREAM.len() - "data: [DONE]\n\n".len());
+        let mut s = Stream::answering();
+        s.push(body.as_bytes(), None);
+        assert!(!s.done(), "not done before [DONE]");
+        s.push(done.as_bytes(), None);
+        assert!(s.done());
+        assert_eq!((s.answer().unwrap().content.as_str(), s.usage().map(|u| u["completion_tokens"].clone())), ("1, 2, 3,", Some(json!(15))));
     }
 
     /// Goal: only the last, cumulative usage is metered, and the client

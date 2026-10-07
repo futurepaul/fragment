@@ -400,6 +400,11 @@ impl FragmentCell {
                 sent = self.draft(d, text).unwrap_or(sent);
                 sent_at = Some(now);
             }
+            // the answer is whole at `[DONE]`: the gateway can hold the
+            // connection open for minutes after it
+            if stream.done() {
+                break;
+            }
         }
         stream.finish(None);
         let answer = stream.answer().cloned().expect("an answering stream keeps its answer");
