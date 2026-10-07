@@ -1101,9 +1101,12 @@ What didn't help:
 What goes where:
 - **The Hermes image's boot list** (phase 4): bytecode with
   `unchecked-hash`, `plugins.disabled` for platforms and dashboard auth,
-  a gateway preloaded before the restore gate, setup gated on stamps,
-  the CA appended rather than regenerated, a readahead list, a
-  single-layer image, and the dashboard and screen lazy.
+  a gateway preloaded before the restore gate, the CA appended rather
+  than regenerated, a readahead list, a single-layer image, and the
+  dashboard and screen lazy. (Setup gated on stamps went on 2026-10-06,
+  issue 156: the image carries no bundled skills, so nothing syncs them,
+  and the config migration runs at every boot, a no-op of 0.07 s on a
+  desktop CPU.)
 - **Upstream Hermes:** load only the configured platforms, key the skills
   sync on the image revision, use lazy imports, and ship bytecode.
 - **The generic Computer DO:** snapshot-backed wakes (decision 18) and a
