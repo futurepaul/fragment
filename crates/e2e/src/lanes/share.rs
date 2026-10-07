@@ -291,9 +291,11 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // the list still says what it was sent, not what the fragment would;
     // the fragment's next real change updates it.
     let quiet = make(&s.name("squiet"), "blank")?;
-    // its create told the list who is in it: a real change, so it lands before the fill
-    let installed = s.eventually(wait, || listed(&quiet).is_ok_and(|f| f.get("sharing").is_some()));
-    anyhow::ensure!(installed, "{quiet}'s create never reached its owner's list");
+    // its create told the list who is in it, and its template's install
+    // its face (sending the sharing as it was then): real changes, so both
+    // land before the fill
+    let installed = s.eventually(wait, || listed(&quiet).is_ok_and(|f| f.get("sharing").is_some() && f["title"] == "Blank"));
+    anyhow::ensure!(installed, "{quiet}'s create and its template's install never reached its owner's list");
     let before = listed(&quiet)?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": quiet, "op": "members", "fill": 4 })))?;
     let filled = api.status(&owner, &quiet)?;
