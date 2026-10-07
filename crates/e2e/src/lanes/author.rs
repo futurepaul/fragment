@@ -773,12 +773,12 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         format!("head {head}, {} lines", seqs.len()),
     );
 
-    // rotate renews what the CLI names; the webhook secret is code.storage's and changes only when asked
+    // rotate renews what the CLI names
     let r = s.cli_json(api, &home, &["rotate", &name, "--json"])?;
     s.ok(
-        "fragment rotate renews the inbox token and the share link, not the webhook secret",
-        r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["webhookSecret"] == c["webhookSecret"],
-        json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "webhook_kept": r["webhookSecret"] == c["webhookSecret"] }),
+        "fragment rotate renews the inbox token and the share link",
+        r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["inboxToken"] != c["inboxToken"],
+        json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "inbox_changed": r["inboxToken"] != c["inboxToken"] }),
     );
     Ok(())
 }

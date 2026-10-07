@@ -27,7 +27,6 @@
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
-//!   POST   /api/webhook                   code.storage (HMAC)
 //!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
@@ -110,7 +109,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op I
 CREATE TABLE IF NOT EXISTS tree (
   ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
   PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
@@ -358,7 +356,6 @@ pub(crate) enum MetaKey {
     /// The share link's token.
     ViewToken,
     InboxToken,
-    WebhookSecret,
     /// Its code.storage repo.
     Repo,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
@@ -393,7 +390,7 @@ pub(crate) enum MetaKey {
     PinMain,
     PinLive,
     /// When a request first asked code.storage for the pins (plane.rs
-    /// `ensure_pins`); after it, moves arrive by webhook, refresh, or poll.
+    /// `ensure_pins`); after it, moves arrive by refresh or poll.
     PinsCheckedAt,
     /// The commit main's manifest was read from.
     MainReadAt,
@@ -467,7 +464,6 @@ impl MetaKey {
             MetaKey::Visibility => "visibility",
             MetaKey::ViewToken => "view_token",
             MetaKey::InboxToken => "inbox_token",
-            MetaKey::WebhookSecret => "webhook_secret",
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
             MetaKey::SharingSent => "sharing_sent",
@@ -1015,12 +1011,6 @@ impl FragmentCell {
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
             (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,
-            (Method::Post, ["api", "webhook"]) => {
-                let event = req.headers().get("x-pierre-event")?.unwrap_or_default();
-                let signature = req.headers().get("x-pierre-signature")?.unwrap_or_default();
-                let body = req.bytes().await?;
-                self.webhook(&event, &signature, &body).await
-            }
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
             (Method::Post, ["api", "files"]) => {
                 let body = body_json(&mut req).await?;
@@ -1145,7 +1135,7 @@ impl FragmentCell {
         let now = js::now_ms();
         let fragment_npub = npub::encode(&fragment_pub);
         let visibility = body.visibility.unwrap_or(Visibility::Link);
-        let (view_token, inbox_token, webhook_secret) = (js::random_hex::<12>(), js::random_hex::<16>(), js::random_hex::<16>());
+        let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
         for (k, v) in [
@@ -1155,7 +1145,6 @@ impl FragmentCell {
             (MetaKey::Visibility, visibility.as_str()),
             (MetaKey::ViewToken, view_token.as_str()),
             (MetaKey::InboxToken, inbox_token.as_str()),
-            (MetaKey::WebhookSecret, webhook_secret.as_str()),
             (MetaKey::Repo, repo.as_str()),
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
@@ -1204,7 +1193,6 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            webhook_secret,
             repo,
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })

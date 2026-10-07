@@ -671,27 +671,20 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "visibility": body.visibility }))
     }
 
-    /// New share-link token, inbox token, or webhook secret (default: all three).
+    /// New share-link token or inbox token (default: both). An agent
+    /// shares for its owner: it renews them as its owner does.
     pub(crate) fn rotate(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        let all = ["inbox", "view", "webhook"];
-        // an agent shares: it renews the links people and apps hold (the
-        // inbox, the share link), never code.storage's webhook secret
-        let agent = actor.for_owner.is_some();
-        let defaults: &[&str] = if agent { &["inbox", "view"] } else { &all };
+        let all = ["inbox", "view"];
         let want: Vec<String> = match &body["scopes"] {
-            Value::Null => defaults.iter().map(|s| s.to_string()).collect(),
             Value::Array(a) if !a.is_empty() => a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect(),
-            Value::Array(_) => defaults.iter().map(|s| s.to_string()).collect(),
-            _ => return Err(CellError::invalid("scopes must be an array of inbox, view, webhook")),
+            Value::Null | Value::Array(_) => all.iter().map(|s| s.to_string()).collect(),
+            _ => return Err(CellError::invalid("scopes must be an array of inbox, view")),
         };
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
-            return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view, webhook)")));
+            return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view)")));
         }
-        if agent && want.iter().any(|w| w == "webhook") {
-            return Err(CellError::new(ErrorCode::Forbidden, "an agent rotates the inbox and share links, never the webhook secret: its owner does"));
-        }
-        for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>()), ("webhook", MetaKey::WebhookSecret, js::random_hex::<16>())] {
+        for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>())] {
             if want.iter().any(|w| w == scope) {
                 self.set_meta(key, &fresh)?;
             }
@@ -704,7 +697,6 @@ impl FragmentCell {
         json_response(&Rotated {
             inbox_token: self.must(MetaKey::InboxToken)?,
             view_token: self.must(MetaKey::ViewToken)?,
-            webhook_secret: if agent { None } else { Some(self.must(MetaKey::WebhookSecret)?) },
             rotated: rotated.iter().map(|s| s.to_string()).collect(),
         })
     }

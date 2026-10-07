@@ -59,7 +59,7 @@ pub struct Config {
     /// docs/explorations/pi-durable.md). Thirty minutes by default, a
     /// default for Paul to confirm (`fragment_core::computer`).
     pub computer_unsaved_max_ms: i64,
-    /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
+    /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
     /// addresses (dev and e2e fleets, which call local fakes). Never on a

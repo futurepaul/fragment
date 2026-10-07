@@ -1,5 +1,5 @@
 //! A small blocking HTTP/1.1 server and client over std TCP: enough for a
-//! fake service (one request per connection) and for delivering webhooks.
+//! fake service (one request per connection) and a client for its tests.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -245,7 +245,7 @@ pub fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// The most of an answer `post` reads, head and body: a webhook's answer
+/// The most of an answer `post` reads, head and body: a test's answer
 /// is a few hundred bytes, and one past this is a bug, not a slow server.
 pub const ANSWER_BYTES_MAX: usize = 1024 * 1024;
 

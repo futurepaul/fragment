@@ -1,7 +1,7 @@
 //! The fragment end-to-end suite: the real cell and agents' Worker under
 //! `wrangler dev` (workerd, from staged copies under `target/e2e/<run>`, so
 //! a running `xtask dev` is never touched), the code.storage fake from
-//! `crates/fakes` (webhooks included), the real CLI, and signed HTTP the
+//! `crates/fakes`, the real CLI, and signed HTTP the
 //! way the CLI and a browser send it. The fakes stand only at vendor
 //! boundaries (code.storage, WorkOS, the model, a push service): this is
 //! the lower rung under the hosted lane.
@@ -577,38 +577,32 @@ impl Suite {
         devstack::containers::remove(&self.project).map(Some)
     }
 
-    /// Registers the fragment's push webhook with the fake (the dashboard
-    /// registration the real service has), so git moves reach the cell.
-    /// Hosted, nothing: the run's commits and deploys go through the API
-    /// (`commit`, `deploy`), which moves the pins itself.
-    pub fn hook(&self, api: &Api, created: &Value) {
-        if self.hosted() {
-            return;
-        }
+    /// Records who owns a fragment made some other way than `create` (the
+    /// CLI, the shell), so `commit` and `deploy` act as them.
+    pub fn owned(&self, created: &Value, keys: &Keys) {
         let name = created["name"].as_str().expect("created.name");
-        let repo = created["repo"].as_str().expect("created.repo");
-        let secret = created["webhookSecret"].as_str().expect("created.webhookSecret");
-        self.fake.register_webhook(repo, &format!("{}/api/f/{name}/webhook", api.base), secret);
+        self.owners.borrow_mut().insert(name.to_string(), keys.clone());
     }
 
-    /// Creates a fragment (signed by `keys`) with its webhook registered.
+    /// Creates a fragment signed by `keys`, its owner.
     pub fn create(&self, api: &Api, keys: &Keys, name: &str) -> Result<Value> {
         let r = api.create(keys, name)?;
         if r.status != 200 {
             bail!("create {name}: {r}");
         }
-        self.hook(api, &r.body);
-        let full = r.body["name"].as_str().context("a create answers the fragment's name")?;
-        self.owners.borrow_mut().insert(full.to_string(), keys.clone());
+        self.owned(&r.body, keys);
         Ok(r.body)
     }
 
-    /// A commit on main by another writer, announced by webhook. Hosted,
-    /// its owner's commit through the files route (`POST /api/f/{name}/files`:
+    /// A commit on main by another writer: a push through the fake, then
+    /// its owner's `refresh`, as the CLI pushes and refreshes. Hosted, its
+    /// owner's commit through the files route (`POST /api/f/{name}/files`:
     /// one commit, main moved at once), since a preview's git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            return self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            let sha = self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            self.refresh(created);
+            return sha;
         }
         let files: Vec<Value> = changes
             .iter()
@@ -622,26 +616,41 @@ impl Suite {
         r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
-    /// Moves live to main's tip (what `fragment deploy` does), announced.
-    /// Hosted, its owner's deploy (`POST /api/f/{name}/deploy`), which
-    /// installs the app at once.
+    /// Moves live to main's tip through the fake, then refreshes (a ref
+    /// move as `fragment rollback` makes one). Hosted, its owner's deploy
+    /// (`POST /api/f/{name}/deploy`), which installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
             let repo = created["repo"].as_str().expect("created.repo");
             let tip = self.fake.branch(repo, "main").expect("main has a commit");
             self.fake.set_branch(repo, "live", &tip);
+            self.refresh(created);
             return tip;
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
     }
 
-    /// A hosted run's `POST /api/f/{name}/{route}`, signed by the owner
-    /// `create` recorded: a git move as a local run makes it through the fake.
+    /// The owner's `refresh` after a move through the fake; one that fails
+    /// (a code.storage outage a test makes) is the test's to see, as the
+    /// CLI only warns.
+    fn refresh(&self, created: &Value) {
+        let _ = self.call_as_owner(created, "refresh", &json!({}));
+    }
+
+    /// `POST /api/f/{name}/{route}`, signed by the owner `create` or
+    /// `owned` recorded.
+    fn call_as_owner(&self, created: &Value, route: &str, body: &Value) -> Result<api::Reply> {
+        let name = created["name"].as_str().expect("created.name");
+        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name}'s owner is recorded by Suite::create or Suite::owned"));
+        self.api().signed(&owner, "POST", &format!("/api/f/{name}/{route}"), Some(body))
+    }
+
+    /// A hosted run's `POST /api/f/{name}/{route}` as its owner: a git move
+    /// as a local run makes it through the fake.
     fn as_owner(&self, created: &Value, route: &str, body: &Value) -> Value {
         let name = created["name"].as_str().expect("created.name");
-        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name} was made by Suite::create, which records its owner"));
-        let r = self.api().signed(&owner, "POST", &format!("/api/f/{name}/{route}"), Some(body)).unwrap_or_else(|e| panic!("{route} {name}: {e:#}"));
+        let r = self.call_as_owner(created, route, body).unwrap_or_else(|e| panic!("{route} {name}: {e:#}"));
         assert!(r.status == 200, "{route} {name}: {r}");
         r.body
     }

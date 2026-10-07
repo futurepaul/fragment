@@ -125,7 +125,7 @@ fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
     api.unsigned("POST", "/api/test/fragment", Some(&body))
 }
 
-/// Waits for a deploy to land (by the webhook): a query answers once it has.
+/// Waits for a deploy to land: a query answers once it has.
 fn landed(s: &Suite, api: &Api, keys: &Keys, name: &str, wait: Duration) {
     s.eventually(wait, || api.op(keys, name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
 }
