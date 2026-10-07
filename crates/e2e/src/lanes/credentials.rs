@@ -36,7 +36,7 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "connected, its owner's read of their connections says so, and its guest is given it at its next read, no token minted to tell",
     "a header: the connection's placeholder from the env, sent as a bearer token, reaches its host as the owner's token from Pipes",
     "and never a header of ours",
-    "a token is held until shortly before it expires; a provider's redirect is the guest's to follow, never followed with it",
+    "each request asks Pipes for its token, so a connection that needs authorizing again stops at the next; a provider's redirect is the guest's to follow, never followed with it",
     "a header: an operator key's placeholder as a bearer token reaches its host as the key",
     "a header of the provider's own (xi-api-key) takes its key",
     "a query parameter: the key in place of the placeholder, the rest of the query as it came",
@@ -129,7 +129,23 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     );
     s.ok(SWAP_CHECKS[5], seen["agent"].is_null(), &seen);
     let said = say(s, 106, &format!("fetch http://{SWAP_CONNECTION_HOST}/redirect with ${SWAP_CONNECTION_ENV}"))?;
-    s.ok(SWAP_CHECKS[6], said.starts_with("fetched 302") && s.workos.tokens(SWAP_CONNECTION).len() == minted_before + 1, &said);
+    let asked = s.workos.tokens(SWAP_CONNECTION).len() == minted_before + 2;
+    // its account needs authorizing again: the next request is refused, no token held
+    s.workos.connect(&email, SWAP_CONNECTION, false);
+    let seen_before = s.upstream.seen().len();
+    let stopped = say(s, 119, &format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION)))?;
+    s.workos.connect(&email, SWAP_CONNECTION, true);
+    let again = api.signed(w.owner, "GET", "/api/connections", None)?;
+    s.ok(
+        SWAP_CHECKS[6],
+        said.starts_with("fetched 302")
+            && asked
+            && stopped.starts_with("fetched 403")
+            && stopped.contains("connect google again")
+            && s.upstream.seen().len() == seen_before
+            && state_of(&again, SWAP_CONNECTION) == "connected",
+        json!({ "redirect": said, "stopped": stopped }),
+    );
 
     // the operator's keys: a bearer token, a header of the provider's own, a query parameter
     let said = say(s, 107, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
