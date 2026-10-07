@@ -608,7 +608,6 @@ dependencies = [
  "fragment-nip98",
  "hex",
  "hkdf",
- "hmac",
  "p256",
  "serde",
  "serde_json",

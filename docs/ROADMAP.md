@@ -355,7 +355,7 @@ designed).
 | Thing | Source of truth | Derived/copies must be |
 |---|---|---|
 | File bytes + history + live pointer | code.storage git | local folder = disposable working copy; cell RAM = LRU cache, never persisted |
-| Tree index (path, size, sha per pinned commit) | derived from git | cell SQLite; names its pinned SHA; invalidated by webhook/poll; serves pinned until refreshed |
+| Tree index (path, size, sha per pinned commit) | derived from git | cell SQLite; names its pinned SHA; moved by the platform's own moves, a refresh, or the poll; serves pinned until refreshed |
 | Manifest and declared operations | `fragment.json` in git | cell caches the pinned copy; an invalid manifest at a new pin keeps the last good cache and records an event |
 | Members, roles, invites | the fragment's supervisor cell | grants and revokes are transactional; the `events` channel records each change |
 | Cell state (supervisor tables, operation ledger, channels, the app facet's SQL) | the S3 bucket (Tigris), via celld replication | — |
@@ -364,7 +364,7 @@ designed).
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | effects dedupe at their owners by tool-call id |
 | Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
-| Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
+| Compute/audit trail | the `events` channel | pin moves recorded as events |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
 in git, or, at 1 MiB and above, in the bucket as content-addressed blobs
@@ -383,7 +383,8 @@ that a pointer in git names.
   repo-scoped storage token (editor+, minted per request, audited).
 - Fragment identity: the npub secret is generated client-side at create,
   crosses the wire once, and is stored wrapped.
-- Webhooks: validate → persist (dedupe) → interpret; a poll backstop,
+- Pins: every move the platform makes it follows, and a writer to git
+  refreshes after its push (the CLI does); no push webhook; a poll backstop,
   every 5 minutes, only while the pins may lag the repo (a storage token
   minted, or a move that failed to follow, in the last day).
 

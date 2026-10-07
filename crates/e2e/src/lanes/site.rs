@@ -190,8 +190,8 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             (r, std::time::Instant::now())
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
-        // the deploy's webhook is sent now; when its answer comes back is
-        // the cell's business (the fake waits for it), not the race's
+        // the deploy is made now; when its refresh answers is the
+        // cell's business, not the race's
         let sent = std::time::Instant::now();
         s.deploy(&c);
         (read.join().expect("the read's thread"), sent)

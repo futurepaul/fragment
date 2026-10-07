@@ -60,8 +60,6 @@ pub mod limits {
     pub const STORAGE_TOKEN_TTL_S: i64 = 900;
     /// A file path in the repo.
     pub const PATH_MAX_BYTES: usize = 300;
-    /// A code.storage webhook's timestamp may differ from the cell's clock by this much.
-    pub const WEBHOOK_WINDOW_S: i64 = 300;
     /// Events per page of `GET events`.
     pub const EVENTS_PAGE: usize = 500;
     /// Records `events` and `ops` each keep (the oldest go first).
@@ -541,8 +539,7 @@ pub struct CreateFragment {
     pub title: Option<String>,
 }
 
-/// The answer to a create: the only time the webhook secret is shown
-/// besides a rotation.
+/// The answer to a create.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Created {
@@ -552,7 +549,6 @@ pub struct Created {
     pub visibility: Visibility,
     pub view_token: String,
     pub inbox_token: String,
-    pub webhook_secret: String,
     pub repo: String,
     pub canonical: String,
 }
@@ -952,18 +948,13 @@ pub struct Join {
 }
 
 /// The answer to `POST /api/f/<name>/rotate` (owner): the tokens as they
-/// are now, and which of them this rotation renewed. The webhook secret is
-/// shown only here and in `Created`.
+/// are now, and which of them this rotation renewed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rotated {
     pub inbox_token: String,
     pub view_token: String,
-    /// The owner's alone: an agent sharing for its owner rotates the links,
-    /// never the webhook secret, and is never told it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_secret: Option<String>,
-    /// The scopes renewed: `inbox`, `view`, `webhook`.
+    /// The scopes renewed: `inbox`, `view`.
     pub rotated: Vec<String>,
 }
 
@@ -1637,8 +1628,8 @@ mod tests {
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {
-        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: Some("w".into()), rotated: vec!["view".into()] };
-        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), rotated: vec!["view".into()] };
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
     #[test]

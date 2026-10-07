@@ -91,8 +91,8 @@ pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
 /// `x-fragment-*` a client sends, stays at the router.
-const PASSED_HEADERS: [&str; 9] =
-    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
+const PASSED_HEADERS: [&str; 7] =
+    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "range"];
 
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
@@ -1111,11 +1111,9 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 _ => format!("/api/{}", rest.join("/")),
             };
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            // code.storage signs its deliveries with the fragment's webhook
-            // secret, and the inbox takes its token, instead of a signature.
+            // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
-                "/api/webhook" => None,
                 "/api/inbox" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {

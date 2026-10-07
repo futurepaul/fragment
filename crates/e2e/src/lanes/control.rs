@@ -202,10 +202,8 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
     s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
     s.ok(
-        "create returns the share, inbox, and webhook tokens",
-        c["viewToken"].as_str().is_some_and(|t| t.len() == 24)
-            && c["inboxToken"].as_str().is_some_and(|t| t.len() == 32)
-            && c["webhookSecret"].as_str().is_some_and(|t| t.len() == 32),
+        "create returns the share and inbox tokens",
+        c["viewToken"].as_str().is_some_and(|t| t.len() == 24) && c["inboxToken"].as_str().is_some_and(|t| t.len() == 32),
         &r,
     );
     let repo = c["repo"].as_str().unwrap_or("").to_string();
@@ -220,7 +218,6 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
         c["canonical"] == api.site_url(&name, ""),
         &r,
     );
-    s.hook(api, c);
 
     let r = api.create(&owner, &label)?;
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
@@ -330,15 +327,6 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
         let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/index.html", crate::SUFFIX, api.port), ..Call::default() })?;
         s.ok(&format!("host {host}.<suffix> is not a fragment, nor the platform"), r.status == 404 && r.message().contains("no fragment here"), &r);
     }
-    let r = api.call(Call {
-        method: "POST",
-        url: format!("{}/api/f/{name}/webhook", api.base),
-        body: Some(br#"{"ref":"refs/heads/main"}"#.to_vec()),
-        content_type: Some("application/json"),
-        extra: vec![("x-pierre-event", "push".into())],
-        ..Call::default()
-    })?;
-    s.ok("an unsigned webhook is 401", r.status == 401, &r);
     // A body of exactly the limit is read (and refused for what it says: a
     // create takes no padding). One over it is refused from its declared
     // length before it is read: the client may see the 413, or the
