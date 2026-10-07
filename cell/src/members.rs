@@ -22,7 +22,10 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! platform's page reads the owner's list alone. A person's search cursor
+//! platform's page reads the owner's list alone. Every row carries the
+//! fragment's face (its kind and title) and its agents, the first added
+//! first: an install that changes the face, or an agent joining or
+//! leaving, sends every row again (`reindex`). A person's search cursor
 //! (search.rs) follows their row: made with a role, gone without one.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
@@ -151,14 +154,20 @@ impl FragmentCell {
     }
 
     /// What its members' lists show of it, at each install of live: its
-    /// kind and title. A change is sent to every member's list (at most
-    /// `MEMBERS_MAX`) and its owner's.
+    /// kind and title (and its agents, read as each row is sent). A change
+    /// is sent to every member's list (at most `MEMBERS_MAX`) and its
+    /// owner's, as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
         let face = face(kind, title);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
         self.set_meta(MetaKey::Face, &face)?;
+        self.reindex()
+    }
+
+    /// Every list's row is sent again: its owner's and each member's.
+    pub(crate) fn reindex(&self) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
         self.index_change(&owner, Some(Role::Owner))?;
         for r in self.rows("SELECT principal, role FROM members", vec![])? {
@@ -207,6 +216,10 @@ impl FragmentCell {
                 console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
             }
         }
+        let agents = match self.listed_agents() {
+            Ok(agents) => agents,
+            Err(e) => return console_error!("{name}: its agents did not read ({:?}): {}", e.code, e.message),
+        };
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ? ORDER BY version DESC LIMIT ?",
@@ -224,10 +237,12 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
-            // every row a role names: the fragment's face, as it is now
+            // every row a role names: the fragment's face and its agents,
+            // as they are now
             if row["role"].is_string() {
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
                     body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
+                    body["face"]["agents"] = json!(agents);
                 }
             }
             // the owner's row: the sharing now, which no later change undoes
@@ -353,6 +368,16 @@ impl FragmentCell {
         Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
     }
 
+    /// Its agent members as every list's row names them: the first added
+    /// first, at most `LISTED_AGENTS_MAX`.
+    fn listed_agents(&self) -> CellResult<Vec<String>> {
+        let rows = self.rows(
+            "SELECT principal FROM members WHERE kind = 'agent' ORDER BY added_at, principal LIMIT ?",
+            vec![SqlStorageValue::Integer(limits::LISTED_AGENTS_MAX as i64)],
+        )?;
+        Ok(rows.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect())
+    }
+
     /// A new member needs room under `MEMBERS_MAX`; a role change does not.
     fn check_room(&self, current: Option<Role>) -> CellResult<()> {
         if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
@@ -410,10 +435,11 @@ impl FragmentCell {
         )?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
-        // a new agent member's computer hears it joined (runs_on.rs); a
-        // role change is no join
+        // a new agent member's computer hears it joined (runs_on.rs), and
+        // every list's row names it; a role change is no join
         if current.is_none() && target.kind == IdentityKind::Agent {
             self.agent_added(&target.id, target.owner.as_deref(), now)?;
+            self.reindex()?;
         }
         // sharing with an agent says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
@@ -462,13 +488,17 @@ impl FragmentCell {
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
             });
         }
-        let owner = self.rows("SELECT owner FROM members WHERE principal = ?", vec![target.as_str().into()])?;
-        let owner = owner.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
+        let removed = self.rows("SELECT owner, kind FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        let owner = removed.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
         self.agent_removed(&target)?;
         self.index_change(&target, None)?;
         self.sharing_changed()?;
+        // every list's row names the agents left
+        if removed.first().is_some_and(|r| r["kind"] == "agent") {
+            self.reindex()?;
+        }
         self.close_sockets(&format!("p:{target}"), "membership revoked");
         // an agent's owner who read through it, and has no standing of their own now
         if let Some(owner) = owner {
@@ -624,6 +654,7 @@ impl FragmentCell {
         // an agent that accepts an invite joins as one added does (runs_on.rs)
         if current.is_none() && caller.kind() == Some(IdentityKind::Agent) {
             self.agent_added(&who, caller.owner(), now)?;
+            self.reindex()?;
         }
         self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;

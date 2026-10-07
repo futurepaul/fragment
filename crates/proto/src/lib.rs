@@ -112,6 +112,11 @@ pub mod limits {
     /// /api/fragments/watch`: their shell's tabs, and any CLI), each told
     /// of every change to it; past this one more is refused (429).
     pub const LIST_WATCHERS_MAX: usize = 16;
+    /// A fragment's agents its row in a person's list names, the first
+    /// added first (a page that needs every one reads its members).
+    pub const LISTED_AGENTS_MAX: usize = 16;
+    /// A chat's preview in a person's list: its newest message's first line.
+    pub const LISTED_PREVIEW_MAX_BYTES: usize = 160;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -622,6 +627,14 @@ pub struct ListedFragment {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Its agent members, the first added (a chat's lead) first, at most
+    /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// A chat's newest message, its first line, as the signer's search
+    /// holds it (none when it holds none: docs/api.md, Search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
     /// (`None` until it has: a fragment from before sends it once).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1588,15 +1601,15 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, sharing: None, archived: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, sharing: None, archived: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), sharing: Some(sharing), archived: true }],
+            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["id:0123456789abcdef0123456789abcdef".into()], preview: Some("hi".into()), sharing: Some(sharing), archived: true }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["id:0123456789abcdef0123456789abcdef"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
         // a list from before archiving reads as nothing archived
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();

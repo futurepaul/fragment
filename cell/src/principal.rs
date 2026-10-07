@@ -3,9 +3,11 @@
 //! lists). The fragments are the authority; each delivers its changes here
 //! from an outbox, versioned so a late delivery never undoes a newer one.
 //! A fragment's row in its owner's list also carries its sharing (who may
-//! open it, its members and guests), sent with each change to them, so the
-//! platform's page reads this one cell and wakes no fragment.
-//! Which keys an identity holds is the registry's (registry.rs).
+//! open it, its members and guests), sent with each change to them, and
+//! every row its agents (a chat's lead first), sent with each change to
+//! them; a chat's row shows its newest message from this person's search
+//! (below). So the platform's page reads this one cell and wakes no
+//! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
 //! Three things here are the person's own, not a fragment's:
 //!
@@ -21,19 +23,23 @@
 //!   it was sent from, and the row's removal (or a new incarnation) drops
 //!   them all; a search reads only entries of rows that name a role. At most
 //!   `SEARCH_ENTRIES_PER_FRAGMENT_MAX` a fragment and `SEARCH_ENTRIES_MAX` in
-//!   all are kept, the oldest going first.
+//!   all are kept, the oldest going first. A chat's newest entry is its
+//!   row's `preview`; a chat with none here (no message every member may
+//!   read, or its entries gone past the total) shows none.
 //! - **Watching** (`GET /api/fragments/watch`; Paul on p5, 2026-10-05: an
 //!   app his agent made did not show in his sidebar until he reloaded):
 //!   the person's open shells, and any CLI, hold a socket here, hibernated
 //!   (the router decided whose list it is). Each change this list applies
 //!   (a row's, newer than the one it holds: a fragment made, shared with
-//!   them, changed, left or deleted; or their archiving) is told to every
+//!   them, changed, left or deleted; their archiving; or a chat's message
+//!   new here, its preview) is told to every
 //!   one as `{type: "changed"}`, naming nothing: each page reads the list
 //!   again with its own credential, so a socket that outlives its session
 //!   learns only that something changed. A socket closed or lost misses
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 
+use fragment_core::npub;
 use fragment_core::search::{self, Query};
 use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Sharing};
 use serde::{Deserialize, Serialize};
@@ -66,8 +72,12 @@ const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
 
-/// The columns `/list` and a search read of a row.
-const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
+/// The columns `/list` and a search read of a row, and a chat's newest
+/// search entry (`said`), read by its place in its fragment's log.
+const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
+  CASE WHEN json_extract(face, '$.kind') = 'chat'
+    THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said
+  FROM memberships m WHERE role IS NOT NULL ORDER BY fragment";
 
 #[durable_object]
 pub struct PrincipalCell {
@@ -98,6 +108,9 @@ struct Face {
     kind: FragmentKind,
     #[serde(default)]
     title: Option<String>,
+    /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<String>,
 }
 
 /// A `memberships` row as `/list` reads it.
@@ -108,6 +121,7 @@ struct Listed {
     sharing: Option<String>,
     face: Option<String>,
     archived: i64,
+    said: Option<String>,
 }
 
 /// `PUT /archived`: the router's, for the signer (`SetArchived`, named).
@@ -284,6 +298,9 @@ impl PrincipalCell {
     /// incarnation, drops what the row held for them: their archiving and
     /// their search entries.
     fn index(&self, c: IndexChange) -> CellResult<bool> {
+        if c.face.as_ref().is_some_and(|f| f.agents.len() > limits::LISTED_AGENTS_MAX || !f.agents.iter().all(|a| npub::is_identity(a))) {
+            return Err(CellError::invalid(format!("{}'s agents are more than a row names, or not identities", c.fragment)));
+        }
         let stored = self.rows("SELECT incarnation, version FROM memberships WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
         let (newer, reborn) = match stored.first() {
             None => (true, false),
@@ -351,7 +368,8 @@ impl PrincipalCell {
     /// A fragment's messages, taken while this person holds a role on it
     /// at the incarnation they come from; each entry once. Then the
     /// fragment's entries past its limit, and everyone's past the total,
-    /// go, the oldest first.
+    /// go, the oldest first. A chat's new message is its row's preview:
+    /// the list's watchers are told.
     fn take_entries(&self, b: SearchBatch) -> CellResult<SearchApplied> {
         if !fragment_proto::valid_fragment_name(&b.fragment) {
             return Err(CellError::invalid(format!("{:?} is not a fragment's name", b.fragment)));
@@ -366,12 +384,13 @@ impl PrincipalCell {
             }
         }
         let fenced = self.rows(
-            "SELECT 1 AS ok FROM memberships WHERE fragment = ? AND role IS NOT NULL AND incarnation = ?",
+            "SELECT json_extract(face, '$.kind') = 'chat' AS chat FROM memberships WHERE fragment = ? AND role IS NOT NULL AND incarnation = ?",
             vec![b.fragment.as_str().into(), SqlStorageValue::Integer(b.incarnation)],
         )?;
-        if fenced.is_empty() {
+        let Some(row) = fenced.first() else {
             return Ok(SearchApplied { member: false, applied: 0 });
-        }
+        };
+        let chat = row["chat"].as_i64() == Some(1);
         let mut applied = 0u64;
         for e in &b.entries {
             let added = self.rows(
@@ -398,6 +417,9 @@ impl PrincipalCell {
             // kept to the total after every delivery, so one is over by at most its own
             assert!(over <= limits::SEARCH_BATCH_MAX as i64, "the total is kept after each delivery");
             self.rows("DELETE FROM search_entries WHERE id IN (SELECT id FROM search_entries ORDER BY at, id LIMIT ?)", vec![SqlStorageValue::Integer(over)])?;
+        }
+        if chat && applied > 0 {
+            self.tell();
         }
         Ok(SearchApplied { member: true, applied })
     }
@@ -463,6 +485,7 @@ fn listed(r: Listed) -> CellResult<Option<ListedFragment>> {
         None => None,
     };
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
-    let (kind, title) = face.map_or((FragmentKind::App, None), |f| (f.kind, f.title));
-    Ok(Some(ListedFragment { name: r.name, role: r.role, kind, title, sharing, archived: r.archived != 0 }))
+    let (kind, title, agents) = face.map_or((FragmentKind::App, None, Vec::new()), |f| (f.kind, f.title, f.agents));
+    let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
+    Ok(Some(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, sharing, archived: r.archived != 0 }))
 }

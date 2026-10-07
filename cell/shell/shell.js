@@ -48,10 +48,10 @@ const CATALOG = [
 ];
 
 // me: the signed-in person; fragments: their list (name, role, kind,
-// title, sharing, archived); computer: theirs, with its agents; agents: by
-// identity; previews: each chat's newest message; members: each chat's
-// agents, by identity, the lead (the first added) first
-const state = { me: null, fragments: [], computer: null, defaultImage: null, agents: new Map(), previews: new Map(), members: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
+// title, agents, preview, sharing, archived: a chat's agents the lead
+// first, and its newest message); computer: theirs, with its agents;
+// agents: by identity
+const state = { me: null, fragments: [], computer: null, defaultImage: null, agents: new Map(), current: store.get(CURRENT, null), frames: new Map(), page: null };
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -99,20 +99,20 @@ const colorOf = (id) => {
   return COLORS[h % COLORS.length];
 };
 // The identity of the agent a fragment is (`maple.ann`), or of a direct
-// chat's (`maple-chat.ann`, made beside it), until the chat's members are read.
+// chat's (`maple-chat.ann`, made beside it), while its row names no agents.
 const agentOf = (name) => {
   const [label, ...rest] = name.split(".");
   const agent = [label.replace(/-chat$/, ""), ...rest].join(".");
   return [...state.agents.values()].find((a) => a.fragment === agent)?.identity ?? null;
 };
-// A chat's agents, the lead first: its member list, once read (a group's
-// come from nowhere else); a direct chat's agent until then.
-const agentsOf = (name) => state.members.get(name) ?? [agentOf(name)].filter(Boolean);
-const isGroup = (name) => (state.members.get(name)?.length ?? 0) >= 2;
+// A chat's agents, the lead first, as its row names them; a direct chat's
+// agent while it names none.
+const agentsOf = (name) => byName(name)?.agents ?? [agentOf(name)].filter(Boolean);
+const isGroup = (name) => agentsOf(name).length >= 2;
 // a chat's face: its title, its lead agent's colour, and its agents' colours
 const identity = (name) => {
   const agents = agentsOf(name);
-  return { title: titleOf(name), color: colorOf(agents[0] ?? null), colors: agents.map(colorOf), preview: state.previews.get(name) ?? "" };
+  return { title: titleOf(name), color: colorOf(agents[0] ?? null), colors: agents.map(colorOf), preview: byName(name)?.preview ?? "" };
 };
 // A chat's mark: its agent's avatar, or a group's agents' stacked (at most
 // three, the lead first), coloured by identity as the chat's page does.
@@ -767,7 +767,7 @@ function renderFound(fragments, messages) {
   const results = $("search-results");
   results.replaceChildren();
   const groups = [
-    ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, state.previews.get(f.name) ?? ""))],
+    ["Chats", fragments.filter((f) => f.kind === "chat").map((f) => foundRow(f.name, f.preview ?? ""))],
     ["Agents", fragments.filter((f) => f.kind === "agent").map((f) => foundRow(f.name, ""))],
     ["Apps", fragments.filter((f) => f.kind === "app" || f.kind === "brain").map((f) => foundRow(f.name, ""))],
     // a message in a fragment the list has not shown yet is left out until it has
@@ -1406,10 +1406,11 @@ function creatingAgent() {
 }
 
 // ---- the person's things, read again whenever they may have changed ----
-// After a change their list told this page of (`watchList`: `changed`),
-// only the fragments whose rows it touched (new, or not as they were) have
-// their chat's members and newest message, or their app's card, read again.
-// An older read's answer that comes after a newer one's is not shown.
+// One read of their list is the sidebar: each chat's row names its agents
+// and its newest message. After a change their list told this page of
+// (`watchList`: `changed`), only the apps whose rows it touched (new, or
+// not as they were) have their card read again. An older read's answer
+// that comes after a newer one's is not shown.
 const reads = { asked: 0, shown: 0 };
 async function load(changed = false) {
   const mine = ++reads.asked;
@@ -1426,43 +1427,14 @@ async function load(changed = false) {
   renderHeading();
   renderUpdate();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
-  previews(touched).catch(() => {});
-  chatMembers(touched).catch(() => {});
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
-}
-// the chats `only` names (a set), or every one
-const among = (only) => (f) => !only || only.has(f.name);
-// each chat's agents, from its member list (the first added first): a
-// group is a chat with two or more; one that does not answer keeps what
-// was read of it before
-async function chatMembers(only = null) {
-  await Promise.all(chats().filter(among(only)).map(async (f) => {
-    const listed = await api("GET", `/api/f/${f.name}/members`).catch(() => null);
-    if (!listed) return;
-    const agents = (listed.members ?? []).filter((m) => m.kind === "agent").map((m) => m.principal);
-    state.members.set(f.name, agents);
-  }));
-  renderChats();
-  renderHeading();
-}
-// each chat's newest message, for its row
-async function previews(only = null) {
-  await Promise.all(chats().filter(among(only)).map(async (f) => {
-    const listed = await api("GET", `/api/f/${f.name}/channels`);
-    const seq = listed.channels?.find((c) => c.name === "chat")?.seq ?? 0;
-    if (!seq) return;
-    const read = await api("GET", `/api/f/${f.name}/channels/chat?after=${Math.max(0, seq - 1)}&limit=1`);
-    const text = read.records?.[0]?.body?.text;
-    if (typeof text === "string") state.previews.set(f.name, text.split("\n")[0].slice(0, 80));
-  }));
-  renderChats();
 }
 
 // ---- live: the person's list tells this page when it changes ----
 // An app their agent makes, one someone shares with them, a delete or an
 // archive elsewhere (Paul on p5, 2026-10-05: his agent's app showed only
-// after a reload): their Principal tells this page's socket
+// after a reload), a chat's new message: their Principal tells this page's socket
 // (`GET /api/fragments/watch`, which names nothing), and a moment after,
 // so a burst is one read, the page reads the list again and patches the
 // sidebar in place. A socket that closes is opened again after a jittered

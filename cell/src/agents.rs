@@ -154,7 +154,8 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .filter_map(|f| {
             // a people-only share is the fragment's to know: a call decides again
             let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
-            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, kind: f.kind, title: f.title, sharing: None, archived: false })
+            // the asker's own view (their search's preview, their archiving) stays theirs
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
