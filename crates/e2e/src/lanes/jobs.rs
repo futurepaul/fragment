@@ -33,6 +33,7 @@ struct Hit {
     path: String,
     authorization: String,
     hops: String,
+    idempotency: String,
     /// JSON bodies (a delivery's), else null.
     body: Value,
 }
@@ -54,6 +55,7 @@ impl Upstream {
                 path: req.path.clone(),
                 authorization: header("authorization"),
                 hops: header("x-fragment-hops"),
+                idempotency: header("idempotency-key"),
                 body: serde_json::from_slice(&req.body).unwrap_or(Value::Null),
             });
             match req.path.as_str() {
@@ -232,7 +234,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "digest", "d3", json!({ "url": upstream.url("/flaky") }))?;
     let flaky = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok("an upstream 503 is retried until it answers", flaky["status"] == "succeeded" && upstream.hits("/flaky").len() == 3, &flaky);
-    let r = api.op(&owner, &name, "careful", "c1", json!({ "url": upstream.url("/down") }))?;
+    let r = api.op(&owner, &name, "careful", "c1", json!({ "url": upstream.url("/down"), "method": "POST" }))?;
     let careful_id = started(&r);
     let r = api.op(&owner, &name, "careful", "c2", json!({ "url": "ftp://example.com/x" }))?;
     let refused = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
@@ -308,6 +310,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "a step that keeps failing runs out of retries, and the job sees why",
         careful["output"]["caught"] == true && careful["output"]["message"].as_str().is_some_and(|m| m.contains("503")) && upstream.hits("/down").len() == 5,
         &careful,
+    );
+    // a step runs at least once: each try of a POST names the step, the same key every time
+    let keys: Vec<String> = upstream.hits("/down").into_iter().map(|h| h.idempotency).collect();
+    s.ok(
+        "a POST's every try carries its step's Idempotency-Key; a GET carries none",
+        keys.len() == 5 && keys.iter().all(|k| *k == keys[0]) && keys[0].ends_with(&format!("-r{careful_id}-s0")) && upstream.hits("/data").iter().all(|h| h.idempotency.is_empty()),
+        format!("{keys:?}"),
     );
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=digest"), None)?;
     s.ok("runs filter by operation, newest first", r.body["runs"].as_array().is_some_and(|a| a.len() == 2 && a[0]["id"].as_i64() > a[1]["id"].as_i64()), &r);
