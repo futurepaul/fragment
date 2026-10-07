@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wall</title>
+  <style>
+    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7c766a; --line: #e4dfd4; --soft: #efebe2; --accent: #a4452c; --on-accent: #fff; --bad: #b3261e; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1e1d17; --fg: #eeeae0; --muted: #9a9384; --line: #2f2d26; --soft: #26241e; --accent: #e59a7f; --on-accent: #16150f; --bad: #f2a49b; } }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
+    main { max-width: 72rem; margin: 0 auto; padding: 2.2rem 1.1rem 4rem; }
+    header { max-width: 40rem; margin-bottom: 1.6rem; }
+    h1 { font: 600 clamp(1.9rem, 6vw, 3rem)/1.1 Georgia, serif; margin: 0; overflow-wrap: anywhere; }
+    #intro { margin: .6rem 0 0; font-size: 1.05rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #here { margin: .7rem 0 0; color: var(--muted); font-size: .9rem; }
+    .link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    a { color: var(--accent); }
+    input, textarea { width: 100%; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--card); color: inherit; font: inherit; }
+    textarea { resize: vertical; min-height: 5.5rem; }
+    input:focus-visible, textarea:focus-visible, button:focus-visible, label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #about { display: grid; gap: .6rem; margin-top: 1rem; }
+    #compose { max-width: 40rem; background: var(--card); border: 1px solid var(--line); border-radius: .8rem; padding: 1rem; display: grid; gap: .7rem; margin-bottom: 2rem; }
+    #compose textarea { border: 0; padding: 0; background: transparent; min-height: 4.5rem; }
+    #compose textarea:focus-visible { outline: 0; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; border-top: 1px solid var(--line); padding-top: .75rem; }
+    .row #name { flex: 1 1 9rem; width: auto; }
+    #as { flex: 1 1 9rem; color: var(--muted); font-size: .92rem; }
+    .photo { border: 1px solid var(--line); border-radius: .5rem; padding: .55rem .8rem; font-size: .92rem; cursor: pointer; color: var(--muted); }
+    .send { border: 0; border-radius: .5rem; padding: .6rem 1.2rem; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
+    .send:disabled { opacity: .6; cursor: default; }
+    #preview { max-width: 9rem; max-height: 9rem; border-radius: .5rem; object-fit: cover; }
+    #note { margin: 0; min-height: 1.2em; font-size: .9rem; color: var(--muted); }
+    #note:empty { display: none; }
+    #note.bad { color: var(--bad); }
+    #wall { columns: 18rem; column-gap: 1rem; }
+    .post { break-inside: avoid; margin: 0 0 1rem; background: var(--card); border: 1px solid var(--line); border-radius: .8rem; overflow: hidden; }
+    .post > img { display: block; width: 100%; height: auto; background: var(--soft); }
+    .post p { margin: 0; padding: .9rem 1rem 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 1.02rem; }
+    .post footer { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem .85rem; font-size: .85rem; color: var(--muted); }
+    .post footer strong { color: var(--fg); font-weight: 600; overflow-wrap: anywhere; }
+    .post footer .hide { margin-left: auto; font-size: .82rem; color: var(--muted); }
+    .face { width: 1.5rem; height: 1.5rem; border-radius: 50%; object-fit: cover; flex: none; background: var(--soft); }
+    #empty { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1 id="title">Wall</h1>
+      <p id="intro"></p>
+      <p id="here">connecting…</p>
+      <form id="about" hidden>
+        <input id="atitle" maxlength="80" required placeholder="The wall's title (Sam's 30th)">
+        <textarea id="aintro" maxlength="280" placeholder="A line for everyone who opens it"></textarea>
+        <div><button class="send">Save</button> <button type="button" class="link" id="acancel">Cancel</button></div>
+      </form>
+    </header>
+    <form id="compose">
+      <textarea id="text" maxlength="1000" placeholder="Write something for the wall"></textarea>
+      <img id="preview" alt="" hidden>
+      <div class="row">
+        <input id="name" maxlength="40" autocomplete="nickname" placeholder="Your name">
+        <span id="as" hidden></span>
+        <label class="photo" id="photo" hidden>Add a photo<input type="file" id="file" accept="image/*" hidden></label>
+        <button class="send" id="send">Post</button>
+      </div>
+      <p id="note"></p>
+    </form>
+    <section id="wall"></section>
+    <p id="empty">Nothing here yet. Be the first to write something.</p>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+    const text = (v, max) => (typeof v === "string" ? v.slice(0, max) : "");
+    const note = (msg, bad = false, ...more) => { $("note").replaceChildren(...[msg, ...more].filter(Boolean)); $("note").className = bad ? "bad" : ""; };
+    const signin = () => el("a", { href: "./__signin?return=/", textContent: "Sign in" });
+    const PEOPLE_AT_ONCE = 64; // __people names at most this many at a time
+
+    let me = null;
+    let myName = "";               // a signed-in poster's username, which their posts carry
+    let editor = false;
+    let hidden = new Set();
+    let photo = null;              // the picked photo, made small enough to post
+    const people = new Map();      // id:… -> {username, picture}, once asked
+    const asking = new Set();
+
+    // when, as people say it
+    function ago(at) {
+      const s = (Date.now() - at) / 1000;
+      if (s < 60) return "just now";
+      if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+      if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+      return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+    }
+
+    // a post's card; its poster's name is filled in once __people says it
+    function card(r) {
+      const b = r.body ?? {};
+      const art = el("article", { className: "post" });
+      art.dataset.seq = r.seq;
+      art.dataset.principal = r.principal;
+      for (const a of Array.isArray(b.attachments) ? b.attachments.slice(0, 1) : []) {
+        if (typeof a?.sha256 === "string" && /^[0-9a-f]{64}$/.test(a.sha256)) art.append(el("img", { src: `./__blob/${a.sha256}`, alt: text(b.text, 120), loading: "lazy" }));
+      }
+      if (text(b.text, 1000).trim()) art.append(el("p", { textContent: text(b.text, 1000) }));
+      const foot = el("footer", {}, el("img", { className: "face", alt: "", hidden: true }), el("strong", { textContent: text(b.name, 40) || "a guest" }), el("span", { textContent: "·" }), el("time", { textContent: ago(r.at) }));
+      foot.querySelector("time").dataset.at = r.at;
+      if (editor) foot.append(el("button", { className: "link hide", type: "button", textContent: "Hide", onclick: () => fragment.call("hide", { seq: r.seq }).catch((e) => note(e.message, true)) }));
+      art.append(foot);
+      art.hidden = hidden.has(r.seq);
+      return art;
+    }
+
+    // a signed-in poster's username and picture, from the platform's registry
+    async function name(art) {
+      const id = art.dataset.principal;
+      if (!id.startsWith("id:")) return;
+      if (!people.has(id) && !asking.has(id)) {
+        const ask = [...document.querySelectorAll("#wall .post")].map((a) => a.dataset.principal).filter((p) => p.startsWith("id:") && !people.has(p) && !asking.has(p));
+        const batch = [...new Set([id, ...ask])].slice(0, PEOPLE_AT_ONCE);
+        batch.forEach((p) => asking.add(p));
+        const got = await fetch(`./__people?${batch.map((p) => `id=${encodeURIComponent(p)}`).join("&")}`).then((r) => r.json()).catch(() => ({}));
+        for (const p of batch) { people.set(p, got.profiles?.[p] ?? null); asking.delete(p); }
+        for (const a of document.querySelectorAll("#wall .post")) show(a);
+      }
+      show(art);
+    }
+    function show(art) {
+      const who = people.get(art.dataset.principal);
+      if (!who) return;
+      art.querySelector("strong").textContent = who.username;
+      const face = art.querySelector(".face");
+      if (who.picture) Object.assign(face, { src: who.picture, hidden: false });
+    }
+
+    // who is this page, first: a visitor with no cookie is given one by the
+    // socket, and a post sent beside it would be given another
+    me = await fragment.me();
+    editor = me.role === "editor" || me.role === "owner";
+    const signedIn = me.principal.startsWith("id:");
+    $("photo").hidden = !editor;
+    if (signedIn) {
+      $("name").hidden = true;
+      $("as").hidden = false;
+      fetch(`./__people?id=${encodeURIComponent(me.principal)}`).then((r) => r.json()).then((p) => { myName = p.profiles?.[me.principal]?.username ?? ""; $("as").textContent = `Posting as ${myName || "you"}`; });
+    } else {
+      $("name").value = localStorage.getItem("wall:name") ?? "";
+      note("Posting as a guest. ", false, signin(), " to post with your own name.");
+    }
+
+    fragment.live("wall", {}, (w) => {
+      $("title").textContent = w.title || "Wall";
+      document.title = w.title || "Wall";
+      $("intro").textContent = w.intro || (editor ? "" : "Leave a note. Everyone here sees it as it lands.");
+      if (editor && !w.title) { $("intro").replaceChildren(el("button", { className: "link", textContent: "Give the wall a title", onclick: openAbout })); }
+      else if (editor) $("intro").append(" ", el("button", { className: "link", textContent: "Edit", onclick: openAbout }));
+      $("atitle").value = w.title;
+      $("aintro").value = w.intro;
+      hidden = new Set(w.hidden);
+      for (const art of document.querySelectorAll("#wall .post")) art.hidden = hidden.has(Number(art.dataset.seq));
+      $("empty").hidden = !!document.querySelector("#wall .post:not([hidden])");
+    }, (e) => note(e.message, true));
+
+    // the wall's newest 200, newest first, then each as it lands
+    fragment.subscribe("posts", (r) => {
+      const art = card(r);
+      $("wall").prepend(art);
+      $("empty").hidden = !!document.querySelector("#wall .post:not([hidden])");
+      name(art);
+    }, { last: 200 });
+    setInterval(() => document.querySelectorAll("#wall time").forEach((t) => (t.textContent = ago(Number(t.dataset.at)))), 60000);
+
+    fragment.presence.set({});
+    fragment.presence.on((list) => {
+      const n = new Set(list.map((p) => p.principal)).size;
+      $("here").textContent = n > 1 ? `${n} people here now` : "Just you here now";
+    });
+    fragment.closed(({ code }) => { $("here").textContent = code === 4004 ? "This wall was deleted." : "This page's access changed: reload it."; });
+
+    function openAbout() { $("about").hidden = false; $("atitle").focus(); }
+    $("acancel").onclick = () => { $("about").hidden = true; };
+    $("about").onsubmit = async (e) => {
+      e.preventDefault();
+      try { await fragment.call("about", { title: $("atitle").value.trim(), intro: $("aintro").value.trim() }); $("about").hidden = true; } catch (err) { note(err.message, true); }
+    };
+
+    // a photo at most 1600 px on its longer side, as a JPEG: a phone's
+    // camera makes several MB, and everyone who opens the wall loads it
+    $("file").onchange = async () => {
+      const file = $("file").files[0];
+      if (!file) return;
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+      const canvas = el("canvas", { width: Math.round(bitmap.width * scale), height: Math.round(bitmap.height * scale) });
+      canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      photo = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.82));
+      Object.assign($("preview"), { src: URL.createObjectURL(photo), hidden: false });
+    };
+
+    $("compose").onsubmit = async (e) => {
+      e.preventDefault();
+      const body = { name: signedIn ? myName : $("name").value.trim(), text: $("text").value.trim() };
+      if (!body.text && !photo) return $("text").focus();
+      if (!signedIn && !body.name) { $("name").focus(); return note("Your name first, so people know who wrote it.", true); }
+      if (!signedIn) localStorage.setItem("wall:name", body.name);
+      $("send").disabled = true;
+      try {
+        if (photo) body.attachments = [await fragment.blob(photo, { type: "image/jpeg", name: "photo.jpg" })];
+        await fragment.post("posts", body);
+        $("text").value = "";
+        photo = null;
+        Object.assign($("preview"), { hidden: true, src: "" });
+        $("file").value = "";
+        note(signedIn ? "" : "Posted as a guest.");
+      } catch (err) {
+        if (err.status === 401) note("This wall takes posts from people signed in. ", true, signin(), " to post.");
+        else note(err.message, true);
+      } finally {
+        $("send").disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
