@@ -450,6 +450,9 @@ pub enum FragmentKind {
     /// A person's managed skills (decision 17: the blessed `skills`
     /// template), which their agents' computers install.
     Skills,
+    /// A person's one memory and main agent (docs/optchat.md: the blessed
+    /// `mind` template).
+    Mind,
 }
 
 impl FragmentKind {
@@ -460,6 +463,7 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
+            FragmentKind::Mind => "mind",
         }
     }
 
@@ -470,6 +474,7 @@ impl FragmentKind {
             "agent" => Some(FragmentKind::Agent),
             "brain" => Some(FragmentKind::Brain),
             "skills" => Some(FragmentKind::Skills),
+            "mind" => Some(FragmentKind::Mind),
             _ => None,
         }
     }

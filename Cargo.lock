@@ -644,6 +644,7 @@ dependencies = [
  "fragment-core",
  "fragment-proto",
  "hex",
+ "serde_json",
  "sha2",
 ]
 
