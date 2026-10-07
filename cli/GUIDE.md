@@ -151,7 +151,6 @@ come from `main`: a synced note is visible without a deploy.
 ```
 fragment sync my-thing --dir .            # push and pull the folder
 fragment deploy my-thing --dir .          # sync, then move live → the site and the app
-fragment deploy my-thing --preview        # an ephemeral ref at main (no URL); deploy to promote
 fragment drafts my-thing                  # deploy history (the live ref's commits)
 fragment rollback my-thing [--to <sha>]   # live back to an earlier deploy
 ```
@@ -554,10 +553,10 @@ fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
 fragment manifest <name>                 fragment invite create|list|revoke ...
-fragment manifest-set <name> FILE        fragment join <name> <token>
+fragment join <name> <token>
 fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
-fragment deploy <name> [--dir D] [--preview] [--note N]
+fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
@@ -578,7 +577,7 @@ its wording:
 - `forbidden`: signed, but your role, or your plan, does not allow it (403); the message says which (a guest makes no fragments)
 - `not_found`: no such fragment, route, or operation (404)
 - `name_taken`: it exists already (409)
-- `conflict`: the branch moved under a sync, a deploy, or a manifest-set
+- `conflict`: the branch moved under a sync or a deploy
 - `conflicting_body`: that operation id already ran with another input (409)
 - `too_large`: over a limit the message names (413)
 - `app_failed`: the app's code refused or threw (422)
@@ -605,7 +604,3 @@ it. A failed `fragment call` names its id (in the message, and as
 up); when its outcome is unknown, call it again with that `--id`, which
 replays it and never runs it twice. A request may take 30 s plus a
 second for every 32 KiB it uploads.
-
-The code.storage server is named by the host; to point the CLI at
-another, set `FRAGMENT_CODESTORAGE_URL` or `"codestorage"` in
-`~/.config/fragment/config.json`.

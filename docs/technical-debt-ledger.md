@@ -11,27 +11,6 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
-## Pages loaded before presence changes came one at a time hear the whole list
-
-- **Observed:** round 3 (S8) made a presence change one socket's change
-  (`{type: "presence", id, principal, data}`). A page loaded before that
-  deploy runs the library it loaded, which reads `m.list` and hands it to
-  its presence handlers; with the new frame that is `undefined`, and a
-  template that maps it throws until the page reloads. So a socket that
-  connects without `?v=2` is tagged `live1` (`LEGACY_TAG` in
-  cell/src/live.rs) and hears the whole list, once after `hello` and on
-  each change, read from every socket's attachment when one is open. The
-  cell logs `live.legacy-page` when one connects.
-- **Risk:** while such a page is open, each presence change reads every
-  socket's attachment again (the O(N) read S8 removed), and the page's
-  own frame is O(N) bytes. Bounded by `LIVE_SOCKETS_MAX` and the presence
-  pace; nothing else is.
-- **First proof:** a `live.legacy-page` event on the fleet: someone kept a
-  page open across the deploy.
-- **Delete when:** no fleet has logged `live.legacy-page` for a week:
-  remove `LEGACY_TAG`, `legacy_presence_frame`, the `v` check (a socket
-  without it is refused), and the live lane's old-page check.
-
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
@@ -79,23 +58,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** a trigger's breaker counts runs that fail or loop
   rather than every run (or an automatic pause expires), or a chat's push
   fires once a turn, on its last reply.
-
-## Fragments share one origin when no hostname suffix is configured
-
-- **Observed:** phase 2 slice B. Without `FRAGMENT_HOST_SUFFIX` the cell
-  serves every fragment from `/f/<name>/` on one origin. Cookies are
-  scoped by path, but a page on one fragment can still send same-origin
-  requests to another's `__op` and `__file` with the visitor's cookies.
-- **Risk:** a fragment acts as its visitors on another fragment they have
-  a share link or anonymous identity for.
-- **First proof:** a fleet serving strangers' fragments without a suffix.
-- **Mitigated:** with a suffix configured, `/f/<name>/…` redirects to the
-  fragment's own host and refuses writes (e2e `site`); `xtask dev` and
-  the e2e run with a suffix.
-- **Delete when:** phase 3 fleets always configure a suffix and path-mode
-  serving is removed (keeping `/f/<name>/__watch`, which carries no
-  cookies), with the `pathmode` e2e section replaced by a check that the
-  cell refuses to start serving without a suffix.
 
 ## A deleted fragment can linger in a person's list
 
@@ -402,6 +364,38 @@ fragment.club until cutover (decisions 34–35).
   already lists them), with an e2e check; or every socket re-resolves
   its key on a timer, not only at a frame it sends.
 
+## The registry is one Durable Object for the fleet
+
+- **Observed:** #156 (problem 8). Every request whose answer depends on
+  who asks resolves its key or session live in the one `Registry` cell
+  (cell/src/registry.rs, `NAME`): one round trip each, never more, and
+  none for a page or file anyone who may see the fragment gets alike
+  (the signin and identities lanes count them). A CLI or agent call, a
+  model call, an operation, an app route, a socket's connect: 1 each (a
+  `__live` socket 1 more a minute while it sends frames); a members-only
+  fragment's page: 1 a file; the shell's load (cell/shell/shell.js
+  `start`, `load`): 4, then up to 3 a chat (its members, its channels,
+  its newest message) and 1 an app (its card), then the open chat's
+  frame (a mint, a redemption, its files and its socket).
+- **Risk:** throughput, and where it lives. Cloudflare puts one object at
+  500–1,000 simple requests a second: a person with 50 chats and 10 apps
+  asks it about 170 times a shell load, so a few such loads a second
+  fill it. A person far from it pays a round trip there for each signed
+  request, and while it restarts (a deploy) every signed request waits.
+- **First proof:** the `Registry` namespace's requests a second
+  (Workers analytics) sustained past 200, or its wall time's p99 past
+  20 ms.
+- **Delete when:** BANKS answers instead (docs/finite-integration.md,
+  FIN-11); or, if the load comes first: the shell reads its sidebar in
+  one request (its list's rows carry what a row shows, or one call
+  answers every chat under one resolved identity), which takes the 3 a
+  chat away; then, if still near the line, sessions and keys move to
+  objects named by what they resolve (a session by its token's hash, a
+  key by itself), written by the registry as they change, which keeps
+  only what must be unique (usernames, sign-in subjects, identities).
+  Each lookup stays one live round trip: no cache outlives a revocation
+  (rule 7).
+
 ## Video steps are off
 
 - **Observed:** 2026-10-03, when OpenRouter was cut (Paul: "I thought we
@@ -438,8 +432,9 @@ fragment.club until cutover (decisions 34–35).
 ## A fragment's git repository is not metered, and storage is sampled daily
 
 - **Observed:** phase 3 (cell/src/meter.rs). A fragment's storage meter
-  samples its SQLite (its own and its app facet's) and its blobs once a
-  day from its alarm, as byte-hours since the last sample. Its
+  samples its own SQLite and its blobs once a day from its alarm, as
+  byte-hours since the last sample (its app's database: the entry "An
+  app's database answers to the app's own code alone"). Its
   code.storage repository is not sampled (code.storage publishes no size
   or price to us), and a computer's backups do not exist yet.
 - **Risk:** git storage is free to its owner; a fragment that grows and
@@ -471,18 +466,6 @@ fragment.club until cutover (decisions 34–35).
   the run is held and replays after a top-up), with an e2e check; the
   platform's own records stay (they cost nothing, and an agent must hear
   where it joined).
-
-## An app's database size is read from its own realm
-
-- **Observed:** phase 3. The storage meter asks the app facet's platform
-  code for its database size (`__size` in cell/platform.mjs), which runs
-  in the author's realm: an app can override it.
-- **Risk:** an app understates its own storage, by at most its cap
-  (`limits::APP_DB_MAX_BYTES`, which the meter clamps to).
-- **First proof:** a `__size` far under the facet's real size.
-- **Delete when:** the runtime lets the supervisor read a facet's storage
-  size itself.
-
 
 ## An agent runs one turn at a time, across all its chats
 
@@ -568,7 +551,7 @@ fragment.club until cutover (decisions 34–35).
   agents, addon, chat; code.storage's git or webhooks: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
-  lockdown, isolation, share, pathmode), and the whole deployment's
+  lockdown, isolation, share), and the whole deployment's
   (identities, signin, ledger's operator). Nothing runs it from CI.
 - **Risk:** a limit, a Workflow resume, or a skipped section's behaviour
   on real vendors breaks unseen.
@@ -579,16 +562,29 @@ fragment.club until cutover (decisions 34–35).
   upstream, its inbox as a webhook's, the real model within the run's
   paid calls), and the local skips made there.
 
-## A query can write past its app's cap
+## An app's database answers to the app's own code alone
 
-- **Observed:** phase 2. A mutation that leaves the app's database over
-  16 MiB rolls back (507), but a query (or a route) that writes anyway is
-  not stopped: celld's hard stop 4 MiB above the cap went with the fork.
-- **Risk:** an app grows its database without bound outside mutations,
-  at its owner's storage cost.
-- **First proof:** an app's database over 16 MiB.
-- **Delete when:** writes outside a mutation and the constructor are
-  refused (or capped) by `platform.mjs`, with a test.
+- **Observed:** phase 2; 2026-10-06 (issue #156, problem 4). Every bound
+  on an app facet's SQLite runs in the app's own realm (cell/platform.mjs),
+  which its code can patch: a mutation that leaves the database over
+  16 MiB rolls back (507), but a query, a route (`fetch`), or code that
+  patches the platform's own writes past it (celld's hard stop 4 MiB
+  above went with the fork). Nothing outside the realm can stop it:
+  workerd allows a facet no `query_only`, `max_page_count` or authorizer
+  (its pragma allowlist), and a query or a route is async, so no
+  transaction spans one to roll back. Nor can the supervisor read the
+  facet's size: only the realm can say it. So the storage meter does not
+  count the app's database (until 2026-10-06 it asked `__size` daily,
+  which loaded the app's code, a billed dynamic worker, every day, to
+  meter at most 16 MiB of an honest app, under a cent a month).
+- **Risk:** the platform pays for app SQLite its owner is not billed for:
+  at most 16 MiB a fragment for an honest app ($0.0032 a month at list),
+  without bound for an app that writes outside its mutations.
+- **First proof:** a Fragment namespace whose stored bytes (Cloudflare's
+  usage) are well over the sum of its fragments' sampled `sqlite`.
+- **Delete when:** the runtime lets the supervisor read a facet's
+  database size or bound it (a facet storage limit), and the meter
+  samples it, with a test of a query that writes past the cap.
 
 ## A blob larger than the zone's request limit cannot be uploaded
 
@@ -614,39 +610,40 @@ fragment.club until cutover (decisions 34–35).
 
 ## The Hermes image patches Hermes' own boot
 
-- **Observed:** phase 4 (`images/hermes/Dockerfile`, `preload.py`).
-  Spike S3b's cuts need upstream changes Hermes v0.21.5 does not have,
-  so the image makes them: a `sed` gates stage2's config migration and
-  skills sync on `hermes-boot stamped` (the build fails unless both
-  lines patch), `02-reconcile-profiles` is replaced with a no-op (the
-  preloaded gateway is the main program), and `preload.py` replaces
-  `tools.skills_sync.sync_skills` and `_sync_bundled_skills_quietly`
-  when the skills stamp matches.
-- **Risk:** a Hermes release moves those lines or names: the build
-  fails on the stage2 patch (loudly), but the preload's replacement
-  stops applying (silently, about 0.5 s slower), or applies to a changed
-  function.
+- **Observed:** phase 4 (`images/hermes/Dockerfile`). The preloaded
+  gateway is hermes-boot's main program (spike S3b), so the image removes
+  upstream's `/etc/cont-init.d/02-reconcile-profiles`, whose
+  `hermes_cli.container_boot` would start an s6-supervised gateway beside
+  it from a restored `gateway_state.json`. The build fails if that script
+  is not there to remove, or another cont-init script names
+  `container_boot`.
+- **Risk:** a Hermes release that starts a gateway at boot some other
+  way: two gateways serve one home.
 - **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream keys its setup and bundled-skills syncs on
-  the image revision and ships a preloadable, unsupervised gateway main
-  program (S3b's "Upstream Hermes" list), proven by the real-Hermes lane
-  on an unpatched image at the same READY time.
+- **Delete when:** upstream lets a container whose main program is the
+  gateway skip its reconciler (or ships a preloadable, unsupervised
+  gateway main program: S3b's "Upstream Hermes" list), proven by the
+  real-Hermes lane on an image without the removal.
 
 ## A Hermes turn's end is read from its reactions
 
 - **Observed:** phase 4, against the real image. Relay has no
-  turn-level end; the bridge reads `👀` off then `✅`/`❌`, and Hermes'
-  multiplexed gateway brackets a message twice (an empty dispatch
-  bracket, then the turn's). The relay runtime ends a turn at `✅` only
-  once it said something, and an empty one only after 20 s with no new
-  `👀` (`EMPTY_SETTLE_MS`).
-- **Risk:** a turn that answers nothing holds the keepalive 20 s longer;
-  a Hermes release that brackets differently ends turns early (their
-  replies then post as turns of their own) or late.
-- **First proof:** a turn that says nothing, or a reply posted under a
-  `said` turn rather than its message's.
-- **Delete when:** Hermes' Relay sends a turn's end (or brackets once),
-  proven by the real-Hermes lane with `EMPTY_SETTLE_MS` gone.
+  turn-level end; the bridge reads its processing hooks' reactions
+  (`👀` off, then `✅`/`❌`). Hermes brackets a message it took while its
+  gateway was starting twice, the first empty (docs/hermes-relay.md), so
+  the relay runtime ends a turn at `❌`, at `✅` only once it said
+  something (Hermes ends no person's turn without a word), and, stopped,
+  at `👀` off. No clock (#156 cut the 1.5 s and 20 s windows).
+- **Risk:** a Hermes release that ends a person's turn saying nothing,
+  or cancels one the bridge did not stop, leaves it running until the
+  idle bound (15 minutes, then an error); one that stops reacting does
+  so for every turn (loudly: the Docker rung's turns never end). Hermes'
+  clarify questions are read by their glyphs (`❓`, `✏️`) the same way.
+- **First proof:** a turn that ends "the agent stopped answering" though
+  Hermes answered,
+  or a reply posted under a `said` turn rather than its message's.
+- **Delete when:** Hermes' Relay sends a turn's end and its questions as
+  structure, proven by the real-Hermes lane.
 
 ## Hermes' tool steps are its progress text
 
@@ -728,9 +725,16 @@ fragment.club until cutover (decisions 34–35).
 ## Each agent's Hermes profile config is rewritten at every boot
 
 - **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
-  its model block (tier, the model intercept, `x-fragment-agent`),
+  its model block (tier, the model intercept, `x-fragment-agent`), its
+  skills' directories, its vision model, its browser and its terminal,
   written whole at each boot; anything Hermes or the agent wrote there
-  is lost.
+  is lost. Hermes' managed scope (`/etc/hermes/config.yaml`, which the
+  boot writes for what every profile shares) cannot carry the rest: it
+  is one layer for every profile, its `${VAR}`s expand against the
+  gateway's own environment, never a profile's `.env`, and Hermes v0.21.5
+  reads some keys (`browser.*`) with `read_raw_config`, past it. A merge
+  into the profile's file would need a YAML parser in the boot, or
+  Hermes' own Python per profile per boot.
 - **Risk:** an agent's own `hermes config set` lasts until the computer
   sleeps.
 - **First proof:** an agent that changes its own Hermes settings.
@@ -758,20 +762,20 @@ fragment.club until cutover (decisions 34–35).
 ## An operator key is metered per call, not per what its vendor counts
 
 - **Observed:** Paul, 2026-10-04 (`fragment_core::price::DEFAULT_KEYS`).
-  The swap meters one `key` unit a call the provider answered. Perplexity's
-  Sonar Pro briefs also bill tokens and a request fee ($0.02 to $0.04 a
-  brief at list), priced as a $0.005 search; xAI's X Search bills posts and
+  The swap holds and settles one `key` unit a call the provider
+  answered. Perplexity's Sonar Pro briefs also bill tokens and a request
+  fee ($0.02 to $0.04 a brief at list), priced as a $0.005 search; xAI's X Search bills posts and
   profiles fetched, priced as a 20-post call ($0.12); ElevenLabs bills
   minutes of music (and characters of speech), priced as a minute ($0.15).
 - **Risk:** a brief or a long composition costs the operator more than
   it charges; a short jingle or a speech call charges the person more than
   it cost.
-- **First proof:** a month's vendor invoice against the ledger's `key`
-  rows for that key.
+- **First proof:** a month's vendor invoice against the ledger's `key:`
+  settlements for that key.
 - **Delete when:** the swap reads each answer's usage (a header or the
-  body, as the model route reads tokens) and meters the vendor's own
-  units, each catalog row naming how, proven by a lane whose upstream fake
-  answers usage and is charged by it.
+  body, as the model route reads tokens) and settles the vendor's own
+  units against a hold of its worst case, each catalog row naming how,
+  proven by a lane whose upstream fake answers usage and is charged by it.
 
 ## Hermes keeps its providers' variable names from its terminal
 

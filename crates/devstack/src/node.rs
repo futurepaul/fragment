@@ -11,8 +11,8 @@
 //! node answers with the pinned version, so a directory under that name is
 //! always whole. Its source of truth is the pin, a new pin is a new name,
 //! and a directory whose node does not answer the pin is refused, named,
-//! for removal. `FRAGMENT_NODE` names another node instead: a release of a
-//! line in `OVERRIDE_MAJORS`, or nothing runs.
+//! for removal. There is no other Node: a machine the pin has no tarball
+//! for runs nothing.
 //!
 //! node_modules is the pinned npm's `npm ci` of package-lock.json, run
 //! again whenever package.json, package-lock.json or the Node differ from
@@ -28,12 +28,10 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-pub use crate::node_release::{Tarball, NODE_VERSION, OVERRIDE_MAJORS, TARBALLS};
+pub use crate::node_release::{Tarball, NODE_VERSION, TARBALLS};
 
 /// Where the official tarballs come from.
 pub const DIST_URL: &str = "https://nodejs.org/dist";
-/// Names a node to run in place of the pin, by absolute path.
-pub const OVERRIDE_VAR: &str = "FRAGMENT_NODE";
 /// A tarball larger than this is refused unread (24.21's are about 50 MB).
 pub const TARBALL_BYTES_MAX: u64 = 128 << 20;
 pub const FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,8 +58,6 @@ pub enum NodeError {
     HashMismatch { file: String, expected: String, actual: String },
     Unpack { file: String, detail: String },
     Io { what: String, source: io::Error },
-    /// The override is not a node this repo runs on.
-    Refused { given: PathBuf, why: String },
     /// `target/tools`' copy of the pin does not answer as the pin.
     Corrupt { dir: PathBuf, detail: String },
     Npm { detail: String },
@@ -70,9 +66,7 @@ pub enum NodeError {
 impl fmt::Display for NodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NodeError::UnsupportedPlatform { os, arch } => {
-                write!(f, "no Node tarball is pinned for {os}/{arch} (crates/devstack/src/node_release.rs); set {OVERRIDE_VAR} to a node of Node {OVERRIDE_MAJORS:?}")
-            }
+            NodeError::UnsupportedPlatform { os, arch } => write!(f, "no Node tarball is pinned for {os}/{arch} (crates/devstack/src/node_release.rs)"),
             NodeError::Fetch { url, detail } => write!(f, "fetching {url}: {detail}"),
             NodeError::TooLarge { url } => write!(f, "{url} is larger than {TARBALL_BYTES_MAX} bytes; refused"),
             NodeError::HashMismatch { file, expected, actual } => {
@@ -80,7 +74,6 @@ impl fmt::Display for NodeError {
             }
             NodeError::Unpack { file, detail } => write!(f, "unpacking {file}: {detail}"),
             NodeError::Io { what, source } => write!(f, "{what}: {source}"),
-            NodeError::Refused { given, why } => write!(f, "{OVERRIDE_VAR}={} {why}; refused (unset it to run the pinned Node v{NODE_VERSION})", given.display()),
             NodeError::Corrupt { dir, detail } => write!(f, "{} is not the pinned Node v{NODE_VERSION} ({detail}): remove it, and the next run fetches it again", dir.display()),
             NodeError::Npm { detail } => write!(f, "npm ci: {detail}"),
         }
@@ -93,53 +86,6 @@ impl std::error::Error for NodeError {}
 fn io_error(what: impl Into<String>) -> impl FnOnce(io::Error) -> NodeError {
     let what = what.into();
     move |source| NodeError::Io { what, source }
-}
-
-/// A Node release's version, `v<major>.<minor>.<patch>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Release {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-}
-
-impl fmt::Display for Release {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v{}.{}.{}", self.major, self.minor, self.patch)
-    }
-}
-
-/// `node --version`'s answer as a release; `None` for anything else: a
-/// prerelease (`v26.8.0-alpha.0.0.0`), a nightly, a build tag, or junk.
-pub fn parse_release(answer: &str) -> Option<Release> {
-    fn number(part: &str) -> Option<u32> {
-        let digits = !part.is_empty() && part.len() <= 9 && part.bytes().all(|b| b.is_ascii_digit());
-        if digits {
-            part.parse().ok()
-        } else {
-            None
-        }
-    }
-    let rest = answer.trim().strip_prefix('v')?;
-    let parts: Vec<&str> = rest.splitn(4, '.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some(Release { major: number(parts[0])?, minor: number(parts[1])?, patch: number(parts[2])? })
-}
-
-/// Whether an override may stand in for the pin: a release of an LTS
-/// line wrangler runs on.
-pub fn override_allowed(release: Release) -> bool {
-    OVERRIDE_MAJORS.contains(&release.major)
-}
-
-/// The pin's release.
-pub fn pinned_release() -> Release {
-    let release = parse_release(&format!("v{NODE_VERSION}"));
-    let release = release.expect("NODE_VERSION is a release");
-    assert!(override_allowed(release), "the pin's own major is one an override may be");
-    release
 }
 
 impl Tarball {
@@ -176,7 +122,6 @@ pub struct Node {
     pub bin: PathBuf,
     /// Its own npm.
     pub npm_cli: PathBuf,
-    pub release: Release,
 }
 
 impl Node {
@@ -214,54 +159,9 @@ impl Node {
     }
 }
 
-/// The Node to run: `FRAGMENT_NODE`'s, or the pin, fetched into `tools`
-/// (`target/tools`) on first use. Never a `node` from PATH.
+/// The pin, from `tools` (`target/tools`), fetched there first if it is
+/// not. Never a `node` from PATH.
 pub fn locate(tools: &Path) -> Result<Node, NodeError> {
-    match std::env::var_os(OVERRIDE_VAR) {
-        Some(given) => from_override(Path::new(&given)),
-        None => pinned(tools),
-    }
-}
-
-/// `node --version`, run with none of `VARS_CLEARED`; `None` when it does
-/// not answer with a release.
-fn version_of(node: &Path) -> Result<(String, Option<Release>), io::Error> {
-    let mut cmd = Command::new(node);
-    cmd.arg("--version").stdin(Stdio::null());
-    for var in VARS_CLEARED {
-        cmd.env_remove(var);
-    }
-    let out = cmd.output()?;
-    let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let release = if out.status.success() { parse_release(&answer) } else { None };
-    Ok((answer, release))
-}
-
-/// The override: an absolute path to a node that answers with a release
-/// of a line in `OVERRIDE_MAJORS`, its own npm beside it.
-pub fn from_override(given: &Path) -> Result<Node, NodeError> {
-    let refused = |why: String| NodeError::Refused { given: given.to_path_buf(), why };
-    if !given.is_absolute() {
-        return Err(refused("is not an absolute path".into()));
-    }
-    let node = fs::canonicalize(given).map_err(|e| refused(format!("does not resolve: {e}")))?;
-    let (answer, release) = version_of(&node).map_err(|e| refused(format!("does not run: {e}")))?;
-    let Some(release) = release else {
-        return Err(refused(format!("answers {answer:?} to --version, not a release")));
-    };
-    if !override_allowed(release) {
-        return Err(refused(format!("is {release}; an override is a release of Node {OVERRIDE_MAJORS:?}")));
-    }
-    let bin = node.parent().expect("a canonical file path has a parent").to_path_buf();
-    let npm_cli = bin.parent().map(|prefix| prefix.join(NPM_CLI)).unwrap_or_default();
-    if !npm_cli.is_file() {
-        return Err(refused(format!("has no npm of its own at {}", npm_cli.display())));
-    }
-    Ok(Node { node, bin, npm_cli, release })
-}
-
-/// The pin, from `tools`, fetched there first if it is not.
-fn pinned(tools: &Path) -> Result<Node, NodeError> {
     let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
     let tarball = tarball_for(os, arch).ok_or(NodeError::UnsupportedPlatform { os, arch })?;
     let home = tools.join(tarball.dir_name());
@@ -277,19 +177,32 @@ fn pinned(tools: &Path) -> Result<Node, NodeError> {
     installed(&home)
 }
 
+/// Whether `node --version` (run with none of `VARS_CLEARED`) answers as
+/// the pin, and what it answered.
+fn answers_as_pin(node: &Path) -> Result<(bool, String), io::Error> {
+    let mut cmd = Command::new(node);
+    cmd.arg("--version").stdin(Stdio::null());
+    for var in VARS_CLEARED {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output()?;
+    let answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((out.status.success() && answer == format!("v{NODE_VERSION}"), answer))
+}
+
 /// The pin's directory as a Node, once it answers as the pin.
 fn installed(home: &Path) -> Result<Node, NodeError> {
     let corrupt = |detail: String| NodeError::Corrupt { dir: home.to_path_buf(), detail };
     let node = home.join("bin/node");
-    let (answer, release) = version_of(&node).map_err(|e| corrupt(format!("its node does not run: {e}")))?;
-    if release != Some(pinned_release()) {
+    let (pinned, answer) = answers_as_pin(&node).map_err(|e| corrupt(format!("its node does not run: {e}")))?;
+    if !pinned {
         return Err(corrupt(format!("its node answers {answer:?}")));
     }
     let npm_cli = home.join(NPM_CLI);
     if !npm_cli.is_file() {
         return Err(corrupt(format!("it has no {NPM_CLI}")));
     }
-    Ok(Node { node, bin: home.join("bin"), npm_cli, release: pinned_release() })
+    Ok(Node { node, bin: home.join("bin"), npm_cli })
 }
 
 /// An exclusive hold on `tools` for fetching and installing (`xtask dev`
@@ -354,8 +267,8 @@ fn install(bytes: &[u8], tarball: &Tarball, tools: &Path) -> Result<PathBuf, Nod
     remove_dir_if_present(&partial)?;
     let entries = unpack(bytes, &name, &partial)?;
     let unpacked = partial.join(&name);
-    let (answer, release) = version_of(&unpacked.join("bin/node")).map_err(|e| NodeError::Unpack { file: file.clone(), detail: format!("its node does not run: {e}") })?;
-    if release != Some(pinned_release()) {
+    let (pinned, answer) = answers_as_pin(&unpacked.join("bin/node")).map_err(|e| NodeError::Unpack { file: file.clone(), detail: format!("its node does not run: {e}") })?;
+    if !pinned {
         return Err(NodeError::Unpack { file, detail: format!("its node answers {answer:?}, not v{NODE_VERSION}") });
     }
     let home = tools.join(&name);
@@ -425,10 +338,10 @@ fn unpack(bytes: &[u8], top: &str, into: &Path) -> Result<u32, NodeError> {
     Ok(count)
 }
 
-/// What node_modules is installed from: the Node, package.json and
+/// What node_modules is installed from: the pin, package.json and
 /// package-lock.json.
-fn stamp(node: &Node, root: &Path) -> Result<String, NodeError> {
-    let mut text = format!("node {}\n", node.release);
+fn stamp(root: &Path) -> Result<String, NodeError> {
+    let mut text = format!("node v{NODE_VERSION}\n");
     for file in ["package.json", "package-lock.json"] {
         let path = root.join(file);
         let bytes = fs::read(&path).map_err(io_error(format!("read {}", path.display())))?;
@@ -442,7 +355,7 @@ fn stamp(node: &Node, root: &Path) -> Result<String, NodeError> {
 /// is `cache/npm`. `npm ci` never writes the lockfile; that it did not is
 /// checked.
 pub fn ensure_modules(node: &Node, root: &Path, tools: &Path, cache: &Path) -> Result<(), NodeError> {
-    let wanted = stamp(node, root)?;
+    let wanted = stamp(root)?;
     let stamp_path = root.join("node_modules").join(STAMP);
     let current = || fs::read_to_string(&stamp_path).ok();
     if current().as_deref() == Some(wanted.as_str()) {
@@ -453,7 +366,7 @@ pub fn ensure_modules(node: &Node, root: &Path, tools: &Path, cache: &Path) -> R
     if current().as_deref() == Some(wanted.as_str()) {
         return Ok(());
     }
-    eprintln!("npm ci with Node {} ({}): node_modules is missing or was installed from another lockfile or Node", node.release, node.node.display());
+    eprintln!("npm ci with Node v{NODE_VERSION} ({}): node_modules is missing or was installed from another lockfile or Node", node.node.display());
     let lockfile = root.join("package-lock.json");
     let before = fs::read(&lockfile).map_err(io_error(format!("read {}", lockfile.display())))?;
     let status = node
@@ -481,27 +394,11 @@ pub fn ensure_modules(node: &Node, root: &Path, tools: &Path, cache: &Path) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::Mutex;
-
-    /// Held by each test that writes an executable and runs it: a process
-    /// another test forks meanwhile would hold the file open for writing,
-    /// and running it would fail (ETXTBSY).
-    static EXEC: Mutex<()> = Mutex::new(());
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("devstack-node-{name}-{}", crate::random_hex(6)));
         fs::create_dir_all(&dir).expect("make the test's directory");
         dir
-    }
-
-    /// An executable shell script at `path` that answers `--version` with `answer`.
-    fn fake_node(path: &Path, answer: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut f = fs::File::create(path).unwrap();
-        writeln!(f, "#!/bin/sh\necho '{answer}'").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// A gzipped tarball of `files` (path, mode, contents).
@@ -538,7 +435,6 @@ mod tests {
             assert!(t.sha256.len() == 64 && t.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{}'s hash is SHA-256 hex", t.platform);
             assert!(TARBALLS[..i].iter().all(|o| o.platform != t.platform && o.sha256 != t.sha256), "{} is pinned once", t.platform);
         }
-        assert_eq!(pinned_release().to_string(), format!("v{NODE_VERSION}"));
     }
 
     /// A tarball that is not the pinned one is refused before anything of
@@ -548,7 +444,6 @@ mod tests {
     /// and with another.
     #[test]
     fn a_tarball_whose_hash_differs_is_refused_unpacked() {
-        let _exec = EXEC.lock().unwrap_or_else(|e| e.into_inner());
         let tools = scratch("hash");
         let top = format!("node-v{NODE_VERSION}-test-x64");
         let node = format!("#!/bin/sh\necho v{NODE_VERSION}\n");
@@ -567,7 +462,10 @@ mod tests {
         assert_eq!(home, tools.join(&top));
         assert!(!tools.join(".partial").exists(), "the staging directory is gone");
         let node = installed(&home).expect("it answers as the pin");
-        assert_eq!((node.bin, node.release), (home.join("bin"), pinned_release()));
+        assert_eq!(node.bin, home.join("bin"));
+        // a node that answers otherwise (Hermes' v26 alpha, say) is not the pin
+        fs::write(home.join("bin/node"), "#!/bin/sh\necho v26.8.0-alpha.0.0.0\n").unwrap();
+        assert!(matches!(installed(&home), Err(NodeError::Corrupt { .. })));
         fs::remove_dir_all(&tools).unwrap();
     }
 
@@ -584,51 +482,12 @@ mod tests {
         fs::remove_dir_all(&into).unwrap();
     }
 
-    /// A release parses; a prerelease, a nightly, or junk does not; and an
-    /// override must be a release of a line in OVERRIDE_MAJORS.
-    #[test]
-    fn only_releases_of_the_supported_lines_may_override() {
-        assert_eq!(parse_release("v24.21.0\n"), Some(Release { major: 24, minor: 21, patch: 0 }));
-        for answer in ["v26.8.0-alpha.0.0.0", "v25.0.0-nightly20250101abc", "24.21.0", "v24.21", "v24.21.0.1", "v24.x.0", "", "node"] {
-            assert_eq!(parse_release(answer), None, "{answer}");
-        }
-        for (answer, allowed) in [("v24.21.0", true), ("v22.23.3", true), ("v18.20.4", false), ("v20.19.0", false), ("v23.11.1", false), ("v26.10.0", false)] {
-            assert_eq!(override_allowed(parse_release(answer).unwrap()), allowed, "{answer}");
-        }
-    }
-
-    /// FRAGMENT_NODE is refused unless it names, absolutely, a node that
-    /// answers with a supported release and has its npm beside it. Method:
-    /// stand-in nodes that answer as Hermes' v26 alpha, a v18, and a v24.
-    #[test]
-    fn an_override_that_is_not_a_supported_release_is_refused() {
-        let _exec = EXEC.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = scratch("override");
-        let refused = |given: &Path| matches!(from_override(given), Err(NodeError::Refused { .. }));
-        let alpha = dir.join("alpha/bin/node");
-        fake_node(&alpha, "v26.8.0-alpha.0.0.0");
-        assert!(refused(&alpha), "Hermes' alpha");
-        let old = dir.join("old/bin/node");
-        fake_node(&old, "v18.20.4");
-        assert!(refused(&old), "a v18");
-        let lts = dir.join("lts/bin/node");
-        fake_node(&lts, "v24.21.0");
-        assert!(refused(&lts), "a node without its npm");
-        fs::create_dir_all(dir.join("lts/lib/node_modules/npm/bin")).unwrap();
-        fs::write(dir.join("lts").join(NPM_CLI), "// npm").unwrap();
-        let node = from_override(&lts).expect("a v24 with its npm");
-        assert_eq!((node.release, node.bin), (Release { major: 24, minor: 21, patch: 0 }, fs::canonicalize(dir.join("lts/bin")).unwrap()));
-        assert!(refused(Path::new("lts/bin/node")), "a relative path");
-        assert!(refused(&dir.join("missing/bin/node")), "nothing there");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
     /// A JavaScript process finds this Node first on its PATH, keeps the
     /// rest of it, keeps its caches under the repo, and inherits none of
     /// the variables that change what node runs.
     #[test]
     fn a_script_runs_on_this_node_first_on_path() {
-        let node = Node { node: "/r/target/tools/n/bin/node".into(), bin: "/r/target/tools/n/bin".into(), npm_cli: "/r/target/tools/n/npm-cli.js".into(), release: pinned_release() };
+        let node = Node { node: "/r/target/tools/n/bin/node".into(), bin: "/r/target/tools/n/bin".into(), npm_cli: "/r/target/tools/n/npm-cli.js".into() };
         let path = node.path(Some(OsStr::new("/home/me/.local/bin:/usr/bin"))).unwrap();
         assert_eq!(path, OsString::from("/r/target/tools/n/bin:/home/me/.local/bin:/usr/bin"));
         assert_eq!(node.path(None).unwrap(), OsString::from("/r/target/tools/n/bin"));

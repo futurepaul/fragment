@@ -39,9 +39,7 @@
 //! most `LIVE_SOCKETS_PER_PRINCIPAL`. Presence comes whole in `hello`,
 //! then one change at a time, each encoded once and sent to every socket
 //! (the O(N) bytes of a change, never O(N²)); a socket's changes past
-//! `PRESENCE_PER_S` a second are dropped. A page loaded before that
-//! protocol (its library connects without `?v=2`) hears the whole list
-//! instead, as it did (`LEGACY_TAG`; docs/technical-debt-ledger.md).
+//! `PRESENCE_PER_S` a second are dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,7 +49,7 @@ use fragment_core::npub;
 use fragment_proto::live::{Answer, Cursor, LiveIn, LiveOut, Present, Query, Subscribe};
 use fragment_proto::{limits, valid_op_id, ChannelRecord, ErrorBody, ErrorCode, OpKind, Role, Via};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use worker::*;
 
 use crate::error::{CellError, CellResult};
@@ -69,14 +67,8 @@ const PAGE_READ_BATCH: usize = 50;
 /// identity is checked again: not final, so the page reconnects and hears
 /// who it is now.
 const ROLE_CHANGED: u16 = 4001;
-/// Every live socket's tag, and the tag of those whose page speaks the
-/// presence protocol of one change a frame (its library asks `?v=2`).
+/// Every live socket's tag.
 const LIVE_TAG: &str = "live";
-const CURRENT_TAG: &str = "live2";
-/// The tag of a socket whose page was loaded before presence came one
-/// change a frame: it hears the whole list on each change, as it did.
-/// Delete with its ledger entry.
-const LEGACY_TAG: &str = "live1";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct LiveState {
@@ -160,13 +152,6 @@ fn present_on(sockets: &[WebSocket]) -> Vec<Present> {
     sockets.iter().filter_map(state_of).filter_map(|s| Some(Present { id: s.id, principal: s.principal, data: s.presence? })).collect()
 }
 
-/// The whole presence list, as a page loaded before presence came one
-/// change a frame reads it (`{type: "presence", list}`): outside `LiveOut`,
-/// since no current reader decodes it. Delete with `LEGACY_TAG`.
-fn legacy_presence_frame(list: Vec<Present>) -> String {
-    json!({ "type": "presence", "list": list }).to_string()
-}
-
 impl FragmentCell {
     /// Who is here now, as every page's presence list holds them: one
     /// entry a socket that shares presence (a job's `presence` step).
@@ -202,9 +187,8 @@ impl FragmentCell {
             _ if link => "view".to_string(),
             _ => "anon".to_string(),
         };
-        let current = caller.url.query_pairs().any(|(k, v)| k == "v" && v == "2");
         let pair = WebSocketPair::new()?;
-        let tags = [LIVE_TAG, &tag, &who, if current { CURRENT_TAG } else { LEGACY_TAG }];
+        let tags = [LIVE_TAG, &tag, &who];
         self.state.accept_websocket_with_tags(&pair.server, &tags);
         let signed_in = caller.principal().is_some();
         let st = LiveState {
@@ -221,29 +205,15 @@ impl FragmentCell {
             self.live.borrow_mut().credentials.insert(st.id.clone(), credential);
         }
         pair.server.serialize_attachment(&st)?;
-        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence: presence.clone() });
-        if !current {
-            self.event("live.legacy-page", "a page loaded before presence came one change a frame connected", json!({}));
-            let _ = pair.server.send_with_str(legacy_presence_frame(presence));
-        }
+        send(&pair.server, &LiveOut::Hello { id: st.id, principal: st.principal, role, presence });
         Ok(Response::from_websocket(pair.client)?)
     }
 
     /// One socket's presence changed, to every socket (its own too): one
-    /// frame, encoded once, and no attachment read. A page from before
-    /// that protocol hears the whole list, read only when one is open.
+    /// frame, encoded once, and no attachment read.
     fn broadcast_presence(&self, change: Present) {
-        let legacy = self.state.get_websockets_with_tag(LEGACY_TAG);
-        if !legacy.is_empty() {
-            let gone = change.data.is_null().then(|| change.id.clone());
-            let list = present_on(&self.state.get_websockets_with_tag(LIVE_TAG)).into_iter().filter(|p| Some(&p.id) != gone.as_ref()).collect();
-            let frame = legacy_presence_frame(list);
-            for ws in &legacy {
-                let _ = ws.send_with_str(&frame);
-            }
-        }
         let frame = LiveOut::Presence(change).encode();
-        for ws in self.state.get_websockets_with_tag(CURRENT_TAG) {
+        for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let _ = ws.send_with_str(&frame);
         }
     }

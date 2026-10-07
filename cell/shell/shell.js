@@ -142,11 +142,10 @@ function patch(box, rows) {
   while (box.children.length > next.length) box.lastElementChild.remove();
 }
 
-function notice(title, text, ...actions) {
+function notice(title, text) {
   const n = $("notice");
   n.replaceChildren(el("strong", null, title));
   if (text) n.append(el("span", null, text));
-  for (const a of actions) n.append(" ", a);
   n.hidden = false;
 }
 
@@ -279,7 +278,6 @@ function openMenu(button, items) {
   if (again) return;
   menuFor = { button };
   menu.replaceChildren(...items.map((it) => {
-    if (it.heading) return el("div", "menu-heading", it.heading);
     const b = el("button");
     b.type = "button";
     b.setAttribute("role", "menuitem");
@@ -569,8 +567,6 @@ async function makeAgent(job, chosen) {
   const chat = await api("POST", "/api/fragments", { name: `${label}-chat`, template: "chat", title: name });
   if (id) await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
   await api("POST", `/api/f/${chat.name}/channels/chat`, { id: "job", body: { text: job.trim() } });
-  // a wake now hides the start's latency: the agent is up as the page opens
-  api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
   return chat.name;
 }
 const dialog = $("new-agent-dialog");
@@ -976,7 +972,7 @@ async function openSettings(push = true) {
     ? section(
         "Credit",
         line("Plan", ledger.plan === "seat_always_on" ? "Always-on seat" : ledger.plan === "seat" ? "Seat" : "Guest"),
-        line("This month", `${usd(ledger.availableMicros ?? ledger.balanceMicros ?? 0)} left`),
+        line("This month", `${usd(ledger.availableMicros)} left`),
         ...(standing && standing !== "ok"
           ? [el("p", "settings-warning", [STOPPED[standing] ?? "Your agents are stopped", WHY[ledger.standing.why]].filter(Boolean).join(": ") + ".")]
           : []),

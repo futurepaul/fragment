@@ -37,9 +37,16 @@ default agent. A fragment on it names it and holds nothing else:
 ## The managed set
 
 All of `finite-mono/finite-skills/skills` (47 skills) but
-`shared-skills-finite`, which git replaces (decision 17), under the same
-categories and names: 43 skills. Names keep finite-skills' `-finite`
-suffix, so none collides with a skill Hermes bundles or one an agent makes.
+`shared-skills-finite`, which git replaces (decision 17), and the ones
+gone below, under the same categories and names: 41 skills. Names keep
+finite-skills' `-finite` suffix, so none collides with a skill Hermes
+bundles or one an agent makes.
+
+`powerpoint-finite` (Anthropic's `pptx` skill) is gone: its license
+(© Anthropic, PBC, all rights reserved) forbids copying, changing and
+distributing it, and it named scripts it lacked (`thumbnail.py`,
+`office/unpack.py`, `office/soffice.py`). An agent reads and writes a deck
+with `python-pptx` (ocr-and-documents-finite says so).
 
 ### Rewritten for fragment
 
@@ -94,9 +101,8 @@ suffix, so none collides with a skill Hermes bundles or one an agent makes.
   music-generation). x-search calls xAI's REST Responses API, since the
   xai-sdk's gRPC cannot pass the intercept. `trading-agent-finite` reads
   FRED's keyless CSV, since the platform offers no FRED key.
-- Left out as no skill reads them: tufte-viz's demo pages (2.5 MB), the
-  OOXML schemas under powerpoint's `scripts/office/schemas/` (no script of
-  it reads them), and compiled Python (`__pycache__`).
+- Left out as no skill reads them: tufte-viz's demo pages (2.5 MB) and
+  compiled Python (`__pycache__`).
 - The paper-writing skills' conference LaTeX kits (38k lines of `.sty`,
   `.bst`, `.tex`) are gone, and so is `ml-paper-writing-finite`, a
   duplicate of `research-paper-writing-finite` (Paul, 2026-10-04: skills
