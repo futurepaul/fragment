@@ -58,8 +58,7 @@ enum Shape {
     Plain,
     /// As fragment.club is since the move (docs/fragment-boats.md): the
     /// platform at `fragment.localhost`, cross-site from the fragments
-    /// (`<flat>.boats.localhost`, one site with each other), whose old
-    /// hosts under `fragment.localhost` redirect to their new ones.
+    /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,
 }
 const ORG: &str = "fragment-e2e";
@@ -479,7 +478,6 @@ impl Suite {
             codestorage_key_pem: self.org_key.clone(),
             codestorage_url: self.fake.node().url.clone(),
             host_suffix: suffix.then(|| self.suffix().to_string()),
-            legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
             // a rehearsal's node is shaped as a branch deployment, whose
             // levers are scoped as a preview's are
             host_label_suffix: self.hosted_rules.then(|| format!("--{REHEARSAL_BRANCH}")),

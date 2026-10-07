@@ -375,9 +375,6 @@ pub enum ErrorCode {
     /// 503: the computer won't wake (its starts kept failing); its owner
     /// can wake it to try again.
     WontWake,
-    /// 410: the fragment moved to another host; the message names its URL
-    /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
-    Moved,
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
@@ -400,7 +397,6 @@ impl ErrorCode {
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull | ErrorCode::WontWake => 503,
-            ErrorCode::Moved => 410,
             ErrorCode::NotConnected => 403,
         }
     }
