@@ -789,8 +789,7 @@ answering `{queued}`) push `payload` (`{title, body, tag, url}`, at most
 3800 bytes) to the subscriptions tagged `who` (at most 64 characters), or
 all of them with `*`, once per mutation or step. A relative `url` is the
 fragment's own (`./` is its page): a click focuses a page of it already
-there, or opens one. `fragment.notify.{supported, permission, ask,
-show}` wrap the Notification API.
+there, or opens one.
 
 `fragment.json`'s `notifyUrls` (at most 3) receive `{type: "changed",
 fragment, sha, paths}` (JSON POST, unsigned, as before) on each move of

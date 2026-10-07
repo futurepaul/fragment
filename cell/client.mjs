@@ -356,63 +356,6 @@ export function me() {
   return hello ? Promise.resolve(hello) : new Promise((resolve) => helloWaiters.push(resolve));
 }
 
-// ---- notifications: thin, defensive wrappers. ask() only prompts from a
-// click (browsers ignore it otherwise); show() fires only while the page
-// is hidden. Nothing here throws or rejects.
-function notifySupported() {
-  try {
-    return typeof Notification !== "undefined";
-  } catch (e) {
-    return false;
-  }
-}
-
-export const notify = {
-  supported: notifySupported,
-  permission() {
-    if (!notifySupported()) return "unsupported";
-    try {
-      return Notification.permission;
-    } catch (e) {
-      return "unsupported";
-    }
-  },
-  ask() {
-    return new Promise((resolve) => {
-      if (!notifySupported()) return resolve("unsupported");
-      let done = false;
-      const settle = (p) => {
-        if (!done) {
-          done = true;
-          clearTimeout(t);
-          resolve(p);
-        }
-      };
-      const t = setTimeout(() => settle("default"), 60000);
-      try {
-        const r = Notification.requestPermission((p) => settle(p));
-        if (r && typeof r.then === "function") r.then(settle, () => settle("denied"));
-      } catch (e) {
-        settle("denied");
-      }
-    });
-  },
-  show(title, opts = {}) {
-    try {
-      if (!notifySupported() || Notification.permission !== "granted" || !document.hidden) return false;
-      const n = new Notification(String(title ?? ""), { body: opts.body == null ? undefined : String(opts.body), tag: opts.tag == null ? undefined : String(opts.tag) });
-      n.onclick = () => {
-        window.focus();
-        n.close();
-        if (opts.url) location.assign(String(opts.url));
-      };
-      return true;
-    } catch (e) {
-      return false;
-    }
-  },
-};
-
 // ---- web push: the fragment's service worker (./__sw.js) and VAPID key
 // (./__push-key); a subscription is stored tagged `who`, and the app
 // pushes to a tag (call.push / job.push). Every failure resolves to
@@ -438,7 +381,7 @@ export const push = {
   async register(who = "") {
     const sw = navigator.serviceWorker;
     if (!sw || typeof PushManager === "undefined") return { ok: false, reason: "unsupported" };
-    if (notifySupported() && Notification.permission === "denied") return { ok: false, reason: "denied" };
+    if (typeof Notification !== "undefined" && Notification.permission === "denied") return { ok: false, reason: "denied" };
     try {
       await sw.register(new URL("__sw.js", base));
       const reg = await sw.ready;
