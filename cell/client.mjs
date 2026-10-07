@@ -157,8 +157,6 @@ function connect() {
   if (socket || ended) return;
   const url = new URL("__live", base);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  // the frames this library reads: presence one change at a time
-  url.searchParams.set("v", "2");
   const ws = new WebSocket(url);
   socket = ws;
   ws.onopen = () => {

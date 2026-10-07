@@ -383,8 +383,7 @@ fn chrono_like() -> String {
 pub fn follow_channel(client: &Client, name: &str, channel: &str, after: i64) -> Result<()> {
     use fragment_proto::live::{Cursor, LiveIn, LiveOut, Subscribe};
     use tungstenite::client::IntoClientRequest;
-    // `v=2`: the current frames (live.rs), which `LiveOut` decodes
-    let http = client.url(&format!("/f/{name}/__live?v=2"));
+    let http = client.url(&format!("/f/{name}/__live"));
     let ws_url = http.replacen("http", "ws", 1);
     let subscribe = |after: i64| LiveIn::Subscribe(Subscribe { channel: channel.to_string(), from: Cursor::After(after) }).encode();
     let mut last = after;

@@ -137,7 +137,7 @@ fn moved(s: &mut Suite, api: &Api) -> Result<()> {
     let body = Some(br#"{"id":"m","input":{}}"#.to_vec());
     let r = api.call(Call { method: "POST", url: format!("{old_origin}/__op/add"), body, content_type: Some("application/json"), ..Call::default() })?;
     s.ok("a write on the old host is 410, naming the new one", r.status == 410 && r.error() == "moved" && r.message().contains(&api.site_url(&name, "__op/add")), &r);
-    let socket = match Socket::connect(api, &format!("{old_origin}/__live?v=2"), None, None, Some(&old_origin)) {
+    let socket = match Socket::connect(api, &format!("{old_origin}/__live"), None, None, Some(&old_origin)) {
         Ok(_) => "opened".to_string(),
         Err(e) => format!("{e:#}"),
     };

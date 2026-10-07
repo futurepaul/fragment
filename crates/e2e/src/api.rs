@@ -649,9 +649,7 @@ pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std
 
 impl Socket {
     /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
-    /// `keys` signs the upgrade, `cookie` rides along like a browser's. A
-    /// `__live` socket speaks the current protocol (`?v=2`), as the browser
-    /// library's does; `__live?v=1` opens one as a page from before it.
+    /// `keys` signs the upgrade, `cookie` rides along like a browser's.
     pub fn open(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<Socket> {
         Socket::open_answered(api, name, path, keys, cookie).map(|(socket, _)| socket)
     }
@@ -661,7 +659,6 @@ impl Socket {
     /// which the upgrade names (one that names none is no browser's, and
     /// its cookies count for nothing).
     pub fn open_answered(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<(Socket, Vec<String>)> {
-        let path = if path == "__live" { "__live?v=2" } else { path };
         let origin = cookie.map(|_| api.site_origin(name));
         Socket::connect(api, &format!("{}/f/{name}/{path}", api.base), keys, cookie, origin.as_deref())
     }
@@ -669,7 +666,6 @@ impl Socket {
     /// A socket to `path` on the fragment's own host, opened as a page on
     /// `origin` opens one (`None`: a client that names no page, as the CLI).
     pub fn on_host(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<Socket> {
-        let path = if path == "__live" { "__live?v=2" } else { path };
         Socket::connect(api, &api.site_url(name, path), keys, cookie, origin).map(|(socket, _)| socket)
     }
 
