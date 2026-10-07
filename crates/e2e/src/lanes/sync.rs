@@ -197,7 +197,7 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     let idle = s.eventually(Duration::from_secs(30), || ahead(&hook("alarm", None), "alarmAt") > day_ms - 180_000);
     let alarm = hook("alarm", None);
     s.ok(
-        "a fragment nothing outside the platform writes is polled once a day: its next pass and its alarm are a day away",
+        "a fragment no one pushes to has its next pass, and its alarm, a day away",
         quiet && closed.status == 200 && idle,
         &alarm,
     );
@@ -234,7 +234,7 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      busy, {} branch reads in four poll intervals; quiet, none", s.fake.requests(&repo, "GET branch") - reads);
     hook("age-outside", Some(day_ms));
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
-    s.ok("a day after the token, it is polled once a day again", quiet, hook("alarm", None));
+    s.ok("a day after the token, its next pass is a day away again", quiet, hook("alarm", None));
     s.commit(&c, &[("announced.md", Some(b"by webhook"))]);
     let alarm = hook("alarm", None);
     s.ok("a webhook moves the pin and leaves the poll quiet: the move it announced is followed", read("announced.md") && ahead(&alarm, "pollAt") > day_ms - 120_000, &alarm);
