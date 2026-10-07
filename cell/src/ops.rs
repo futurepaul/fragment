@@ -186,15 +186,19 @@ impl FragmentCell {
     /// whether there is code: the facet table answers the running facet,
     /// and the loader's callbacks read the code when there is none.
     pub(crate) fn facet(&self) -> CellResult<js::Facet> {
-        let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
-        let Some(loader_id) = rows.first().and_then(|r| r["loader_id"].as_str()) else {
+        let Some(loader_id) = self.installed_code()? else {
             return Err(CellError::new(ErrorCode::NoCode, "the live commit has no app.mjs (deploy one)"));
         };
         // the version the loader runs (installed_id less this fragment's
         // key, which is the same for every version of it): one dynamic worker a day
         self.note_dynamic_worker(&format!("{loader_id}:{}", platform().id));
         self.app.facet(&self.raw, &self.app_facet()?)
+    }
 
+    /// The installed app code's identity (its stored loader id), when live has an app.
+    pub(crate) fn installed_code(&self) -> CellResult<Option<String>> {
+        let rows = self.rows("SELECT loader_id FROM code WHERE id = 1", vec![])?;
+        Ok(rows.first().map(|r| r["loader_id"].as_str().expect("code.loader_id is TEXT NOT NULL").to_string()))
     }
 
     /// `POST /api/f/<name>/ops/<op>`: a signed caller.

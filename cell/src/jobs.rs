@@ -30,7 +30,9 @@
 //! step that fails for a reason that may pass (an upstream 5xx, a network
 //! error) is retried with backoff. A run that fails for good is **held**:
 //! kept with its input until someone replays it; its kept answers go when
-//! it finishes, and a replay takes every step afresh.
+//! it finishes, and a replay takes every step afresh. An attempt runs on
+//! the app's code installed at its first advance (`runs.code`): its kept
+//! answers are that code's steps', so an advance on other code holds it.
 //!
 //! **Triggers** start runs as the fragment itself, with an editor's reach:
 //! cron schedules (on this object's alarm), records appended to a channel
@@ -156,9 +158,11 @@ pub(crate) struct RunRow {
     pub created_at: i64,
     pub finished_at: Option<i64>,
     pub error: Option<String>,
+    /// The app's code (its loader id) this attempt took its first step on.
+    pub code: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error";
+const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error, code";
 /// What a run's paid steps were charged (`charges`, ai.rs).
 const RUN_COST: &str = "(SELECT SUM(micros) FROM charges WHERE charges.run = runs.id) AS cost_micros";
 
@@ -181,6 +185,7 @@ fn run_row(r: &Value) -> RunRow {
         created_at: int("created_at"),
         finished_at: r["finished_at"].as_i64(),
         error: r["error"].as_str().map(str::to_string),
+        code: r["code"].as_str().map(str::to_string),
     };
     assert!(row.attempt >= 1, "a run's attempts count from 1: {r}");
     row
@@ -573,6 +578,15 @@ impl FragmentCell {
         if self.cfg.test_hooks && count > 0 {
             self.held_advance(run_id).await?;
         }
+        // An attempt runs on the code installed at its first advance: its
+        // kept answers fit that code's steps alone, so an advance on other
+        // code holds it, and a replay runs it afresh on the code then.
+        let code = self.installed_code()?;
+        if count == 0 {
+            self.exec("UPDATE runs SET code = ? WHERE id = ?", vec![code.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from), SqlStorageValue::Integer(run_id)])?;
+        } else if code != run.code {
+            return fail("the app's code changed while the run was in flight: replay it to run on the new code".into());
+        }
         let results = match self.kept_answers(run_id, attempt, count)? {
             Kept::All(results) => results,
             Kept::Missing(index) => return fail(format!("step {index} has no kept answer: replay it")),
@@ -707,13 +721,13 @@ impl FragmentCell {
         )
     }
 
-    /// The kind of a step's kept answer, when it has one.
-    fn kept_kind(&self, run: i64, attempt: u32, index: u32) -> CellResult<Option<String>> {
+    /// Whether a step has a kept answer.
+    fn is_kept(&self, run: i64, attempt: u32, index: u32) -> CellResult<bool> {
         let rows = self.rows(
-            "SELECT kind FROM steps WHERE run = ? AND attempt = ? AND idx = ?",
+            "SELECT idx FROM steps WHERE run = ? AND attempt = ? AND idx = ?",
             vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into()), SqlStorageValue::Integer(index.into())],
         )?;
-        Ok(rows.first().map(|r| r["kind"].as_str().expect("steps.kind is TEXT NOT NULL").to_string()))
+        Ok(!rows.is_empty())
     }
 
     /// A run's input, as the call or trigger that started it gave it.
@@ -726,42 +740,35 @@ impl FragmentCell {
     /// `POST /job/effect`: one step, performed and its answer kept (a
     /// value, or a lasting failure the job sees) before the reply; a
     /// passing failure is a 502, which the Workflow retries. A step that
-    /// already has a kept answer (its reply was lost) is not performed again.
+    /// already has a kept answer (its reply was lost) is not performed again;
+    /// one kept as another kind (a job that did not reach its steps in the
+    /// same order) is the next advance's to refuse, in the app's platform code.
     async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
         let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
         let index = call.index;
         if index as usize >= limits::JOB_STEPS_MAX {
             return Err(CellError::invalid(format!("step {index}: a job takes at most {} steps", limits::JOB_STEPS_MAX)));
         }
-        let kept = match self.kept_kind(run.id, run.attempt, index)? {
-            Some(kept) => kept,
-            None => {
-                let out = match Step::from_parts(&call.kind, call.args) {
-                    Ok(step) => self.perform(&run, index, step).await,
-                    // the args come from the app's realm: the job sees why, and may catch it
-                    Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
-                };
-                let outcome = match out {
-                    Ok(v) => StepOutcome::Value(v),
-                    Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
-                    Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
-                };
-                let mut answer = StepResult { kind: call.kind.clone(), outcome };
-                // the job's body reads every answer back at each later step
-                let size = serde_json::to_string(&answer).expect("a step result serializes").len();
-                if size > limits::RESULT_MAX_BYTES {
-                    answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES));
-                }
-                self.keep_step(run.id, run.attempt, index, &answer)?;
-                let kept = self.kept_kind(run.id, run.attempt, index)?.ok_or_else(|| CellError::host(format!("step {index}'s answer was not kept")))?;
-                // lost after the step ran and its answer was kept: the Workflow tries it again
-                self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
-                kept
+        if !self.is_kept(run.id, run.attempt, index)? {
+            let out = match Step::from_parts(&call.kind, call.args) {
+                Ok(step) => self.perform(&run, index, step).await,
+                // the args come from the app's realm: the job sees why, and may catch it
+                Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
+            };
+            let outcome = match out {
+                Ok(v) => StepOutcome::Value(v),
+                Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
+                Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
+            };
+            let mut answer = StepResult { kind: call.kind, outcome };
+            // the job's body reads every answer back at each later step
+            let size = serde_json::to_string(&answer).expect("a step result serializes").len();
+            if size > limits::RESULT_MAX_BYTES {
+                answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES));
             }
-        };
-        // one step, one kind: a retry names the kind its first try did
-        if kept != call.kind {
-            return Err(CellError::host(format!("step {index} of run #{} was kept as {kept}, and is {} now", run.id, call.kind)));
+            self.keep_step(run.id, run.attempt, index, &answer)?;
+            // lost after the step ran and its answer was kept: the Workflow tries it again
+            self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
         }
         self.launch_queued().await;
         Ok(json!({ "kept": index }))

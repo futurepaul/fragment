@@ -1031,7 +1031,13 @@ unknown operation, a call that threw), or runs out of retries, makes the
 arguments do not fit its kind (`job.ai.text` without a model, say), with
 what does not fit. Every kind of step and its arguments are defined once,
 as `Step` in `crates/core/src/steps.rs`. A job that throws is
-**held**: its run keeps the input and error until someone replays it. At
+**held**: its run keeps the input and error until someone replays it. A
+run runs on the app's code (`app.mjs` and `applib/`) installed when it
+took its first step: a deploy that changes that code while the run is in
+flight holds it at its next step, saying so (its kept answers are the old
+code's steps'), and a replay runs it afresh on the new code. A step taken
+as another kind than the run first took it (a body that did not reach its
+steps in the same order) throws. At
 most 256 steps (`limits::JOB_STEPS_MAX`; an agent's turn waits in polls and
 sleeps) and 4 MiB of step results per run; a result of at most 1 MiB.
 

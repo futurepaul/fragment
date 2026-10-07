@@ -21,7 +21,8 @@
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
 // body re-runs from the top at every step with the results so far, so it
 // must reach its steps in the same order each time and change nothing
-// except through steps (docs/api.md, Jobs).
+// except through steps (docs/api.md, Jobs); the supervisor holds a run whose
+// code changed under it, so the results are always this code's.
 //
 // Every answer is an envelope, so no value an author returns can be
 // mistaken for a platform answer: a query's { result }, a mutation's
@@ -288,7 +289,7 @@ class Job {
       return NEVER;
     }
     if (done.kind !== kind) {
-      return Promise.reject(new Error(`step ${index} was ${done.kind} when this run took it and is ${kind} now: the job's code changed under the run`));
+      return Promise.reject(new Error(`step ${index} was ${done.kind} when this run took it and is ${kind} now: a job reaches its steps in the same order each time`));
     }
     if ("error" in done) return Promise.reject(new StepError(kind, done.error));
     return Promise.resolve(done.value);

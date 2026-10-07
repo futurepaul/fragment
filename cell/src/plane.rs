@@ -128,7 +128,8 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 /// A blob's served type came after the blob table (blobs.rs): one from
 /// before is served untyped. A channel trigger's posters (`from`) came
 /// after the trigger table: one from before fires for every record, as it
-/// was installed to.
+/// was installed to. A run's code came after the run table (jobs.rs
+/// `advance`): a run in flight from before is held at its next step.
 /// Runs in the constructor, before anything reads these tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
     for (table, column, decl) in [
@@ -137,6 +138,7 @@ pub(crate) fn migrate_code(sql: &SqlStorage) {
         ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "mime", "TEXT"),
         ("code_triggers", "from_kind", "TEXT"),
+        ("runs", "code", "TEXT"),
     ] {
         let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
         if !cols.iter().any(|c| c["name"] == column) {
