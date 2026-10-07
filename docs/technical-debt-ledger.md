@@ -775,7 +775,9 @@ fragment.club until cutover (decisions 34–35).
 - **Observed:** 2026-10-06, the hosted hold (docs/durable-computers.md,
   "The hold is answered once the desktop has drawn"). A Chromium the
   agent runs with its default profile keeps it under Hermes' home
-  (`/data/hermes/.config/chromium`), not the work, and holds its SQLite
+  (`/data/hermes/.config/chromium`; since the image pins an agent's
+  `HOME` to its profile's, `/data/hermes/profiles/<profile>/home/.config/chromium`:
+  docs/computers.md, "Hermes' container guesses"), not the work, and holds its SQLite
   databases there in SQLite's exclusive locking mode while it runs, so no
   copy of one moment can be had. Our image keeps such a database hot
   (images/hermes/boot/src/held.rs, `copy_all`; its `held` event's

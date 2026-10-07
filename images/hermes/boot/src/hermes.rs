@@ -228,6 +228,32 @@ pub fn chromium_script(full: &Path, shell: &Path) -> String {
     )
 }
 
+/// What Hermes would otherwise decide by guessing whether it runs in a
+/// container, pinned in the boot's environment (and so the gateway's, its
+/// agents' terminals' and the desktop's) the same on every runtime. Its
+/// guess (`hermes_platform/host/runtime.py: is_container()`) is Docker's
+/// marker `/.dockerenv`, Podman's, Kubernetes', or a runtime's name in
+/// `/proc/1/cgroup` or the root mount: Docker gives every container the
+/// marker, Cloudflare Containers likely none of them, so there Hermes would
+/// act as on a host. Each pin is what Hermes does in a container, as the
+/// Docker rung has always run it (docs/computers.md, "Hermes' container
+/// guesses", has every guess and what decides it):
+///
+/// - `TERMINAL_HOME_MODE=profile`: each agent's terminal, `execute_code`
+///   and file tools' `~` have the agent's own `HOME`, its profile's `home`
+///   (one of `PROFILE_DIRS`). Taken for a host, every agent's would be the
+///   gateway's own, `/data/hermes`: one `~` for all the computer's agents,
+///   among Hermes' own files (its `.env`, `config.yaml`).
+/// - `HERMES_SKIP_CHMOD=1`: Hermes leaves the modes of its home's
+///   directories and files as the image and the boot make them. Taken for
+///   a host, it makes them owner-only (0700, 0600) at each start; the
+///   computer has one user and root, and holds no secret, so that guards
+///   nothing here.
+///
+/// The third guess the image's paths reach, Chromium's flags, is pinned by
+/// the image's Chromium (`CHROMIUM`).
+pub const RUNTIME_ENV: [(&str, &str); 2] = [("TERMINAL_HOME_MODE", "profile"), ("HERMES_SKIP_CHMOD", "1")];
+
 /// What the computer keeps as its guest's tools' work, saved as a record
 /// of its own (docs/computers.md, "Data and the restore gate").
 pub const WORK: &str = "/data/work";
@@ -609,6 +635,25 @@ mod tests {
         assert_eq!(run(None), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "with none, the headless shell");
         assert_eq!(run(Some("")), "shell --no-sandbox --disable-dev-shm-usage --user-data-dir=/p https://example.com\n", "an empty DISPLAY is none");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Hermes' container guesses, pinned: each named once, as Hermes reads
+    /// it, and nothing the boot writes names one again (Hermes' config
+    /// overrides its environment); `profile` needs each profile's `home`,
+    /// without which Hermes keeps the gateway's own `HOME`.
+    #[test]
+    fn hermes_container_guesses_are_pinned() {
+        let pins: std::collections::BTreeMap<&str, &str> = RUNTIME_ENV.into_iter().collect();
+        assert_eq!(pins.len(), RUNTIME_ENV.len(), "each named once: {RUNTIME_ENV:?}");
+        assert_eq!(pins.get("TERMINAL_HOME_MODE"), Some(&"profile"), "one of Hermes' auto, real, profile");
+        assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
+        assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
+        let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
+        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S), default_config("http://m"), profile_config(&agent(), Tier::Medium, "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        for (name, _) in RUNTIME_ENV {
+            let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
+            assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
+        }
     }
 
     #[test]

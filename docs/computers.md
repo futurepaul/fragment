@@ -816,6 +816,40 @@ persisted)".
   build, and a `.deb` on disk installs offline. An intranet computer
   needs an apt mirror (and PyPI's and npm's) named in the image.
 
+### Hermes' container guesses
+
+Hermes v0.21.5 does some things differently when it believes it runs in
+a container, and it guesses: `is_container()`
+(`hermes_platform/host/runtime.py`, once per process) is true on
+`/.dockerenv`, `/run/.containerenv`, `KUBERNETES_SERVICE_HOST`, a
+runtime's name in `/proc/1/cgroup`, or `kubepods`, `containerd` or `crio`
+in the root mount; a few places read `/.dockerenv` (or `docker` in
+`/proc/1/cgroup`) alone. Docker gives every container `/.dockerenv`, so
+the lower rung always reads as a container; Containers likely gives none
+of these (only p5 can confirm), and there Hermes would take the computer
+for a host. The image fakes no marker: it pins every guess its paths
+reach (the gateway, an agent's terminal and file tools, its browser and
+desktop) to what Hermes does in a container, as the Docker rung has
+always run it, in the environment `hermes-boot pre-init` gives everything
+after it (`RUNTIME_ENV`, `images/hermes/boot/src/hermes.rs`).
+
+| Guess | What it decides | Pinned |
+|---|---|---|
+| `get_subprocess_home` (`TERMINAL_HOME_MODE`, `auto` by default) | `HOME` for an agent's terminal and `execute_code`, its file tools' `~`, a skill's paths, the write guard's homes: in a container its profile's `home` (`/data/hermes/profiles/<profile>/home`); on a host the gateway's own, `/data/hermes`, one for every agent | `TERMINAL_HOME_MODE=profile`. Only the environment counts: a multiplexed gateway reads no profile's `terminal.home_mode` |
+| `apply_secure_dir_policy`, `_secure_file` | on a host, Hermes' home made owner-only (0700, 0600) at each start; in a container left as made | `HERMES_SKIP_CHMOD=1` |
+| `browser_tool_install._running_in_docker` | Chromium's `--no-sandbox --disable-dev-shm-usage`; Chromium's auto-install | the image's Chromium (above): always those flags, and never missing |
+
+The rest are not reached, or only say something: the install method (the
+image's `docker` stamp in `/opt/hermes` is read first), NixOS container
+mode (no `.container-mode`), `/restart`'s exit for a supervisor (the bridge
+passes no slash command), the startup audit's log line about the home's
+mount, the CLI's service, status, setup and doctor commands, CLI voice, the
+dashboard (off) and OTLP export (off). A skill tagged `environments:
+[docker]` would be offered only on Docker; none of Hermes', ours or the
+templates' is. The lower rung's `an_agents_home_is_the_same_on_either_runtime`
+runs the image both ways (`Runtime::Hosted`: no marker, which Hermes takes
+for a host) and finds the same `HOME`, `~` and modes.
+
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:

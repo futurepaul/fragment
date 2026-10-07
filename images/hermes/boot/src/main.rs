@@ -396,6 +396,11 @@ fn pre_init() -> ! {
             std::env::set_var("AGENT_BROWSER_EXECUTABLE_PATH", p.trim());
         }
     }
+    // What Hermes would guess from whether it sees a container, the same
+    // on every runtime (hermes::RUNTIME_ENV); s6 hands it on to `main`.
+    for (name, value) in hermes::RUNTIME_ENV {
+        std::env::set_var(name, value);
+    }
     // Warm the gateway's files on the second CPU, and start its imports, while
     // the platform restores /data (S3b: -0.2 s and -0.9 s).
     let _ = Command::new(format!("{OPT}/bin/hermes-boot")).arg("readahead").spawn();
