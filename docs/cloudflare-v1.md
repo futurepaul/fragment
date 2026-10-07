@@ -108,9 +108,10 @@ speaking Cloudflare's APIs) returns once this product works.
 
    Status, 2026-10-07 (branch `claude/agents-ask-each-other`): a chat's
    `@` lists all of its owner's agents, the chat's first; one not in the
-   chat is added (an editor, by the shell, which hands a person's agents
-   only to their own fragments' pages: docs/api.md, The shell) before the
-   message names it. Agents ask each other by `@` in a shared chat, or
+   chat is added (an editor, by the shell once its person confirms it in
+   the shell's own dialog; the shell hands a person's agents only to their
+   own fragments' pages: docs/api.md, The shell) before the message names
+   it. Agents ask each other by `@` in a shared chat, or
    with `fragment ask <agent> "…" [--wait]`, in a chat of the two and
    their owner. The answering bridge counts the hops (never fewer than a
    record claims; for its own computer's agents, from the turn the poster

@@ -232,13 +232,21 @@ dark.addEventListener("change", () => { for (const f of document.querySelectorAl
 // origin only (its status's canonical URL), `{fragment: "agents", agents:
 // [{identity, fragment, name, title}]}`, and again whenever they change.
 // It may then ask for one of them in its fragment (`{fragment: "add-agent",
-// identity, nonce}`): the shell adds that agent as an editor, as making a
-// chat does (decision 36: an owner shares their own fragment with their own
-// agent), and answers `{fragment: "agent-added", nonce, identity, ok,
-// error?}`. Nothing else: a frame of a fragment the person does not own
-// (shared with them) learns nothing and adds no one, and no page adds
-// anyone but the person's own agents. It names no template: any page of
-// theirs may use it.
+// identity, nonce}`): the shell asks its person, in its own dialog (never
+// in the frame: a page is code its author or an agent wrote, so it asks
+// and never grants), "Add Fred to <title>?", and only on their Add adds that
+// agent as an editor, as making a chat does (decision 36: an owner shares
+// their own fragment with their own agent). It answers `{fragment:
+// "agent-added", nonce, identity, ok, error?}`: `error` "declined" on
+// Cancel, "not answered" after ADD_CONFIRM_MS, "busy" while another ask is
+// open. Nothing is remembered: every add is asked. A frame of a fragment
+// the person does not own (shared with them) learns nothing and adds no
+// one, and no page adds anyone but the person's own agents. It names no
+// template: any page of theirs may use it.
+const ADD_CONFIRM_MS = 90_000;
+// Add arms this long after the dialog shows, so the click or key that sent
+// the page's message cannot confirm it (the share sheet's 800 ms).
+const ADD_ARM_MS = 800;
 const rosterTo = new Map(); // a frame's window -> its fragment's origin
 const origins = new Map(); // fragment name -> its origin (a promise)
 function originOf(name) {
@@ -282,10 +290,15 @@ addEventListener("message", async (event) => {
     event.source.postMessage({ fragment: "agents", agents: roster() }, origin);
     return;
   }
-  const answer = (ok, error) => event.source.postMessage({ fragment: "agent-added", nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
+  const asker = event.source;
+  const answer = (ok, error) => asker.postMessage({ fragment: "agent-added", nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
   if (typeof d.nonce !== "string" || d.nonce.length > 64) return;
   const agent = state.agents.get(d.identity);
   if (!agent) return answer(false, "that is not one of your agents");
+  const said = await confirmAdd(agent, name);
+  if (said !== "added") return answer(false, said);
+  // the frame may have gone, or shown another page, while its person read
+  if (frame.contentWindow !== asker || !frame.isConnected) return;
   try {
     await api("PUT", `/api/f/${seg(name)}/members/${seg(agent.identity)}`, { role: "editor" });
     answer(true);
@@ -293,6 +306,49 @@ addEventListener("message", async (event) => {
     answer(false, e.message);
   }
 });
+// The person's answer to one page's add, in the shell's own dialog:
+// "added" on Add; "declined" on Cancel or Escape; "not answered" when left
+// ADD_CONFIRM_MS. One at a time: another ask while it is open is "busy".
+const addDialog = $("add-agent-dialog");
+let adding = null; // { resolve, timer, arm, outcome }
+function confirmAdd(agent, name) {
+  if (adding) return Promise.resolve("busy");
+  return new Promise((resolve) => {
+    const who = titleOf(agent.fragment);
+    $("add-agent-title").textContent = `Add ${who}?`;
+    $("add-agent-text").textContent = `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`;
+    addDialog.dataset.agent = agent.identity;
+    addDialog.dataset.fragment = name;
+    $("add-agent-go").disabled = true;
+    adding = {
+      resolve,
+      outcome: "declined",
+      arm: setTimeout(() => { $("add-agent-go").disabled = false; }, ADD_ARM_MS),
+      timer: setTimeout(() => {
+        if (adding) adding.outcome = "not answered";
+        addDialog.close();
+      }, ADD_CONFIRM_MS),
+    };
+    addDialog.showModal();
+    $("add-agent-cancel").focus();
+  });
+}
+// whatever closes it (Add, Cancel, Escape, the timeout) settles the ask once
+addDialog.addEventListener("close", () => {
+  if (!adding) return;
+  const { resolve, timer, arm, outcome } = adding;
+  adding = null;
+  clearTimeout(timer);
+  clearTimeout(arm);
+  resolve(outcome);
+});
+$("add-agent-form").onsubmit = (e) => {
+  e.preventDefault();
+  if ($("add-agent-go").disabled || !adding) return;
+  adding.outcome = "added";
+  addDialog.close();
+};
+$("add-agent-cancel").onclick = () => addDialog.close();
 
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {

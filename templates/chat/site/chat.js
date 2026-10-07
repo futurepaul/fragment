@@ -29,7 +29,8 @@
 // `@` lists the chat's agents, then (when the shell framing it is its
 // owner's) the owner's other agents, which the shell hands over on asking
 // (`{fragment: "agents?"}`); a message to one of those asks the shell to
-// add it first (`{fragment: "add-agent"}`), then names it in `to`.
+// add it first (`{fragment: "add-agent"}`; the shell asks its person, in
+// its own dialog), then names it in `to`.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
 // runs. The look is Skyler's (the Fragment UI handoff, 2026-10-02).
@@ -62,8 +63,9 @@ const PROFILES_PER_ASK = 64;
 const MEMBERS_AGAIN_MS = 5000;
 // A timer's longest wait (setTimeout's own bound).
 const TIMER_MAX_MS = 2 ** 31 - 1;
-// The shell's answer to adding an agent is waited for this long.
-const ADD_WAIT_MS = 15000;
+// The shell's answer to adding an agent is waited for this long: its person
+// answers its own dialog first (it gives up on that after 90 s).
+const ADD_WAIT_MS = 120000;
 // The owner's agents a shell may hand over, at most (a computer runs 32).
 const ROSTER_MAX = 64;
 const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -1271,7 +1273,8 @@ export function mount(root) {
         try {
           await addAgent(a);
         } catch (err) {
-          throw new Error(`${who(a).name} was not added to this chat: ${err.message}`);
+          const why = err.message === "declined" ? "you did not add them" : err.message;
+          throw new Error(`${who(a).name} was not added to this chat (${why})`);
         }
       }
       if (outside.length) await readMembers();

@@ -322,12 +322,15 @@ owner's others, each marked "adds them to this chat"; a guest's page, one
 someone else owns, and one opened in a tab of its own (no shell) list the
 chat's agents alone. A message whose `@mentions` name one of the others
 asks the shell to add it first (`{fragment: "add-agent", identity,
-nonce}`; the shell adds it as an editor, as making a chat does, and
-answers `agent-added`), reads the members again, and only then is posted,
-its `to` naming it: the agent is a member before the message, so its
-bridge takes it (a message from before an agent joined starts nothing).
-An add that fails or goes unanswered for 15 s sends nothing and says why
-in the banner, the message kept in the composer.
+nonce}`): the shell asks its person in its own dialog ("Add Fred to
+<chat>?"), and on their Add adds it as an editor, as making a chat does,
+and answers `agent-added`. The page then reads the members again, and
+only then posts the message, its `to` naming it: the agent is a member
+before the message, so its bridge takes it (a message from before an
+agent joined starts nothing). So the first message to an agent new to the
+chat costs one click. An add declined, refused, or unanswered for 120 s
+sends nothing and says why in the banner, the message kept in the
+composer.
 
 ## Push
 

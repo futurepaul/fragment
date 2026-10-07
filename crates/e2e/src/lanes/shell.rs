@@ -1200,6 +1200,47 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     );
     let _ = b.screenshot(page, &shots.join("desktop-roster.png"));
 
+    // a page's own add (no click in the shell) asks its person in the
+    // shell's dialog, and adds no one while it waits, nor on Cancel
+    let agents_in = |api: &Api| -> Vec<Value> {
+        shell(api, me.session, "GET", &format!("/api/f/{chat}/members"), None, &[])
+            .map(|r| r.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect())
+            .unwrap_or_default()
+    };
+    let posted = b.eval_in_frame(
+        page,
+        &host,
+        &format!(
+            "(() => {{ addEventListener('message', (e) => {{ if (e.data?.fragment === 'agent-added' && e.data.nonce === 'e2e-no-click') document.documentElement.dataset.e2eAdded = JSON.stringify(e.data); }}); \
+             parent.postMessage({{ fragment: 'add-agent', identity: {}, nonce: 'e2e-no-click' }}, '*'); return true; }})()",
+            js(&first)
+        ),
+    )?;
+    let dialog = "document.getElementById('add-agent-dialog')";
+    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.agent === {}", js(&first)), wait);
+    let text = b.eval(page, "document.getElementById('add-agent-text').textContent")?;
+    let armed_late = b.eval(page, "document.getElementById('add-agent-go').disabled")? == true;
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let while_open = agents_in(api);
+    b.click(page, "#add-agent-cancel")?;
+    let mut answer = Value::Null;
+    let _ = s.eventually(wait, || {
+        answer = b.eval_in_frame(page, &host, "document.documentElement.dataset.e2eAdded ?? null").unwrap_or(Value::Null);
+        !answer.is_null()
+    });
+    let after = agents_in(api);
+    s.ok(
+        "a page's add asks the person in the shell's own dialog (its Add armed only after a moment), adds no one while left open, and Cancel answers declined",
+        posted == true
+            && asked
+            && text.as_str().is_some_and(|t| t.contains(me.first_title) && t.contains("Reader"))
+            && armed_late
+            && while_open == vec![json!(reader)]
+            && after == vec![json!(reader)]
+            && answer.as_str().and_then(|a| serde_json::from_str::<Value>(a).ok()).is_some_and(|a| a["ok"] == false && a["error"] == "declined"),
+        json!({ "text": text, "whileOpen": while_open, "after": after, "answer": answer }),
+    );
+
     // picked with the keyboard, then sent
     let partial: String = me.first.chars().take(3).collect();
     let only = json!([{ "agent": first, "outside": true }]);
@@ -1216,6 +1257,14 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
         &format!("(() => {{ const t = document.getElementById('text'); t.value += {}; t.dispatchEvent(new Event('input', {{ bubbles: true }})); document.getElementById('say').requestSubmit(); return true; }})()", js(said)),
     )?;
     s.ok("typing its name's start narrows @ to it, and Enter picks it", narrowed == only && picked == format!("@{} ", me.first).as_str() && sent == true, json!({ "narrowed": narrowed, "picked": picked }));
+    // sending asks the person first, in the shell: they press Add
+    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.agent === {}", js(&first)), wait);
+    let unsent = agents_in(api) == vec![json!(reader)] && replies(api, me.session, &chat, &first, said) == 0;
+    let _ = b.screenshot(page, &shots.join("desktop-roster-confirm.png"));
+    let armed = b.until(page, "!document.getElementById('add-agent-go').disabled", wait);
+    b.click(page, "#add-agent-go")?;
+    let closed = b.until(page, &format!("!{dialog}.open"), wait);
+    s.ok("sending asks the person in the shell's dialog first, and nothing is added or sent until they press Add", asked && unsent && armed && closed, json!({ "asked": asked, "unsent": unsent }));
     let mut members = Value::Null;
     let added = s.eventually(wait, || {
         members = shell(api, me.session, "GET", &format!("/api/f/{chat}/members"), None, &[]).map(|r| r.body).unwrap_or_default();
