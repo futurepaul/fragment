@@ -10,6 +10,7 @@ mod computers;
 mod control;
 mod credentials;
 mod delegation;
+mod drafts;
 mod deliver;
 mod frames;
 mod identities;
@@ -55,6 +56,7 @@ const LANES: &[Lane] = &[
     members::members,
     identities::identities,
     signin::signin,
+    drafts::drafts,
     levers::levers,
     members::secrets,
     delegation::delegation,
@@ -124,7 +126,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
-    &["chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
+    &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
