@@ -373,13 +373,24 @@ pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
     let cfg = Config::from_env(&env);
     // a branch deployment's queue is named for its branch after this
     let dead = batch.queue().starts_with(DEAD_QUEUE);
-    let messages: Vec<Message<Delivery>> = batch.raw_iter().map(Message::try_from).collect::<Result<_>>()?;
+    let messages: Vec<RawMessage> = batch.raw_iter().collect();
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
-    futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, cfg, dead))).await;
+    futures_util::future::join_all(messages.into_iter().map(|raw| consume_one(raw, &env, cfg, dead))).await;
     Ok(())
 }
 
-async fn consume_one(message: Message<Delivery>, env: &Env, cfg: &Config, dead: bool) {
+async fn consume_one(raw: RawMessage, env: &Env, cfg: &Config, dead: bool) {
+    let id = raw.id();
+    let message = match Message::<Delivery>::try_from(raw) {
+        Ok(m) => m,
+        Err(e) => {
+            // one no cell of this release sends (an older one's, say): no
+            // receiver can take it; neither retried nor marked, it is acked
+            // with its batch, and the rest of the batch goes on
+            console_error!("{}", json!({ "event": "delivery.unreadable", "id": id, "message": e.to_string() }));
+            return;
+        }
+    };
     let d = message.body();
     if dead {
         let _ = report(env, d, Outcome::Failed, 0, "out of retries").await;
