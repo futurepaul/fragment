@@ -539,7 +539,7 @@ async fn users(env: &Env, rest: &[&str]) -> CellResult<Response> {
                 return Err(CellError::new(ErrorCode::NotFound, format!("{username} has no picture")));
             };
             let blob =
-                js::blob_get(env.as_ref(), &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+                js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
             let headers = Headers::new();
             headers.set("content-type", &picture.mime)?;
             headers.set("cache-control", "public, max-age=300")?;
@@ -698,7 +698,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             // registry names them, so no one it does not know stores any.
             ask_registry(env, &calls::View { identity: None, by: by() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
-            js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
+            js::blob_put_bytes(env, &format!("pictures/{sha}"), &body).await?;
             json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
         }
         (Method::Get, [id]) => {
