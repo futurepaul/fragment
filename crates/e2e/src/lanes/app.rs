@@ -41,7 +41,8 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", editor.pubkey_hex()), Some(&json!({ "role": "editor" })))?;
     let live = ship(s, &c, TODO_APP, TODO_JSON);
     let r = api.status(&owner, &name)?;
-    s.ok("deploying installs the app from live", r.body["code"]["sha"] == live.as_str() && r.body["code"]["error"].is_null(), &r);
+    let own = r.body["code"]["id"].as_str().is_some_and(|id| id.starts_with("app:"));
+    s.ok("deploying installs the app from live, its own code", r.body["code"]["sha"] == live.as_str() && own && r.body["code"]["error"].is_null(), &r);
 
     // how many times the fragment's activation built its worker code for
     // the loader (a test hook): only when the loader holds no worker by id

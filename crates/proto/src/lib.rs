@@ -569,8 +569,12 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
-    /// The live commit the code was read from; `None` when live has no `app.mjs`.
+    /// The live commit the code was installed from; `None` without app code.
     pub sha: Option<String>,
+    /// What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),
+    /// or `blessed:<template>@<release>` (the platform release's code, which
+    /// a fragment on a blessed template runs whatever its commit: decision 40).
+    pub id: Option<String>,
     pub operations: std::collections::BTreeMap<String, OpDecl>,
     /// Why the latest live commit's code was not installed, if it was not.
     pub error: Option<String>,
