@@ -206,7 +206,11 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   computer's first, one more for each after), when it was taken, the
   start it was of, and whether its guest answered the hold (`held`). It
   keeps the newest three and deletes each older one's archive as a new
-  one is kept. The view lists them (`saves`), newest first.
+  one is kept (and what a save that failed had taken), keeping each
+  record until its delete worked, so a delete that failed is tried again
+  at the next save (at most 16 records wait; past that the oldest's
+  archive stays in R2, logged). The view lists them (`saves`), newest
+  first.
 - **When.** A save is asked for when the computer's work ends (its
   guest's last keepalive closes, and 30 s pass with none opened again, so
   turns back to back save once), every 15 minutes while a keepalive stays

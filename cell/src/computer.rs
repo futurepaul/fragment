@@ -184,7 +184,8 @@ enum MetaKey {
     /// the newest saves of `/data` with their `DirectoryBackup` records
     /// (the authority on what a wake restores, handed back to restore and
     /// to delete them), the snapshot that caches the current one, what each
-    /// start restored, and its rollbacks. The one save kept before several
+    /// start restored, its rollbacks, and the records let go of until their
+    /// deletes worked. The one save kept before several
     /// were (the old `backup` key) is not read: a hard cut.
     Saves,
     /// Why the last wake was refused.
@@ -910,9 +911,9 @@ impl ComputerCell {
 
     /// Saves `/data` as save `seq` of start `generation` (`held`: its guest
     /// answered the hold), and keeps it: the newest of the saves kept, the
-    /// oldest past `SAVES_KEPT` deleted. Any record of it already taken
-    /// when a later one fails is deleted too. The test lever's failed saves
-    /// (`fail-saves`) fail here first.
+    /// oldest past `SAVES_KEPT` let go of (`forget`). Any record of it
+    /// already taken when a later one fails is let go of too. The test
+    /// lever's failed saves (`fail-saves`) fail here first.
     async fn save(&self, generation: u64, held: bool, seq: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
@@ -939,10 +940,11 @@ impl ComputerCell {
             match self.call("backup", &[g.clone(), dir.into(), exclude]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => records.push(record),
                 Err(e) => {
-                    for taken in &records {
-                        let _ = self.call("forget", &[js::to_js(taken)]).await;
-                    }
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
+                    match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
+                        Ok(lost) => self.forget(lost).await,
+                        Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+                    }
                     return Event::SaveFailed { generation, seq, why: e.message };
                 }
             }
@@ -988,21 +990,38 @@ impl ComputerCell {
     }
 
     /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are deleted. Answers it.
+    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
     async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let dropped = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
-        for old in dropped {
-            for record in &old.records {
-                if let Err(e) = self.call("forget", &[js::to_js(record)]).await {
-                    console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "forget": old.number, "error": e.message }));
-                }
+        self.forget(lost).await;
+        Ok(save)
+    }
+
+    /// Deletes each record let go of (`Saves::forgetting`), and forgets it
+    /// once its delete worked: one that failed stays, for the next save's
+    /// pass (a delete of what is gone already works). `lost`: records
+    /// pushed out unforgotten, whose archives stay in R2, logged.
+    async fn forget(&self, lost: Vec<Value>) {
+        let id = self.meta(MetaKey::Id).ok().flatten();
+        for record in &lost {
+            console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
+        }
+        let pending = self.saves().map(|s| s.forgetting().to_vec()).unwrap_or_default();
+        // bounded: at most FORGETTING_MAX
+        for record in pending {
+            let rid = record["id"].as_str().unwrap_or_default().to_string();
+            let done = match self.call("forget", &[js::to_js(&record)]).await {
+                Ok(_) => self.update_saves(|s| s.forgot(&rid)),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = done {
+                console_error!("{}", json!({ "computer": id, "forget": rid, "error": e.message }));
             }
         }
-        Ok(save)
     }
 
     /// Lets go of the guest's hold: an awake save's end, or a sleep that
