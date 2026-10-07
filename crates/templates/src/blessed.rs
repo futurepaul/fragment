@@ -310,7 +310,8 @@ mod tests {
     /// Method: every skill is `skills/<category>/<name>/SKILL.md` with a
     /// frontmatter naming it and saying what it is for; names are unique; the
     /// rewritten skills are there and what they replace is not; nothing
-    /// Finite-only or generated rides along; and it fits a listing.
+    /// Finite-only, generated, or ours not to redistribute rides along; and
+    /// it fits a listing.
     #[test]
     fn the_skills_template_is_the_managed_set() {
         let files = data("skills");
@@ -325,6 +326,8 @@ mod tests {
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
             assert_eq!(data_file("skills", f.path), Some(f));
             if let Ok(text) = std::str::from_utf8(f.bytes) {
+                // the repo is MIT, and the release hands this to every person
+                assert!(!text.contains("All rights reserved"), "{} is not ours to redistribute", f.path);
                 for finite_only in ["/profile-assets/", "~/.finite/", "FINITECHAT_HOME", "/home/node/", ".hermes/.env", ".hermes/venv", "git.finite.chat"] {
                     assert!(!text.contains(finite_only), "{} names {finite_only}", f.path);
                 }
@@ -344,10 +347,10 @@ mod tests {
         for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
-        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite"] {
+        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 42, "finite-skills' 47, less shared-skills, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
+        assert_eq!(names.len(), 41, "finite-skills' 47, less shared-skills and powerpoint, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 
