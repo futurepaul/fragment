@@ -240,7 +240,7 @@ fragment verify my-thing --dir .            # full-content audit
     "add":    { "kind": "mutation", "role": "editor",
                 "input": { "type": "object", "required": ["text"], "additionalProperties": false,
                            "properties": { "text": { "type": "string", "maxLength": 200 } } } },
-    "list":   { "kind": "query", "role": "public" },
+    "list":   { "kind": "query", "role": "public", "description": "Every item, oldest first." },
     "ingest": { "kind": "job" }
   },
   "channels": { "activity": { "read": "viewer" } },
@@ -258,6 +258,9 @@ fragment verify my-thing --dir .            # full-content audit
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
+- `description` (1 to 1024 characters) says what it does and answers,
+  for an agent: it makes the operation a tool of `fragment mcp` ("Use it
+  from another agent", below), and `fragment status` shows it.
 - `"ephemeral": true` on a mutation you call often with a "latest value":
   its calls keep no ledger row (a mutation's id is
   otherwise kept a week in your app's 16 MiB database), so the same id
@@ -402,6 +405,34 @@ fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
 
+## Use it from another agent
+
+`fragment mcp <name>` serves a fragment's operations to any agent that
+speaks MCP (Claude Code, goose, …) as tools, over stdio: each operation
+whose `fragment.json` entry has a `description` and that your role may
+call, with its input schema. Its queries always; with `--write`, its
+mutations and jobs too.
+
+```
+claude mcp add my-thing -- fragment mcp my-thing            # read-only: its described queries
+claude mcp add my-thing -- fragment mcp my-thing --write    # and its described mutations and jobs
+```
+
+A tool's call is a `fragment call` with a fresh id, signed with this
+machine's key as every command is (`fragment login` first). A result
+with a string `text` (a view the operation rendered) answers as that
+text, any other as JSON, and a refusal is the tool's error, with the
+platform's message. The tools are read when the client connects and
+each time it lists them. Stdout carries the protocol alone: a failure
+to start goes to stderr, and `-v` logs each request there.
+
+On a computer it runs in the agent mode ("As an agent, on a computer"),
+as the agent, with no key: name the fragment in full.
+
+```
+FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragment mcp mind.paul
+```
+
 ## People
 
 ```
@@ -516,6 +547,7 @@ fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
 fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
+fragment mcp <name> [--write]
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host
