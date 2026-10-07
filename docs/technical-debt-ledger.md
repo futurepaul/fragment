@@ -229,42 +229,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** tokens are signed only for the repo the fragment's
   creation recorded, checked on every token, with a test.
 
-## A deleted fragment leaves its agent registered
-
-- **Observed:** the agent add-on (`fragment.json`'s `agent` block). A
-  fragment's own agent is an identity in the registry, owned by the
-  fragment's owner and named as the fragment. Deleting the fragment
-  wipes the fragment's cell and so the agent's membership and
-  subscription, but not the agent: its identity, key, and conversations
-  stay, and it counts toward its owner's agents
-  (`limits::AGENTS_PER_OWNER_MAX`).
-- **Risk:** an owner who makes and deletes many fragments with agents
-  runs into the agents limit; a fragment made again under the same name
-  gets the old agent back, with its conversations.
-- **First proof:** an owner whose agents count nears the limit, or a
-  re-made fragment whose agent recalls the old one's visitors.
-- **Delete when:** deleting a fragment retires its own agent (its
-  registry entry and key revoked, its cell wiped), with an e2e that
-  deletes a fragment with an agent and checks both.
-
-## An agent forgets what falls out of its conversation window
-
-- **Observed:** the reliability pass (audit R10). Each step loads the
-  newest 256 messages, cut to start at a turn's first message: the
-  running turn whole, and earlier turns while they total 256 KiB
-  (`fragment_core::history`). Nothing summarizes what falls out, and the
-  agent's tables `messages`, `steps`, and `tool_runs` keep every row
-  (`steer` drops what the model read at the next turn, `heard` forgets
-  after a day); the owner's view shows the newest 256 of each.
-- **Risk:** an agent answers without context it had long ago, with no
-  sign that it lost it; its database grows with its age.
-- **First proof:** an agent asked about something said before its
-  window.
-- **Delete when:** goose's compaction runs on the window's edge (a
-  summary message stands in for what falls out), and rows older than
-  the summary are deleted, with a test that a fact from before the
-  window survives in the summary.
-
 ## A socket opened with a key outlives that key's revocation
 
 - **Observed:** phase 4 slice A. Every request resolves its key live, so
@@ -387,23 +351,6 @@ fragment.club until cutover (decisions 34–35).
   platform's own records stay (they cost nothing, and an agent must hear
   where it joined).
 
-## An agent runs one turn at a time, across all its chats
-
-- **Observed:** phase 7 slice A keeps one conversation per chat, but one
-  turn runs at a time per agent (agent/src/lib.rs `begin`, `next_turn`):
-  a message for another chat, or from someone other than the running
-  turn's starter, waits (at most 64) until the running turn ends. One
-  driver, one watchdog alarm, and one cancel token per agent stay as
-  phase 5 built them.
-- **Risk:** a long turn in one chat (a slow model, a long tool call)
-  delays every other chat's answer; a busy agent turns messages away
-  (429, redelivered) past 64 waiting.
-- **First proof:** an owner whose agent is in several busy chats sees
-  answers arrive minutes late, or the delivery dead-letter queue holds
-  an agent's inbox.
-- **Delete when:** turns of different conversations run at once (a
-  driver, a watchdog, and a cancel token per conversation), proven by an
-  e2e where chat B's answer lands while chat A's turn is held in a tool.
 
 ## A postable channel's retention is fixed
 
@@ -468,7 +415,7 @@ fragment.club until cutover (decisions 34–35).
   --hosted`, crates/e2e/src/hosted.rs): it runs on a preview the sections
   whose declared needs a preview meets. The rest are skips there, each
   saying why: those that script a vendor fake (the model: ai, ledger,
-  agents, addon, chat; code.storage's git: create, files,
+  chat; code.storage's git: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
   lockdown, isolation, share), and the whole deployment's

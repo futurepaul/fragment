@@ -17,9 +17,8 @@ deployment's host secret salted with **the sealing Durable Object's class
 and id**, so a value opens only in the object that sealed it; it is
 AES-256-GCM sealed as `w2.<key id>.<nonce‖ciphertext>`, where the key id
 names which host secret sealed it. The host secret is a Secrets Store
-secret bound to the platform Worker (and the agents' Worker, which seals
-agents' keys) as `HOST_SECRET`: an app's isolate gets an env the platform
-builds. Rotating it is by name (below): the new one bound as
+secret bound to the platform Worker as `HOST_SECRET`: an app's isolate
+gets an env the platform builds. Rotating it is by name (below): the new one bound as
 `HOST_SECRET` and the old as `HOST_SECRET_PREVIOUS`; values sealed under
 the old one still open, and come back resealed, which the cell stores.
 
@@ -49,14 +48,13 @@ name fixed in code (`fragment_core::secrets_store`) and reads no value:
 
 | Config field | Bound as | To |
 |---|---|---|
-| `host_secret` | `HOST_SECRET` | the platform Worker and the agents' Worker |
-| `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | both |
+| `host_secret` | `HOST_SECRET` | the platform Worker |
+| `host_secret_previous` (while a rotation runs) | `HOST_SECRET_PREVIOUS` | the platform Worker |
 | `codestorage.private_key` | `CODESTORAGE_KEY` | the platform Worker |
 | `workos.client_id`, `workos.api_key` | `WORKOS_CLIENT`, `WORKOS_KEY` | the platform Worker |
 | a provider's `key` (an operator key) | `OPERATOR_KEY_<NAME>` (`perplexity` → `OPERATOR_KEY_PERPLEXITY`) | the platform Worker |
 
-- **Reading.** `cell/src/keys.rs` is the one place the cell reads them,
-  and `agent/src/keys.rs` the agents' Worker's (the host secrets alone).
+- **Reading.** `cell/src/keys.rs` is the one place they are read.
   A value read is kept per isolate for **at most 60 seconds**
   (`secrets_store::CACHE_MS_MAX`, `Cache`), then read again: a value set
   again in the store is in use in every warm isolate within a minute,

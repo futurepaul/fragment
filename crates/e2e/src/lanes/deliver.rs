@@ -3,8 +3,9 @@
 //! a browser would; subscriptions that are gone, retries, the dead-letter
 //! report; and AI as a job's steps: text through the model
 //! route and images on its transport (both the Workers AI fake, a lower
-//! rung at the vendor boundary), generated images stored as files, and
-//! video steps refused. What each paid step costs is the ledger section's.
+//! rung at the vendor boundary), generated images stored as files, video
+//! steps refused, and the calories template's text step. What each paid
+//! step costs is the ledger section's.
 
 use std::time::{Duration, Instant};
 
@@ -284,6 +285,52 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         "an answer that is no JPEG is refused, saying why, and nothing is written; the call is charged",
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
         &r,
+    );
+    calories(s, api, wait)
+}
+
+/// The calories template, with no agent (Paul, 2026-10-07): a signed-in
+/// person's plain words on `ask` start its `heard` job, whose text step
+/// names the items; each is logged as theirs, and the answer is theirs on
+/// `replies`. Words that name no food (the fake's echo is no JSON) log
+/// nothing, and say so.
+fn calories(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let name = s.named(api, &owner, "calories")?;
+    let made = api.create_with(&owner, json!({ "name": name, "template": "calories" }))?;
+    anyhow::ensure!(made.status == 200, "calories from its template: {made}");
+    let replies = || {
+        let r = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/replies?after=0"), None);
+        r.ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()
+    };
+    let today = || api.op(&owner, &name, "today", "q", json!({})).map(|r| r.body["result"].clone()).unwrap_or_default();
+    s.ai.say_next(&[r#"{"items": [{"food": "2 eggs", "calories": 140}, {"food": "toast", "calories": 80}]}"#]);
+    let post = |id: &str, text: &str| api.signed(&owner, "POST", &format!("/api/f/{name}/channels/ask"), Some(&json!({ "id": id, "body": { "text": text } })));
+    post("a1", "2 eggs and toast")?;
+    let landed = s.eventually(wait, || !replies().is_empty());
+    let (day, said) = (today(), replies());
+    s.ok(
+        "calories: a signed-in person's plain words are read by a text step, each item logged as theirs, and answered for them on replies",
+        landed && day["total"] == 220 && day["entries"].as_array().map(Vec::len) == Some(2) && said[0]["body"] == json!({ "for": owner_id, "text": "Logged 2 eggs (140 kcal), toast (80 kcal)." }),
+        json!({ "today": day, "replies": said }),
+    );
+    post("a2", "hello there")?;
+    let landed = s.eventually(wait, || replies().len() == 2);
+    let (day, said) = (today(), replies());
+    s.ok(
+        "and words that name no food log nothing, saying so",
+        landed && day["total"] == 220 && said[1]["body"]["text"].as_str().is_some_and(|t| t.starts_with("I couldn't tell")),
+        json!({ "today": day, "replies": said }),
+    );
+    let r = api.op(&owner, &name, "summarize", "s1", json!({}))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let said = replies();
+    s.ok(
+        "its summary of the caller's day is a text step over their entries, answered for them",
+        run["status"] == "succeeded" && said.len() == 3 && said[2]["body"]["for"] == owner_id.as_str()
+            && said[2]["body"]["text"].as_str().is_some_and(|t| t.contains("2 eggs (140 kcal), toast (80 kcal); 220 kcal in all")),
+        json!({ "run": run, "replies": said }),
     );
     Ok(())
 }

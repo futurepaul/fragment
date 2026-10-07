@@ -423,18 +423,12 @@ impl Bound {
         }
     }
 
-    /// The agents' Worker's: the host secret alone (it seals agents' keys).
-    pub fn agent(&self) -> Vec<(String, &str)> {
+    /// The platform Worker's: every one.
+    pub fn cell(&self) -> Vec<(String, &str)> {
         let mut bound = vec![(bindings::HOST_SECRET.to_string(), self.host_secret.as_str())];
         if let Some(previous) = &self.host_secret_previous {
             bound.push((bindings::HOST_SECRET_PREVIOUS.to_string(), previous.as_str()));
         }
-        bound
-    }
-
-    /// The platform Worker's: every one.
-    pub fn cell(&self) -> Vec<(String, &str)> {
-        let mut bound = self.agent();
         bound.push((bindings::CODESTORAGE_KEY.to_string(), self.codestorage_key.as_str()));
         if let Some((client, key)) = &self.workos {
             bound.push((bindings::WORKOS_CLIENT.to_string(), client.as_str()));
@@ -596,9 +590,8 @@ mod tests {
         assert!(matches!(Value::checked(big, "over"), Err(StoreError::InvalidValue(why)) if !why.contains("aaaa")), "the refusal names no value");
     }
 
-    /// The Workers' bindings: the agents' the host secret alone, the
-    /// platform's every one, each once, each to its name in one store; and
-    /// what a store lacks is named with its binding.
+    /// The platform Worker's bindings: every one, each once, each to its
+    /// name in one store; and what a store lacks is named with its binding.
     #[test]
     fn bindings_name_each_secret_once() {
         let mut bound = Bound::conventional(true, &["perplexity", "google-places"]);
@@ -618,12 +611,10 @@ mod tests {
                 ("OPERATOR_KEY_GOOGLE_PLACES", "fragment-google-places-api-key"),
             ]
         );
-        assert_eq!(bindings_json("0f0e", &bound.agent()).as_array().map(Vec::len), Some(2), "the agents' Worker holds the host secrets alone");
         let doubled = vec![("HOST_SECRET".to_string(), "a"), ("HOST_SECRET".to_string(), "b")];
         assert!(std::panic::catch_unwind(|| bindings_json("0f0e", &doubled)).is_err());
 
         let listed = |names: &[&str]| names.iter().map(|n| Listed { name: n.to_string(), id: "i".into(), created: String::new(), modified: String::new() }).collect::<Vec<_>>();
-        assert_eq!(missing(&bound.agent(), &listed(&["fragment-host-secret", "fragment-host-secret-2025", "other"])), vec![]);
         let gone = missing(&cell, &listed(&["fragment-host-secret", "fragment-codestorage-private-key"]));
         let gone: Vec<&str> = gone.iter().map(|(_, n)| *n).collect();
         assert_eq!(gone, ["fragment-host-secret-2025", "fragment-workos-client-id", "fragment-workos-api-key", "fragment-perplexity-api-key", "fragment-google-places-api-key"]);

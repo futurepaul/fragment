@@ -41,15 +41,14 @@ the deployment's secrets are Worker secrets (below).
 Secrets Store bindings (docs/secrets.md): each a secret in the account's
 Cloudflare Secrets Store, named by the deployment's config and bound by
 `cargo xtask deploy` (wrangler's local store, seeded by devstack, in dev
-and the e2e), read only by `cell/src/keys.rs` (the agents' Worker: the
-host secrets, by `agent/src/keys.rs`), each value used for a minute at
-most before it is read again. The names are
+and the e2e), read only by `cell/src/keys.rs`, each value used for a
+minute at most before it is read again. The names are
 `fragment_core::secrets_store`'s. An app's isolate gets an env the
 platform builds, so no author code can name one:
 
 | Binding | Meaning |
 |---|---|
-| `HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes); the key computers' placeholders are tagged with is derived from it. Bound to the agents' Worker too |
+| `HOST_SECRET` | seals values at rest, per Durable Object (at least 32 bytes); the key computers' placeholders are tagged with is derived from it |
 | `HOST_SECRET_PREVIOUS` | the host secret before a rotation, bound while it runs; values sealed under it open and come back resealed |
 | `CODESTORAGE_KEY` | the org's PKCS#8 P-256 key, which signs code.storage tokens (a one-line PEM may carry literal `\n`) |
 | `WORKOS_CLIENT` | sign-in: fragment's WorkOS environment's client id; unbound, sign-in answers 500 |
@@ -84,13 +83,9 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their `e2e-…` fragments |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
-| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `fail-join {times}` fails its next joins of the agent its `agent` block declares, before anything is asked, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
+| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
 | `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (1 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
-
-The agents' own test controls (`POST /api/a/{name}/test`, Agents below)
-are another Worker's, on with `AGENT_TEST_HOOKS=allow`, which only the
-local e2e sets.
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
 on Free and Pro), below the 256 MiB a blob route allows (debt ledger).
@@ -170,8 +165,7 @@ signed by an agent may name an identity in `for=<id:…>` in its URL's
 query (inside the signed URL, so the signature covers it): the request
 acts with the lower of the role that identity holds in the fragment (its
 membership, an agent of its own that is a member, or the visibility
-floor; never the share link, which the agent does not hold, but for a
-fragment's own agent on its own fragment: A fragment's agent) and the
+floor; never the share link, which the agent does not hold) and the
 agent's cap: the agent's own role there, or its owner's membership role
 if higher, and never above `editor`. The owner's part is the owner's own
 role, so an agent never reaches further than its owner could. The
@@ -524,9 +518,9 @@ and styles only inline and images only from the platform
 | `GET /api/f/{name}/secrets` | editor | → `{names}`; values never leave |
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
-| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed and the agent it declares has joined (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
+| `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
 | `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
-| `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it, and the agent its `agent` block declares joins, at once |
+| `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, release?}]}` at main; a pointer's `size` is its bytes'. A fragment on a blessed template lists that template's data from the release beneath its own files (`release: true`, `lastCommitSha` `release:<hash of its bytes>`: templates/skills/README.md) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store; with none of its own at `path`, a blessed template's data file from the release |
 | `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes as the body (`content-length` required, at most 256 MiB), streamed through and hashed on the way in: → `{ok, sha, size, stored}`; bytes that hash to anything else are deleted and refused (400). Its `content-type` is what `__blob` serves it as, when that is passive media (Blobs, below) |
@@ -1004,18 +998,6 @@ and the AI steps (`job.ai.*`), all above:
   fragment's), unless the job set its own.
 - `job.publish(channel, body, kind)`: a record, once per step.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
-- `job.agent({prompt, conversation?, channel?})` → `{text, turn}`: one
-  turn of the fragment's own agent (A fragment's agent, below) for the
-  run's principal; a triggered run's is the fragment itself, so the agent
-  acts as its own member, an editor. `conversation` is a key the job
-  chooses (`[A-Za-z0-9._-]{1,64}`, the principal's own; default one per
-  run, `run-<run>`); `channel`, a channel editors may post to (the agent
-  is one), where the turn posts its steps and answer (default none). It is two steps: `agent.start`
-  starts the turn, named by the run and the step (not the attempt), so a
-  retried or replayed step reattaches to the turn it started and never
-  starts a second; then `agent.poll`, with sleeps of 2, 4, 8, 16, then
-  30 seconds between, at most 40 times. A turn that fails or is stopped
-  throws a `StepError`; the model calls are the owner's to pay.
 - What the fragment's own page reads, read for its code:
   `job.members()` → its members as `__members` lists them (`[{principal,
   role, kind, addedAt, …}]`, the first added first); `job.people(ids)` →
@@ -1225,161 +1207,6 @@ platform is elsewhere (`Cache-Control: no-store`, so the platform can
 still move); any other name under the suffix, 404; anything else, the
 platform.
 
-## Agents (`agent/`)
-
-A second script in the platform's fleet, with no ingress of its own: the
-router authenticates `/api/agents` and `/api/a/*` like any signed
-request and hands them on with the caller's identity
-(`x-agent-principal`), which is all the script trusts; an inbox delivery
-passes as it came. Agents act on fragments through the API above,
-signing with their own keys. An agent's name is `<label>.<username>`,
-its owner's (a bare label is one of the signer's own); making one also
-registers it as its maker's, in the same request. Owner routes check the
-caller is the agent's registered owner. Each agent's key is made in its
-cell and kept sealed for it. It holds no model key: its model calls are
-the platform's model route's (`POST /api/models/v1/chat/completions`,
-signed by the agent, for the turn's asker, naming the turn's fragment:
-Models, above), metered on its owner's ledger, and a turn its owner's
-ledger refuses (no credit, a guest, a fragment's cap) fails saying why.
-Its variables: `FRAGMENT_API` (the platform it acts on, and its models),
-`AGENT_URL` (the base of the inboxes it hands out: the platform's),
-`AGENT_TEST_HOOKS=allow` (dev and e2e only). The script reads a request
-body of at most 64 KiB, measured as it arrives (413 before anything
-else).
-
-| method & path | who | body → answer |
-| --- | --- | --- |
-| `POST /api/agents` | a person with a username | `{name, model? (a tier: "cheap", the default, or "medium"), instructions?}` → `{name, npub, model, id}`: made and registered as the caller's; again by its owner, the same answer (`replayed`); a name under someone else's username is 403; another model is 400 |
-| `GET /api/a/{name}` | owner | → `{name, id, owner, npub, model, active, driving, outcome (running, idle, stopped, yielded, error), error, tokens, watchdogRestarts, conversation, asker, waiting: [{conversation, asker, at}], conversations: [{conversation, outcome, error, asker, at}], listens: {count, newest: [{fragment, channel, at}]}, ignored: [{fragment, channel, principal, at}], messages: [{id, role, text, tool_requests, tool_responses, steer, conversation}], steer, toolRuns, steps}` (each list its newest 256, oldest first but `conversations` and `listens`, newest first). `active`, `outcome`, and `error` are the running (or last) turn's, of any conversation; `conversation` and `asker` name it (`direct` is the owner's own conversation, a chat's is `<fragment>/<channel>`); `steer` holds the running turn's messages from its starter sent while it worked (a new turn drops those the model read); `ignored` notes anonymous messages, which start nothing |
-| `GET /api/a/{name}/state?wait_ms=` | owner | → `AgentState` `{active, driving, outcome, error, answer}` (`crates/proto`) of the owner's own conversation: `active` while a turn of it runs or waits behind a chat's, `answer` its newest message when that is the model's text; answered once it is not active or `wait_ms` (0-25000, default 0) has passed: the read waits in the agent's cell, so a client waiting out a turn asks about every 25 s (`fragment agent say` does) |
-| `POST /api/a/{name}/turns` | owner | `{text}` (at most 16 KiB) → `{started}`; during the owner's own turn, `{steered: true}` (read between steps); during another (a chat's), `{queued: true}`: it runs next, in the owner's conversation. At most 64 messages wait (429) |
-| `POST /api/a/{name}/stop` | owner | → `{active, driving}`; a tool in flight is interrupted; the messages waiting run next |
-| `GET /api/a/{name}/tools` | owner | → `{tools: ["platform__create_fragment", "platform__list_fragments", "platform__operations", "platform__call", "platform__list_files", "platform__read_file", "<fragment>__<op>", ...]}`: what the owner's own turn has (below) |
-| `POST /api/a/{name}/listen` | owner | `{fragment, channel? ("chat"), reply? ("say")}` → `{fragment, channel, reply, subscription}`: the agent subscribes itself to the channel (it must be a member) with an inbox URL of its own (`AGENT_URL`); at most 500. `reply` answers a chat whose channel takes no posts (one made before phase 7); a postable channel is answered by a post. A new listen first drops those of fragments the agent is no longer in: of the fragments its memberships leave out, up to 16 are asked, and one that answers 404 or 403 loses its listens (so does one whose subscribe answers either, and a chat whose answer's post answers 403, or 404 `not_found`: a reply operation the chat does not have, 404 `unknown_operation`, ends the turn in an error and keeps the listen). Listening again to the same fragment's channel is the same listen: its inbox URL, so the one subscription (made again if the fragment dropped it), answering through the `reply` it names now |
-| `POST /api/a/{name}/job` | owner (a fragment's job) | `{id, asker, conversation, channel?, text}` → `{turn}`: a turn of a fragment's own agent for `asker`, once per `id` (again: the same `turn`, `replayed`); it waits for a turn of its own and never steers another. Its conversation is `job:<asker>:<conversation>`, under `<fragment>/<channel>/` when it names a channel |
-| `GET /api/a/{name}/job?turn=` | the same | → `{ended, outcome, text?, error?}`: `running` until it ends, then `idle` (answered, `text` its answer), `stopped`, `yielded`, or `error` |
-| `PUT /api/a/{name}/scope` | owner (a fragment's deploy) | `{fragment, tools, instructions, model?}` → `{fragment, tools, model}`: a fragment's own agent takes what its block declares (A fragment's agent, below); 403 for any agent not made for that fragment |
-| `POST /api/a/{name}/inbox/{token}` | the fragment's delivery (the token is the capability) | a `Delivery` (`crates/proto`), decoded whole: one that does not decode (a record without its `seq`, say) is 400. A message (a body with no `kind`, or `kind: "message"`: its `text`, else its JSON) from an identity starts a turn in the chat's conversation, acting for that identity; from the running turn's starter in its conversation, it steers that turn; any other waits for a turn of its own (429 past 64 waiting: the fragment delivers it again). `{kind: "stop", turn?}` from the running turn's starter, in its chat, naming that turn (or none), stops it; from anyone else, or another kind, it is ignored, never a message. The agent's own, one heard before (within a day: past the longest redelivery), and a message from an anonymous visitor (`anon:`) are ignored (the owner's view keeps the newest 32 anonymous ones). The turn's last answer goes back as the agent, with the id `rp:<40 hex of SHA-256 of its message id>`: posted to the channel as `{text, turn}` when it takes posts (`POST /api/f/{fragment}/channels/{channel}`), else `POST /api/f/{fragment}/ops/{reply}` `{text}`; an unknown token is 404 |
-| `POST /api/a/{name}/test` | owner, test fleets (`AGENT_TEST_HOOKS=allow`: the local e2e only) | `{hold_in_tool_ms?, hold_after_tool_ms?, hold_after_answer_ms?, watchdog_ms?, window_messages? (2-256), view_rows? (2-256), model_timeout_ms? (200-100000)}` |
-
-One conversation per chat: a turn belongs to the owner's own
-conversation or to one chat's, reads only it, and answers there. One turn
-runs at a time; a message for another conversation, or from anyone but
-the running turn's starter, waits for a turn of its own, and so does a
-steer the turn ended before reading (unless it was stopped). The driver
-that ends a turn starts the next one waiting in the same step. A turn
-records who started it (the owner, or the identity whose record it was),
-and every call it makes on the platform acts for them (`for`, above);
-the agent's own calls (listening, a chat's answer) name no one; its model
-calls name the asker too, and its owner pays.
-
-A turn's tools, read as it starts, are of two kinds. Per-operation
-tools, for the turn's chat and the other fragments the agent is a member
-of (less the other chats it follows; at most 16 fragments, 128 tools):
-each fragment's operations, read with its status `for` the turn's asker,
-those the role it answers may call, named `<fragment>__<op>` with the
-operation's input schema, less each followed channel's reply operation
-(the model is told its answer to a chat is posted for it, and a call to
-a tool the turn does not offer is answered with an error, so the turn
-goes on to its answer). And the platform's verbs, for every fragment the
-asker reaches: `platform__list_fragments` (`GET /api/fragments?for=`),
-`platform__operations` (`{fragment}` → its operations and the role the
-turn acts with there), `platform__call` (`{fragment, operation, input}`),
-`platform__list_files`, `platform__read_file`, and, in its owner's turns
-only, `platform__create_fragment` (from a template, as a person makes
-one: the fragment is its owner's, the agent an editor). The agent writes
-no fragment's files and deploys none. A call is `POST
-/api/f/<fragment>/ops/<op>?for=<asker>` signed by the agent with the id
-`tc:<40 hex of SHA-256 of the tool-call id>`: a replayed call replays
-the operation. A job's call (either kind of tool) answers when its run
-ends, reading it `for` the asker every second for up to 90 s: `{run,
-status, output}` (succeeded) or `{run, status, error}` (held, blocked),
-else `{run, status, note}` (still going). At most 64 steps a turn. Each step sends the model a window
-of its conversation, not all of it: the newest 256 messages, cut to
-start at a turn's first message (so a tool call and its result stay
-together), with the running turn whole and earlier turns while they
-total 256 KiB. The earlier turns' tool results are sent cut to their
-first 400 characters and a note of how many more were cut (their images
-to a note), so old output cannot push a model call past its deadline;
-the stored conversation keeps them whole. A turn that alone outgrows the
-window ends in an error; the next message starts a turn that fits. A chat turn's answer is its
-last message, when that is the model's text.
-
-Every turn tells the model, after the agent's instructions, that its
-answer to a chat is posted for it, and that it acts for the person who
-asked, reaching only what they may (`TURN_NOTES` in `agent/src/lib.rs`).
-An agent made with a default instruction of any age (they all open
-alike) is told today's.
-
-A model call (`agent/src/model.rs`) asks for at most 4096 tokens and has
-100 s, counted to the answer's last byte, so streaming does not stretch
-it; its answer is read whole before the turn sees it. A call past its
-deadline, one that fails, or one that answers nothing (no text and no
-tool call: reasoning alone is nothing) is made once more, told why when
-that helps; one the platform refuses for good (401, 402 for its owner's
-ledger, 403 for a guest) is not, and the turn says why. Nothing twice,
-after tool calls that worked in the turn, is answered with what those
-calls did ("Done. Here is what I did: …"). A call in a reply cut off at
-its limit (`finish_reason: length`) is refused, saying so (goose's
-parse), and the model tries again. A turn that fails (a
-second failed call, or any other error) is never silent: "I couldn't
-finish: <why>. Ask me to try again." is its answer, stored in its
-conversation and posted to its chat as an answer is, and the chat's
-`turn.end` carries the error.
-
-### A fragment's agent (the `agent` block)
-
-A fragment may declare an agent people talk to through one of its
-channels, in `fragment.json` (checked at deploy like the rest of it):
-
-```json
-"agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask", "model": "cheap" }
-```
-
-`channel` is a channel it declares with a `post` role; `instructions` a
-file of its repo, read at live (at most 8 KiB: one missing, empty, or
-larger is refused as an invalid manifest is, live's code not installed
-and `code.error` saying why); `tools` operations it declares, none
-owner-only; `model` is optional, a tier (`cheap`, the default, or `medium`).
-
-A deploy whose live manifest declares one makes it so as it lands (the
-refresh or deploy that moved live answers once the agent has
-joined), each part idempotent (the alarm retries one that did not
-finish, an `agent.join-failed` event, within the poll interval). The
-agent hears its channel from the deploy that declared that channel: as
-it joins, the records posted there since, before its subscription began
-(the newest 32), are delivered to it once, so a message sent before it
-listened is still answered; nothing posted before that deploy is, and a
-later deploy catches up on nothing. The fragment's
-own agent is named as the fragment is, made its owner's on first need
-(`POST /api/agents` with a `scope`, which only a deploy names), and given
-what the block declares (`PUT /api/a/{name}/scope {fragment, tools,
-instructions, model}`, owner, for the fragment it was made for only); it
-is an editor of this fragment, a member of nothing else, listening to
-`channel`. A deploy that drops the block, or names another agent or
-channel, removes the one before (its membership and its subscription).
-Each change is an event (`agent.joined`, `agent.left`). An agent of that
-name made otherwise is not taken over.
-
-A fragment's own agent differs from a person's three ways. Its tools are
-the block's operations, read with the fragment's status `for` the asker
-and offered as their role may call them: no other fragment, no platform
-verb. It keeps one conversation per person who posts
-(`<fragment>/<channel>/<identity>`), so strangers never share one. And
-it is told, after its instructions, that its answer is posted for it and
-each call acts as the asker. A signed-in person's post
-to the channel starts a turn for them (an anonymous one starts nothing);
-each call acts for them (`for`: the lower of their role and the agent's,
-and the app's `call.principal` is them). On its own fragment, the
-fragment's own agent gives a signed-in asker what that fragment's
-visibility gives anyone who reached it, its link: on a `link` or
-`public` fragment they are at least a viewer (their post on its channel
-took that), a membership above it still wins, and a `members` fragment
-gives nothing more; never a person's agent, nor another fragment; the answer goes to the channel as `{text,
-turn}` and the steps to `work` when the fragment declares it postable,
-a chat's records (below). Its model calls are its owner's to
-pay.
-
 ## Connections (decisions 22 and 37)
 
 Every provider of the deployment's catalog (`FRAGMENT_PROVIDERS`): a
@@ -1570,46 +1397,6 @@ key's call its owner's ledger refuses).
 
 ### A chat's records
 
-docs/chat-records.md extends this for computers' agents (phase 4: turns,
-drafts, prompts, attachments, Stop, hand-offs, routines) and wins where
-they differ.
-
-A chat is two channels (and, on the blessed template, its push job:
-docs/chat-records.md), and an agent answering it (one that listens
-there, or the fragment's own: the `agent` block, above):
-
-```json
-"channels": {
-  "chat": { "read": "public", "post": "viewer" },
-  "work": { "read": "viewer", "post": "editor" }
-}
-```
-
-- `chat`: messages, `{text}`, posted by viewers and up (link holders
-  too; `fragment.post("chat", {text})`); an agent's answer, `{text,
-  turn}`; and `{kind: "stop", turn}`, the page's Stop, which the agent
-  acts on only from the turn's starter. A body of another `kind` is for
-  pages, never a message.
-- `work`: an agent's progress, for turns a chat started, each posted by
-  the agent (best-effort: a failed post never fails the turn) with the id
-  `wk:<turn>:<part>` (`start`, the call's number, `end`), so a replayed
-  step posts the same record and nothing new:
-  - `{kind: "turn.start", turn, asker}`: who asked (only they may steer
-    or stop it);
-  - `{kind: "turn.step", turn, step, tool, args, ok, excerpt, text?}`: one
-    per tool call, once its result is stored, numbered from 1 in the
-    order the model asked: the tool's name, its arguments as one line of
-    JSON (at most 140 characters), whether it worked, at most 300
-    characters of its result, and the model's text before the call (at
-    most 300) on the first call of a message. A result can hold what the
-    asker reaches in other fragments (R17: they could read it
-    anyway), so only this excerpt is posted;
-  - `{kind: "turn.end", turn, outcome, error?}`: `idle` (answered),
-    `stopped`, `yielded`, or `error` (at most 300 characters of it).
-
-  `turn` is 24 hex of the SHA-256 of the turn's first message's id; the
-  answer on `chat` names it, so a page places the steps above their
-  answer. Nothing streams: a record is a whole step.
-
-A chat made before this (a `say` operation, `chat` taking no posts) keeps
-its own page, and its agent answers through `say`, with no `work`.
+A chat's records (its `chat` and `work` channels: turns, steps,
+replies, prompts, Stop) are docs/chat-records.md's: the bridge writes
+them and the chat template reads them.

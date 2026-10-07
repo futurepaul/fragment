@@ -438,13 +438,12 @@ impl FragmentCell {
                 }
                 json!({ "aged": ms })
             }
-            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "fail-join" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
+            Some(lever @ ("fail-deliveries" | "fail-outbox" | "fail-triggers" | "drop-effects" | "fail-meter-acks" | "fail-after-paid" | "fail-cards")) => {
                 let key = match lever {
                     "fail-cards" => MetaKey::TestFailCards,
                     "fail-deliveries" => MetaKey::TestFailDeliveries,
                     "fail-outbox" => MetaKey::TestFailOutbox,
                     "fail-triggers" => MetaKey::TestFailTriggers,
-                    "fail-join" => MetaKey::TestFailJoin,
                     "fail-meter-acks" => MetaKey::TestFailMeterAcks,
                     "fail-after-paid" => MetaKey::TestFailAfterPaid,
                     _ => MetaKey::TestDropEffects,

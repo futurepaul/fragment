@@ -2,7 +2,7 @@
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
-//! An agent's tools use the same two routes.
+//! The shell uses the same two routes (an agent's settings, a rename).
 
 use std::collections::BTreeMap;
 

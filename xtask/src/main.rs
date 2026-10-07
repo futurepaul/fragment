@@ -1,14 +1,13 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
-//!                    parallel once worker-build has fetched its tools: build.rs)
+//!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, the Workers AI fake on :8796
-//!                    behind the model route, and the agents' Worker beside it
-//!                    (their turns spend their owner's ledger; new people are
-//!                    seats with the month's included credit)
+//!                    code.storage fake on :8792, and the Workers AI fake on :8796
+//!                    behind the model route (its calls spend their payer's
+//!                    ledger; new people are seats with the month's included
+//!                    credit)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
@@ -91,9 +90,9 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// cell/ and agent/ for wasm32 (build.rs).
+/// cell/ for wasm32 (build.rs).
 fn build() -> Result<()> {
-    build::workers()
+    build::cell()
 }
 
 fn dev(args: &[String]) -> Result<()> {
@@ -168,14 +167,9 @@ fn dev(args: &[String]) -> Result<()> {
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
-    // the agents' Worker runs beside it, as a deployment runs it, bound to
-    // the same host secret
-    devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{DEV_PORT}"), agent_url: format!("http://127.0.0.1:{DEV_PORT}"), test_hooks: false }
-        .configure(&devstack::agent_dir(), &fleet.bound())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         port: DEV_PORT,
-        with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
         // wrangler's own debug logs, when asked for
         node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
@@ -186,7 +180,6 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
-    println!("  agents:       {}/api/agents (beside it; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
 
@@ -293,19 +286,18 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// What the e2e runs: the workers (build.rs: in parallel once worker-build
-/// has its tools), the CLI (the e2e drives it too) and the suite beside
-/// them, and the computer images the node's boot builds, built ahead
-/// beside them all so its build finds every layer cached.
+/// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
+/// suite beside it, and the computer images the node's boot builds, built
+/// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
     let built = std::thread::scope(|s| {
         let images = s.spawn(build::images);
         let native = s.spawn(build_native);
-        let workers = build::workers();
-        workers.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let cell = build::cell();
+        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
     });
-    println!("built the workers, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
     built
 }
 
@@ -368,10 +360,7 @@ fn check() -> Result<()> {
         .current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .current_dir(Path::new(&devstack::cell_dir())))?;
-    run(Command::new("cargo")
-        .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .current_dir(Path::new(&devstack::agent_dir())))
+        .current_dir(Path::new(&devstack::cell_dir())))
 }
 
 /// Where the one-line install fetches the CLI from.

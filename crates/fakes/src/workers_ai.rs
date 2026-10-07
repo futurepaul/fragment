@@ -27,9 +27,8 @@
 //! (`describe_image`: its kind and size), so a test sees which image a
 //! model was shown.
 //!
-//! Replies are scripted (text, tool calls, or text beside tool calls) and
-//! answered in order before falling back to an echo of the last message,
-//! or, for a real agent runtime (`transcripts`), to
+//! A call answers the text a test set for it (`say_next`), else an echo of
+//! its last message, or, for a real agent runtime (`transcripts`),
 //! `transcript_reply`: a pure function of the transcript (lesson 13), which
 //! an agent's own auxiliary calls (titles, its approval guardian) cannot put
 //! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
@@ -56,7 +55,7 @@ pub const TAKES_IMAGES: [&str; 1] = [fragment_core::models::CHEAP_MODEL];
 /// answer starts so.
 pub const SEEN: &str = "I see an image";
 
-/// A scripted model reply.
+/// A model's reply: an echo's, or `transcript_reply`'s.
 #[derive(Clone, Debug)]
 pub enum Reply {
     Text(String),
@@ -113,7 +112,8 @@ struct State {
     calls: Vec<AiCall>,
     /// How the next calls answer, in order: a status, or `None` as they would.
     failures: VecDeque<Option<u16>>,
-    script: VecDeque<Reply>,
+    /// The texts the next calls answer, in order; then as they would.
+    said: VecDeque<String>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
     /// The next streamed answers end before their usage, in order.
@@ -122,7 +122,7 @@ struct State {
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
-    /// Unscripted calls answer `transcript_reply`, in pieces.
+    /// Calls answer `transcript_reply`, in pieces.
     transcripts: bool,
 }
 
@@ -452,16 +452,19 @@ fn answer(s: &mut State, req: &Request) -> Response {
         return problem(400, &why);
     }
     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
-    let scripted = s.script.pop_front();
+    let said = s.said.pop_front();
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
-    if s.transcripts && scripted.is_none() && follows_a_tool(&body) {
+    if s.transcripts && said.is_none() && follows_a_tool(&body) {
         s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
     }
     let broken = s.breaks.pop_front().unwrap_or(false);
-    let unscripted = |s: &State| if s.transcripts { transcript_reply(&body) } else { Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))) };
+    let reply = match said {
+        Some(text) => Reply::Text(text),
+        None if s.transcripts => transcript_reply(&body),
+        None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
+    };
     if body["stream"] == true {
-        let reply = scripted.unwrap_or_else(|| unscripted(s));
         let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
         let written = match &reply {
             Reply::Text(t) => t.chars().count(),
@@ -473,11 +476,6 @@ fn answer(s: &mut State, req: &Request) -> Response {
         let events = stream(&model, &reply, &mut s.tool_calls, usage_of(used, &body, written), budget, broken, pieces);
         return Response::bytes(200, "text/event-stream", events.into_bytes()).with_header("cf-aig-log-id", &log_id);
     }
-    let reply = match scripted {
-        Some(r @ Reply::Text(_)) => r,
-        _ if s.transcripts => transcript_reply(&body),
-        _ => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
-    };
     let tool_calls = |calls: &[(String, Value)]| -> Vec<Value> {
         calls.iter().enumerate().map(|(i, (name, args))| json!({ "id": format!("call_{}_{i}", s.answers), "type": "function", "function": { "name": name, "arguments": args.to_string() } })).collect()
     };
@@ -514,7 +512,7 @@ impl WorkersAi {
         let st = Arc::clone(&state);
         let handler: Handler = Arc::new(move |req: &Request| {
             // an answer held back (`delay_next`) waits here, with the state
-            // unlocked, after its script was consumed
+            // unlocked, after its levers were consumed
             let (response, sleep_ms) = {
                 let mut s = st.lock().expect("workers ai state");
                 let response = answer(&mut s, req);
@@ -533,18 +531,18 @@ impl WorkersAi {
         self.state.lock().expect("workers ai state")
     }
 
-    /// Replies the next calls answer, in order (an unstreamed one takes text).
-    pub fn script(&self, replies: &[Reply]) {
-        self.state().script.extend(replies.iter().cloned());
-    }
-
-    /// Drops any scripted replies, usages, breaks and delays not yet used.
+    /// Drops any texts, usages, breaks and delays set and not yet used.
     pub fn clear_script(&self) {
         let mut s = self.state();
-        s.script.clear();
+        s.said.clear();
         s.usage.clear();
         s.breaks.clear();
         s.delays.clear();
+    }
+
+    /// The texts the next calls answer, in order (a model's JSON, say).
+    pub fn say_next(&self, texts: &[&str]) {
+        self.state().said.extend(texts.iter().map(|t| t.to_string()));
     }
 
     /// What the next answers report they used, in order.
@@ -574,8 +572,8 @@ impl WorkersAi {
     }
 
 
-    /// Unscripted calls answer from their transcript (`transcript_reply`),
-    /// in pieces (`true`), or echo their last message.
+    /// Calls answer from their transcript (`transcript_reply`), in pieces
+    /// (`true`), or echo their last message.
     pub fn transcripts(&self, on: bool) {
         self.state().transcripts = on;
     }

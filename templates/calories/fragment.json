@@ -3,12 +3,13 @@
   "operations": {
     "log_food": {
       "kind": "mutation",
-      "role": "viewer",
+      "role": "editor",
       "input": {
         "type": "object",
-        "required": ["food", "calories"],
+        "required": ["who", "food", "calories"],
         "additionalProperties": false,
         "properties": {
+          "who": { "type": "string", "minLength": 1, "maxLength": 200 },
           "food": { "type": "string", "minLength": 1, "maxLength": 200 },
           "calories": { "type": "integer", "minimum": 0, "maximum": 10000 }
         }
@@ -24,12 +25,13 @@
       "role": "viewer",
       "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
     },
+    "heard": { "kind": "job" },
     "summarize": { "kind": "job", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
   },
   "channels": {
     "ask": { "read": "viewer", "post": "viewer", "signedIn": true },
-    "work": { "read": "viewer", "post": "editor" }
+    "replies": { "read": "viewer" }
   },
-  "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask" },
-  "meta": { "title": "Calories", "description": "Say what you ate in plain words: an agent logs it, and your day adds up live." }
+  "triggers": [{ "channel": "ask", "run": "heard" }],
+  "meta": { "title": "Calories", "description": "Say what you ate in plain words: a model reads it, logs each item, and your day adds up live." }
 }

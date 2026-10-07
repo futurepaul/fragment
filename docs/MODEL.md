@@ -31,11 +31,9 @@ the wire contract in full.
    (a page everyone who may see it gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
-5. **Agents are add-ons a fragment declares** (docs/cloudflare-v1.md, "The rule");
-   a fragment that declares none carries nothing of them. Agents are
-   hosted members with durable turns. A computer, a container a person
-   owns that runs their agent fragments, is the other add-on
-   (Computers, below).
+5. **Agents are fragments a computer runs** (docs/cloudflare-v1.md,
+   decisions 13 to 15), members of the fragments they work in. No
+   fragment declares one (Agents and Computers, below).
 
 ## Anatomy of a fragment, in Cloudflare terms
 
@@ -220,45 +218,16 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 ## Agents
 
-The agent loop is goose's (`goose-agent`, the GDK), everywhere: it
-replaces libfx in cells and fx over ACP on computers (Paul, 2026-09-23;
-the spike and its handoff are on branch `spike/goose-agent`,
-`spikes/goose-agent/HANDOFF.md`, and at the tag `celld-final`).
-
-- A fragment declares its agent in `fragment.json`: instructions, the
-  operations it may call, the postable channel it answers, and its model
-  (docs/api.md, A fragment's agent). A turn starts from a signed-in visitor's message
-  there or from a job step, `job.agent`.
-- An agent is a Durable Object with a key, memberships in fragments, and
-  its conversation in SQL. It runs as its own Worker (`agent/`,
-  a workers-rs Durable Object, ~6 MB of wasm), so fragment cells do not
-  carry goose.
-- **The loop runs in the agent's cell**, where its conversation lives
-  (running it on the agent's computer went with computers at the cut).
-- A turn is goose's state machine: load the conversation, run one step (a
-  model call, a batch of tool calls, or a steer), apply the step's
-  effects in SQL, repeat. The saved conversation is the replay ledger; a
-  watchdog alarm resumes a turn a crash interrupted (SIGKILL mid-tool:
-  the replay reuses the tool-call id and the effect lands once). This
-  supersedes spike 3's Workflow-per-turn design; Workflows remain for app
-  `job` operations.
-- Tools are the operations of the fragments the agent belongs to, the
-  platform's verbs for any fragment its asker reaches (list, read one's
-  operations, call one, files, deploy). The model's tool-call id is
-  the operation id, so the operation ledger dedupes a replayed call.
-- People steer a running turn (a durable queue drained between steps) and
-  stop it (11–15 ms in a cell).
-- An agent answers the postable channels it follows (a fragment's own
-  agent its declared one, calories' `ask`). A member's message starts a
-  turn; the messages people should see are the turn's effects appended
-  to that channel, while the full working conversation (tool calls and
-  results) stays in the agent's cell. The agent keeps one conversation
-  per channel it answers, and a turn answers in its own. (The chat
-  template went at the cut; chats come back as a blessed fragment
-  template: docs/cloudflare-v1.md, "The rule".) A turn acts for whoever started it: every call names them
-  (`for`), and acts with the lower of their role and the agent's cap
-  (docs/cloudflare-v1.md, R17). An anonymous visitor's message starts nothing.
-- Model calls use the owner's own model credential (`docs/secrets.md`).
+An agent is a fragment (kind `agent`) with an identity of its own, owned
+by a person and run by a computer of theirs: today a Hermes profile,
+whose bridge turns the records of the channels it follows into turns
+(docs/cloudflare-v1.md, decisions 14 and 15; docs/computers.md;
+docs/chat-records.md). It acts on fragments through the platform's API
+as their member, for whoever asked: every call names them (`for`), and
+acts with the lower of their role and the agent's cap
+(docs/cloudflare-v1.md, R17). The in-fragment goose agent (a loop in a Durable Object of its own,
+a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
+#156): one runtime, with one set of turn semantics.
 
 ## Computers
 

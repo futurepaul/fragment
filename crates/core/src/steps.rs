@@ -56,14 +56,6 @@ pub enum Step {
     /// Cloudflare (crate::media).
     #[serde(rename = "ai.video")]
     AiVideo {},
-    /// `job.agent`'s first step: a turn of the fragment's own agent for
-    /// the run's principal, named by the run and this step, so a retried or
-    /// replayed step reattaches to it rather than start another.
-    #[serde(rename = "agent.start")]
-    AgentStart(AgentTurn),
-    /// A started turn's state, by its id (the start's answer).
-    #[serde(rename = "agent.poll")]
-    AgentPoll { turn: String },
     /// `job.members()`: the fragment's members, as its page's `__members`
     /// lists them (the first added first).
     #[serde(rename = "members")]
@@ -80,18 +72,6 @@ pub enum Step {
 
 /// The identities one `job.people` step names: a page's `__people` limit.
 pub const PEOPLE_MAX: usize = 64;
-
-/// `job.agent({prompt, conversation?, channel?})`: the message, the
-/// conversation it continues (a key the job chooses; none: the run's own),
-/// and the channel its steps and answer are posted to (none: nowhere).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentTurn {
-    pub prompt: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<String>,
-}
 
 /// `job.fetch`'s request. Header values may name secrets as `{{NAME}}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,8 +190,6 @@ impl Step {
             Step::AiText(_) => "ai.text",
             Step::AiImage(_) => "ai.image",
             Step::AiVideo {} => "ai.video",
-            Step::AgentStart(_) => "agent.start",
-            Step::AgentPoll { .. } => "agent.poll",
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
@@ -270,8 +248,6 @@ mod tests {
             ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
             ("ai.video", json!({})),
-            ("agent.start", json!({ "prompt": "summarize today", "conversation": "daily", "channel": "ask" })),
-            ("agent.poll", json!({ "turn": "0123456789abcdef01234567" })),
             ("members", json!({})),
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
@@ -281,7 +257,7 @@ mod tests {
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 16, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -307,8 +283,6 @@ mod tests {
             Ok(Step::AiVideo {}),
             "a video's args are not read: it is refused whatever it asks"
         );
-        let Ok(Step::AgentStart(a)) = step("agent.start", json!({ "prompt": "p" })) else { panic!() };
-        assert_eq!((a.conversation, a.channel), (None, None), "the run's own conversation, posted nowhere");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hi" }], "extra": true })) else { panic!() };
         assert_eq!((t.prompt, t.messages.map(|m| m.len())), (None, Some(1)), "a key the platform does not read is ignored");
         let Ok(Step::AiText(t)) = step("ai.text", json!({ "prompt": "hi" })) else { panic!() };
@@ -335,9 +309,6 @@ mod tests {
         refused("publish", json!({ "channel": "feed", "body": {} }), "missing field `kind`");
         refused("push", json!({ "payload": {} }), "missing field `who`");
         refused("files.read", json!("log.txt"), "invalid type");
-        refused("agent.start", json!({ "conversation": "daily" }), "missing field `prompt`");
-        refused("agent.start", json!({ "prompt": 7 }), "invalid type");
-        refused("agent.poll", json!({}), "missing field `turn`");
         refused("people", json!({}), "missing field `ids`");
         refused("people", json!({ "ids": "id:x" }), "invalid type");
         refused("people", json!({ "ids": [7] }), "invalid type");

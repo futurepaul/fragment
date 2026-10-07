@@ -86,8 +86,7 @@ pub(crate) struct RegisterAgent {
     pub owner: By,
     pub key: String,
     /// The agent fragment it is made from (a computer's agent, whose key is
-    /// its fragment's own), which names it: `None` for an agent of a CLI's
-    /// or of a fragment's `agent` block.
+    /// its fragment's own), which names it: `None` for an agent of a CLI's.
     #[serde(default)]
     pub fragment: Option<String>,
 }

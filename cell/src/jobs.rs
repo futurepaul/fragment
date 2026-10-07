@@ -845,8 +845,6 @@ impl FragmentCell {
             ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
                 self.step_ai(run, index, &ai).await
             }
-            Step::AgentStart(turn) => self.step_agent_start(run, index, turn).await,
-            Step::AgentPoll { turn } => self.step_agent_poll(&turn).await,
             // what the fragment's own page reads, read for its code: who is
             // in it, their names, and who is here
             Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),

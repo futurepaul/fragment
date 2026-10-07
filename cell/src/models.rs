@@ -21,10 +21,10 @@
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
 //! A job's image step calls its model on the same transport (`run`).
 //!
-//! Who calls: the agents' Worker, `POST /api/models/v1/chat/completions`
-//! (`route`), signed by the agent, `for` naming whom it acts for and
-//! `fragment` the turn's fragment; and, from phase 4, the computer's model
-//! intercept (`complete`). The payer is the agent's owner (decision 36).
+//! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
+//! signed by the agent (its computer's model intercept signs it), `for`
+//! naming whom it acts for and `fragment` the turn's fragment; `complete`
+//! is the call itself. The payer is the agent's owner (decision 36).
 //! A call names a tier, or `vision`: the deployment's vision model
 //! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
 //! image (Hermes' screenshots), metered the same way.

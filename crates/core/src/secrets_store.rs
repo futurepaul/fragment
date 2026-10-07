@@ -3,8 +3,7 @@
 //! (docs/secrets.md). A deployment's config names the store secret behind
 //! each binding; `cargo xtask deploy` writes the bindings, and `cargo xtask
 //! secret` sets the values. Nothing here holds a value: the cell
-//! (cell/src/keys.rs) and the agents' Worker (agent/src/keys.rs) read them,
-//! through `Cache`.
+//! (cell/src/keys.rs) reads them, through `Cache`.
 //!
 //! The names are new at the move to the store (2026-10-05), so none is the
 //! name of a Worker secret an earlier deploy uploaded: such a secret, still

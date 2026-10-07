@@ -7,10 +7,10 @@ Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
-An **agent** is an optional add-on, and a fragment that declares none
-carries nothing of it: goose, so a calorie tracker can take "2 eggs and
-toast". Fragments run on Cloudflare: each is a Durable Object that
-sleeps when idle, its app in a Worker of its own
+Your **agents** are fragments too, run by a computer of your own (today,
+Hermes profiles), and act on other fragments as their members.
+Fragments run on Cloudflare: each is a Durable Object that sleeps when
+idle, its app in a Worker of its own
 ([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers
 ([docs/computers.md](docs/computers.md)).
 
@@ -21,8 +21,6 @@ This repo holds:
   fragment's app in its own loaded worker, and runs jobs as Workflows.
 - **the `fragment` CLI** (`cli/`): the whole control surface, built for
   agents. `fragment guide` prints the agent guide.
-- **the agents** (`agent/`): goose's loop in a Durable Object per agent,
-  a Worker beside the cell's; an agent joins fragments as a member.
 - **the harness** (`xtask/`, `crates/`): the dev stack, Rust fakes for
   code.storage, Workers AI, WorkOS, and a push service, and the e2e suite
   that drives the real cell, CLI, and a browser.
@@ -63,7 +61,7 @@ and runs its npm (below).
 Then:
 
 ```
-cargo xtask dev            # the cell and its agents on :8790 under wrangler dev, the code.storage and WorkOS fakes
+cargo xtask dev            # the cell on :8790 under wrangler dev, the code.storage and WorkOS fakes
 cargo xtask try todo       # in another terminal: todo | inbox | notes
 ```
 
@@ -118,7 +116,6 @@ To move the pin:
 
 ```
 cell/          the cell: router, registry, fragment supervisor, jobs, files, blobs, deliveries, ledger
-agent/         the agents' Worker (goose's loop)
 cli/           the fragment CLI and GUIDE.md (the agent guide)
 crates/proto   wire types and limits
 crates/core    the cell's pure logic, host-tested (schemas, cron, globs, the ledger and price book, web push)
@@ -128,7 +125,7 @@ crates/fakes   code.storage, Workers AI, WorkOS, and push-service fakes
 
 crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite
-templates/     blank, calories, inbox, notes, todo
+templates/     blank, calories, inbox, notes, todo; the blessed agent, brain, chat, skills
 xtask/         build, dev, try, check, e2e, deploy, teardown
 deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
 docs/          the plan (cloudflare-v1.md), model, contract, the debt ledger

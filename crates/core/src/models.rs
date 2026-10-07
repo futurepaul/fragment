@@ -52,8 +52,8 @@ pub const IMAGE_DATA_URL_MAX_BYTES: usize = 5 * 1024 * 1024;
 /// few hundred KiB.
 pub const MODEL_BODY_MAX_BYTES: usize = IMAGE_DATA_URL_MAX_BYTES + 1024 * 1024;
 const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits Hermes' shrunk image, and stays near it");
-/// The most one call may write, reasoning included. An agent asks for 4096
-/// (agent/src/model.rs); a job's text step may ask for more, up to this.
+/// The most one call may write, reasoning included: a job's text step may
+/// ask for up to this.
 /// It bounds the worst case each call reserves: GLM-5.3's is $0.11 of
 /// output at list price, before its input.
 pub const MAX_TOKENS: u32 = 16_384;
