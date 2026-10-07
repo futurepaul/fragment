@@ -142,7 +142,6 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
         host_suffix: "fragment.localhost".into(),
-        legacy_host_suffix: None,
         host_label_suffix: None,
         // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
