@@ -153,10 +153,10 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
 }
 
 /// The poll backstop (docs/api.md, `FRAGMENT_POLL_INTERVAL_S`): a fragment
-/// something outside the platform may write (a storage token was minted
-/// for it, or a webhook came, in the last day) is polled every interval,
-/// so an editor's push through code.storage syncs within it; one nothing
-/// touches is polled once a day.
+/// whose pins may lag its repo (a storage token was minted for it in the
+/// last day) is polled every interval, so an editor's push through
+/// code.storage syncs within it; one nothing touches is never polled, its
+/// daily pass included, and a webhook leaves it so.
 fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let name = s.named(api, &owner, "quiet")?;
@@ -210,6 +210,15 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         asked == 0 && !read("quiet.md"),
         format!("{asked} branch reads"),
     );
+    // its daily pass, brought in by the lever
+    let pass = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "poll-now" })))?;
+    let passed = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
+    let asked = s.fake.requests(&repo, "GET branch") - reads;
+    s.ok(
+        "its daily pass asks code.storage nothing either",
+        pass.status == 200 && passed && asked == 0 && !read("quiet.md"),
+        format!("{asked} branch reads, {}", hook("alarm", None)),
+    );
 
     // an editor who may push through code.storage: a storage token
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/storage-token"), None)?;
@@ -228,6 +237,6 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a day after the token, it is polled once a day again", quiet, hook("alarm", None));
     s.commit(&c, &[("announced.md", Some(b"by webhook"))]);
     let alarm = hook("alarm", None);
-    s.ok("a webhook brings the poll back to its interval too", read("announced.md") && ahead(&alarm, "pollAt") <= interval_ms, &alarm);
+    s.ok("a webhook moves the pin and leaves the poll quiet: the move it announced is followed", read("announced.md") && ahead(&alarm, "pollAt") > day_ms - 120_000, &alarm);
     Ok(())
 }

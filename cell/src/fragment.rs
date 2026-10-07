@@ -369,11 +369,11 @@ pub(crate) enum MetaKey {
     /// The owner's row in their list has been sent this fragment's sharing
     /// (members.rs); a fragment from before sends it once.
     SharingSent,
-    /// When the poll backstop runs next (a day after the last pass, or
-    /// within the poll interval while the fragment is busy: plane.rs `busy`).
+    /// When the next pass runs (a day after the last, or within the poll
+    /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
-    /// When something outside the platform last may have written the repo:
-    /// a storage token was minted for it, or a webhook arrived (plane.rs).
+    /// When the pins last may have fallen behind the repo: a storage token
+    /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
@@ -1287,9 +1287,10 @@ impl FragmentCell {
     /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
     /// life was made since; then the life's index, search, joined and
     /// delivery outboxes, due schedules, queued runs, and the pass: the
-    /// poll backstop, which also checks
-    /// running runs. The next pass is a day away, or within the poll
-    /// interval while the fragment is busy (`arm`). Then it re-arms.
+    /// trims, the poll backstop (while the pins may lag), the blob
+    /// collection, running runs checked, and the storage sample. The next
+    /// pass is a day away, or within the poll interval while the fragment
+    /// is busy (`arm`). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1321,7 +1322,9 @@ impl FragmentCell {
             self.trim_audit()?;
             self.trim_runs()?;
             self.trim_writes()?;
-            self.poll().await;
+            if self.pins_may_lag()? {
+                self.poll().await;
+            }
             if let Err(e) = self.collect_blobs().await {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
