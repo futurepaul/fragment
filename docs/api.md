@@ -935,16 +935,20 @@ reported (`delivery.failed`).
 A job's AI steps bill the fragment's owner, on their ledger (Ledger,
 below), capped when the run's principal is neither the owner nor an
 agent of theirs (a run does not record whom an agent asked for). Text
-goes through the platform's model route (Models, below) by tier; images
-are FLUX.1 [schnell] (`@cf/black-forest-labs/flux-1-schnell`) on Workers
-AI, on the model route's transport (the `AI` binding through the
-deployment's AI Gateway), metered in neurons at Workers AI's price for
-it: 4.80 a 512×512 tile and 9.60 a step (`fragment_core::media`).
-Nothing holds a key: the binding is pre-authenticated.
+goes through the platform's model route (Models, below) by tier;
+decisions are Clef (`@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash`)
+and images FLUX.1 [schnell] (`@cf/black-forest-labs/flux-1-schnell`) on
+Workers AI, on the model route's transport (the `AI` binding through the
+deployment's AI Gateway). Clef is metered in its input tokens ($0.24 and
+$0.09 a million; its output is free: `fragment_core::decide`), an image in
+neurons at Workers AI's price for it: 4.80 a 512×512 tile and 9.60 a step
+(`fragment_core::media`). Nothing holds a key: the binding is
+pre-authenticated.
 
 Each paid step reserves its worst case on the owner's ledger before its
 call (text: its request's bytes as tokens in and its tier's capped
-`max_tokens` out; an image: a 1024×1024 image's 4 tiles at its steps),
+`max_tokens` out; a decision: its input's bytes as tokens, at most Clef's
+65,536-token window; an image: a 1024×1024 image's 4 tiles at its steps),
 under the step's reference,
 `step:<fragment>@<incarnation>/run/<run>/attempt/<attempt>/step/<index>`.
 It keeps what the call bought beside the step (by
@@ -967,11 +971,48 @@ usage is charged its reservation, `ai.cost-missing`, never nothing). So:
 
 The steps:
 
-- `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?})`
-  → `{text, model, tier, usage}`: `model` is a tier, `cheap` (the default)
-  or `medium` (`high` is refused: Models); `max_tokens` is at most 16384;
+- `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
+  tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
+  tier, usage}`: `model` is a tier, `cheap` (the default) or `medium`
+  (`high` is refused: Models); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
+  - `messages` reach the model as given, an assistant's `tool_calls` and
+    `role: "tool"` results among them.
+  - `tools` are OpenAI's (`{type: "function", function: {name,
+    description?, parameters?, strict?}}`): at most 64 in 64 KiB of JSON,
+    each name 1 to 64 letters, digits, `_` or `-`, once. `tool_choice` is
+    `none`, `auto`, `required` or `{type: "function", function: {name}}`
+    of one of them.
+  - `message` is the model's, `{role: "assistant", content, tool_calls?}`
+    (`content` a string, `""` with none; `tool_calls` OpenAI's, `{id, type:
+    "function", function: {name, arguments}}`, `arguments` the JSON text
+    the model wrote), never its reasoning; `text` is its `content`, and
+    `finish_reason` the model's (`stop`, `tool_calls`, `length`).
+  - `draft: {channel, turn}`: the call streams, and its text so far is put
+    as that channel's draft, as `PUT …/channels/{channel}/draft` puts one
+    (`draft` frames on `__live`, never stored), from the fragment itself
+    (its npub): at most 4 a second, and its whole text once more at its
+    end; none past 64 KiB, or past the fragment's pace for drafts. The
+    channel is one the app declares (it needs no post role; whoever may
+    read it sees the drafts), the turn `^[A-Za-z0-9._:-]{1,128}$`. A
+    stream that breaks, or ends before its answer says why it stopped, is
+    called again under the same reservation.
+- `job.ai.decide({model, state, questions, images?})` → `{answers, model,
+  usage}`: Clef's input and answers, as its catalog's schemas say.
+  `model` is `clef` or `clef-flash` (`model` answers its catalog id);
+  `state` is text, or JSON (an object or an array); `questions` maps 1 to
+  64 ids (1 to 100 letters, digits, `_`, `.`, `-`) to a question: `{type:
+  "noul", instructions, criteria?: {true?, false?}}` (yes or no), `{type:
+  "choice", instructions, criteria: {<option>: <description>}}` (2 to 255
+  options), or `{type: "score", instructions, criteria: [<level>, …]}` (2
+  to 10, lowest first); `instructions` is text, or JSON holding it.
+  `images` are at most 4 `data:` URLs of PNG, JPEG or WebP. Each answer is
+  under its question's id: `{type: "noul", noul}` (the probability of
+  yes), `{type: "choice", choice, probabilities, confidence}`, or `{type:
+  "score", score, legend, probabilities, confidence}`; `usage` is
+  `{input_tokens, output_tokens}`. An answer that does not answer every
+  question is refused and charged its reservation (`ai.decide-refused`).
 - `job.ai.image({prompt, path, steps?})` → `{path, size, sha256,
   mediaType}`: a JPEG (`image/jpeg`) written to `main` at `path`, which
   ends in `.jpg` or `.jpeg` (a file is served by its extension: bug 5),
