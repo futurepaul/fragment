@@ -1,4 +1,5 @@
 mod api;
+mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
@@ -262,6 +263,27 @@ enum Cmd {
         #[arg(long)]
         body: String,
         /// The post's id (default: a fresh one)
+        #[arg(long)]
+        id: Option<String>,
+    },
+    /// Ask another of your agents (an agent: of its owner's) something, in
+    /// a chat of the two of you and your owner, made the first time (a
+    /// person: their direct chat with it), or in --chat; prints the chat
+    /// and the question's record. Its answer comes in that chat; --wait
+    /// prints it
+    Ask {
+        /// The agent: its label or fragment (`fred`, `fred.paul`), or its identity
+        agent: String,
+        /// What to ask it
+        text: String,
+        /// Ask in this chat instead (each of you two not in it is added, as its
+        /// owner's agent may)
+        #[arg(long)]
+        chat: Option<String>,
+        /// Wait for its answer and print it: at most SECS seconds (default 300)
+        #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+        wait: Option<u64>,
+        /// The question's post id (a retry with the same --id posts nothing again)
         #[arg(long)]
         id: Option<String>,
     },
@@ -1440,6 +1462,35 @@ fn run(cli: Cli) -> Result<()> {
             println!("{}", serde_json::to_string(&v.record)?);
             if v.replayed {
                 eprintln!("(replayed: post {id} had already appended this record)");
+            }
+        }
+        Cmd::Ask { agent, text, chat, wait, id } => {
+            let id = id.unwrap_or_else(|| format!("ask-{:016x}", rand::random::<u64>()));
+            let v = ask::ask(&c, &agent, &text, chat.as_deref(), wait, id)?;
+            json_exit(j, &v);
+            println!("asked {} in {} (record {})", v.asked.name, v.chat, v.record["seq"]);
+            for who in &v.added {
+                println!("  added {who} to {} as an editor", v.chat);
+            }
+            if v.replayed {
+                eprintln!("(replayed: this question was posted before)");
+            }
+            match (&v.answer, v.waited_s) {
+                (Some(a), _) => {
+                    match (a.outcome.as_str(), &a.error) {
+                        ("idle", _) => println!("{} answered:", v.asked.name),
+                        (outcome, Some(why)) => println!("{} could not answer ({outcome}): {why}", v.asked.name),
+                        (outcome, None) => println!("{}'s turn ended {outcome}:", v.asked.name),
+                    }
+                    for r in &a.replies {
+                        println!("{}", r.text);
+                        if r.attachments > 0 {
+                            println!("  ({} file{} in the chat)", r.attachments, if r.attachments == 1 { "" } else { "s" });
+                        }
+                    }
+                }
+                (None, Some(s)) => println!("no answer in {s} s: it comes in {} (`fragment channel {} chat --after {}`)", v.chat, v.chat, v.record["seq"]),
+                (None, None) => println!("its answer comes in {} (`--wait` waits for it)", v.chat),
             }
         }
         Cmd::Channel { name, channel: None, .. } => {
