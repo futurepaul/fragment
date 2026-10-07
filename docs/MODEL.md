@@ -219,8 +219,8 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 ## Agents
 
 An agent is a fragment (kind `agent`) with an identity of its own, owned
-by a person and run by a computer of theirs: today a Hermes profile,
-whose bridge turns the records of the channels it follows into turns
+by a person and run by a computer of theirs: today goose
+(docs/optchat.md), whose bridge turns the records of the channels it follows into turns
 (docs/cloudflare-v1.md, decisions 14 and 15; docs/computers.md;
 docs/chat-records.md). It acts on fragments through the platform's API
 as their member, for whoever asked: every call names them (`for`), and

@@ -21,7 +21,7 @@ If Playwright is missing in the project:
 npm install -D playwright
 ```
 
-Your computer carries a headless Chromium (Hermes' browser): prefer it over
+Your computer may carry a headless Chromium: prefer it over
 Playwright's downloaded browser cache when it is set, and download one only
 when it is not:
 

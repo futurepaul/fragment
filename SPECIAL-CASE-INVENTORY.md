@@ -9,7 +9,7 @@ a fragment could build the same thing on top of those APIs. The list
 stays short (Paul, 2026-10-02).
 
 Adding an entry needs its reason and its API. Removing one is always
-welcome. Nothing here may name an agent runtime (Hermes), a template or
+welcome. Nothing here may name an agent runtime, a template or
 a vendor's product beyond the credential it holds.
 
 | Surface | Why it is platform | Built on |

@@ -12,7 +12,7 @@
   // the Sandbox SDK's DirectoryBackup (entry.mjs) imports Node's modules;
   // a computer's container has a PID namespace of its own, its entrypoint
   // PID 1 as on Containers (without it, `wrangler dev` shares the host's,
-  // and Hermes' s6-overlay refuses to start)
+  // and an init that must be PID 1 refuses to start)
   "compatibility_flags": ["nodejs_compat", "containers_pid_namespace"],
   "build": { "command": "worker-build --release", "watch_dir": ["src", "shell", "../crates", "../templates"] },
   "worker_loaders": [{ "binding": "LOADER" }],
@@ -44,7 +44,7 @@
   // Object, placed beside it (the `durable_object` policy, which snapshots
   // need), from a named image each computer is pinned to. Dev and the e2e
   // run the stub image under Docker; a deployment's config names its own
-  // (the Hermes image).
+  // (the goose image).
   "containers": [
     {
       "class_name": "Computer",

@@ -5,9 +5,8 @@ version: 1.0.0
 author: community
 license: MIT
 metadata:
-  hermes:
-    tags: [PDF, Documents, Editing, NLP, Productivity]
-    homepage: https://pypi.org/project/nano-pdf/
+  tags: [PDF, Documents, Editing, NLP, Productivity]
+  homepage: https://pypi.org/project/nano-pdf/
 ---
 
 # nano-pdf
@@ -17,7 +16,7 @@ Edit PDFs using natural-language instructions. Point it at a page and describe w
 ## Prerequisites
 
 ```bash
-# Install with uv (recommended — already available in Hermes)
+# Install with uv (recommended)
 uv pip install nano-pdf
 
 # Or with pip

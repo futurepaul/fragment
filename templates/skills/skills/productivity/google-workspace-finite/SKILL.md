@@ -5,9 +5,8 @@ version: 2.1.0
 author: Nous Research (rewritten for fragment)
 license: MIT
 metadata:
-  hermes:
-    tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email]
-    homepage: https://github.com/NousResearch/hermes-agent
+  tags: [Google, Gmail, Calendar, Drive, Sheets, Docs, Contacts, Email]
+  homepage: https://github.com/NousResearch/hermes-agent
 ---
 
 # Google Workspace
@@ -31,7 +30,7 @@ library only) does the common calls the same way.
 ## Connected?
 
 ```bash
-GAPI="python3 ${HERMES_SKILL_DIR}/scripts/google_api.py"
+GAPI="python3 ${SKILL_DIR}/scripts/google_api.py"
 $GAPI check
 ```
 

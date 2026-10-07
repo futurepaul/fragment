@@ -7,7 +7,8 @@ proves every route. The TypeScript runtime this replaced was deleted
 (its contract is in git history, last at `35f5e18`). The desktop and the
 personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
 33; their contract is at the tag `celld-final`); computers came back
-(Computers, below), with Hermes as our image's agent runtime.
+(Computers, below), with goose as our image's agent runtime
+(docs/optchat.md).
 
 ## Configuration
 
@@ -619,7 +620,7 @@ and styles only inline and images only from the platform
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried until done), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
@@ -720,6 +721,9 @@ the code the fragment's own.
   keep theirs; the number is not declarable yet.
 - `kind` is `query`, `mutation`, or `job` (below); a job's `role`
   defaults to `editor`.
+- `description` (optional, 1 to 1024 characters) says what the operation
+  does, for an agent: `status.code.operations` shows it, and it makes
+  the operation a tool of `fragment mcp` (cli/GUIDE.md).
 - `triggers` (at most 32) start runs of an operation: `{"cron": "0 9 * *
   *", "run": op}` (five fields, UTC, 1 = Sunday), `{"channel": "inbox" |
   <app channel>, "run": op}` (each new record; with `"from": "person" |
@@ -1039,7 +1043,7 @@ payer's and the agent's identities). `high` (Opus) is refused, 400,
 saying why, until Cloudflare raises Unified Billing's Opus limit; a model
 id is never a tier. `vision` names the deployment's vision model (its
 config's `vision_model`, GLM-5.3 Flash unless named, one the price book
-prices), for a runtime's calls about an image (Hermes' screenshots:
+prices), for a runtime's calls about an image (a screenshot:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
 
@@ -1056,8 +1060,7 @@ the call counts in its month and is under its cap for anyone but the
 owner (or the owner's agent acting for them); when another person owns
 it, that owner's ledger is asked first whether it is still open
 (decision 26). A request is at most 6 MiB (413 past it, nothing
-reserved): a screenshot Hermes shrinks to 5 MiB of base64 after a 413
-fits. Each call reserves its worst case (the body's bytes as
+reserved): an image of 5 MiB of base64 fits. Each call reserves its worst case (the body's bytes as
 tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
 then settles from its last, cumulative usage, input less what was cached
 (Workers AI puts a per-chunk delta on every chunk and the whole call's
@@ -1529,7 +1532,7 @@ is docs/computers.md; the routes here are its owner's.
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
-| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (docs/computers.md); a sleeping one's reads it as it starts |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |

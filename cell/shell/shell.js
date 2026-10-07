@@ -6,7 +6,7 @@
 // each is a frame of the fragment's own origin, signed in there by the
 // platform's frame mint (`/auth/frame`), for this page only. This page
 // holds no key: it calls the API with the person's platform session
-// (`x-fragment-shell`, same-origin only). It knows nothing of Hermes:
+// (`x-fragment-shell`, same-origin only). It knows no agent runtime:
 // everything in a frame is a fragment. Design: Skyler's handoff
 // (2026-10-02); what it did not draw is the older prototype's, in its look.
 import "./tooltips.js";

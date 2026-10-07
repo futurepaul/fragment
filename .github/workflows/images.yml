@@ -1,7 +1,7 @@
-# The computer images' Rust (images/: the bridge and hermes-boot,
-# docs/bridge.md): its own workspace, so its own job. Host tests and clippy,
-# warnings denied. The Docker lane (images/bridge/tests/docker.rs, real
-# Hermes included) builds 4 GB of images and is run by hand:
+# The computer images' Rust (images/: the bridge, docs/bridge.md): its own
+# workspace, so its own job. Host tests and clippy, warnings denied. The
+# Docker lane (images/bridge/tests/docker.rs) builds the images and is run
+# by hand:
 # `cargo test -p fragment-bridge --test docker -- --ignored`.
 name: images
 

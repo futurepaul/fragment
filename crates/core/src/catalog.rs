@@ -206,7 +206,7 @@ const RESERVED_HEADERS: [&str; 13] =
 
 /// Environment variables a guest image relies on: never a credential's.
 const RESERVED_ENV: [&str; 11] = ["PATH", "HOME", "SHELL", "USER", "ENV", "TERM", "PWD", "PYTHONPATH", "PYTHONSTARTUP", "NODE_OPTIONS", "SSL_CERT_FILE"];
-const RESERVED_ENV_PREFIXES: [&str; 4] = ["FRAGMENT_", "LD_", "BASH_", "HERMES_"];
+const RESERVED_ENV_PREFIXES: [&str; 4] = ["FRAGMENT_", "LD_", "BASH_", "GOOSE_"];
 
 fn header_name_ok(name: &str) -> bool {
     (1..=PLACE_NAME_MAX_BYTES).contains(&name.len())
@@ -466,7 +466,7 @@ mod tests {
         assert!(matches!(with(&|g| g["placements"] = json!([{ "basic": "user" }, { "header": "authorization" }])), Err(CatalogError::Placement { .. })));
         assert!(matches!(with(&|g| g["placements"] = json!([{ "query": "k" }, { "query": "k" }])), Err(CatalogError::Placement { .. })));
         assert!(matches!(with(&|g| g["env"] = json!([])), Err(CatalogError::Env { .. })));
-        for bad in ["lower", "PATH", "FRAGMENT_API", "LD_PRELOAD", "HERMES_HOME", "1KEY", "A-B"] {
+        for bad in ["lower", "PATH", "FRAGMENT_API", "LD_PRELOAD", "GOOSE_PROVIDER", "1KEY", "A-B"] {
             assert!(matches!(with(&|g| g["env"] = json!([bad])), Err(CatalogError::Env { .. })), "{bad}");
         }
         let twice = json!([google(), { "name": "gmail", "kind": "connection", "hosts": ["gmail.googleapis.com"], "placements": [{ "header": "authorization" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] }]);

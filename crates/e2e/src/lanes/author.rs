@@ -766,6 +766,105 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["inboxToken"] != c["inboxToken"],
         json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "inbox_changed": r["inboxToken"] != c["inboxToken"] }),
     );
+    mcp(s, api, &home, &keys, &name)
+}
+
+/// `fragment mcp` in `home`, given `args`, sent `messages` one per line and
+/// then its stdin's end: its stdout's lines, each a JSON-RPC answer.
+fn mcp_session(s: &Suite, api: &Api, home: &std::path::Path, args: &[&str], messages: &[Value]) -> Result<Vec<Value>> {
+    let mut child = s
+        .bare_cli()
+        .arg("mcp")
+        .args(args)
+        .env("HOME", home)
+        .env("FRAGMENT_HOST", &api.base)
+        .env_remove("FRAGMENT_OUTPUT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("its stdin is piped");
+    for m in messages {
+        std::io::Write::write_all(&mut stdin, format!("{m}\n").as_bytes())?;
+    }
+    drop(stdin);
+    let out = child.wait_with_output()?;
+    anyhow::ensure!(out.status.success(), "fragment mcp {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).map_err(|e| anyhow::anyhow!("fragment mcp {args:?} wrote a line that is no JSON-RPC message ({e}): {l}")))
+        .collect()
+}
+
+/// `fragment mcp`: a fragment's described operations as an MCP server's
+/// tools over the CLI's stdio, signed with its key. The todo template
+/// describes its four; the chat fixture (`name`) describes none.
+fn mcp(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys, chat: &str) -> Result<()> {
+    let todo = s.named(api, keys, "mcp-todo")?;
+    let t = s.create(api, keys, &todo)?;
+    let files: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
+    s.commit(&t, &files);
+    s.deploy(&t);
+    let r = api.status(keys, &todo)?;
+    let described = &r.body["code"]["operations"]["list"]["description"];
+    s.ok("status shows an operation's description", described.as_str().is_some_and(|d| d.starts_with("The list:")), &r.body["code"]);
+    let message = |id: i64, method: &str, params: Value| json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+    let opening = [
+        message(1, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "e2e", "version": "1" } })),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        message(2, "tools/list", json!({})),
+    ];
+    let tools = |a: &Value| -> Vec<String> { a["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    let text = |a: &Value| a["result"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+
+    // read-only: the described query alone, and no mutation
+    let mut messages = opening.to_vec();
+    messages.push(message(3, "tools/call", json!({ "name": "add", "arguments": { "text": "not written" } })));
+    messages.push(message(4, "tools/call", json!({ "name": "list", "arguments": {} })));
+    let a = mcp_session(s, api, home, &[&todo], &messages)?;
+    s.ok(
+        "fragment mcp answers initialize in 2025-06-18, serving tools",
+        a.first().is_some_and(|i| i["result"]["protocolVersion"] == "2025-06-18" && i["result"]["capabilities"]["tools"].is_object()),
+        json!(a),
+    );
+    let list = a.get(1).and_then(|l| l["result"]["tools"].as_array().and_then(|t| t.first().cloned())).unwrap_or_default();
+    s.ok(
+        "read-only, its tools are the described queries, each with its schema and description",
+        a.get(1).map(tools) == Some(vec!["list".to_string()])
+            && list["annotations"]["readOnlyHint"] == true
+            && list["inputSchema"]["additionalProperties"] == false
+            && list["description"].as_str().is_some_and(|d| d.starts_with("The list:")),
+        json!(a.get(1)),
+    );
+    s.ok("and a mutation is no tool without --write", a.get(2).is_some_and(|e| e["error"]["code"] == -32602), json!(a.get(2)));
+    let empty = a.get(3).map(text).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    s.ok("tools/call runs the query, answering its result as JSON", empty.as_ref().is_some_and(|v| v["todos"] == json!([])), json!(a.get(3)));
+
+    // --write: the described mutations too, called as the CLI's person
+    let mut messages = opening.to_vec();
+    messages.push(message(3, "tools/call", json!({ "name": "add", "arguments": { "text": "from an agent" } })));
+    messages.push(message(4, "tools/call", json!({ "name": "list" })));
+    messages.push(message(5, "tools/call", json!({ "name": "add", "arguments": {} })));
+    let a = mcp_session(s, api, home, &[&todo, "--write"], &messages)?;
+    s.ok(
+        "with --write its tools are every described operation",
+        a.get(1).map(tools) == Some(["add", "list", "remove", "toggle"].map(str::to_string).to_vec()),
+        json!(a.get(1)),
+    );
+    let added = a.get(2).map(text).and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    s.ok("tools/call runs a mutation", a.get(2).is_some_and(|r| r["result"]["isError"] == false) && added.is_some_and(|v| v["id"].is_i64()), json!(a.get(2)));
+    s.ok("and the next call sees what it wrote", a.get(3).map(text).is_some_and(|t| t.contains("from an agent")), json!(a.get(3)));
+    s.ok(
+        "a refusal is the tool's error, with the platform's message",
+        a.get(4).is_some_and(|r| r["result"]["isError"] == true && text(r).contains("/text: is required")),
+        json!(a.get(4)),
+    );
+    let r = api.op(keys, &todo, "list", "after-mcp", json!({}))?;
+    s.ok("the tool's write is the app's data", r.body["result"]["todos"].as_array().is_some_and(|t| t.len() == 1 && t[0]["text"] == "from an agent"), &r);
+
+    // a fragment that describes none of its operations serves no tools
+    let a = mcp_session(s, api, home, &[chat, "--write"], &opening)?;
+    s.ok("a fragment with no described operations serves no tools", a.get(1).map(tools) == Some(vec![]), json!(a));
     Ok(())
 }
 

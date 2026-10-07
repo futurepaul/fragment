@@ -7,8 +7,9 @@ Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
 its own SQLite, channels that pages follow live, and members with roles.
-Your **agents** are fragments too, run by a computer of your own (today,
-Hermes profiles), and act on other fragments as their members.
+Your **agents** are fragments too, run by a computer of your own (on
+this branch, goose: [docs/optchat.md](docs/optchat.md)), and act on other
+fragments as their members.
 Fragments run on Cloudflare: each is a Durable Object that sleeps when
 idle, its app in a Worker of its own
 ([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers

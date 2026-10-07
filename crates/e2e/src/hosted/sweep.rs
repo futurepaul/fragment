@@ -40,7 +40,7 @@ pub const RUN_HEX: usize = 6;
 const RUN_IDS: i64 = 1 << (4 * RUN_HEX);
 /// `--sweep-all` spares a fragment younger than this: a run started after
 /// whoever chose to sweep everything may be using it. A whole hosted run
-/// takes well under an hour (agent-smoke, the longest section, half of one).
+/// takes well under an hour.
 pub const SPARED_FOR_MS: i64 = 60 * 60 * 1000;
 /// The pages of e2e people one sweep walks at most (a page is 100).
 const PAGES_MAX: usize = 100;
