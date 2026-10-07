@@ -26,6 +26,10 @@
 // "Notify me" subscribes this browser for its person, from a click
 // (`fragment.push.register`), and the page's presence says whether the chat
 // is on screen (`looking`), so its person is not pushed while it is.
+// `@` lists the chat's agents, then (when the shell framing it is its
+// owner's) the owner's other agents, which the shell hands over on asking
+// (`{fragment: "agents?"}`); a message to one of those asks the shell to
+// add it first (`{fragment: "add-agent"}`), then names it in `to`.
 //
 // It speaks only chat records: nothing here knows which runtime an agent
 // runs. The look is Skyler's (the Fragment UI handoff, 2026-10-02).
@@ -58,6 +62,11 @@ const PROFILES_PER_ASK = 64;
 const MEMBERS_AGAIN_MS = 5000;
 // A timer's longest wait (setTimeout's own bound).
 const TIMER_MAX_MS = 2 ** 31 - 1;
+// The shell's answer to adding an agent is waited for this long.
+const ADD_WAIT_MS = 15000;
+// The owner's agents a shell may hand over, at most (a computer runs 32).
+const ROSTER_MAX = 64;
+const HANDLE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const ROLES = ["public", "viewer", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 // Skyler's agent colors; an agent's is chosen by its identity.
@@ -159,7 +168,7 @@ export function mount(root) {
       <div class="banner" id="banner" role="alert" hidden><span id="banner-text"></span><button type="button" id="banner-dismiss">Dismiss</button></div>
       <div class="here" id="here" hidden></div>
       <form class="composer" id="say">
-        <div class="mentions" id="mentions" role="listbox" aria-label="Agents in this chat" hidden></div>
+        <div class="mentions" id="mentions" role="listbox" aria-label="Agents" hidden></div>
         <input id="attachment-picker" type="file" multiple hidden>
         <div class="attachments" id="attachments" hidden></div>
         <textarea id="text" rows="1" aria-label="Message" maxlength="${TEXT_MAX_BYTES}" disabled></textarea>
@@ -193,7 +202,10 @@ export function mount(root) {
     pending: null, // { seq, at, n, target }: this page's message no turn has started on yet
     here: [], // the fragment's presence: [{ id, principal, data }]
     toggled: new Map(), // a step card's key -> open, once someone opened or closed it
+    roster: [], // the owner's agents, from the shell that frames the chat: [{ identity, name, title }]
   };
+  // where the shell that handed the roster is (its answers come from there)
+  let rosterOrigin = null;
   // a record's arrival: ties of `at` across the two channels keep it
   let arrivals = 0;
 
@@ -227,10 +239,11 @@ export function mount(root) {
     }
     schedule();
   }
+  const inRoster = (principal) => state.roster.find((r) => r.identity === principal) ?? null;
   function isAgent(principal) {
     const p = profiles.get(principal);
     if (p && p.kind) return p.kind === "agent";
-    return state.members.some((m) => m.principal === principal && m.kind === "agent") || [...state.turns.values()].some((t) => t.agent === principal);
+    return state.members.some((m) => m.principal === principal && m.kind === "agent") || [...state.turns.values()].some((t) => t.agent === principal) || !!inRoster(principal);
   }
   /// How a principal shows: `{agent, name, color?, picture?, initial?}`.
   function who(principal) {
@@ -238,7 +251,8 @@ export function mount(root) {
     want(principal);
     const p = profiles.get(principal);
     if (isAgent(principal)) {
-      const name = p?.title ?? (p?.name ? capital(p.name) : p?.username ? `${p.username}'s agent` : "Agent");
+      const r = inRoster(principal);
+      const name = p?.title ?? r?.title ?? (p?.name ? capital(p.name) : r ? capital(r.name) : p?.username ? `${p.username}'s agent` : "Agent");
       return { agent: true, name, color: colorOf(principal) };
     }
     const name = p?.username ?? (p ? `id:…${principal.slice(-6)}` : "…");
@@ -247,9 +261,16 @@ export function mount(root) {
   /// The word that @mentions an agent: its name (its fragment's label).
   function handleOf(principal) {
     const p = profiles.get(principal);
-    return typeof p?.name === "string" ? p.name.toLowerCase() : null;
+    if (typeof p?.name === "string") return p.name.toLowerCase();
+    return inRoster(principal)?.name ?? null;
   }
   const chatAgents = () => state.members.filter((m) => m.kind === "agent").map((m) => m.principal);
+  /// Who `@` may name: the chat's agents (the lead first), then the
+  /// owner's others the shell handed over, which a message adds first.
+  const mentionable = () => {
+    const here = chatAgents();
+    return [...here, ...state.roster.map((r) => r.identity).filter((id) => !here.includes(id))];
+  };
   const lead = () => chatAgents()[0] ?? [...state.turns.values()].find((t) => t.agent)?.agent ?? null;
 
   function face(principal, w = who(principal), agentSize = "tiny") {
@@ -506,7 +527,8 @@ export function mount(root) {
     stop.dataset.turn = mine?.id ?? "";
     if (canPost()) {
       const firstName = first ? who(first).name : null;
-      input.placeholder = mine ? `Add to what ${who(mine.agent).name} is doing` : !firstName ? "Message" : names.length > 1 ? `Message ${firstName}, or @ someone else` : `Message ${firstName}`;
+      const others = mentionable().length > 1;
+      input.placeholder = mine ? `Add to what ${who(mine.agent).name} is doing` : !firstName ? "Message" : others ? `Message ${firstName}, or @ someone else` : `Message ${firstName}`;
     }
     refreshSend();
   }
@@ -1075,7 +1097,8 @@ export function mount(root) {
     input.focus();
   };
 
-  // @mentions: the chat's agents whose name the word before the caret starts
+  // @mentions: the agents whose name the word before the caret starts, the
+  // chat's first, then the owner's others (a message adds them first)
   let picking = null; // { start, end, matches, index }
   function closeMentions() {
     picking = null;
@@ -1087,9 +1110,10 @@ export function mount(root) {
     const typed = input.value.slice(0, caret).match(/(?<![A-Za-z0-9_])@([A-Za-z0-9_-]*)$/);
     if (!typed) return closeMentions();
     const partial = typed[1].toLowerCase();
-    const matches = chatAgents().filter((a) => handleOf(a)?.startsWith(partial));
+    const matches = mentionable().filter((a) => handleOf(a)?.startsWith(partial));
     if (!matches.length) return closeMentions();
     picking = { start: caret - typed[1].length - 1, end: caret, matches, index: Math.min(picking?.index ?? 0, matches.length - 1) };
+    const here = chatAgents();
     $("mentions").hidden = false;
     $("mentions").replaceChildren(
       ...matches.map((a, i) => {
@@ -1097,7 +1121,12 @@ export function mount(root) {
         b.type = "button";
         b.setAttribute("role", "option");
         b.setAttribute("aria-selected", String(i === picking.index));
+        b.dataset.agent = a;
         b.append(avatar(colorOf(a), "tiny"), who(a).name);
+        if (!here.includes(a)) {
+          b.classList.add("outside");
+          b.append(el("span", "mention-note", "adds them to this chat"));
+        }
         // before the textarea's blur
         b.onpointerdown = (e) => e.preventDefault();
         b.onclick = () => pick(a);
@@ -1112,10 +1141,47 @@ export function mount(root) {
     grow();
     input.focus();
   }
-  /// The chat's agents a message's @mentions name: its `to`.
+  /// The agents a message's @mentions name: its `to` (once each is in the
+  /// chat: `send` adds the owner's others first).
   function addressed(text) {
     const words = mentions(text);
-    return chatAgents().filter((a) => words.includes(handleOf(a)));
+    return mentionable().filter((a) => words.includes(handleOf(a)));
+  }
+
+  // ---- the owner's other agents: the shell that frames the chat hands
+  // them over when its person owns it (a guest's shell, or no shell, hands
+  // none, and `@` lists the chat's own), and adds one on asking ----
+  const adding = new Map(); // nonce -> { resolve, reject, timer }
+  function addAgent(identity) {
+    return new Promise((resolve, reject) => {
+      if (!framed || !rosterOrigin) return reject(new Error("only the shell adds an agent to a chat"));
+      const nonce = crypto.randomUUID();
+      const timer = setTimeout(() => {
+        adding.delete(nonce);
+        reject(new Error("the shell did not answer"));
+      }, ADD_WAIT_MS);
+      adding.set(nonce, { resolve, reject, timer });
+      window.parent.postMessage({ fragment: "add-agent", identity, nonce }, rosterOrigin);
+    });
+  }
+  function fromShell(event) {
+    const d = event.data;
+    if (d?.fragment === "agents" && Array.isArray(d.agents)) {
+      rosterOrigin = event.origin;
+      state.roster = d.agents
+        .filter((a) => a && typeof a.identity === "string" && a.identity.startsWith("id:") && typeof a.name === "string" && HANDLE.test(a.name))
+        .slice(0, ROSTER_MAX)
+        .map((a) => ({ identity: a.identity, name: a.name, title: typeof a.title === "string" && a.title ? a.title : capital(a.name) }));
+      schedule();
+      if (picking) updateMentions();
+    } else if (d?.fragment === "agent-added" && typeof d.nonce === "string" && event.origin === rosterOrigin) {
+      const waiting = adding.get(d.nonce);
+      if (!waiting) return;
+      adding.delete(d.nonce);
+      clearTimeout(waiting.timer);
+      if (d.ok === true) waiting.resolve();
+      else waiting.reject(new Error(typeof d.error === "string" ? d.error : "it was not added"));
+    }
   }
 
   // this page's typing, to everyone here: on while there is text and a key
@@ -1197,10 +1263,21 @@ export function mount(root) {
     for (const f of files) f.uploading = true;
     renderAttachments();
     try {
+      const to = addressed(text);
+      // an agent of the owner's not in the chat yet is added first, so its
+      // bridge follows the chat and takes the message (bounded: the roster)
+      const outside = to.filter((a) => !chatAgents().includes(a));
+      for (const a of outside) {
+        try {
+          await addAgent(a);
+        } catch (err) {
+          throw new Error(`${who(a).name} was not added to this chat: ${err.message}`);
+        }
+      }
+      if (outside.length) await readMembers();
       const named = [];
       // bounded: at most ATTACHMENTS_MAX files
       for (const f of files) named.push(await fragment.blob(f.file, { name: f.name }));
-      const to = addressed(text);
       const body = { text, ...(to.length ? { to } : {}), ...(named.length ? { attachments: named } : {}) };
       const id = unsent && JSON.stringify(unsent.body) === JSON.stringify(body) ? unsent.id : crypto.randomUUID();
       unsent = { id, body };
@@ -1319,13 +1396,17 @@ export function mount(root) {
     problem(`Notifications were not turned ${was === "on" ? "off" : "on"}: ${answer.error ?? answer.reason}`);
   };
 
-  // The shell that frames the chat may say light or dark. Only its frame
-  // listens, and only to its parent; the theme is all a message can change.
+  // The shell that frames the chat may say light or dark, hand over its
+  // person's agents, and answer an add. Only its frame listens, and only to
+  // its parent.
   addEventListener("message", (event) => {
     if (!framed || event.source !== window.parent) return;
     const d = event.data;
     if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) document.documentElement.dataset.theme = d.mode;
+    else fromShell(event);
   });
+  // asks once: a shell that is its owner's answers (and again on a change)
+  if (framed) window.parent.postMessage({ fragment: "agents?" }, "*");
 
   // ---- who this page is, then the channels it may read, and who is here ----
   fragment.subscribe("chat", onChat, { last: CHAT_LAST, onDraft });

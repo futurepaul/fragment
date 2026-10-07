@@ -226,6 +226,74 @@ function theme(frame) {
 }
 dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
+// ---- the person's agents, for a page of theirs that asks (a chat's @) ----
+// A frame of a fragment the person owns may ask for their agents
+// (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
+// origin only (its status's canonical URL), `{fragment: "agents", agents:
+// [{identity, fragment, name, title}]}`, and again whenever they change.
+// It may then ask for one of them in its fragment (`{fragment: "add-agent",
+// identity, nonce}`): the shell adds that agent as an editor, as making a
+// chat does (decision 36: an owner shares their own fragment with their own
+// agent), and answers `{fragment: "agent-added", nonce, identity, ok,
+// error?}`. Nothing else: a frame of a fragment the person does not own
+// (shared with them) learns nothing and adds no one, and no page adds
+// anyone but the person's own agents. It names no template: any page of
+// theirs may use it.
+const rosterTo = new Map(); // a frame's window -> its fragment's origin
+const origins = new Map(); // fragment name -> its origin (a promise)
+function originOf(name) {
+  if (!origins.has(name)) {
+    const asked = api("GET", `/api/f/${seg(name)}/status`).then((s) => new URL(s.urls.canonical).origin);
+    asked.catch(() => origins.delete(name));
+    origins.set(name, asked);
+  }
+  return origins.get(name);
+}
+const roster = () => [...state.agents.values()].map((a) => ({ identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment) }));
+let rosterSent = "";
+function rosterChanged() {
+  const agents = roster();
+  const now = JSON.stringify(agents);
+  if (now === rosterSent) return;
+  rosterSent = now;
+  const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
+  for (const [win, origin] of rosterTo) {
+    if (!live.has(win)) rosterTo.delete(win);
+    else win.postMessage({ fragment: "agents", agents }, origin);
+  }
+}
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== "agents?" && d?.fragment !== "add-agent") return;
+  // the frame that sent it shows one of the person's own fragments, and
+  // the page in it is that fragment's
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || byName(name)?.role !== "owner") return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  if (d.fragment === "agents?") {
+    rosterTo.set(event.source, origin);
+    event.source.postMessage({ fragment: "agents", agents: roster() }, origin);
+    return;
+  }
+  const answer = (ok, error) => event.source.postMessage({ fragment: "agent-added", nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
+  if (typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  const agent = state.agents.get(d.identity);
+  if (!agent) return answer(false, "that is not one of your agents");
+  try {
+    await api("PUT", `/api/f/${seg(name)}/members/${seg(agent.identity)}`, { role: "editor" });
+    answer(true);
+  } catch (e) {
+    answer(false, e.message);
+  }
+});
+
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
   const out = [];
@@ -1409,6 +1477,7 @@ async function load(changed = false) {
   renderApps();
   renderHeading();
   renderUpdate();
+  rosterChanged();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});
