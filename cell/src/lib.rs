@@ -50,6 +50,7 @@ mod live;
 mod members;
 mod meter;
 mod models;
+mod oauth;
 mod ops;
 mod plane;
 mod principal;
@@ -143,7 +144,7 @@ pub const SHELL_HEADER: &str = "x-fragment-shell";
 /// Who asks an API request, unresolved: the key that signed it (NIP-98),
 /// or, from the platform's own page (the shell), the person's platform
 /// session.
-enum Caller {
+pub(crate) enum Caller {
     Key(String),
     Session(String),
 }
@@ -151,7 +152,7 @@ enum Caller {
 /// A request's caller: its signature when it has one; else the platform
 /// session, only for the shell's own requests (`shell_session`); else the
 /// unsigned request's 401.
-fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
+pub(crate) fn caller(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Caller> {
     if req.headers().get("authorization")?.is_none() {
         if let Some(token) = shell_session(Config::from_env(env), req, url)? {
             return Ok(Caller::Session(token));
@@ -1017,6 +1018,15 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (_, ["share" | "join", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
+        }
+        // connected clients' authorization server (oauth.rs)
+        (_, [".well-known", "oauth-authorization-server"] | ["oauth", _]) => {
+            let segs = segments.clone();
+            oauth::route(req, env, cfg, &url, &segs).await
+        }
+        (_, ["api", "oauth", "connections", rest @ ..]) => {
+            let rest = rest.to_vec();
+            oauth::connections(&req, env, &url, &rest).await
         }
         (Method::Get | Method::Head, ["healthz"]) => {
             let mut resp = Response::ok("ok")?;

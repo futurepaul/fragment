@@ -22,6 +22,7 @@ mod keys;
 mod levers;
 mod ledger;
 mod limits;
+mod mcp;
 mod members;
 mod notes;
 mod plane;
@@ -62,6 +63,7 @@ const LANES: &[Lane] = &[
     plane::deploy,
     templates::templates,
     share::share,
+    mcp::mcp,
     isolation::isolation,
     frames::frames,
     app::ops,
@@ -125,7 +127,7 @@ const LANES: &[Lane] = &[
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "hermes", "agent-smoke", "agent-ask"],
-    &["chat", "shell-ui", "wipe", "sync", "restart"],
+    &["chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
