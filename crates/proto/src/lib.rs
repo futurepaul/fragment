@@ -574,8 +574,12 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
-    /// The live commit the code was read from; `None` when live has no `app.mjs`.
+    /// The live commit the code was installed from; `None` without app code.
     pub sha: Option<String>,
+    /// What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),
+    /// or `blessed:<template>@<release>` (the platform release's code, which
+    /// a fragment on a blessed template runs whatever its commit: decision 40).
+    pub id: Option<String>,
     pub operations: std::collections::BTreeMap<String, OpDecl>,
     /// Why the latest live commit's code was not installed, if it was not.
     pub error: Option<String>,
@@ -636,7 +640,7 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
-    /// (`None` until it has: a fragment from before sends it once).
+    /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
@@ -821,14 +825,12 @@ pub mod routed {
     pub const NAME: &str = "x-fragment-name";
     /// The URL the request arrived on.
     pub const URL: &str = "x-fragment-url";
-    /// How the site was addressed: `host` (its own origin) or `path` (`/f/<name>/`).
-    pub const MODE: &str = "x-fragment-mode";
     /// Who is asking (JSON: the identity and the key it signed with).
     pub const SIGNED: &str = "x-fragment-signed";
     /// Who is asking a site request, not yet resolved (JSON: the key a
     /// signature was verified for, or the origin's session token).
     pub const CREDENTIAL: &str = "x-fragment-credential";
-    pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
+    pub const ALL: [&str; 4] = [NAME, URL, SIGNED, CREDENTIAL];
     /// The caller's identity on a request the router hands the agents'
     /// script (`agent/`), which trusts nothing else.
     pub const AGENT_PRINCIPAL: &str = "x-agent-principal";
@@ -1611,7 +1613,7 @@ mod tests {
             value(&listed),
             serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["id:0123456789abcdef0123456789abcdef"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
-        // a list from before archiving reads as nothing archived
+        // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
         assert!(!read.archived);
         let found = SearchAnswer {

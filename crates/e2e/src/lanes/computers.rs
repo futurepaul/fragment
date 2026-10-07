@@ -916,7 +916,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     // computer over (lesson 6), and it answers what comes next, once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     s.crash()?;
-    let api = s.start(false, true)?;
+    let api = s.start(false)?;
     let r = api.signed(&owner, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "m40", "body": { "text": "after the crash" } })))?;
     s.ok("after a crash of the platform, a message to the chat", r.status == 200, &r);
     // its own turn's replies: a routine's, on its cron minute, may land in

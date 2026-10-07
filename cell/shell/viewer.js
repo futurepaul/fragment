@@ -1,6 +1,6 @@
 // The viewer: apps and files stacked vertically in the right column, newest on
-// top. Each pane has a header (icon, title, status, presence, actions,
-// maximize, close; drag it to reorder) and resizes against its neighbours
+// top. Each pane has a header (icon, title, status, actions, maximize,
+// close; drag it to reorder) and resizes against its neighbours
 // through split-grid row gutters. Order is only grid-row placement: a pane's
 // element never moves in the DOM once added, so app iframes keep their state
 // through reordering, resizing, collapsing the viewer, maximizing, and other
@@ -130,8 +130,8 @@ export function createViewer({ stack, onChange = () => {} }) {
     p.el.classList.add("flash");
   }
 
-  // open({ key, title, subtitle?, icon?: Element, status?: Element, presence?: Element, body: Element, actions?: [{ icon, title, onClick }], size?, persist? })
-  // `status` follows the title; `presence` stands before the actions.
+  // open({ key, title, subtitle?, icon?: Element, status?: Element, body: Element, actions?: [{ icon, title, onClick }], persist? })
+  // `status` follows the title.
   function open(spec) {
     const existing = panes.find((p) => p.key === spec.key);
     if (existing) { focus(spec.key); return existing; }
@@ -156,7 +156,6 @@ export function createViewer({ stack, onChange = () => {} }) {
     const grow = document.createElement("span");
     grow.className = "grow";
     head.append(grow);
-    if (spec.presence) head.append(spec.presence);
     for (const a of spec.actions || []) head.append(button(a.icon, a.title, a.onClick));
     const max = button("max", "Maximize", () => maximize(spec.key));
     head.append(max, button("x", "Close", () => close(spec.key)));
@@ -173,7 +172,7 @@ export function createViewer({ stack, onChange = () => {} }) {
     gutter.title = "Drag to resize · double-click to share evenly";
     gutter.addEventListener("mousedown", (e) => { if (e.detail === 2) { for (const p of panes) p.size = 1; relayout(); } }); // see layout.js on dblclick
     const avg = panes.length ? panes.reduce((n, p) => n + p.size, 0) / panes.length : 1;
-    const size = spec.size || restored.get(spec.key) || avg;
+    const size = restored.get(spec.key) || avg;
     restored.delete(spec.key);
     const pane = { key: spec.key, el, gutter, max, size, persist: spec.persist !== false, disposeGlow: windowGlow(el) };
     head.addEventListener("pointerdown", (e) => reorder(pane, e));
@@ -271,9 +270,7 @@ export function createViewer({ stack, onChange = () => {} }) {
   }
 
   return {
-    open, close, focus, maximize,
-    has: (key) => panes.some((p) => p.key === key),
+    open, close,
     get keys() { return panes.map((p) => p.key); },
-    saved: () => store.get(KEY, []),
   };
 }

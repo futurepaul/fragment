@@ -63,7 +63,6 @@ process tools, and stop it when the task ends.
 ```sh
 fragment drafts notes-project              # the deploy history: live's commits
 fragment deploy notes-project              # move live to main's tip (its site and app)
-fragment deploy notes-project --preview    # an ephemeral ref at main, no URL; deploy to promote
 fragment rollback notes-project            # live back to the deploy before
 fragment rollback notes-project --to <sha> # or to a named one
 fragment events notes-project --tail 30    # what happened, who did it

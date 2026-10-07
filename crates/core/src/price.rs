@@ -107,9 +107,9 @@ pub enum Usage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageClass {
-    /// Blobs, site copies, screenshots, backups and replicas.
+    /// Blobs, site copies, screenshots and backups.
     R2,
-    /// A fragment's SQLite (its Durable Object's and its app facet's).
+    /// A fragment's SQLite (its Durable Object's).
     Sqlite,
     /// A fragment's git repository at code.storage.
     Git,

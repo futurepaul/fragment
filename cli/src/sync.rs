@@ -11,11 +11,11 @@
 use crate::api::Client;
 use crate::api::CodedError;
 use crate::codestorage::{Author, Change, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
+use fragment_core::blob::sha256_hex;
 use fragment_core::codestorage::TreeEntry;
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -44,7 +44,6 @@ pub struct SyncOptions {
     /// in pull mode, pull `live` rather than main
     pub live: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
-    pub codestorage: Option<String>,
 }
 
 impl Default for SyncOptions {
@@ -56,7 +55,6 @@ impl Default for SyncOptions {
             prune: false,
             live: false,
             writer_id: "anon".into(),
-            codestorage: None,
         }
     }
 }
@@ -210,10 +208,6 @@ impl Report {
             println!("all {} files match the repo", self.scan.files);
         }
     }
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 fn state_path(dir: &Path) -> PathBuf {
@@ -527,27 +521,21 @@ fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, ap
     }
 }
 
-/// `fragment sync`: connects, runs one pass, and nudges the cell's pins
-/// when a commit landed.
+/// `fragment sync` (and a deploy's): connects, runs one pass, and nudges
+/// the cell's pins when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
-    let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
-    let report = pass(client, &storage, name, dir, opts)?;
+    let storage = CodeStorage::connect(client, name)?;
+    let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name, opts)?)?;
     if report.landed {
         refresh_pins(client, name);
     }
     Ok(report)
 }
 
-/// One pass over the folder with a connected `storage`: a command's own
-/// (deploy's is also its live move's), or a watcher's held one. It does
-/// not nudge the cell's pins: a caller whose pass `landed` calls
-/// `refresh_pins`, once for everything it moved.
-pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
-    pass_over(client, storage, name, dir, opts, read_local(dir, name, opts)?)
-}
-
-/// `pass`, over a folder already read (`read_local`): a watcher reads it
-/// first to learn whether it needs a pass at all.
+/// One pass over a folder already read (`read_local`: a watcher reads it
+/// first to learn whether it needs a pass at all), with a connected
+/// `storage`: a command's own, or a watcher's held one. It does not nudge
+/// the cell's pins: a caller whose pass `landed` calls `refresh_pins`.
 pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
     let Local { mut state, journal, files: local, stats } = local;
     // World binding (`SyncState::host`): refuse before any read or write.
@@ -923,10 +911,10 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path,
 
 /// Full-content audit: local truth vs the repo listing + fetched bytes
 /// (no shortcuts — every remote file is fetched and hashed).
-pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>) -> Result<Report, SyncError> {
+pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (local, stats) = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
-    let storage = CodeStorage::connect(client, name, codestorage)?;
+    let storage = CodeStorage::connect(client, name)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;
     for p in listing.files.keys() {
@@ -946,41 +934,6 @@ pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>
         }
     }
     Ok(drift)
-}
-
-/// Commit exactly one file to main with CAS retries (manifest-set).
-pub fn commit_single_file(
-    client: &Client,
-    name: &str,
-    path: &str,
-    bytes: Vec<u8>,
-    message: &str,
-    writer_id: &str,
-    codestorage: Option<&str>,
-) -> Result<String, SyncError> {
-    let storage = CodeStorage::connect(client, name, codestorage)?;
-    let author = Author::writer(writer_id);
-    for attempt in 1..=MAX_CAS_ATTEMPTS {
-        let head = storage.branch_head(MAIN)?;
-        if let (true, Some(tip)) = (attempt > 1, &head) {
-            if storage.read_file(path, MAIN).is_ok_and(|b| b == bytes) {
-                // the last attempt's answer was lost, or someone wrote the
-                // same bytes: either way main holds them
-                return Ok(tip.clone());
-            }
-        }
-        match storage.commit(head.as_deref(), message, &author, &[Change::Upsert { path: path.to_string(), bytes: bytes.clone() }]) {
-            Ok(tip) => return Ok(tip),
-            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < MAX_CAS_ATTEMPTS => continue,
-            Err(CsError::CasRejected { detail }) => {
-                return Err(SyncError::Cs(CsError::CasRejected {
-                    detail: format!("branch kept moving after {MAX_CAS_ATTEMPTS} attempts ({detail})"),
-                }));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    unreachable!("bounded loop returns from every arm")
 }
 
 #[cfg(test)]
@@ -1246,7 +1199,7 @@ mod tests {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
         let c = client_for(&mock);
-        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let storage = CodeStorage::connect(&c, "t").unwrap();
         let before = list_main(&storage).unwrap();
         let changes = [
             Change::Upsert { path: "a.txt".into(), bytes: b"a, longer now".to_vec() },
@@ -1329,18 +1282,6 @@ mod tests {
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.commit_pack_count(), 1, "and nothing is left to send");
         fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn manifest_set_with_a_lost_answer_lands_once() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
-        let c = client_for(&mock);
-        mock.drop_commit_answers("t", 1);
-        let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
-        assert_eq!(mock.commit_pack_count(), 1, "sent once");
-        assert_eq!(mock.branch("t", "main").as_deref(), Some(tip.as_str()));
-        assert_eq!(mock.file_at("t", "main", "fragment.json").unwrap(), br#"{"name":"t","visibility":"public"}"#);
     }
 
     #[test]
@@ -1528,7 +1469,7 @@ mod tests {
         let dir = tmpdir("conflict-paths");
         fs::write(dir.join("a"), b"ours a").unwrap();
         fs::write(dir.join("a.md"), b"ours a.md").unwrap();
-        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let storage = CodeStorage::connect(&c, "t").unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t");
         let listing = list_main(&storage).unwrap();
         let (local, _) = scan_local(&dir, None, true).unwrap();
@@ -1574,12 +1515,12 @@ mod tests {
         let c = client_for(&mock);
         let dir = tmpdir("verify");
         sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        let clean = verify(&c, "t", &dir, None).unwrap();
+        let clean = verify(&c, "t", &dir).unwrap();
         assert!(clean.conflicts.is_empty(), "{:?}", clean.conflicts);
         assert_eq!(clean.exit_code(), 0, "a folder in sync exits 0");
         // same size, different content — the exact lie the audit exists for
         fs::write(dir.join("b.txt"), b"went-drft").unwrap();
-        let report = verify(&c, "t", &dir, None).unwrap();
+        let report = verify(&c, "t", &dir).unwrap();
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");

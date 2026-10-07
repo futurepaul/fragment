@@ -1,13 +1,18 @@
-//! The JavaScript surfaces workers-rs 0.8.5 does not wrap: the Worker
+//! The JavaScript surfaces workers-rs 0.8.5 does not wrap (the Worker
 //! Loader, Durable Object facets, the Workflows binding, the AI binding's
-//! options, and synchronous storage transactions. Every `Reflect` call in
-//! the cell lives here, behind typed functions.
+//! options, R2's read of a `Range` header as it came, and synchronous
+//! storage transactions), and the blob store's calls, on workers-rs's R2.
+//! Every `Reflect` call in the cell lives here, behind typed functions.
 
 use fragment_core::facet::{self, Answer, LedgerRow, Mutated, Queried};
 use fragment_proto::ErrorCode;
+use worker::crypto::{DigestStream, DigestStreamAlgorithm};
 use worker::js_sys::{self, Array, Function, Object, Promise, Reflect};
-use worker::wasm_bindgen::{closure::Closure, JsCast, JsValue};
+// the macro's generated code names `wasm_bindgen`: worker's re-export
+use worker::wasm_bindgen::{self, closure::Closure, prelude::*, JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
+use worker::web_sys::{ReadableStream, WritableStream};
+use worker::{Bucket, Env};
 
 use crate::error::{CellError, CellResult};
 
@@ -91,8 +96,8 @@ pub struct Facet {
     stub: JsValue,
 }
 
-/// The app facet's name for a fragment made before each life had its own
-/// (`Fragment::app_facet`): `app@<incarnation>` since.
+/// The app facet's name, before its life's `@<incarnation>`: each life of
+/// a fragment's name has its own (`Fragment::app_facet`).
 pub const APP_FACET: &str = "app";
 
 /// The capabilities an app's env holds: `FILES`, bound to `fragment`
@@ -356,8 +361,8 @@ pub async fn jobs_status(env: &JsValue, id: &str) -> Result<Option<serde_json::V
 }
 
 /// The fleet's blob store (`BLOBS`, an R2 binding over the fleet bucket).
-fn blobs(env: &JsValue) -> CellResult<JsValue> {
-    binding(env, "BLOBS", "r2_buckets")
+fn blobs(env: &Env) -> CellResult<Bucket> {
+    Ok(env.bucket("BLOBS")?)
 }
 
 async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue> {
@@ -367,22 +372,14 @@ async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue
 
 /// Streams `body` into the blob store at `key` while hashing it
 /// (`crypto.DigestStream`): answers (bytes stored, SHA-256 hex).
-pub async fn blob_put(env: &JsValue, key: &str, body: JsValue) -> CellResult<(u64, String)> {
+pub async fn blob_put(env: &Env, key: &str, body: ReadableStream) -> CellResult<(u64, String)> {
+    let (stored, hashed) = tee(&body)?;
+    let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
     let bucket = blobs(env)?;
-    let pair: Array = call(&body, "tee", &[]).map_err(|e| CellError::host(format!("tee: {}", js_message(&e))))?.unchecked_into();
-    let crypto = get(&js_sys::global(), "crypto")?;
-    let digest_class: Function = get(&crypto, "DigestStream")?.dyn_into().map_err(|_| CellError::host("crypto.DigestStream is missing"))?;
-    let args = Array::of1(&JsValue::from_str("SHA-256"));
-    let digest = Reflect::construct(&digest_class, &args).map_err(|e| CellError::host(format!("DigestStream: {}", js_message(&e))))?;
-    let put = call(&bucket, "put", &[key.into(), pair.get(0)]);
-    let pipe = call(&pair.get(1), "pipeTo", std::slice::from_ref(&digest));
-    let both = Array::of2(&put.map_err(|e| CellError::host(format!("put: {}", js_message(&e))))?, &pipe.map_err(|e| CellError::host(format!("pipeTo: {}", js_message(&e))))?);
-    let done = JsFuture::from(Promise::all(&both)).await.map_err(|e| CellError::host(format!("storing the blob: {}", js_message(&e))))?;
-    let object = Array::from(&done).get(0);
-    let size = get(&object, "size")?.as_f64().unwrap_or(0.0) as u64;
-    let hash = await_js(Ok(get(&digest, "digest")?), "digest").await?;
-    let bytes = js_sys::Uint8Array::new(&hash).to_vec();
-    Ok((size, hex::encode(bytes)))
+    let (put, piped) = futures_util::future::join(bucket.put(key, stored).execute(), JsFuture::from(hashed.pipe_to(digest.raw()))).await;
+    let object = put.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
+    piped.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
+    Ok((object.map_or(0, |o| o.size()), hex::encode(digest.digest().await?.to_vec())))
 }
 
 /// Reads a request's body to its end, keeping nothing, when nothing read
@@ -397,9 +394,8 @@ pub async fn drain(req: &worker::Request) -> CellResult<()> {
     if inner.body_used() || body.locked() {
         return Ok(());
     }
-    let sink_class: Function = get(&js_sys::global(), "WritableStream")?.dyn_into().map_err(|_| CellError::host("WritableStream is missing"))?;
-    let sink = Reflect::construct(&sink_class, &Array::new()).map_err(|e| CellError::host(format!("WritableStream: {}", js_message(&e))))?;
-    await_js(call(&body, "pipeTo", &[sink]), "draining the body").await?;
+    let sink = WritableStream::new().map_err(|e| CellError::host(format!("WritableStream: {}", js_message(&e))))?;
+    JsFuture::from(body.pipe_to(&sink)).await.map_err(|e| CellError::host(format!("draining the body: {}", js_message(&e))))?;
     Ok(())
 }
 
@@ -419,15 +415,6 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
-/// Hands a request, as it came (method, URL, headers, body), to a service
-/// binding: the agents' script, co-hosted in this fleet.
-pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -> CellResult<worker::Response> {
-    let service = self::binding(env, binding, "services")?;
-    let out = await_js(call(&service, "fetch", &[JsValue::from(req.inner())]), binding).await?;
-    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host(format!("{binding} answered no Response")))?;
-    Ok(worker::Response::from(resp))
-}
-
 /// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc
 /// `browser`), through its `fetch`: the routes `@cloudflare/puppeteer`
 /// speaks to it, a WebSocket upgrade among them (card.rs).
@@ -439,19 +426,14 @@ pub async fn browser_fetch(env: &JsValue, req: worker::Request) -> CellResult<wo
 }
 
 /// Stores bytes at `key`.
-pub async fn blob_put_bytes(env: &JsValue, key: &str, bytes: &[u8]) -> CellResult<()> {
-    let data = js_sys::Uint8Array::from(bytes);
-    await_js(call(&blobs(env)?, "put", &[key.into(), data.into()]), "put").await?;
+pub async fn blob_put_bytes(env: &Env, key: &str, bytes: &[u8]) -> CellResult<()> {
+    blobs(env)?.put(key, bytes.to_vec()).execute().await?;
     Ok(())
 }
 
 /// A blob's size, or `None` when absent.
-pub async fn blob_head(env: &JsValue, key: &str) -> CellResult<Option<u64>> {
-    let object = await_js(call(&blobs(env)?, "head", &[key.into()]), "head").await?;
-    if object.is_null() || object.is_undefined() {
-        return Ok(None);
-    }
-    Ok(Some(get(&object, "size")?.as_f64().unwrap_or(0.0) as u64))
+pub async fn blob_head(env: &Env, key: &str) -> CellResult<Option<u64>> {
+    Ok(blobs(env)?.head(key).await?.map(|o| o.size()))
 }
 
 /// A blob's bytes as a stream: (body, whole size, the served range as
@@ -462,14 +444,16 @@ pub struct BlobBody {
     pub range: Option<(u64, u64)>,
 }
 
-pub async fn blob_get(env: &JsValue, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
+/// The request's own `Range` header goes to R2 as it came, which reads it
+/// (workers-rs's `get` takes only a parsed range).
+pub async fn blob_get(env: &Env, key: &str, range: Option<&str>) -> CellResult<Option<BlobBody>> {
     let options = Object::new();
     if let Some(r) = range {
         let headers = worker_sys::web_sys::Headers::new().map_err(|e| CellError::host(js_message(&e)))?;
         headers.set("range", r).map_err(|e| CellError::host(js_message(&e)))?;
         set(&options, "range", JsValue::from(headers));
     }
-    let object = await_js(call(&blobs(env)?, "get", &[key.into(), options.into()]), "get").await?;
+    let object = await_js(call(blobs(env)?.as_ref(), "get", &[key.into(), options.into()]), "get").await?;
     if object.is_null() || object.is_undefined() {
         return Ok(None);
     }
@@ -486,27 +470,14 @@ pub async fn blob_get(env: &JsValue, key: &str, range: Option<&str>) -> CellResu
     Ok(Some(BlobBody { body, size, range }))
 }
 
-pub async fn blob_delete(env: &JsValue, keys: &[String]) -> CellResult<()> {
-    let list = Array::new();
-    for k in keys {
-        list.push(&JsValue::from_str(k));
-    }
-    await_js(call(&blobs(env)?, "delete", &[list.into()]), "delete").await?;
-    Ok(())
+pub async fn blob_delete(env: &Env, keys: &[String]) -> CellResult<()> {
+    Ok(blobs(env)?.delete_multiple(keys.to_vec()).await?)
 }
 
-/// Keys under `prefix`, a page at a time: (keys, the cursor for the next page).
-pub async fn blob_list(env: &JsValue, prefix: &str, cursor: Option<&str>) -> CellResult<(Vec<String>, Option<String>)> {
-    let options = Object::new();
-    set(&options, "prefix", prefix);
-    if let Some(c) = cursor {
-        set(&options, "cursor", c);
-    }
-    let listed = await_js(call(&blobs(env)?, "list", &[options.into()]), "list").await?;
-    let objects = Array::from(&get(&listed, "objects")?);
-    let keys = objects.iter().filter_map(|o| get(&o, "key").ok().and_then(|k| k.as_string())).collect();
-    let next = if get(&listed, "truncated")?.as_bool() == Some(true) { get(&listed, "cursor")?.as_string() } else { None };
-    Ok((keys, next))
+/// The first page of keys under `prefix`, and whether there are more.
+pub async fn blob_list(env: &Env, prefix: &str) -> CellResult<(Vec<String>, bool)> {
+    let listed = blobs(env)?.list().prefix(prefix).execute().await?;
+    Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 
 /// Runs `f` as one `storage.transactionSync` of the Durable Object whose
@@ -556,9 +527,9 @@ pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, optio
 
 /// A stream as two that read the same bytes (`ReadableStream.tee`): one
 /// may be read while the other is dropped.
-pub fn tee(stream: &worker_sys::web_sys::ReadableStream) -> CellResult<(worker_sys::web_sys::ReadableStream, worker_sys::web_sys::ReadableStream)> {
-    let pair: Array = call(stream.as_ref(), "tee", &[]).map_err(|e| CellError::host(format!("tee: {}", js_message(&e))))?.unchecked_into();
-    let branch = |i: u32| pair.get(i).dyn_into::<worker_sys::web_sys::ReadableStream>().map_err(|_| CellError::host("tee answered no stream"));
+pub fn tee(stream: &ReadableStream) -> CellResult<(ReadableStream, ReadableStream)> {
+    let pair = stream.tee();
+    let branch = |i: u32| pair.get(i).dyn_into::<ReadableStream>().map_err(|_| CellError::host("tee answered no stream"));
     Ok((branch(0)?, branch(1)?))
 }
 
@@ -566,13 +537,16 @@ pub fn now_ms() -> i64 {
     js_sys::Date::now() as i64
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = crypto, js_name = getRandomValues)]
+    fn get_random_values(buf: &mut [u8]);
+}
+
 /// Cryptographically random bytes (the runtime's `crypto.getRandomValues`).
 pub fn random_bytes<const N: usize>() -> [u8; N] {
-    let crypto = Reflect::get(&js_sys::global(), &JsValue::from_str("crypto")).expect("globalThis.crypto");
-    let buf = js_sys::Uint8Array::new_with_length(N as u32);
-    call(&crypto, "getRandomValues", &[buf.clone().into()]).expect("crypto.getRandomValues");
     let mut out = [0u8; N];
-    buf.copy_to(&mut out);
+    get_random_values(&mut out);
     out
 }
 

@@ -1,19 +1,19 @@
 ---
 name: ocr-and-documents-finite
-description: Extract text from PDFs and scanned documents. Use web_extract for remote URLs, pymupdf for local text-based PDFs, marker-pdf for OCR/scanned docs. For DOCX use python-docx, for PPTX see the powerpoint skill.
+description: Extract text from PDFs and scanned documents. Use web_extract for remote URLs, pymupdf for local text-based PDFs, marker-pdf for OCR/scanned docs. For DOCX use python-docx, for PPTX python-pptx.
 version: 2.3.0
 author: Hermes Agent
 license: MIT
 metadata:
   hermes:
     tags: [PDF, Documents, Research, Arxiv, Text-Extraction, OCR]
-    related_skills: [powerpoint-finite]
+    related_skills: []
 ---
 
 # PDF & Document Extraction
 
 For DOCX: use `python-docx` (parses actual document structure, far better than OCR).
-For PPTX: see the `powerpoint-finite` skill (uses `python-pptx` with full slide/notes support).
+For PPTX: use `python-pptx` (slides and their notes).
 This skill covers **PDFs and scanned documents**.
 
 ## Step 1: Remote URL Available?
@@ -195,4 +195,4 @@ Note: always write search scripts to a file rather than using python3 -c — mul
 - Both helper scripts accept `--help` for full usage
 - marker-pdf downloads ~2.5GB of models to `~/.cache/huggingface/` on first use
 - For Word docs: `pip install python-docx` (better than OCR — parses actual structure)
-- For PowerPoint: see the `powerpoint-finite` skill (uses python-pptx)
+- For PowerPoint: `pip install python-pptx`

@@ -159,6 +159,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session, &username)?;
+    search_follows_reading(s, api)?;
     list_watch(s, api, &session, &username, &id)
 }
 
@@ -458,6 +459,48 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     let r = api.signed(&outsider, "DELETE", &format!("/api/f/{own}"), None)?;
     let gone = s.eventually(SEARCH_WAIT, || theirs(&outsider, "tomatoes").is_ok_and(|r| r.status == 200 && hits_in(&r, &own).is_empty()));
     s.ok("a deleted fragment's messages leave its people's search", r.status == 200 && gone, theirs(&outsider, "tomatoes")?);
+    Ok(())
+}
+
+/// Search follows who may read (#156, problem 5): a deploy that makes a
+/// channel the editors' takes its messages from every list (only channels
+/// every member reads are searched), and a member who joins after never
+/// gets them. Method: an app with two postable channels, `talk` tightened
+/// by a second deploy and `notes` left as it was; each wait ends on what
+/// does arrive, never on an absence.
+fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
+    const OPEN: &[u8] = br#"{ "channels": { "talk": { "read": "viewer", "post": "viewer" }, "notes": { "read": "viewer", "post": "viewer" } } }"#;
+    const CLOSED: &[u8] = br#"{ "channels": { "talk": { "read": "editor", "post": "editor" }, "notes": { "read": "viewer", "post": "viewer" } } }"#;
+    let (owner, viewer, late) = (api.person()?, api.person()?, api.person()?);
+    let name = s.named(api, &owner, "readers")?;
+    let c = s.create(api, &owner, &name)?;
+    s.commit(&c, &[("fragment.json", Some(OPEN))]);
+    s.deploy(&c);
+    let add = |keys: &fragment_nip98::Keys| api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", keys.pubkey_hex()), Some(&json!({ "role": "viewer" })));
+    anyhow::ensure!(add(&viewer)?.status == 200, "adding the viewer");
+    let post = |channel: &str, id: &str, text: &str| api.signed(&owner, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": { "text": text } })));
+    let search = |keys: &fragment_nip98::Keys| api.signed(keys, "GET", "/api/search?q=rhubarb", None);
+    let took = s.eventually(SEARCH_WAIT, || post("talk", "t1", "the rhubarb is ready").is_ok_and(|r| r.status == 200));
+    let found = s.eventually(SEARCH_WAIT, || search(&viewer).is_ok_and(|r| hits_in(&r, &name).len() == 1));
+    s.ok("a viewer finds a message on a channel every member reads", took && found, search(&viewer)?);
+
+    s.commit(&c, &[("fragment.json", Some(CLOSED))]);
+    s.deploy(&c);
+    let gone = s.eventually(SEARCH_WAIT, || search(&viewer).is_ok_and(|r| r.status == 200 && hits_in(&r, &name).is_empty()));
+    let read = api.signed(&viewer, "GET", &format!("/api/f/{name}/channels/talk"), None)?;
+    s.ok("a deploy that makes the channel the editors' takes its message from the viewer's search, as from their reading (403)", gone && read.status == 403, &read);
+    let gone = s.eventually(SEARCH_WAIT, || search(&owner).is_ok_and(|r| r.status == 200 && hits_in(&r, &name).is_empty()));
+    s.ok("and from the owner's: a channel only some members read is never searched", gone, search(&owner)?);
+
+    anyhow::ensure!(add(&late)?.status == 200, "adding the late viewer");
+    let posted = post("notes", "n1", "the rhubarb went to market")?;
+    let caught_up = s.eventually(SEARCH_WAIT, || search(&late).is_ok_and(|r| !hits_in(&r, &name).is_empty()));
+    let r = search(&late)?;
+    s.ok(
+        "a member who joins after finds the channels searched now, never the tightened one's old message",
+        posted.status == 200 && caught_up && hits_in(&r, &name).iter().all(|h| h["channel"] == "notes"),
+        &r,
+    );
     Ok(())
 }
 
@@ -927,7 +970,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
     s.ok(
         &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && want.len() == 42 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        listed && want.len() == 41 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
         json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
     );
     // an agent's own skill, from its fragment, shows beside it
@@ -1012,7 +1055,13 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("it takes two agents or more, in the order picked: the first leads", one == true && order == json!(["Lead", "2", false]), &order);
     let _ = b.screenshot(page, &shots.join("desktop-new-group.png"));
     b.eval(page, "document.getElementById('new-group-form').requestSubmit()")?;
-    let made = b.until(page, "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open", wait);
+    // made once its row is in the sidebar and its chat's heading has drawn its two agents
+    let made = b.until(
+        page,
+        "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open \
+         && document.querySelectorAll('#agent-mark .avatar-stack .agent-avatar').length === 2",
+        wait,
+    );
     let row = b.eval(
         page,
         "(() => { const g = document.querySelector('#chats .agent-row[data-group=\"2\"]'); if (!g) return null; const color = (a) => a.style.getPropertyValue('--agent-color'); \

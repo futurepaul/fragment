@@ -128,15 +128,6 @@ fn invite_json(r: &Value) -> Invite {
     }
 }
 
-/// An invites table from before invites could name their invitee gains
-/// the column (every invite made before is anyone's who holds its token).
-pub(crate) fn migrate(sql: &SqlStorage) {
-    let cols: Vec<Value> = sql.exec("PRAGMA table_info(invites)", None).and_then(|c| c.to_array()).unwrap_or_default();
-    if !cols.iter().any(|c| c["name"] == "invitee") {
-        sql.exec("ALTER TABLE invites ADD COLUMN invitee TEXT", None).expect("the invites table migrates");
-    }
-}
-
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
     /// in the caller's turn, beside the membership write it mirrors. Their
@@ -183,8 +174,7 @@ impl FragmentCell {
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
-        self.index_change(&owner, Some(Role::Owner))?;
-        self.set_meta(MetaKey::SharingSent, "1")
+        self.index_change(&owner, Some(Role::Owner))
     }
 
     /// Sends one index change to `principal`'s list: whether it took it.
@@ -207,15 +197,15 @@ impl FragmentCell {
     /// request that flushes sends its own change and waits one round,
     /// whatever its members; the alarm sends the rest, a batch a pass. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
-    /// A fragment from before the owner's row carried its sharing sends it
-    /// once, here (on its next change, or its alarm).
     pub(crate) async fn flush_index(&self) {
         let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.must(MetaKey::Owner)) else { return };
-        if matches!(self.meta(MetaKey::SharingSent), Ok(None)) {
-            if let Err(e) = self.sharing_changed() {
-                console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
-            }
+        if let Err(e) = self.search_fence() {
+            console_error!("{name}: its search was not fenced to the channels searched now ({:?}): {}", e.code, e.message);
         }
+        let searched = match self.searched_channels() {
+            Ok(searched) => searched,
+            Err(e) => return console_error!("{name}: its searched channels did not read ({:?}): {}", e.code, e.message),
+        };
         let agents = match self.listed_agents() {
             Ok(agents) => agents,
             Err(e) => return console_error!("{name}: its agents did not read ({:?}): {}", e.code, e.message),
@@ -237,9 +227,10 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
-            // every row a role names: the fragment's face and its agents,
-            // as they are now
+            // every row a role names: the channels searched, and the
+            // fragment's face and its agents, as they are now
             if row["role"].is_string() {
+                body["searched"] = json!(searched);
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
                     body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
                     body["face"]["agents"] = json!(agents);

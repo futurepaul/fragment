@@ -99,46 +99,6 @@ struct Deployment {
     test_secret_file: Option<PathBuf>,
 }
 
-/// The fields a config named before the deployment's secrets moved to its
-/// Secrets Store (2026-10-05), each by where it sat and what replaced it:
-/// a config that still names one is refused, saying so (a hard cut: no
-/// file is read in its place).
-const REPLACED_FIELDS: [(&str, &str, &str); 4] = [
-    ("", "host_secret_file", "host_secret"),
-    ("codestorage", "private_key_file", "private_key"),
-    ("workos", "client_id_file", "client_id"),
-    ("workos", "api_key_file", "api_key"),
-];
-
-/// Refuses a config (its JSON) that names a field the store replaced
-/// (`REPLACED_FIELDS`, and a provider's `key_file`), naming its
-/// replacement and the command that moves the file it names into the store.
-fn refuse_replaced(v: &Value, config: &Path) -> Result<()> {
-    let moved = |at: String, instead: String, file: &Value| {
-        let file = file.as_str().unwrap_or("<its file>");
-        anyhow::anyhow!(
-            "{at} is gone: the deployment's secrets live in its Cloudflare Secrets Store now (docs/secrets.md). Move the file in once, \
-             `cargo xtask secret set <name> --config {} --from-file {file}`, and name that secret as {instead}",
-            config.display()
-        )
-    };
-    for (within, field, instead) in REPLACED_FIELDS {
-        let object = if within.is_empty() { Some(v) } else { v.get(within) };
-        if let Some(file) = object.and_then(|o| o.get(field)) {
-            let at = if within.is_empty() { field.to_string() } else { format!("{within}.{field}") };
-            let instead = if within.is_empty() { instead.to_string() } else { format!("{within}.{instead}") };
-            return Err(moved(at, instead, file));
-        }
-    }
-    for row in v["providers"].as_array().into_iter().flatten() {
-        if let Some(file) = row.get("key_file") {
-            let name = row["name"].as_str().unwrap_or("?");
-            return Err(moved(format!("providers: {name}'s key_file"), "its key".to_string(), file));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Computers {
@@ -399,7 +359,6 @@ fn read_test_secret(file: &Path) -> Result<String> {
 
 fn load(config: &Path) -> Result<Deployment> {
     let v = read_json(config)?;
-    refuse_replaced(&v, config).with_context(|| format!("check {}", config.display()))?;
     let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
 }
@@ -410,9 +369,9 @@ fn read_json(config: &Path) -> Result<Value> {
     serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))
 }
 
-/// What `cargo xtask secret` takes from a deployment's config: read as
-/// leniently as a migration needs (a config still naming its secrets'
-/// files works, to move them into the store).
+/// What `cargo xtask secret` takes from a deployment's config: read
+/// leniently, so a config that does not load as a deploy loads it still
+/// names its account (and `secret list` says why it does not load).
 pub(crate) struct SecretsOf {
     pub account_id: String,
     /// The host secret's names (`host_secret`, `host_secret_previous`):
@@ -896,41 +855,6 @@ mod tests {
         }
     }
 
-    /// The store's hard cut: a config that still names a secret's file is
-    /// refused, naming what replaced the field and the command that moves
-    /// the file in; nothing reads the file instead.
-    #[test]
-    fn a_config_naming_a_secrets_file_is_refused() {
-        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        let fresh: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        let refused = |edit: &dyn Fn(&mut Value), test: &str| {
-            let mut v = fresh.clone();
-            edit(&mut v);
-            load(&config_file(test, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default()
-        };
-        let r = refused(&|v| v["host_secret_file"] = json!("~/.config/fragment/secrets/host-secret"), "old-host");
-        assert!(r.contains("host_secret_file is gone") && r.contains("as host_secret") && r.contains("--from-file ~/.config/fragment/secrets/host-secret"), "{r}");
-        let r = refused(&|v| v["codestorage"]["private_key_file"] = json!("~/k.pem"), "old-codestorage");
-        assert!(r.contains("codestorage.private_key_file is gone") && r.contains("as codestorage.private_key"), "{r}");
-        let r = refused(&|v| v["workos"]["client_id_file"] = json!("~/c"), "old-workos-client");
-        assert!(r.contains("workos.client_id_file is gone") && r.contains("as workos.client_id"), "{r}");
-        let r = refused(&|v| v["workos"]["api_key_file"] = json!("~/a"), "old-workos-key");
-        assert!(r.contains("workos.api_key_file is gone") && r.contains("as workos.api_key"), "{r}");
-        let r = refused(&|v| v["providers"][1]["key_file"] = json!("~/p"), "old-provider");
-        assert!(r.contains("perplexity's key_file is gone") && r.contains("as its key"), "{r}");
-        // and a config of the old shape whole (no new fields) says the same
-        let r = refused(
-            &|v| {
-                let o = v.as_object_mut().unwrap();
-                o.remove("host_secret");
-                o.insert("host_secret_file".into(), json!("~/h"));
-            },
-            "old-whole",
-        );
-        assert!(r.contains("host_secret_file is gone"), "{r}");
-        assert!(load(&config_file("fresh", &fresh)).is_ok());
-    }
-
     /// Every name a config gives a store secret is one: a path (the old
     /// fields' values pasted into the new ones) or anything outside the
     /// store's characters is refused with its field, and a rotation names
@@ -1028,15 +952,21 @@ mod tests {
         }
     }
 
-    /// OpenRouter went (a hard cut): a config that still names its key is
-    /// refused, not deployed without it.
+    /// A field gone in a hard cut is refused, never deployed without:
+    /// OpenRouter's key, and the secrets' files the store replaced (a
+    /// provider's among them).
     #[test]
-    fn a_config_naming_openrouter_is_refused() {
+    fn a_config_naming_a_field_gone_is_refused() {
         let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        v["openrouter_api_key_file"] = json!("~/.config/fragment/secrets/openrouter-api-key");
-        let refused = serde_json::from_value::<Deployment>(v).err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
+        let fresh: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        // each field, and the object (a JSON pointer) it is added to
+        for (field, within) in [("openrouter_api_key_file", ""), ("host_secret_file", ""), ("key_file", "/providers/1")] {
+            let mut v = fresh.clone();
+            v.pointer_mut(within).and_then(Value::as_object_mut).expect("the config has it").insert(field.into(), json!("~/f"));
+            let refused = load(&config_file(field, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(refused.contains(&format!("unknown field `{field}`")), "{refused}");
+        }
+        assert!(load(&config_file("fresh", &fresh)).is_ok());
     }
 
     /// The provider catalog, its keys' store names, and a default image are
