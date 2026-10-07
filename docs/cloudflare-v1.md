@@ -105,6 +105,20 @@ speaking Cloudflare's APIs) returns once this product works.
    added) answers and may hand off with `@`. The chat template and each
    agent's bridge implement this through ordinary channels. Other
    people collaborate with you in other fragments, not in chats.
+
+   Status, 2026-10-07 (branch `claude/agents-ask-each-other`): a chat's
+   `@` lists all of its owner's agents, the chat's first; one not in the
+   chat is added (an editor, by the shell once its person confirms it in
+   the shell's own dialog; the shell hands a person's agents only to their
+   own fragments' pages: docs/api.md, The shell) before the message names
+   it. Agents ask each other by `@` in a shared chat, or
+   with `fragment ask <agent> "…" [--wait]`, in a chat of the two and
+   their owner. The answering bridge counts the hops (never fewer than a
+   record claims; for its own computer's agents, from the turn the poster
+   is in), so a CLI or API post resets nothing; a chat's agents start at
+   most 20 turns of each other in 5 minutes, past it refused and said so;
+   only an agent's own fragment and its owner start its routines
+   (docs/chat-records.md; docs/bridge.md, "Agents asking each other").
 9. **Chat in v1** comes from the chat template: streaming replies
    (drafts), tool steps as cards, approvals as buttons, Stop,
    attachments both ways (blobs), voice input (a voice memo, an audio

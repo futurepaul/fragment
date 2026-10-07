@@ -117,6 +117,15 @@
       <div class="rename-actions"><button id="rename-cancel" type="button">Cancel</button><button type="submit">Save name</button></div>
     </form>
   </dialog>
+  <!-- a page of the person's own asks to add one of their agents to its
+       fragment: the shell asks them, here, never in the frame (docs/api.md, The shell) -->
+  <dialog class="rename-agent" id="add-agent-dialog" aria-labelledby="add-agent-title" aria-describedby="add-agent-text">
+    <form id="add-agent-form">
+      <h2 id="add-agent-title">Add an agent?</h2>
+      <p id="add-agent-text"></p>
+      <div class="rename-actions"><button id="add-agent-cancel" type="button">Cancel</button><button type="submit" id="add-agent-go" disabled>Add</button></div>
+    </form>
+  </dialog>
   <dialog class="search-dialog" id="search-dialog" aria-labelledby="search-title">
     <div class="search-heading">
       <h2 id="search-title">Search chats, apps and messages</h2>
