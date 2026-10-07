@@ -80,23 +80,6 @@ fragment.club until cutover (decisions 34–35).
   rather than every run (or an automatic pause expires), or a chat's push
   fires once a turn, on its last reply.
 
-## Fragments share one origin when no hostname suffix is configured
-
-- **Observed:** phase 2 slice B. Without `FRAGMENT_HOST_SUFFIX` the cell
-  serves every fragment from `/f/<name>/` on one origin. Cookies are
-  scoped by path, but a page on one fragment can still send same-origin
-  requests to another's `__op` and `__file` with the visitor's cookies.
-- **Risk:** a fragment acts as its visitors on another fragment they have
-  a share link or anonymous identity for.
-- **First proof:** a fleet serving strangers' fragments without a suffix.
-- **Mitigated:** with a suffix configured, `/f/<name>/…` redirects to the
-  fragment's own host and refuses writes (e2e `site`); `xtask dev` and
-  the e2e run with a suffix.
-- **Delete when:** phase 3 fleets always configure a suffix and path-mode
-  serving is removed (keeping `/f/<name>/__watch`, which carries no
-  cookies), with the `pathmode` e2e section replaced by a check that the
-  cell refuses to start serving without a suffix.
-
 ## A deleted fragment can linger in a person's list
 
 - **Observed:** phase 2 slice B. Each person's list of fragments is an
@@ -568,7 +551,7 @@ fragment.club until cutover (decisions 34–35).
   agents, addon, chat; code.storage's git or webhooks: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
-  lockdown, isolation, share, pathmode), and the whole deployment's
+  lockdown, isolation, share), and the whole deployment's
   (identities, signin, ledger's operator). Nothing runs it from CI.
 - **Risk:** a limit, a Workflow resume, or a skipped section's behaviour
   on real vendors breaks unseen.

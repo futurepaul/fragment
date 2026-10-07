@@ -331,7 +331,7 @@ fn a_preview_names_its_hosts() {
     assert_eq!(api.site_url("todo.paul", "x?y=1"), "https://todo--paul--p5.finite.place/x?y=1");
     assert_eq!(api.site_origin("todo.paul"), "https://todo--paul--p5.finite.place");
     assert!(api.signs_in_by_levers());
-    let local = Api::new(8790, Some("fragment.localhost"), &Run::new(SECRET.into(), 0));
+    let local = Api::new(8790, "fragment.localhost", &Run::new(SECRET.into(), 0));
     assert_eq!(local.site_url("todo.paul", ""), "http://todo--paul.fragment.localhost:8790/");
     assert_eq!(local.branch("rh").site_url("todo.paul", ""), "http://todo--paul--rh.fragment.localhost:8790/", "a rehearsal's node is shaped as a branch");
 }

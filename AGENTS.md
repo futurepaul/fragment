@@ -95,7 +95,7 @@ prebuilt bundle is in the debt ledger).
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  hermes, agent-smoke, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name

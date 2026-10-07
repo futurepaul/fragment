@@ -302,7 +302,7 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
 
     // a restart: the next activation settles what was pending, and only that
     s.stop()?;
-    s.start(false, true)?;
+    s.start(false)?;
     s.ok("after a restart the app answers", notes() == 4, notes());
     let r = call("note", "n4", json!({ "slug": "four", "text": "four" }))?;
     s.ok("and applies mutations", r.status == 200 && note(s, "four").as_deref() == Some(&b"four"[..]), &r);

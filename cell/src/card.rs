@@ -177,7 +177,7 @@ impl FragmentCell {
             Ok(v) => v,
             Err(skip) => return Ok(Err(skip)),
         };
-        let Some(origin) = self.cfg.outside_origin(&self.name()?) else { return Ok(Err(Skip::NoAddress)) };
+        let origin = self.cfg.outside_origin(&self.name()?);
         let owner = self.must(MetaKey::Owner)?;
         match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Create, fragment: None, by_owner: true }).await {
             Ok(_) => {}

@@ -19,7 +19,7 @@ the deployment's secrets are Worker secrets (below).
 |---|---|
 | `CODESTORAGE_ORG` | the code.storage org |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
-| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below); unset, from `/f/<name>/` |
+| `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below). Every deployment names one: an isolate without it does not start |
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
 | `FRAGMENT_LEGACY_HOST_SUFFIX` | where fragments were served before the suffix moved: a fragment's host under it redirects to its host under the suffix (Moved hosts, below); counted only beside a different suffix. fragment.club's is `fragment.club`, its suffix `fragment.boats` |
@@ -244,8 +244,7 @@ A person chooses a **username** once (above; the platform's page asks
 after the first sign-in, and `fragment username <name>` does too). A
 fragment's **name** is `<label>.<username>`: `todo.futurepaul`,
 served at `todo--futurepaul.<suffix>` (one DNS label, under the
-suffix's one wildcard certificate; or `/f/todo.futurepaul/` on a
-fleet without a suffix), its code.storage repo `todo--futurepaul`.
+suffix's one wildcard certificate), its code.storage repo `todo--futurepaul`.
 A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
 403. In a signed request's path, a bare label names the signer's own
@@ -271,7 +270,7 @@ random bytes, the registry keeps their SHA-256).
 | `POST /auth/logout` | ends the session and every fragment session made from it, clears the cookie, and sends the browser to WorkOS's logout (`session_id` from the access token's `sid`); from another origin, 403 (`GET` shows the button) |
 | `GET /auth/fragment?name=&return=` | signed in: → `<fragment origin>/__signin?token=<a single-use redemption, 60 s, for that fragment only>` (a session holds at most 16 unspent; past that, the oldest is refused), at once for a fragment of the person's own, one shared with them, or one they said yes to; for any other, first a page asking "Continue to X?" (Asking first, below); signed out: → sign in first |
 | `POST /auth/fragment?name=&return=` | that page's form (`form`, its token): the yes, remembered, then → the fragment's `__signin?token=` (303); another origin, or a missing or stale token, 403 |
-| `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403, and so is every request on a fleet without a suffix |
+| `GET /auth/frame?name=&return=` | a frame of the platform's own page (the shell's tabs; Frame sessions, below) signs in to the fragment: → its `__signin?token=<a frame redemption>` (`Cache-Control: no-store`, `Referrer-Policy: no-referrer`) where `/auth/fragment` would redeem at once; where it would ask first, or no one is signed in, a note in the frame. Anything but a frame of the platform's own page (by Fetch Metadata) is 403 |
 | `GET /cli?key=<npub>&proof=` | the link `fragment login` prints: `proof` is the key's own NIP-98 event for `POST <platform>/cli/approve`, good for ten minutes (the proof of possession; without it, stale, or by another key: 400). Signed in: a page showing the key's last eight characters, to compare with the terminal, and an Add button; signed out: → sign in first, keeping the link |
 | `POST /cli/approve` | the page's form (`key`, `proof`): the key joins the signed-in person at once; a key someone else holds, or a revoked one, is 409; another origin 403; the CLI waits for `GET /api/identities/me` to answer. People themselves come only from sign-in (`POST /api/identities {kind: "person"}` is 400) |
 
@@ -305,8 +304,7 @@ fragment's.
 
 On a fragment's origin, `GET __signin?token=` redeems the redemption for
 this fragment only (another fragment's is 401 and stays unspent) and sets
-`fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/` or
-`/f/<name>/`). A frame redemption (Frame sessions, below) is redeemed
+`fragment_site` (HttpOnly, SameSite=Lax, host-only, `Path=/`). A frame redemption (Frame sessions, below) is redeemed
 only in a frame, and any other only outside one: shown to the other kind of
 page it is 401, and spent. Without a token, `__signin` starts at the
 platform, unless this origin's session is live already (then straight
@@ -378,9 +376,7 @@ the platform's origin (docs/fragment-boats.md, design C):
   origin. A page on any other origin (a fragment's page, its author's
   code, framed in the shell or anywhere) sends `same-site` or
   `cross-site` and is refused (403); so is a top-level visit, a fetch, an
-  `object` or `embed`, and a request without Fetch Metadata. A fleet
-  without a suffix, whose fragments share the platform's origin, mints
-  none (403).
+  `object` or `embed`, and a request without Fetch Metadata.
 - Signed in, it follows `/auth/fragment`'s consent: on the person's own
   fragments, those shared with them, and those they said yes to, a frame
   redemption (single-use, 60 s, for that fragment only, its embedder the
@@ -767,10 +763,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   new, so neither's deploys are shot (`card.skipped`); a ledger that does
   not answer refuses none.
 - **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
-  (`{live, why: not_an_app | members_only | no_address | owner_pays}`),
+  (`{live, why: not_an_app | members_only | owner_pays}`),
   `card.failed` (`{failures}`). A retry and a stale shot say nothing.
-  A deployment that serves fragments by path (no `FRAGMENT_HOST_SUFFIX`)
-  has no page for a visitor to open: no cards. A page's Open Graph image
+  A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
 
 ### Deliveries: web push and notifyUrls
@@ -1060,8 +1055,8 @@ CLI: `fragment runs <name> [<run>] [--status S]`, `fragment triggers
 
 ## Serving
 
-`<label>--<username>.<suffix>/<path>` (or `/f/<name>/<path>` without a suffix; with
-one, those redirect to the fragment's host, except `__watch`). Every path
+`<label>--<username>.<suffix>/<path>` (`/f/<name>/<path>` on the platform's host
+redirects there, a `GET` or `HEAD` only, except `__watch` and `__live`). Every path
 on a fragment's host is the fragment's, `/api/…` included (the platform
 API answers on the platform's host):
 

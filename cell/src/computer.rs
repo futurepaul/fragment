@@ -1231,7 +1231,7 @@ impl ComputerCell {
             Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
             Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
         };
-        let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host("a computer's origin needs FRAGMENT_HOST_SUFFIX"))?;
+        let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
         // why it won't wake; else what its saves' failures say (a sleep that
         // kept its container, or slept unsaved); else why a wake was refused

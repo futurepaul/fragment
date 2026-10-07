@@ -106,7 +106,6 @@ const LANES: &[Lane] = &[
     agent_smoke::agent_smoke,
     sync::folder_sync,
     restart::restart,
-    restart::pathmode,
 ];
 
 /// The suite split for CI (`--shard k/n`): each shard runs on a runner of
@@ -126,7 +125,7 @@ const LANES: &[Lane] = &[
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "agent-smoke", "sync", "restart", "pathmode"],
+    &["shell", "computers", "chat", "hermes", "agent-smoke", "sync", "restart"],
     &["agents", "addon", "shell-ui"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[

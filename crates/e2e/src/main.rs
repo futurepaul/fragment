@@ -414,7 +414,7 @@ impl Suite {
                 println!("      {e:#}");
             }
         }
-        self.start(false, true)?;
+        self.start(false)?;
         Ok(())
     }
 
@@ -424,8 +424,8 @@ impl Suite {
         match (&self.preview, self.hosted_rules) {
             (Some(preview), _) => Api::hosted(preview, &self.shared),
             // a rehearsal's node is shaped as a branch deployment
-            (None, true) => Api::new(self.port, Some(SUFFIX), &self.shared).branch(REHEARSAL_BRANCH),
-            (None, false) => Api::new(self.port, Some(SUFFIX), &self.shared),
+            (None, true) => Api::new(self.port, SUFFIX, &self.shared).branch(REHEARSAL_BRANCH),
+            (None, false) => Api::new(self.port, SUFFIX, &self.shared),
         }
     }
 
@@ -457,15 +457,15 @@ impl Suite {
 
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
-        let started = self.start(false, true);
+        let started = self.start(false);
         self.shape = Shape::Plain;
         let mut api = started?;
         api.base = format!("http://{SUFFIX}:{}", self.port);
         Ok(api)
     }
 
-    /// Starts the node; `suffix` serves fragments from their own hosts.
-    pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
+    /// Starts the node, fragments on their own hosts.
+    pub fn start(&mut self, clean: bool) -> Result<Api> {
         anyhow::ensure!(self.preview.is_none(), "a hosted run starts no node: a section that does declares Need::Node");
         assert!(self.node.is_none(), "one node at a time");
         let tools = self.tools.as_ref().context("a local run locates its tools")?;
@@ -478,8 +478,8 @@ impl Suite {
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
             codestorage_url: self.fake.node().url.clone(),
-            host_suffix: suffix.then(|| self.suffix().to_string()),
-            legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
+            host_suffix: self.suffix().to_string(),
+            legacy_host_suffix: (self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
             // a rehearsal's node is shaped as a branch deployment, whose
             // levers are scoped as a preview's are
             host_label_suffix: self.hosted_rules.then(|| format!("--{REHEARSAL_BRANCH}")),
@@ -497,9 +497,9 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            platform_url: Some(match (self.shape, suffix) {
-                (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
-                _ => format!("http://127.0.0.1:{}", self.port),
+            platform_url: Some(match self.shape {
+                Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
+                Shape::Plain => format!("http://127.0.0.1:{}", self.port),
             }),
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
@@ -532,7 +532,7 @@ impl Suite {
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
-        Ok(Api::new(self.port, suffix.then_some(self.suffix()), &self.shared))
+        Ok(Api::new(self.port, self.suffix(), &self.shared))
     }
 
     /// The fragments' suffix in the next node's shape.
@@ -551,9 +551,9 @@ impl Suite {
             return Ok(Api::hosted(preview, &self.shared));
         }
         if self.node.is_none() {
-            self.start(false, true)?;
+            self.start(false)?;
         }
-        Ok(Api::new(self.port, None, &self.shared))
+        Ok(Api::new(self.port, SUFFIX, &self.shared))
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -924,7 +924,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         println!("shard {shard}: {}", lanes::SHARDS[shard.k as usize - 1].join(", "));
     }
     let t0 = Instant::now();
-    s.start(true, true)?;
+    s.start(true)?;
     // wrangler builds the computer images as it boots: built ahead (xtask's
     // build), every step is a cache hit, and the boot takes seconds
     let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();

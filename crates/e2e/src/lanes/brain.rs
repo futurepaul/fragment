@@ -311,7 +311,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
 
     // restart: the index survives, and follows the next change
     s.stop()?;
-    let api = &s.start(false, true)?;
+    let api = &s.start(false)?;
     let st = index(api, &keys, &name);
     let r = search(api, &keys, &name, json!({ "q": "inverter" }))?;
     s.ok(

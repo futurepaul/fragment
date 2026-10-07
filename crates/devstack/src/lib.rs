@@ -294,8 +294,8 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>` when set.
-    pub host_suffix: Option<String>,
+    /// Fragments are served from `<label>--<username>.<suffix>`.
+    pub host_suffix: String,
     /// Where fragments were served before the suffix moved: a fragment's
     /// host there redirects to its host under the suffix.
     pub legacy_host_suffix: Option<String>,
@@ -411,9 +411,7 @@ impl Fleet {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
             vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
-        if let Some(s) = &self.host_suffix {
-            vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
-        }
+        vars.push(("FRAGMENT_HOST_SUFFIX", self.host_suffix.as_str()));
         if let Some(s) = &self.legacy_host_suffix {
             vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
         }
