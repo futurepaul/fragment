@@ -108,7 +108,7 @@ pub fn isolation(s: &mut Suite, _: &Api) -> Result<()> {
     let result = result.and(opened).and(hosts);
     drop(api);
     s.stop()?;
-    s.start(false, true)?;
+    s.start(false)?;
     result
 }
 

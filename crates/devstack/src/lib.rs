@@ -22,7 +22,6 @@ pub mod node;
 mod node_release;
 pub mod signals;
 pub mod store;
-pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -34,9 +33,6 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// installs it). Moving it re-checks what containers.rs leans on in it
 /// and its workerd (docs/technical-debt-ledger.md).
 pub const WRANGLER_VERSION: &str = "4.145.0";
-/// Names another wrangler entry script (a `bin/wrangler.js`), run on the
-/// pinned Node all the same.
-pub const WRANGLER_BIN_VAR: &str = "WRANGLER_BIN";
 /// The pinned Node, unpacked (node.rs), under the repo root.
 pub const TOOLS_DIR: &str = "target/tools";
 /// The caches every JavaScript process keeps, under the repo root:
@@ -211,35 +207,31 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.
 pub struct Tools {
     pub node: node::Node,
-    /// wrangler's entry script: `WRANGLER_BIN`'s, or the pinned one npm
-    /// installed (`node_modules/wrangler/bin/wrangler.js`).
+    /// wrangler's entry script, the pinned one npm installed
+    /// (`node_modules/wrangler/bin/wrangler.js`).
     pub wrangler: PathBuf,
     /// `CACHE_DIR`, absolute.
     pub cache: PathBuf,
 }
 
 impl Tools {
-    /// The pinned Node (or `FRAGMENT_NODE`'s), fetched on first use;
-    /// node_modules from its own `npm ci` when missing or stale; and the
-    /// wrangler package.json pins, or `WRANGLER_BIN`'s, checked by version.
-    /// Nothing from PATH.
+    /// The pinned Node, fetched on first use; node_modules from its own
+    /// `npm ci` when missing or stale; and the wrangler package.json pins,
+    /// checked by version. Nothing from PATH.
     pub fn locate() -> Result<Tools> {
         let root = repo_root();
         let cache = root.join(CACHE_DIR);
         let node = node::locate(&root.join(TOOLS_DIR))?;
         node::ensure_modules(&node, &root, &root.join(TOOLS_DIR), &cache)?;
-        let wrangler = match std::env::var_os(WRANGLER_BIN_VAR) {
-            Some(p) => PathBuf::from(p),
-            None => root.join("node_modules/wrangler/bin/wrangler.js"),
-        };
+        let wrangler = root.join("node_modules/wrangler/bin/wrangler.js");
         if !wrangler.is_file() {
-            bail!("no wrangler entry script at {} ({WRANGLER_BIN_VAR} names one, a wrangler package's bin/wrangler.js; unset, it is the one npm ci installs)", wrangler.display());
+            bail!("no wrangler at {} (npm ci installs it: remove node_modules, and the next run installs it again)", wrangler.display());
         }
         let tools = Tools { node, wrangler, cache };
         let out = tools
@@ -294,8 +286,8 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>` when set.
-    pub host_suffix: Option<String>,
+    /// Fragments are served from `<label>--<username>.<suffix>`.
+    pub host_suffix: String,
     /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
     /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
     /// test levers to the e2e's own things (the hosted lane's rehearsal).
@@ -319,9 +311,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
-    /// The platform's origin (sign-in, the platform session), when it is
-    /// not the hostname suffix itself.
-    pub platform_url: Option<String>,
+    /// The platform's origin (sign-in, the platform session;
+    /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
+    pub platform_url: String,
     /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
@@ -384,6 +376,7 @@ impl Fleet {
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
+            ("FRAGMENT_PLATFORM_URL", self.platform_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
         ];
@@ -406,19 +399,13 @@ impl Fleet {
         let retry = self.delivery_retry_s.map(|r| r.to_string());
         if let Some(r) = &retry {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
-            vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
-        if let Some(s) = &self.host_suffix {
-            vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
-        }
+        vars.push(("FRAGMENT_HOST_SUFFIX", self.host_suffix.as_str()));
         if let Some(s) = &self.host_label_suffix {
             vars.push(("FRAGMENT_HOST_LABEL_SUFFIX", s.as_str()));
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
-        }
-        if let Some(p) = &self.platform_url {
-            vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
@@ -740,7 +727,7 @@ mod tests {
     fn wrangler_runs_on_the_pinned_node_with_repo_caches() {
         let root = repo_root();
         let bin = root.join(TOOLS_DIR).join("node-test/bin");
-        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js"), release: node::pinned_release() };
+        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js") };
         let tools = Tools { node, wrangler: root.join("node_modules/wrangler/bin/wrangler.js"), cache: root.join(CACHE_DIR) };
         let cmd = tools.wrangler().expect("a wrangler command");
         assert_eq!(cmd.get_program(), bin.join("node").as_os_str());

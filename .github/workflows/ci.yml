@@ -5,11 +5,9 @@
 # vendor boundaries (docs/cloudflare-v1.md, phase 2). The celld e2e on
 # macOS is at tag celld-final.
 #
-# The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS), each
-# on a runner of its own with its own build and node; the `e2e` job checks
-# from their summaries that together they ran every section exactly once
-# and every check passed (`cargo xtask e2e-summary`). A manual run
-# (workflow_dispatch) also runs the suite whole, in one job, to compare.
+# The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS: every
+# section in exactly one, a host test checks), each on a runner of its own
+# with its own build and node; the `e2e` job is green when every shard is.
 #
 # Caches are restored on every run and saved only from master's pushes
 # (a PR reads master's): each key names what it holds below. A save comes
@@ -157,17 +155,10 @@ jobs:
         with:
           path: target/tools
           key: ${{ steps.node.outputs.cache-primary-key }}
-      # the aggregate below runs this build's xtask, so it builds nothing
-      - if: matrix.shard == 1
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-xtask
-          path: target/debug/xtask
-          retention-days: 1
-      # one shard's sections on a fresh node, and their summary; the run's
-      # scratch (each node boot's log, the lanes' screenshots) is kept when
-      # a check fails, and uploaded below
-      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4 --summary target/e2e-summary/shard-${{ matrix.shard }}.json
+      # one shard's sections on a fresh node; the run's scratch (each node
+      # boot's log, the lanes' screenshots) is kept when a check fails, and
+      # uploaded below
+      - run: cargo xtask e2e --no-build --shard ${{ matrix.shard }}/4
         env:
           CHROME_BIN: /usr/bin/google-chrome
       # after the run, from any shard that shot a preview card: miniflare
@@ -178,12 +169,6 @@ jobs:
         with:
           path: target/cache
           key: ${{ steps.js.outputs.cache-primary-key }}
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-summary-${{ matrix.shard }}
-          path: target/e2e-summary/
-          retention-days: 7
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -191,77 +176,14 @@ jobs:
           path: target/e2e/
           retention-days: 7
 
-  # the check named `e2e`: the shards together ran every section exactly
-  # once, their counts add up, and every check passed. It runs whatever the
-  # shards did (unless the run was cancelled), so a red shard makes it
-  # red, never skipped.
+  # the check named `e2e`: green when every shard is (a re-run's, by each
+  # shard's latest attempt). It runs whatever the shards did (unless the run
+  # was cancelled), so a red shard makes it red, never skipped.
   e2e:
     needs: e2e-shard
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: e2e-xtask
-          path: bin
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: e2e-summary-*
-          merge-multiple: true
-          path: summaries
-      - run: chmod +x bin/xtask && bin/xtask e2e-summary summaries
-      - if: needs.e2e-shard.result != 'success'
-        run: echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where" && exit 1
+      - run: test "${{ needs.e2e-shard.result }}" = success || { echo "a shard's job failed (${{ needs.e2e-shard.result }}); its log says where"; exit 1; }
 
-  # a manual run's whole suite in one job, to compare its counts with the
-  # shards' (`cargo xtask e2e-summary` prints both the same way)
-  e2e-whole:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - id: toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target/release
-            target/debug
-            cell/target
-            agent/target
-          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
-          restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
-      - uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.cargo/bin/worker-build
-            ~/.cache/worker-build
-          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock', 'agent/Cargo.lock') }}
-          restore-keys: worker-build-0.8.5-${{ runner.os }}-
-      - uses: actions/cache/restore@v4
-        with:
-          path: target/tools
-          key: node-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs') }}
-      - uses: actions/cache/restore@v4
-        with:
-          path: target/cache
-          key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
-      - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
-      - run: cargo xtask e2e --summary target/e2e-summary/whole.json
-        env:
-          CHROME_BIN: /usr/bin/google-chrome
-      - if: always()
-        run: cargo xtask e2e-summary target/e2e-summary
-      - if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-scratch-whole
-          path: target/e2e/
-          retention-days: 7

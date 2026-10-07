@@ -127,6 +127,13 @@ pub fn snippet(text: &str) -> &str {
     cut(text, limits::SEARCH_SNIPPET_MAX_BYTES)
 }
 
+/// A chat's preview in a person's list, of its newest message's text: its
+/// first line with words, bounded (`limits::LISTED_PREVIEW_MAX_BYTES`).
+pub fn preview(text: &str) -> &str {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    cut(line, limits::LISTED_PREVIEW_MAX_BYTES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +170,18 @@ mod tests {
         assert_eq!(cut("abc", 2), "ab");
         assert_eq!(cut("é", 1), "");
         assert_eq!(snippet(&"x".repeat(1000)).len(), limits::SEARCH_SNIPPET_MAX_BYTES);
+    }
+
+    /// Goal: a chat's row shows one bounded line of its newest message.
+    /// Method: blank lines first, CRLF, and a long line of 3-byte characters.
+    #[test]
+    fn a_preview_is_the_first_line_with_words() {
+        assert_eq!(preview("Water the tomatoes\nevery Tuesday"), "Water the tomatoes");
+        assert_eq!(preview("\n  \r\n  hello there \r\nmore"), "hello there");
+        let euros = "€".repeat(limits::LISTED_PREVIEW_MAX_BYTES);
+        let long = preview(&euros);
+        assert!(long.len() <= limits::LISTED_PREVIEW_MAX_BYTES && long.len() > limits::LISTED_PREVIEW_MAX_BYTES - 3);
+        assert_eq!(preview(" \n "), "");
     }
 
     /// Goal: no query is FTS5 syntax (no injection). Method: every

@@ -1,7 +1,0 @@
-.action-tooltip {
-  position: fixed; z-index: 10000; width: max-content; max-width: calc(100vw - 12px);
-  padding: 4px 7px; border-radius: 5px; background: #363636; color: #f5f5f5;
-  box-shadow: 0 2px 8px rgba(0,0,0,.2); pointer-events: none;
-  font: 500 11px/1.4 var(--font-sans, system-ui); white-space: nowrap;
-}
-.action-tooltip[hidden] { display: none; }

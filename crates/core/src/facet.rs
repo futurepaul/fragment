@@ -125,7 +125,7 @@ pub struct Queried {
 
 /// A mutation ran, now or before (`__mutate`): its result (the JSON text
 /// the app answered, or the ledger stored) and effects, and the run its
-/// ledger row holds (`None` for a row from before runs were numbered).
+/// ledger row holds (`None` for an ephemeral mutation, which keeps none).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mutated {
@@ -196,8 +196,7 @@ struct Ledger {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LedgerRow {
-    #[serde(deserialize_with = "present")]
-    pub run: Option<i64>,
+    pub run: i64,
     pub effects: Value,
 }
 
@@ -316,8 +315,11 @@ mod tests {
 
     #[test]
     fn answers_decode_strictly() {
-        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":true,"run":null,"effects":[],"result":{"id":1}}"#) else { panic!("a replay") };
-        assert!(m.replayed && m.run.is_none() && m.result.get() == r#"{"id":1}"#);
+        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":true,"run":4,"effects":[],"result":{"id":1}}"#) else { panic!("a replay") };
+        assert!(m.replayed && m.run == Some(4) && m.result.get() == r#"{"id":1}"#);
+        // an ephemeral mutation keeps no ledger row, so it names no run
+        let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":false,"run":null,"effects":[],"result":1}"#) else { panic!("an ephemeral run") };
+        assert!(m.run.is_none());
         let Ok(Answer::Ran(m)) = decode::<Mutated>(r#"{"replayed":false,"result":null,"effects":[{"push":"*","payload":{}}],"run":7}"#) else { panic!("a run") };
         assert_eq!((m.replayed, m.run, m.result.get()), (false, Some(7), "null"));
         // what the author's realm could make of it: a missing key, a wrong type, an extra key, not JSON
@@ -373,9 +375,10 @@ mod tests {
     fn ledger_rows_decode_strictly() {
         assert!(decode_ledger(r#"{"result":null}"#).unwrap().is_none());
         let row = decode_ledger(r#"{"result":{"run":3,"effects":null}}"#).unwrap().unwrap();
-        assert_eq!((row.run, row.effects.is_null()), (Some(3), true));
-        assert!(decode_ledger(r#"{"result":{"run":null,"effects":[]}}"#).unwrap().unwrap().run.is_none());
-        for bad in [r#"{}"#, r#"{"result":{"effects":[]}}"#, r#"{"result":{"run":3}}"#, r#"{"result":{"id":"x","run":3,"effects":[]}}"#] {
+        assert_eq!((row.run, row.effects.is_null()), (3, true));
+        // every row holds the run it committed: one without is no row the platform code wrote
+        let unnumbered = r#"{"result":{"run":null,"effects":[]}}"#;
+        for bad in [r#"{}"#, r#"{"result":{"effects":[]}}"#, r#"{"result":{"run":3}}"#, r#"{"result":{"id":"x","run":3,"effects":[]}}"#, unnumbered] {
             assert!(decode_ledger(bad).is_err(), "{bad}");
         }
     }
