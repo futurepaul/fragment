@@ -122,32 +122,6 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
     Ok(())
 }
 
-/// Who may post to a channel came after the channel table (phase 7 slice
-/// B1), then whether they must be signed in, and ephemeral mutations after
-/// the operation table: a table from before gains the columns, and its
-/// channels take no posts, from anyone, and its mutations keep ledger rows.
-/// A blob's served type came after the blob table (blobs.rs): one from
-/// before is served untyped. A channel trigger's posters (`from`) came
-/// after the trigger table: one from before fires for every record, as it
-/// was installed to. A run's code came after the run table (jobs.rs
-/// `advance`): a run in flight from before starts over at its next step.
-/// Runs in the constructor, before anything reads these tables.
-pub(crate) fn migrate_code(sql: &SqlStorage) {
-    for (table, column, decl) in [
-        ("code_channels", "post", "TEXT"),
-        ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"),
-        ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
-        ("blobs", "mime", "TEXT"),
-        ("code_triggers", "from_kind", "TEXT"),
-        ("runs", "code", "TEXT"),
-    ] {
-        let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
-        if !cols.iter().any(|c| c["name"] == column) {
-            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), None).expect("a table migrates");
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct OpRow {
     op: String,

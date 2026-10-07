@@ -46,7 +46,8 @@ use crate::error::{CellError, CellResult};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS memberships (
-  fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL);
+  fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL,
+  sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT);
 CREATE TABLE IF NOT EXISTS search_entries (
   id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL,
   at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n));
@@ -166,14 +167,6 @@ impl DurableObject for PrincipalCell {
     fn new(state: State, _env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
-        // a list from before rows carried a fragment's sharing, its face,
-        // the person's archiving, or the channels searched
-        let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for (col, ty) in [("sharing", "TEXT"), ("face", "TEXT"), ("archived", "INTEGER NOT NULL DEFAULT 0"), ("searched", "TEXT")] {
-            if !cols.iter().any(|c| c["name"] == col) {
-                sql.exec(&format!("ALTER TABLE memberships ADD COLUMN {col} {ty}"), None).expect("the memberships table migrates");
-            }
-        }
         PrincipalCell { state }
     }
 
@@ -234,7 +227,7 @@ impl PrincipalCell {
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
                 let rows: Vec<Listed> = self.typed(LISTED, vec![])?;
-                let fragments = rows.into_iter().filter_map(|r| listed(r).transpose()).collect::<CellResult<Vec<_>>>()?;
+                let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
                 Ok(Response::from_json(&FragmentList { fragments })?)
             }
             (Method::Put, "/archived") => {
@@ -441,7 +434,7 @@ impl PrincipalCell {
             if fragments.len() == limits::SEARCH_FRAGMENTS_MAX {
                 break;
             }
-            let Some(f) = listed(row)? else { continue };
+            let f = listed(row)?;
             if query.names(&f.name, f.title.as_deref()) {
                 fragments.push(f);
             }
@@ -475,12 +468,8 @@ impl PrincipalCell {
     }
 }
 
-/// A row as a list shows it; `None` for a fragment from before usernames
-/// (decision 16's hard cut: served nowhere, so never listed).
-fn listed(r: Listed) -> CellResult<Option<ListedFragment>> {
-    if !fragment_proto::valid_fragment_name(&r.name) {
-        return Ok(None);
-    }
+/// A row as a list shows it.
+fn listed(r: Listed) -> CellResult<ListedFragment> {
     let sharing = match r.sharing.as_deref().map(serde_json::from_str::<Sharing>) {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
@@ -488,5 +477,5 @@ fn listed(r: Listed) -> CellResult<Option<ListedFragment>> {
     };
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
     let (kind, title) = face.map_or((FragmentKind::App, None), |f| (f.kind, f.title));
-    Ok(Some(ListedFragment { name: r.name, role: r.role, kind, title, sharing, archived: r.archived != 0 }))
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, sharing, archived: r.archived != 0 })
 }

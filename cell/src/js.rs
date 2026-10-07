@@ -96,8 +96,8 @@ pub struct Facet {
     stub: JsValue,
 }
 
-/// The app facet's name for a fragment made before each life had its own
-/// (`Fragment::app_facet`): `app@<incarnation>` since.
+/// The app facet's name, before its life's `@<incarnation>`: each life of
+/// a fragment's name has its own (`Fragment::app_facet`).
 pub const APP_FACET: &str = "app";
 
 /// The capabilities an app's env holds: `FILES`, bound to `fragment`

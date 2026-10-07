@@ -210,8 +210,6 @@ impl DurableObject for FragmentCell {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
         sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
-        crate::plane::migrate_code(&sql);
-        crate::members::migrate(&sql);
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
@@ -363,13 +361,10 @@ pub(crate) enum MetaKey {
     /// Its code.storage repo.
     Repo,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
-    /// its own app database (`app_facet`). None: `app`, made before.
+    /// its own app database (`app_facet`).
     AppFacet,
     /// The latest members index change (members.rs).
     IndexVersion,
-    /// The owner's row in their list has been sent this fragment's sharing
-    /// (members.rs); a fragment from before sends it once.
-    SharingSent,
     /// When the next pass runs (a day after the last, or within the poll
     /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
@@ -474,7 +469,6 @@ impl MetaKey {
             MetaKey::WebhookSecret => "webhook_secret",
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
-            MetaKey::SharingSent => "sharing_sent",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
@@ -685,10 +679,9 @@ impl FragmentCell {
         self.meta(key)?.ok_or_else(|| missing(key))
     }
 
-    /// The app facet's name: this life's (`MetaKey::AppFacet`), or `app` for
-    /// a fragment made before each life had its own.
+    /// The app facet's name: this life's (`MetaKey::AppFacet`).
     pub(crate) fn app_facet(&self) -> CellResult<String> {
-        Ok(self.meta(MetaKey::AppFacet)?.unwrap_or_else(|| js::APP_FACET.to_string()))
+        self.must(MetaKey::AppFacet)
     }
 
     pub(crate) fn count(&self, q: &str) -> CellResult<u64> {
