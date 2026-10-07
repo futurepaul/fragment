@@ -194,15 +194,17 @@ bridge that answers decides whether it is a turn, and how deep
 (docs/chat-records.md, "An agent's reply"):
 
 - **The hop is counted here, not read.** A record by an agent of this
-  computer is one hop past the turn that agent is in: its turn in that
-  chat (running; or ended, held or remembered for `ENDED_HOPS_MS`, which a
-  reply read just after its turn was let go needs), else its deepest
-  turn running anywhere else, else, in none at all, `HOPS_MAX` (answered,
-  handing on nothing). A record's `hop` only raises it. So a post made
+  computer is one hop past the turn that agent is in: its turn running in
+  that chat, or the one there the record's `turn` names when that ended
+  within `ENDED_HOPS_MS` (remembered, never written: a reply read just
+  after its turn was let go); and its deepest turn running anywhere else,
+  the deeper of the two; in none at all, `HOPS_MAX` (answered, handing on
+  nothing). A CLI post names no turn, so a turn just ended does not count
+  for it (`an_ended_turn_counts_only_for_the_reply_that_names_it`). A record's `hop` only raises it. So a post made
   around the bridge (the CLI, the API, a script the agent left running)
   resets nothing: `a_hand_off_loop_stops_at_the_cap` runs the same
-  A, B, A, B loop with every reply's `hop` and `turn` stripped and stops
-  at the same place, and `a_scripted_hand_off_loop_stops_at_the_cap`
+  A, B, A, B loop with each hand-off posted by its turn as the CLI does (no
+  `hop`, no `turn`) and stops at the same place, and `a_scripted_hand_off_loop_stops_at_the_cap`
   (tests/bridge.rs) runs it with the scripted runtime, then an agent's
   CLI-shaped post, answered once. What is remembered of ended turns is
   never written to `/data`: a reply the next life reads first is the last

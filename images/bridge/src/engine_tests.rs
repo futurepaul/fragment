@@ -669,9 +669,10 @@ fn reply_and_end(e: &mut Engine, turn: &str, text: &str, now: u64) -> Value {
 }
 
 /// Two agents told to hand off to each other until something stops them:
-/// the turns they ran, with their hops. `around` strips each reply's `hop`
-/// and `turn` before the other reads it, as a post made with the CLI or the
-/// API carries neither.
+/// the turns they ran, with their hops. Through the bridge, each turn's
+/// reply names the other (read after its turn was let go); `around`, each
+/// turn posts its hand-off itself while it runs, as the CLI or the API
+/// does: no `hop`, no `turn`.
 fn ping_pong(around: bool) -> Vec<(String, u32)> {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
@@ -684,16 +685,54 @@ fn ping_pong(around: bool) -> Vec<(String, u32)> {
         assert!(next.is_empty(), "one turn a record");
         ran.push((t.agent.name.clone(), hop));
         let other = if t.agent.name == "juniper" { "rowan" } else { "juniper" };
-        let mut reply = reply_and_end(&mut e, &t.turn, &format!("over to you @{other}"), T0 + seq);
-        assert_eq!(reply["to"], json!([format!("id:{other}")]), "a mention of the other agent hands off");
-        if around {
-            let o = reply.as_object_mut().expect("a body");
-            o.remove("hop");
-            o.remove("turn");
-        }
-        next = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &format!("id:{}", t.agent.name), reply), T0 + seq);
+        let by = format!("id:{}", t.agent.name);
+        let text = format!("over to you @{other}");
+        next = if around {
+            let posted = json!({ "text": text, "to": [format!("id:{other}")] });
+            let started = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, posted), T0 + seq);
+            ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + seq);
+            started
+        } else {
+            let reply = reply_and_end(&mut e, &t.turn, &text, T0 + seq);
+            assert_eq!(reply["to"], json!([format!("id:{other}")]), "a mention of the other agent hands off");
+            to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, reply), T0 + seq)
+        };
     }
     ran
+}
+
+/// A turn just ended counts only for the reply that names it: an agent
+/// handed back to in a chat of two, its turn there ended, then asked again
+/// by its person elsewhere, asks the other with the CLI from that new turn
+/// at one hop, not one past the turn it finished. Invalid: a post naming
+/// the ended turn (a reply read late, or a forgery while it runs no turn)
+/// counts from it.
+#[test]
+fn an_ended_turn_counts_only_for_the_reply_that_names_it() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let (talk, pair) = ("talk.paul", "juniper-rowan.paul");
+    // in the pair chat: the person to juniper, juniper to rowan, rowan back to juniper
+    let j0 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(1, 10, "id:paul", json!({ "text": "start", "to": ["id:juniper"] })), T0);
+    let to_r = reply_and_end(&mut e, &j0[0].0.turn, "@rowan yours", T0 + 1);
+    let r1 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(2, 11, "id:juniper", to_r), T0 + 2);
+    let to_j = reply_and_end(&mut e, &r1[0].0.turn, "@juniper back to you", T0 + 3);
+    let j2 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(3, 12, "id:rowan", to_j), T0 + 4);
+    assert_eq!(j2[0].1, 2);
+    let j2_turn = j2[0].0.turn.clone();
+    reply_and_end(&mut e, &j2_turn, "thanks", T0 + 5);
+    // its person asks it again in talk: a turn at hop 0 there
+    let t0 = to_all(&mut e, &[&j, &r], &v, talk, rec_at(1, 13, "id:paul", json!({ "text": "ask rowan again", "to": ["id:juniper"] })), T0 + 6);
+    assert_eq!(t0[0].1, 0);
+    // from it, `fragment ask` into the pair chat: one hop, not three
+    let asked = to_all(&mut e, &[&j, &r], &v, pair, rec_at(4, 14, "id:juniper", json!({ "text": "and now?", "to": ["id:rowan"] })), T0 + 7);
+    assert_eq!(asked.iter().map(|(t, h)| (t.agent.name.as_str(), *h)).collect::<Vec<_>>(), vec![("rowan", 1)]);
+    e.step(Input::Runtime(Event::End { turn: asked[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    e.step(Input::Runtime(Event::End { turn: t0[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    // naming the ended hop-2 turn (in no turn now) counts from it
+    let named = to_all(&mut e, &[&j, &r], &v, pair, rec_at(5, 15, "id:juniper", json!({ "text": "late", "to": ["id:rowan"], "turn": j2_turn })), T0 + 9);
+    assert_eq!(named[0].1, limits::HOPS_MAX, "one past the turn it names");
 }
 
 /// Goal (decision 8): two agents that hand off to each other stop at the

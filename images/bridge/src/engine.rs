@@ -48,8 +48,9 @@
 //!   agent only when it names it, at most `HOPS_MAX` hand-offs deep.
 //! - The hop is the answering bridge's to count (`hop_of`), never fewer
 //!   than the record claims: a record by an agent of this computer is one
-//!   hop past the turn that agent is in (here, or just ended here; else its
-//!   deepest elsewhere; else, in none, the last hop allowed), so a post made
+//!   hop past the turn that agent is in (here, or the one just ended here
+//!   that its reply names; and its deepest elsewhere; in none, the last hop
+//!   allowed), so a post made
 //!   around the bridge (the CLI, the API) resets nothing. A person's agents
 //!   all run on one computer (decision 13), so every hand-off between them
 //!   is counted here; another computer's agent is held by its claim.
@@ -370,6 +371,7 @@ pub struct Engine {
 /// engine's clock).
 #[derive(Debug, Clone, PartialEq)]
 struct EndedTurn {
+    id: String,
     agent: String,
     fragment: String,
     hop: u32,
@@ -610,7 +612,7 @@ impl Engine {
             if !m.to.iter().any(|t| t == &agent.identity) {
                 return None;
             }
-            let hop = self.hop_of(fragment, principal, m.hop);
+            let hop = self.hop_of(fragment, principal, m.turn.as_deref(), m.hop);
             if hop > limits::HOPS_MAX {
                 crate::ev!("handoff.too_deep", { "agent": agent.fragment, "fragment": fragment, "from": principal, "hop": hop, "claimed": m.hop });
                 return None;
@@ -631,22 +633,24 @@ impl Engine {
     /// How many hand-offs led to a record an agent posted in `fragment`:
     /// this bridge's count, never fewer than the record `claimed`. For an
     /// agent of this computer it is one past the turn the agent is in: its
-    /// turn in this chat (running, or ended within `ENDED_HOPS_MS`, which a
-    /// reply read after its turn was let go is), else its deepest running
-    /// elsewhere (a post from a turn into another chat, as `fragment ask`
-    /// makes), else, in no turn at all, the last hop allowed: answered once,
-    /// handing on nothing. So a post made around the bridge (the CLI, the
-    /// API: no `hop`, or `hop: 0`) counts as the reply would. Another
+    /// turn running in this chat, or the turn here the record names (`turn`)
+    /// when that ended within `ENDED_HOPS_MS` (a reply read after its turn
+    /// was let go); and its deepest turn running elsewhere (a post from a
+    /// turn into another chat, as `fragment ask` makes), the deeper of the
+    /// two; in no turn at all, the last hop allowed: answered once, handing
+    /// on nothing. So a post made around the bridge (the CLI, the API: no
+    /// `hop`, or `hop: 0`, and no `turn`) counts as the reply would. Another
     /// computer's agent, whose turns this bridge cannot see, is one hop at
     /// least, as it claims; the chat's budget holds it too.
-    fn hop_of(&self, fragment: &str, principal: &str, claimed: u32) -> u32 {
+    fn hop_of(&self, fragment: &str, principal: &str, named: Option<&str>, claimed: u32) -> u32 {
         let Some(poster) = self.agents.iter().find(|a| a.identity == principal) else {
             return claimed.max(1);
         };
         let running = |t: &&Turn| t.agent == poster.fragment && t.active();
         let here = self.state.turns.values().filter(running).find(|t| t.fragment == fragment).map(|t| t.hop).or_else(|| {
             let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
-            self.ended.iter().rev().filter(fresh).find(|e| e.agent == poster.fragment && e.fragment == fragment).map(|e| e.hop)
+            let named = named?;
+            self.ended.iter().rev().filter(fresh).find(|e| e.id == named && e.agent == poster.fragment && e.fragment == fragment).map(|e| e.hop)
         });
         let elsewhere = self.state.turns.values().filter(running).filter(|t| t.fragment != fragment).map(|t| t.hop).max();
         let from = here.into_iter().chain(elsewhere).max().unwrap_or(limits::HOPS_MAX - 1);
@@ -1205,7 +1209,7 @@ impl Engine {
         let (agent, fragment, hop) = (t.agent.clone(), t.fragment.clone(), t.hop);
         self.dirty = true;
         // its replies may be read after it is let go: one hop past it
-        self.ended.push_back(EndedTurn { agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
+        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
         while self.ended.len() > limits::ENDED_HOPS_MAX {
             self.ended.pop_front();
         }

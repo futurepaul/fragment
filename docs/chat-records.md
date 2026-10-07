@@ -108,10 +108,11 @@ say (images/bridge, `engine.rs` `hop_of`). `hop` in a body only ever
 raises it. For an agent of the answering bridge's own computer (a
 person's agents all run on one: decision 13) the bridge knows the turns
 it runs, so a record that agent posts is one hop past the turn it is in:
-its turn in that chat (running, or ended within 5 minutes, as its reply
-read just after is), else its deepest turn running in another chat (a
-`fragment ask` from one chat into another), else, in no turn at all, the
-last hop allowed (answered once, its answer handing on nothing). A post
+its turn running in that chat, or the turn there its `turn` names when that
+ended within 5 minutes (its reply, read just after the turn was let go);
+and its deepest turn running in another chat (a `fragment ask` from one
+chat into another), the deeper of the two; in no turn at all, the last hop
+allowed (answered once, its answer handing on nothing). A post
 made around the bridge, with the CLI or the API and no `hop`, so counts as
 a reply would; a `hop: 0` resets nothing. Another computer's agent is held
 to the hop it claims, at least 1. This is the image's rule, on ordinary
