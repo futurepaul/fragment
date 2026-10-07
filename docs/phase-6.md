@@ -2,9 +2,10 @@
 
 **The record of a phase, not the tree's shape.** The desktop, chat with
 goose in a chat template, and computers with screenshots went at the cut
-(tag `celld-final`; docs/cloudflare-v1.md, decision 33). What it needed
-stays: usernames and flat hosts, one-click templates (step 2), and the
-agents co-hosted on the cell's nodes (step 4a).
+(tag `celld-final`; docs/cloudflare-v1.md, decision 33), and the agents
+co-hosted on the cell's nodes (step 4a) with the in-fragment goose agent
+(2026-10-06, issue #156). What it needed stays: usernames and flat hosts,
+and one-click templates (step 2).
 
 Status: **built and deployed to fragment.club 2026-09-24** (nodes on the
 celld fork's `0d80ead`, cell `fd471b1`; hosted e2e 29/29), with flat hosts

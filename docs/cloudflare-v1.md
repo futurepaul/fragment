@@ -64,8 +64,8 @@ speaking Cloudflare's APIs) returns once this product works.
    They are Rust in the cell, with thin JS shims where workers-rs lacks
    an API (Worker Loader and Facets, the container's `exec` and
    intercepts, the Sandbox helpers). The shell is a small TypeScript
-   SPA. The in-fragment goose agent stays a Rust Worker, and the CLI
-   stays Rust.
+   SPA, and the CLI stays Rust. The cell is the one Worker (the
+   in-fragment goose agent's went: decision 33).
 3. **Accounts.** Dev and previews run on Paul's personal Cloudflare
    account. Production gets its own account before cutover. CI deploys
    from a clean configuration, the way a stranger would. WorkOS'
@@ -150,8 +150,8 @@ speaking Cloudflare's APIs) returns once this product works.
     boot script checks out the agent fragments assigned to its computer
     into profiles, and commits Hermes' changes back. One Hermes gateway
     serves every profile (`gateway.multiplex_profiles`). Memories and
-    custom skills are versioned, can be undone, and a future goose agent
-    can read them.
+    custom skills are versioned, can be undone, and another runtime can
+    read them.
 16. **Making an agent** starts the agent template: "What's this agent's
     job?", an optional name (otherwise it chooses), which connections it
     may use, and its model tier. It draws its own avatar in the
@@ -383,8 +383,8 @@ speaking Cloudflare's APIs) returns once this product works.
 
 29. **All of today's fragment model is ported**, core first.
     - Core: operations over the app's SQLite (Loader and Facets), live
-      updates, members and invites, files in git and deploys, isolation
-      on fragment.boats, and the in-fragment goose agent.
+      updates, members and invites, files in git and deploys, and
+      isolation on fragment.boats.
     - Then: jobs and cron (Workflows); deliveries, webhooks and push
       (Queues); blobs (R2); secrets and outbound fetch; and AI steps.
 
@@ -419,7 +419,13 @@ speaking Cloudflare's APIs) returns once this product works.
       - every e2e lane for them.
     - The chat and agent templates are rebuilt on the rule above.
     - The krun engine moves to its own repo, which Paul creates.
-    - Kept: the in-fragment goose agent.
+    - The in-fragment goose agent went too (2026-10-06, issue #156's
+      head scratcher 6): the `agent/` Worker on the goose fork, a
+      fragment's `agent` block, `job.agent`, `fragment agent`, the
+      calories template, and their e2e sections. Agents are fragments a
+      computer runs (decisions 14 and 15): one runtime, with one set of
+      turn, tool, progress and recovery semantics. An app's own model
+      calls are its AI steps.
     - Nothing on fragment.club migrates. People sign in again with the
       same WorkOS identity, and one seed carries usernames across.
 34. **Infra comes down after cutover**, one irreversible step at a
@@ -663,7 +669,6 @@ browser ── fragment.club (the shell) ─┐      ┌── <label>--<user>.f
  R2: blobs, site copies, screenshots, backups, replicas
  code.storage: every fragment's git (apps, chats, agents, brains, skills)
  Queues: deliveries, push, ledger batches   Workflows: jobs and cron runs
- goose agent Worker (Rust): a fragment's own agent, behind a service binding
 ```
 
 The shell talks to the platform's public API and frames fragments. The

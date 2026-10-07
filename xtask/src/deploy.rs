@@ -10,14 +10,14 @@
 //! (read-only) and refuses, before anything is built or made, when a
 //! secret the config names is not there. From the config and the
 //! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
-//! wrangler config under `target/deploy/<name>/`,
-//! the store secrets bound by name (`secrets_store_secrets`), makes the
-//! bucket and queues it names, and runs `wrangler deploy`. Only a branch's
+//! wrangler config under `target/deploy/<name>/`, the store secrets bound
+//! by name (`secrets_store_secrets`), makes the bucket and queues it
+//! names, and runs `wrangler deploy`. Only a branch's
 //! test secret is still a Worker secret, uploaded from a file of mode 600
 //! that is removed after.
 //!
 //! A branch deployment (`--branch b`) is a complete copy beside the others
-//! in one account and zone: its Workers, Durable Objects, Workflow, queues
+//! in one account and zone: its Worker, Durable Objects, Workflow, queues
 //! and bucket are named for it, its platform is `b.<zone>`, and its
 //! fragments are `<label>--<username>--b.<zone>` (one wildcard DNS record
 //! and certificate cover them all). Its repos are named `b--…` in the
@@ -515,7 +515,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     let bound = bound(&d)?;
     let tools = devstack::Tools::locate()?;
-    // and every store secret the Workers are bound to is there (read-only)
+    // and every store secret the Worker is bound to is there (read-only)
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     crate::build()?;
@@ -700,7 +700,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// Removes a branch deployment: its Workers (their Durable Objects and
+/// Removes a branch deployment: its Worker (its Durable Objects and
 /// data with them), its Workflow and its queues. Its bucket is emptied by
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.

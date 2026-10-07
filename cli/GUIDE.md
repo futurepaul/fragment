@@ -113,7 +113,7 @@ short-lived, repo-scoped token the platform mints for the agent.
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
+fragment init my-inbox --template inbox   # or: todo | notes | blank
 ```
 
 `fragment create <name> --template T` makes one on the platform with no
@@ -126,7 +126,6 @@ gives it its own title; any other is copied in as its first commit.
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
-- `calories`: a food log you tell what you ate; its own agent logs it.
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
@@ -293,8 +292,7 @@ export class App extends DurableObject {
   secret `NAME`, filled in outside your code), `job.publish(channel,
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
-  `job.push(who, payload)`, `job.ai.text|image|video(...)`,
-  `job.agent({prompt})` (below). A step that
+  `job.push(who, payload)`, `job.ai.text|image|video(...)`. A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -318,61 +316,6 @@ export class App extends DurableObject {
   ledger (below). `job.ai.video` is off until videos run on Cloudflare.
   GLM can spend a small `max_tokens` thinking: `reasoning_effort` is
   `low` unless you ask for `high`.
-
-## An agent in your fragment
-
-A fragment can bring its own agent: signed-in people talk to it through
-a channel, and it calls your operations for them. Declare it, with its
-instructions in a file of the fragment (`fragment new --template
-calories` is a working example):
-
-```json
-{
-  "operations": { "log_food": { "kind": "mutation", "role": "viewer", "input": { … } },
-                  "today":    { "kind": "query",    "role": "viewer" } },
-  "channels":   { "ask":  { "read": "viewer", "post": "viewer" },
-                  "work": { "read": "viewer", "post": "editor" } },
-  "agent": { "instructions": "agent.md", "tools": ["log_food", "today"], "channel": "ask",
-             "model": "cheap" }
-}
-```
-
-- Deploying makes it: an agent named as the fragment is, yours, an
-  editor of this fragment and of nothing else, listening to `channel`
-  (declared, with a `post` role; `"signedIn": true` refuses anonymous
-  posts outright). Redeploying updates it; a deploy
-  without the block removes it. A fragment with no block carries nothing
-  of one.
-- `tools` are operations of this fragment (never an owner-only one): the
-  model is offered those, as the person asking may call them, and no
-  other fragment's, no files, no deploy. `model` is optional: a tier,
-  `cheap` (the default) or `medium`.
-- A signed-in person's post to the channel (`fragment.post("ask",
-  {text})`) starts a turn; an anonymous one starts nothing. Someone
-  signed in who holds the link counts as a viewer for it, as they do on
-  the page. Each person has a conversation of their own with it, and each call acts for them,
-  with the lower of their role and the agent's: `call.principal` is the
-  person (`call.agent` the agent), so what it logs is theirs.
-- Its answer lands on the channel as `{text, turn}`, and its steps on
-  `work` (a start naming who asked, each tool call, an end): render them
-  as you like.
-- You pay for its model calls, from your ledger. Past your fragment's
-  cap, it answers only you.
-
-A job asks it too, for the run's principal (a triggered run's: the
-fragment, as an editor), and waits for the answer:
-
-```js
-async summarize(input, job) {
-  const { text, turn } = await job.agent({ prompt: "Summarize what I ate today.", channel: "ask" });
-  return { text };
-}
-```
-
-`conversation` (a key you choose) continues one across runs; without it
-each run has its own. `channel` posts the turn's steps and answer there
-too. A replayed run reattaches to the turn it started; a turn that fails
-or is stopped throws a `StepError`.
 
 ## Pages
 
@@ -492,26 +435,15 @@ A revoked key is refused from its next request and never comes back.
 
 ## Agents
 
-An agent is an identity with its own key, a model, and a conversation
-of its own (`agent/`, goose's loop), and you own it. Its tools are the
-operations of the fragments it belongs to, so what it may do is what its
-memberships allow. As its owner you can read whatever it can read (as a
-viewer), but you never act through it.
+An agent is an identity of its own, and you own it: an agent fragment
+your computer runs (you make one in the shell; "As an agent, on a
+computer" above). What it may do is what its memberships allow, and
+acting for you it never holds more than you do. As its owner you can
+read whatever it can read (as a viewer), but you never act through it.
 
 ```
-fragment agent create my-bot                          # makes it and registers it as yours; prints its id
-fragment members add my-thing <bot id> --role editor     # now it has my-thing's operations as tools
-fragment agent tools my-bot
-fragment agent say my-bot "add milk to the list"      # waits, prints the answer
-fragment agent show my-bot                            # its turn and recent messages
-fragment agent stop my-bot
+fragment members add my-thing <agent id> --role editor   # now it can call my-thing's operations
 ```
-
-A message sent while it works steers the running turn. A chat with the
-agent as a member, after `fragment agent listen my-bot my-chat`, gets an
-answer to every message from someone else. The agents answer on the
-platform's own host (their script is co-hosted in its fleet);
-`FRAGMENT_AGENTS` names another.
 
 ## Secrets
 
@@ -561,7 +493,6 @@ fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
-fragment agent create|show|say|stop|tools|listen ...
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host

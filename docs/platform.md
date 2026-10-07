@@ -28,7 +28,7 @@ belongs in a template instead.
 | `/share/<name>` | The share sheet, in a dialog in the shell, or on a page of its own: who is in; the owner invites by username, sets roles, removes, revokes invites, sets who can open it, and copies and renews the link. Sharing grants, so no fragment's code (which its author or an agent rewrites) may do it |
 | `/auth/fragment` | Signing in on a fragment's origin; on one that is not the person's nor shared with them, it asks "Continue to X?" first, once (docs/api.md, Asking first) |
 | `/join/<name>?token=` | Accepting an invite: what it grants, then a click; an invite by username is its invitee's alone. Replaced a fragment-origin `__join` (a page there is its author's) |
-| `/api/*` | The signed API: fragments, members, identities, budgets, agents (`/api/agents`, `/api/a/*`, co-hosted) |
+| `/api/*` | The signed API: fragments, members, identities, budgets, computers |
 
 No page on another origin may frame a platform page: every one answers
 `frame-ancestors 'none'` (PR `platform-no-framing`) but the share sheet,
@@ -48,18 +48,6 @@ fragment's page cannot script the window it opened on one. The sharing
 pages' forms also carry a token bound to the session and arm after a
 moment (docs/api.md, Sharing).
 
-## An agent a fragment declares
-
-`fragment.json`'s `agent` block (docs/api.md, A fragment's agent) is a
-vanilla feature: any fragment may declare one, and a fragment that does
-not carries nothing of it. What the platform does for it, a fragment's
-code cannot: its deploy makes the agent (named as the fragment, its
-owner's, an editor of that fragment alone, listening to the declared
-channel) or removes it, offers it only the operations the block names,
-runs its turns for the fragment's jobs (`job.agent`), and pays for its
-model calls from the owner's budget (`cell/src/agents.rs`,
-`sync_agent`).
-
 ## Behavior no fragment declares
 
 - **Which of a browser's cookies count** on a fragment's origin follows
@@ -71,11 +59,6 @@ model calls from the owner's budget (`cell/src/agents.rs`,
   Opening a fragment by its URL). An app's own answers pass as they are.
 - **An agent's authority** in a turn is the lower of its asker's role
   and a cap (phase 7, decision 1).
-- **An agent in a chat posts its work** (phase 7, C): a turn a chat
-  started posts its start, each tool call, and its end to the chat's
-  `work` channel, and its answer to `chat` naming the turn, when the chat
-  declares them postable; a stop the turn's starter posts on `chat` stops
-  it. The records' shape is docs/api.md's (A chat's records).
 - **Postable channels keep their newest 10,000 records**
   (`limits::POSTED_KEPT`), the oldest dropped with their posts' keys, as
   `events` and `ops` keep theirs: not declarable yet.

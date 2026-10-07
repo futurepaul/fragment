@@ -1,8 +1,8 @@
 # fragment-next
 
 Fragment is the product: stateful, multiplayer web apps published from
-the CLI. Agents are optional add-ons a fragment declares; computers come
-back on Cloudflare (docs/cloudflare-v1.md, phase 4).
+the CLI. Agents are fragments a computer of your own runs (today, Hermes
+profiles; docs/cloudflare-v1.md, decisions 14 and 15).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
@@ -27,12 +27,13 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — usernames and flat hosts, templates, your agent
-   making apps (its desktop and computers went at the cut);
+   `docs/phase-6.md` — usernames and flat hosts, templates (its
+   desktop, computers and goose agents went at the cuts);
    `docs/phase-4.md` — sign-in, identities, budgets (live);
    `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
-   `docs/phase-5.md` — agents (choices for review);
+   `docs/phase-5.md` — agents as members (the record: its goose agents
+   went on 2026-10-06);
    `docs/durable-computers.md` — how a computer's state survives a
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
@@ -79,7 +80,7 @@ prebuilt bundle is in the debt ledger).
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
   to the system's cache. Moving the pin: README.md, "The pinned Node".
-- `cargo xtask build`: the cell and the agents for wasm32.
+- `cargo xtask build`: the cell for wasm32.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
@@ -87,14 +88,14 @@ prebuilt bundle is in the debt ledger).
   lists), naming each file and line that does not parse; then host tests
   and clippy (host and wasm), warnings denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
-  builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
+  builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
+  brain, push, ai, ledger, shell, computers, chat, shell-ui,
   hermes, agent-smoke, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
@@ -146,8 +147,7 @@ prebuilt bundle is in the debt ledger).
   and every check passed, printed as one run. CI splits each shard's run
   in two, `--build-only` then `--no-build`, so the cache saves between
   (the build also builds the computer images ahead of the node, beside
-  the Rust; the cell and the agent build in parallel once worker-build
-  has its tools: `xtask/src/build.rs`).
+  the Rust: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
   … | --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the hosted
   lane, the same sections against the branch deployment
@@ -172,13 +172,11 @@ prebuilt bundle is in the debt ledger).
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
-  when `cell/src` or `crates/` change,
-  agents (`agent/`, goose's loop) beside it in the same process (the router
-  hands them `/api/agents` and `/api/a/*`), whose model calls go through
-  the model route to the Workers AI fake on :8796 (echoes, and draws
-  placeholder JPEGs for image steps; dev never calls a real model) and
-  spend their owner's ledger (dev people are seats, with the month's
-  included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  when `cell/src` or `crates/` change, the model route and AI steps on
+  the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
+  image steps; dev never calls a real model), which spend their payer's
+  ledger (dev people are seats, with the month's included credit), the
+  code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -198,8 +196,7 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank` and `calories`, which has a goose agent of its own); the
-  shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`); the shell's catalog offers `todo`, `inbox` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store
@@ -253,8 +250,7 @@ prebuilt bundle is in the debt ledger).
 
 - The deployment's secrets live in its account's Cloudflare Secrets
   Store: set with `cargo xtask secret`, named in its config, bound to the
-  Workers by name, and read only by `cell/src/keys.rs` and
-  `agent/src/keys.rs` (docs/secrets.md). Only the DNS token and a
+  Worker by name, and read only by `cell/src/keys.rs` (docs/secrets.md). Only the DNS token and a
   preview's test secret are files read by path. Never print them, pass
   them on a command line (no `--value`), or commit them; deleting one is
   Paul's.

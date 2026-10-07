@@ -347,8 +347,8 @@ pub struct WorkOsVars {
 }
 
 impl Fleet {
-    /// The store secrets its Workers are bound to, by name.
-    pub fn bound(&self) -> store::Bound {
+    /// The store secrets its Worker is bound to, by name.
+    fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
         store::Bound::conventional(self.workos.is_some(), &providers)
     }
@@ -473,7 +473,7 @@ pub struct NodeOptions {
     pub port: u16,
     /// Where each boot's log goes (`node-<port>-<boot>.log`).
     pub log_dir: PathBuf,
-    /// wrangler's own debug logs in the log, beside the Workers' output.
+    /// wrangler's own debug logs in the log, beside the Worker's output.
     pub node_logs: bool,
     /// A process group of its own, so the e2e crashes wrangler and workerd
     /// as one. `xtask dev` keeps it in the terminal's, so Ctrl-C reaches it

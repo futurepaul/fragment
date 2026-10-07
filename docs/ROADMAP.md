@@ -12,6 +12,10 @@ desktop and one home (decision 25), the personal agent's chat, and the
 fleet's deploy path left `master`. Their decisions and phases below
 (6, 8, and C–F) are the record; their code and docs are at the tag
 `celld-final`.
+Cut 2026-10-06 (issue #156, head scratcher 6): the in-fragment goose
+agent (decisions 10 and 20, phase 5, and D's agent add-on) left
+`master`; agents are fragments a computer runs, today Hermes. Those
+decisions and phases are the record; their code is at `1da3b4a`.
 Engineering style: `/Users/futurepaul/dev/finite/engineering-style/
 engineering-style.md` (the Finite contract), including hard cuts, the
 debt ledger (`docs/technical-debt-ledger.md`), and assertions on in
