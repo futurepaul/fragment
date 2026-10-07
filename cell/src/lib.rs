@@ -574,7 +574,7 @@ pub(crate) fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
 }
 
 /// An identity's fragments, as its `Principal` cell lists them.
-async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+pub(crate) async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
     let list = Request::new("https://principal.internal/list", Method::Get)?;
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
 }
@@ -769,7 +769,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
 
 /// A fragment named in an API path: `<label>.<username>`, or a bare label
 /// for a signed caller's own (under its username; an agent's owner's).
-fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
+pub(crate) fn named_fragment(name: &str, signer: Option<&Signed>) -> CellResult<String> {
     if valid_fragment_name(name) {
         return Ok(name.to_string());
     }
@@ -1027,6 +1027,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (_, ["share" | "join", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
+        }
+        // the platform's MCP server, for a connected client (mcp.rs)
+        (_, ["mcp"]) | (Method::Get | Method::Head, [".well-known", "oauth-protected-resource"] | [".well-known", "oauth-protected-resource", "mcp"]) => {
+            let segs = segments.clone();
+            mcp::platform(req, env, cfg, &url, &segs).await
         }
         // connected clients' authorization server (oauth.rs)
         (_, [".well-known", "oauth-authorization-server"] | ["oauth", _]) => {

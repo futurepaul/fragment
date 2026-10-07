@@ -147,6 +147,7 @@ pub fn mcp(s: &mut Suite, api: &Api) -> Result<()> {
     let resource = api.site_url(&name, "__mcp");
     authorization_server(s, api, &session, &keys, &email, &resource)?;
     fragment_server(s, api, &session, &keys, &name)?;
+    platform_server(s, api, &session, &keys, &name)?;
     limits(s, api, &session, &keys, &resource)?;
     Ok(())
 }
@@ -533,6 +534,119 @@ fn fragment_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, name: &
     api.signed(keys, "DELETE", &format!("/api/oauth/connections/{id}"), None)?;
     let r = rpc(api, name, Some(&token), "tools/list", json!({}), true)?;
     s.ok("an ended connection's access token is refused at once (401)", r.status == 401, &r);
+    Ok(())
+}
+
+/// A JSON-RPC request to the platform's `/mcp`, as a modern client sends it.
+fn platform_rpc(api: &Api, token: Option<&str>, method: &str, params: Value) -> Result<Reply> {
+    let mut params = params;
+    params["_meta"] = json!({ "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "e2e", "version": "1" } });
+    let mut extra = vec![("mcp-protocol-version", "2026-07-28".to_string()), ("mcp-method", method.to_string())];
+    if let Some(tool) = params["name"].as_str() {
+        extra.push(("mcp-name", tool.to_string()));
+    }
+    if let Some(token) = token {
+        extra.push(("authorization", format!("Bearer {token}")));
+    }
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    api.call(Call { method: "POST", url: format!("{}/mcp", api.base), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), extra, ..Call::default() })
+}
+
+/// One of the platform's tools, called: its structured answer, or why not.
+fn verb(api: &Api, token: &str, tool: &str, arguments: Value) -> Result<Value> {
+    let r = platform_rpc(api, Some(token), "tools/call", json!({ "name": tool, "arguments": arguments }))?;
+    anyhow::ensure!(r.status == 200, "tools/call {tool}: {r}");
+    Ok(r.body)
+}
+
+/// The platform's verbs as an MCP server at `/mcp`: the CLI's daily loop.
+fn platform_server(s: &mut Suite, api: &Api, session: &str, keys: &Keys, fragment: &str) -> Result<()> {
+    let resource = format!("{}/mcp", api.base);
+    let metadata_url = format!("{}/.well-known/oauth-protected-resource/mcp", api.base);
+    let r = platform_rpc(api, None, "tools/list", json!({}))?;
+    s.ok(
+        "without a token, the platform's /mcp is 401, naming its metadata",
+        r.status == 401 && r.header("www-authenticate") == format!("Bearer resource_metadata=\"{metadata_url}\""),
+        format!("{r} {}", r.header("www-authenticate")),
+    );
+    let r = api.unsigned("GET", "/.well-known/oauth-protected-resource/mcp", None)?;
+    s.ok("its metadata names /mcp and the platform", r.status == 200 && r.body["resource"] == resource.as_str() && r.body["authorization_servers"] == json!([api.base]), &r);
+    let client = Client::register(api, "E2E Claude")?;
+    let tokens = client.connect(api, session, &resource)?;
+    let token = tokens["access_token"].as_str().unwrap_or_default().to_string();
+    let r = platform_rpc(api, Some(&token), "tools/list", json!({}))?;
+    let names: Vec<&str> = r.body["result"]["tools"].as_array().map(|t| t.iter().filter_map(|t| t["name"].as_str()).collect()).unwrap_or_default();
+    s.ok(
+        "its tools are the CLI's daily loop",
+        names == ["list", "create", "status", "files", "read", "write", "deploy", "members", "share", "visibility", "call", "events"],
+        &r,
+    );
+
+    // the loop: make one, read it, change it, deploy it, call it, share it
+    let name = s.named(api, keys, "mcp-made")?;
+    let label = name.split('.').next().unwrap_or_default().to_string();
+    let r = verb(api, &token, "create", json!({ "label": label, "template": "todo" }))?;
+    s.ok("create makes a fragment of theirs from a template", r["result"]["structuredContent"]["name"] == name.as_str(), &r);
+    s.owned(&r["result"]["structuredContent"], keys);
+    let view = r["result"]["structuredContent"]["viewToken"].as_str().unwrap_or_default().to_string();
+    let r = verb(api, &token, "list", json!({}))?;
+    let mine = r["result"]["structuredContent"]["fragments"].as_array().is_some_and(|f| f.iter().any(|f| f["name"] == name.as_str() && f["role"] == "owner"));
+    s.ok("list has it, theirs", mine, &r);
+    let r = verb(api, &token, "status", json!({ "name": label }))?;
+    s.ok("status names a bare label's fragment as theirs, with its operations", r["result"]["structuredContent"]["name"] == name.as_str() && r["result"]["structuredContent"]["code"]["operations"].to_string().contains("toggle"), &r);
+    let r = verb(api, &token, "files", json!({ "name": name }))?;
+    s.ok("files lists its files", r["result"]["structuredContent"]["files"].to_string().contains("site/index.html"), &r);
+    let r = verb(api, &token, "read", json!({ "name": name, "path": "fragment.json" }))?;
+    s.ok("read answers a file's text", r["result"]["structuredContent"]["text"].as_str().is_some_and(|t| t.contains("\"toggle\"")), &r);
+    let write = json!({ "name": name, "files": [{ "path": "site/hello.txt", "text": "hello from a client" }], "key": "w1" });
+    let first = verb(api, &token, "write", write.clone())?;
+    let again = verb(api, &token, "write", write)?;
+    s.ok(
+        "write commits to main, once by its key",
+        first["result"]["structuredContent"]["commit"].is_string() && again["result"]["structuredContent"]["commit"] == first["result"]["structuredContent"]["commit"],
+        format!("{first} {again}"),
+    );
+    let r = verb(api, &token, "deploy", json!({ "name": name }))?;
+    s.ok("deploy makes main live", r["result"]["structuredContent"]["live"].is_string(), &r);
+    let r = api.call(Call { method: "GET", url: api.site_url(&name, &format!("hello.txt?view={view}")), ..Call::default() })?;
+    s.ok("and its page serves what the client wrote", r.status == 200 && r.text == "hello from a client", &r);
+    let r = verb(api, &token, "call", json!({ "name": name, "op": "add", "id": "c1", "input": { "text": "from the platform's tools" } }))?;
+    s.ok("call runs one of its operations", r["result"]["structuredContent"]["replayed"] == false && r["result"]["structuredContent"]["result"]["id"].is_i64(), &r);
+    let r = verb(api, &token, "call", json!({ "name": name, "op": "list", "input": {} }))?;
+    s.ok("and a query reads it", r["result"]["structuredContent"]["result"]["todos"].to_string().contains("from the platform's tools"), &r);
+    let (_, other, _) = person(api)?;
+    let username = api.username(&other)?;
+    let r = verb(api, &token, "share", json!({ "name": name, "member": format!("@{username}"), "role": "viewer" }))?;
+    let members = verb(api, &token, "members", json!({ "name": name }))?;
+    let theirs = api.identity(&other)?;
+    let added = members["result"]["structuredContent"]["members"].as_array().is_some_and(|m| m.iter().any(|m| m["principal"] == theirs.as_str() && m["role"] == "viewer"));
+    s.ok("share adds someone by username, and members lists them", r["result"]["isError"] == false && added, &members);
+    let r = verb(api, &token, "visibility", json!({ "name": name, "visibility": "members" }))?;
+    s.ok("visibility sets who may open it", r["result"]["structuredContent"]["visibility"] == "members", &r);
+    let r = verb(api, &token, "events", json!({ "name": name, "tail": 100 }))?;
+    let events = r["result"]["structuredContent"]["events"].as_array().cloned().unwrap_or_default();
+    let by = |kind: &str| events.iter().filter(|e| e["kind"] == kind && e["data"]["client"] == "E2E Claude").count();
+    s.ok(
+        "events says what the client did: its writes (create, write, deploy, share, visibility) and its call",
+        by("client.acted") >= 5 && by("client.called") == 1,
+        format!("{} client.acted, {} client.called", by("client.acted"), by("client.called")),
+    );
+
+    // what it may not do, and where its token is no good
+    let (_, stranger, _) = person(api)?;
+    let foreign = s.named(api, &stranger, "mcp-theirs")?;
+    let made = api.create_with(&stranger, json!({ "name": foreign, "visibility": "members" }))?;
+    anyhow::ensure!(made.status == 200, "create {foreign}: {made}");
+    s.owned(&made.body, &stranger);
+    let r = verb(api, &token, "status", json!({ "name": foreign }))?;
+    s.ok("someone else's members-only fragment is the call's refusal (forbidden)", r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().is_some_and(|t| t.starts_with("forbidden")), &r);
+    let r = verb(api, &token, "nope", json!({}))?;
+    s.ok("an unknown tool is -32602", r["error"]["code"] == -32602, &r);
+    let r = rpc(api, fragment, Some(&token), "tools/list", json!({}), true)?;
+    s.ok("the platform's token is refused at a fragment's __mcp", r.status == 401, &r);
+    let theirs = client.connect(api, session, &api.site_url(fragment, "__mcp"))?;
+    let r = platform_rpc(api, theirs["access_token"].as_str(), "tools/list", json!({}))?;
+    s.ok("and a fragment's at the platform's /mcp", r.status == 401, &r);
     Ok(())
 }
 

@@ -932,7 +932,8 @@ impl FragmentCell {
         let query = |k: &str| caller.url.query_pairs().find(|(q, _)| q == k).map(|(_, v)| v.into_owned());
         let segments: Vec<String> = path.trim_start_matches('/').split('/').map(decode_segment).collect();
         let segs: Vec<&str> = segments.iter().map(String::as_str).collect();
-        match (req.method(), segs.as_slice()) {
+        let method = req.method();
+        let answered = match (req.method(), segs.as_slice()) {
             (Method::Post, ["create"]) => {
                 let body: CreateFragment = body_json(&mut req).await?;
                 if body.name != routed_name {
@@ -1060,7 +1061,25 @@ impl FragmentCell {
                 self.inbox(&token, hops, &body).await
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
+        };
+        if let Ok(resp) = &answered {
+            self.noted_client(&caller, &method, &path, resp.status_code());
         }
+        answered
+    }
+
+    /// What a connected client changes names it (docs/api.md, Connected
+    /// clients): each write it made here that was taken, as `client.acted`.
+    /// An operation's call says so itself (`client.called`, ops.rs), its
+    /// replays and queries saying nothing.
+    fn noted_client(&self, caller: &Caller, method: &Method, path: &str, status: u16) {
+        let Some((signed, through)) = caller.signed.as_ref().and_then(|s| s.through.as_ref().map(|t| (s, t))) else { return };
+        if matches!(method, Method::Get | Method::Head) || path.starts_with("/api/ops/") || !(200..300).contains(&status) {
+            return;
+        }
+        let principal = npub::display(&signed.id);
+        let summary = format!("{} {path} by {principal} through {}", method.as_ref(), through.client);
+        self.event("client.acted", &summary, json!({ "method": method.as_ref(), "route": path, "principal": principal, "client": through.client, "connection": through.connection }));
     }
 
     async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
