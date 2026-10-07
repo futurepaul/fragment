@@ -691,11 +691,6 @@ impl Suite {
         self.cli_command(api, home, args).output().expect("run the fragment CLI")
     }
 
-    /// `cli`, run in `cwd` (where `fragment init` makes its folder).
-    pub fn cli_in(&self, api: &Api, home: &Path, cwd: &Path, args: &[&str]) -> Output {
-        self.cli_command(api, home, args).current_dir(cwd).output().expect("run the fragment CLI")
-    }
-
     /// The CLI as a lane spawns it itself (a watcher, a piped input): its
     /// config under the HOME the lane sets, on every system.
     pub fn bare_cli(&self) -> Command {
