@@ -1093,7 +1093,7 @@ impl FragmentCell {
                 return Err(CellError::invalid("a title is 1 to 120 characters"));
             }
         }
-        let cs_cfg = self.cfg.codestorage()?;
+        let cs_cfg = self.cfg.codestorage();
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
         // A claim left by a create that crashed mid-flight expires.
@@ -1223,7 +1223,7 @@ impl FragmentCell {
             code: self.code_status()?,
             view_token: Some(facts.view_token),
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
-            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform(&caller.url) },
+            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             name: facts.name,
         })

@@ -17,7 +17,7 @@ the deployment's secrets are Worker secrets (below).
 
 | Variable | Meaning |
 |---|---|
-| `CODESTORAGE_ORG` | the code.storage org |
+| `CODESTORAGE_ORG` | the code.storage org (required) |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Moved hosts, below). Every deployment names one: an isolate without it does not start |
 | `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
@@ -27,9 +27,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
 | `FRAGMENT_EGRESS_LOCAL` | `allow` lets jobs fetch loopback and private addresses, and takes a connection's http:// consent URL (dev and e2e fakes); never on a shared fleet. It also makes a fleet local for its test levers (Test levers, below) |
 | `FRAGMENT_BLOB_GRACE_S` | how long a blob no branch names is kept before it is deleted (default 7 days) |
-| `FRAGMENT_PUSH_SUBJECT` | who push services may contact about this fleet's pushes (a `mailto:` or https URL; RFC 8292) |
-| `FRAGMENT_DELIVERY_RETRY_S` | the shortest wait before a delivery is retried (default 10; the wait grows with the delivery's age, up to an hour), and before a preview card's failed shot is (doubling: Cards, below) |
-| `FRAGMENT_DELIVERY_RETRY_MAX_S` | the longest (default an hour, never under the shortest; test fleets set both, for a fixed pace) |
+| `FRAGMENT_DELIVERY_RETRY_S` | test fleets: every wait before a delivery, or a preview card's failed shot, is tried again, pinned. Unset, a delivery's wait is 10 s growing with its age to an hour, and a shot's 10 s doubling to an hour (Cards, below) |
 | `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
@@ -37,7 +35,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, and release usernames (as `FRAGMENT_CREATORS` once read them) |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
-| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (default: the hostname suffix itself; fragment.club's is https://fragment.club, on no fragment's domain) |
+| `FRAGMENT_PLATFORM_URL` | the platform's origin, where sign-in and the platform session live (required; fragment.club's is https://fragment.club, on no fragment's domain). Every push's VAPID token names it as its contact (`sub`, RFC 8292) |
 | `FRAGMENT_SIGNINS_PENDING_MAX` | sign-ins begun and not finished that the registry keeps (default 100000; at least 1): a sign-in is kept through this many later starts, so the oldest is let go only past this many starts in its ten minutes (Sign-in, below) |
 | `FRAGMENT_PROVIDERS` | the provider catalog a computer's swap offers (`fragment_core::catalog`; docs/computers.md, Connections and operator keys): a JSON list of `{name, kind: connection\|operator\|own, hosts, placements, env, price?}`, rendered from the config's `providers`; none by default. A malformed one is refused at the node's first request (the deploy checks it first). An operator key's price is the price book's `keys`; raise `FRAGMENT_PRICE_BOOK_VERSION` with every change to one |
 
@@ -278,7 +276,7 @@ On fragment.club the platform is cross-site from every fragment
 (`fragment.club` and `<label>--<username>.fragment.boats`), so its
 SameSite=Lax session cookie reaches a fragment's page only on a
 top-level visit. A fleet whose platform shares the fragments' domain
-(`FRAGMENT_PLATFORM_URL` unset) puts them on one site, where the cookie
+(a `FRAGMENT_PLATFORM_URL` on the suffix's site) puts them on one site, where the cookie
 rides along on a fragment page's form, fetch, or frame. Either way every
 page here answers `Content-Security-Policy:
 frame-ancestors 'none'` and `X-Frame-Options: DENY` (no page may frame
@@ -743,8 +741,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
 - **Retried with backoff, then quiet.** A failed try (no browser, a page
   that does not open, a socket that fails, a try lost with the
   fragment's object: each counts as failed from when it begins) is tried
-  again after `FRAGMENT_DELIVERY_RETRY_S`, doubling to
-  `FRAGMENT_DELIVERY_RETRY_MAX_S`, at most 5 tries in all. Then the live is
+  again after 10 s, doubling to an hour (a test fleet's
+  `FRAGMENT_DELIVERY_RETRY_S` pins the wait), at most 5 tries in all.
+  Then the live is
   given up: one `card.failed` event, and the card before stays.
 - **As a visitor without an account sees it.** The renderer has no
   session of anyone's: a `public` fragment is shot as anyone sees it, a

@@ -209,7 +209,7 @@ impl FragmentCell {
             Err(e) => return self.outbox_failed(failed, id, attempts, &e.message),
         };
         // one token per push service for all of this push's batches
-        let mut tokens = Tokens::new(&vapid, &self.cfg.push_subject, js::now_ms() / 1000);
+        let mut tokens = Tokens::new(&vapid, &self.cfg.platform_url, js::now_ms() / 1000);
         for _ in 0..PUSH_BATCHES_MAX {
             let subs = match self.rows(
                 "SELECT id, endpoint, p256dh, auth FROM push_subs WHERE id > ? AND id <= ? AND (? = '*' OR who = ?) ORDER BY id LIMIT ?",
