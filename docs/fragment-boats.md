@@ -528,7 +528,7 @@ Docs each slice updates:
 
 - `docs/api.md`: Sign-in, the cookies, the isolation rules, and
   `__frame`. Its "one site with the platform" passages go.
-- `docs/platform.md`: a `__frame` row; the framing note now says the
+- `docs/platform.md` (at the tag `celld-final`): a `__frame` row; the framing note now says the
   platform is cross-site.
 - `docs/operate.md` (the `celld` branch's): DNS, certificates, the fleet variables.
 - `docs/ROADMAP.md`: a decision (23, as built) amending decision 16,
@@ -693,7 +693,7 @@ In order:
    inside a page that holds the capability and went through `__frame`.
    Amended 2026-09-26 (Paul): making a desktop with the platform's
    new-fragment form is that allow (the form says so); any other way asks
-   in the share sheet (docs/platform.md, `frame`).
+   in the share sheet (docs/platform.md at the tag `celld-final`, `frame`).
 
 ## Not in scope
 

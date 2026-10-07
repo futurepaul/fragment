@@ -603,7 +603,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 
 ### C. Declutter
 - Take the desktop's and chats' special cases out of the core
-  (`docs/platform.md`: the chat page, the owner's agent in every chat,
+  (`docs/platform.md` at the tag: the chat page, the owner's agent in every chat,
   the `work` channel, "is it a chat", the new desktop's visibility and
   framing). Each becomes something any fragment may declare, moves into
   its template, or waits behind one seam that D replaces.
@@ -615,7 +615,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   The new desktop's visibility stayed (`publish.rs`, `first_visibility`):
   fragment.json holds no access. *Since `pet-followups`:* it reads what
   the template declares (a computer, or any capability), naming no
-  template; platform.md's row for it is gone. The chat's three wait for D.
+  template; platform.md's row for it went. The chat's three wait for D.
 
 ### D. The agent add-on
 - *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`
@@ -697,7 +697,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   agent (and a computer, after E) and uses only what any fragment may
   declare. Phase 6's look and quality; no new features.
 - **Acceptance:** the desktop lane and the phase7 flow pass, and
-  `docs/platform.md` has no special case for the desktop.
+  `docs/platform.md` at the tag has no special case for the desktop.
 - *Built 2026-09-26 (PR `desktop-computers`):* the sidebar's Computers.
   New computer makes a pet fragment (`computer-…`) through `__fragments`,
   told apart by its name as chats are; it opens as a pane and is awake
@@ -705,7 +705,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   (`job.computer.exec`) is how your agent runs commands there, from any
   chat, through the platform's verbs; a job's call now answers what the
   job answered (docs/computers.md at the tag). Since #60 keyed `first_visibility` on
-  what a template declares, docs/platform.md names the desktop only as the
+  what a template declares, docs/platform.md (at the tag) named the desktop only as the
   first user of `fragments` and `frame`: no special case is left. *Since
   `agent-handoff`:* your agent hands work to a computer from any chat (a
   pet you name, or a throwaway builder).

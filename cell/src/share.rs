@@ -165,7 +165,7 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
 /// The share sheet itself: a sharing page only the platform's own pages
 /// may frame (the shell shows it in a dialog: cell/shell/shell.js
 /// `share`). `'self'` is the platform's origin alone; every fragment is on
-/// another (docs/platform.md).
+/// another (docs/api.md, Sign-in).
 fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let mut resp = sheet_page(status, title, body, true)?;
     let h = resp.headers_mut();
