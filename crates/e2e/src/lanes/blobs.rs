@@ -28,7 +28,6 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let c = s.cli_json(api, &home, &["create", &s.name("blobs"), "--show-tokens", "--json"])?;
     let name = c["name"].as_str().unwrap_or("").to_string();
-    s.hook(api, &c);
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     let dir = s.dir("blobs");
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();

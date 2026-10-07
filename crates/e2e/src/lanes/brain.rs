@@ -131,7 +131,6 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let name = made.body["name"].as_str().unwrap_or("").to_string();
     s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && name.starts_with(&format!("{label}.")), &made);
     anyhow::ensure!(made.status == 200, "no brain to test: {made}");
-    s.hook(api, &made.body);
     let repo = made.body["repo"].as_str().unwrap_or("").to_string();
     let listed = s.eventually(WAIT, || {
         shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| {
@@ -143,9 +142,14 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its repo names the template and its face, nothing else", m.body == json!({ "template": "brain", "meta": { "title": "Garden" } }), &m);
     let st = api.status(&keys, &name)?;
     let ops = &st.body["code"]["operations"];
+    let release = fragment_templates::blessed::release("brain").map(|r| format!("blessed:brain@{r}"));
     s.ok(
-        "the release's code runs on it: search, its index, and the job its file trigger starts",
-        st.body["code"]["error"].is_null() && ops["search"]["kind"] == "query" && ops["changed"]["kind"] == "job" && ops["reindex"]["role"] == "editor",
+        "the release's code runs on it, as its status names it: search, its index, and the job its file trigger starts",
+        st.body["code"]["error"].is_null()
+            && st.body["code"]["id"].as_str() == release.as_deref()
+            && ops["search"]["kind"] == "query"
+            && ops["changed"]["kind"] == "job"
+            && ops["reindex"]["role"] == "editor",
         &st.body["code"],
     );
     let t = api.signed(&keys, "GET", &format!("/api/f/{name}/triggers"), None)?;
@@ -311,7 +315,7 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
 
     // restart: the index survives, and follows the next change
     s.stop()?;
-    let api = &s.start(false, true)?;
+    let api = &s.start(false)?;
     let st = index(api, &keys, &name);
     let r = search(api, &keys, &name, json!({ "q": "inverter" }))?;
     s.ok(

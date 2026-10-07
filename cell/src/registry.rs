@@ -73,7 +73,6 @@ CREATE TABLE IF NOT EXISTS subjects (
   issuer TEXT NOT NULL, subject TEXT NOT NULL, identity TEXT NOT NULL, linked_at INTEGER NOT NULL, email TEXT,
   PRIMARY KEY (issuer, subject));
 CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
-DROP TABLE IF EXISTS meta;
 CREATE TABLE IF NOT EXISTS usernames (
   username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
@@ -104,7 +103,6 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
-        signin::migrate(&state.storage().sql());
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }

@@ -1,15 +1,13 @@
 // The platform's hand-written JavaScript (besides platform.mjs, which runs
-// inside the app facet, and storage.mjs, a computer's S3 endpoint).
-// Everything else is Rust. The runtime gives RPC only to a class that
-// extends DurableObject, and workers-rs classes do not, so these classes do
-// and forward each handler. workers-rs 0.8.5 has no Workflows and no
-// Containers, so the job driver and a computer's container calls are here
-// too; they only call and call back: every decision is Rust's (jobs.rs,
-// computer.rs).
+// inside the app facet). Everything else is Rust. The runtime gives RPC
+// only to a class that extends DurableObject, and workers-rs classes do
+// not, so these classes do and forward each handler. workers-rs 0.8.5 has
+// no Workflows and no Containers, so the job driver and a computer's
+// container calls are here too; they only call and call back: every
+// decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
-import { handleS3 } from "./storage.mjs";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
@@ -129,6 +127,19 @@ export class Job extends WorkflowEntrypoint {
   }
 }
 
+// The last `keep` bytes `stream` carries, read to its end, as text: at
+// most those and one chunk are held at once.
+async function tail(stream, keep) {
+  let last = new Uint8Array(0);
+  for await (const chunk of stream) {
+    const both = new Uint8Array(last.length + chunk.length);
+    both.set(last);
+    both.set(chunk, last.length);
+    last = both.slice(-keep);
+  }
+  return new TextDecoder().decode(last);
+}
+
 // A computer's container (docs/computers.md), for the Rust `ComputerCell`
 // (computer.rs), which reaches it as `ctx.computerHost`. Each method is one
 // runtime call and its plumbing. Every call that touches the container
@@ -227,7 +238,6 @@ class ContainerHost {
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    await this.#settled(() => c.interceptOutboundHttp("storage.fragment.internal", egress("storage")));
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
@@ -239,15 +249,7 @@ class ContainerHost {
 
   // Waits until the container takes an exec (it is up), for at most `ms`.
   async execReady(generation, ms) {
-    const t0 = Date.now();
-    while (generation === this.#generation && Date.now() - t0 < ms) {
-      try {
-        const out = await (await this.#c.exec(["true"])).output();
-        if (out.exitCode === 0) return true;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    return false;
+    return (await this.execUntil(generation, ["true"], ms)).ok;
   }
 
   // Runs `argv` until it exits 0 (polling every 100 ms), for at most `ms`:
@@ -272,20 +274,34 @@ class ContainerHost {
     return { ok: false, tries, last };
   }
 
-  // Runs `argv` in the container, answering within `ms` when it is given,
-  // with the last `keep` bytes of its output (4 KiB unless named).
-  async exec(generation, argv, ms, keep) {
+  // Runs `argv` in the container: its exit code and the last `keep` bytes
+  // of its output, stdout and stderr together (4 KiB unless named), all of
+  // it held as it runs. Past `ms` (a wait for a container still starting
+  // included) the call fails and the process is killed (SIGKILL), started
+  // or not; one seen to exit is never signalled (an uncaught error in the
+  // DO, the runtime's docs say).
+  async exec(generation, argv, ms, keep = 4096) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    const run = (async () => (await this.#c.exec(argv, { stderr: "combined" })).output())();
+    if (!(ms > 0)) throw new Error(`${argv.join(" ")}: an exec is bounded`);
+    const kill = new AbortController();
+    let exited = false;
+    const run = (async () => {
+      const proc = await this.#c.exec(argv, { stderr: "combined", signal: kill.signal });
+      proc.exitCode.then(() => (exited = true), () => (exited = true));
+      const output = await tail(proc.stdout, keep);
+      return { exitCode: await proc.exitCode, output };
+    })();
     // a late failure, once the bound answered, is no one's to hear
     run.catch(() => {});
     let timer;
     const late = new Promise((_, reject) => {
-      if (ms) timer = setTimeout(() => reject(new Error(`${argv.join(" ")}: no answer within ${ms} ms`)), ms);
+      timer = setTimeout(() => {
+        if (!exited) kill.abort();
+        reject(new Error(`${argv.join(" ")}: no answer within ${ms} ms`));
+      }, ms);
     });
     try {
-      const out = await (ms ? Promise.race([run, late]) : run);
-      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-(keep || 4096)) };
+      return await Promise.race([run, late]);
     } finally {
       clearTimeout(timer);
     }
@@ -424,14 +440,11 @@ export class Computer extends DurableObject {
 
 // Every intercepted request a computer's guest makes (docs/computers.md):
 // `props.route` is the host it asked for, and `props.computer` the
-// computer, both set by the Computer DO, never by the guest. Storage is
-// answered here; the rest is Rust's (`ComputerEgress.handle`).
+// computer, both set by the Computer DO, never by the guest. Rust answers
+// it (`ComputerEgress.handle`).
 export class ComputerEgress extends WorkerEntrypoint {
   fetch(request) {
     const { computer, route } = this.ctx.props;
-    if (route === "storage") {
-      return handleS3(request, this.env.BLOBS, `computers/${computer}/storage/`).then(([resp]) => resp);
-    }
     return rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
   }
 }

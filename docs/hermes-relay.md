@@ -82,9 +82,33 @@ image against it.
   The first answer wins; prompt ids are its own (`<nonce>.<hex>`).
 - Hermes: `going_idle` → the connector: `going_idle_ack`.
 - `react`: `👀` on the message as processing starts, off as it ends,
-  then `✅` or `❌` (a cancelled turn: neither). Hermes has no other
-  end-of-turn signal, and its multiplexed gateway brackets one message
-  twice: once, empty, as it dispatches to the profile, then the turn's.
+  then `✅` or `❌` (a cancelled turn: neither): `RelayAdapter`'s
+  `on_processing_start` and `on_processing_complete`, with its
+  `_ACK_EMOJI_DEFAULT` (only Telegram gets others). Hermes has no other
+  end-of-turn signal. A message that reaches it while its gateway starts
+  (its adapters connect before `_startup_restore_in_progress` clears) is
+  bracketed twice: once, empty, then `✅`, as `_handle_message` queues it
+  behind the startup restore, then the turn's own as
+  `_drain_startup_restore_queue` runs it (`gateway/run_inbound.py`,
+  `gateway/run_startup.py`). In the real image that is a boot's first
+  turn, 1.3 s apart; every later message is bracketed once. A person's
+  turn always says something before its `✅`: an empty answer becomes
+  `EMPTY_RESPONSE_EXPLANATION` and a bare silence marker
+  `_UNEXPECTED_SILENCE_REPLY` (`gateway/run_turn.py`); a handler that
+  raises sends `❌`, then its notice (`_notify_turn_error`).
+
+What Relay does not carry (v0.21.5, and upstream's main on 2026-10-06):
+a turn's start or end as a frame of its own (the gateway's frames are
+`hello`, `outbound`, `inbound_ack`, `going_idle`, and an `interrupt`
+nothing sends); a question to answer
+in words as anything but text (an open `clarify` is the base adapter's
+`❓ <question>`; one with choices is a `prompt` of `prompt_kind:
+"clarify"`, whose "Other" is answered `✏️ Type your answer:`; main
+translates both, keeping the glyphs); a tool step as anything but
+progress text (`task_card` is Slack's alone). Hermes' supported hooks
+(`gateway/hooks.py`: `agent:start`, `agent:step`, `agent:end`; plugins'
+`pre_tool_call`, `post_tool_call`) have all three, but outside Relay:
+the bridge would need a channel of its own beside it.
 
 ## Hermes' settings (images/hermes)
 

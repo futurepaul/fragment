@@ -161,7 +161,7 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let closed = api.page(&app, "", None)?;
     let r = hand_for_paul("PUT", "visibility", Some(json!({ "visibility": "public" })))?;
     let mut open = None;
-    // the deploy lands by the webhook: the page is asked again until it has
+    // the deploy lands: the page is asked again until it has
     s.eventually(Duration::from_secs(20), || {
         open = api.page(&app, "", None).ok();
         open.as_ref().is_some_and(|p| p.status == 200 && p.text.contains("Paul's app"))
@@ -175,17 +175,12 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let r = hand_for_paul("POST", "rotate", Some(json!({ "scopes": ["view"] })))?;
     let after = api.status(&paul, &app)?.body["viewToken"].as_str().unwrap_or("").to_string();
     s.ok(
-        "it rotates the share link, and is never told the webhook secret",
-        r.status == 200 && r.body["rotated"] == json!(["view"]) && r.body["viewToken"] == after.as_str() && !before.is_empty() && after != before && r.body.get("webhookSecret").is_none(),
+        "it rotates the share link",
+        r.status == 200 && r.body["rotated"] == json!(["view"]) && r.body["viewToken"] == after.as_str() && !before.is_empty() && after != before,
         &r,
     );
-    let r = hand_for_paul("POST", "rotate", Some(json!({ "scopes": ["webhook"] })))?;
     let defaults = hand_for_paul("POST", "rotate", Some(json!({})))?;
-    s.ok(
-        "but the webhook secret is the owner's to rotate (403), and a rotate that names nothing renews only the links",
-        r.status == 403 && defaults.status == 200 && defaults.body["rotated"] == json!(["inbox", "view"]) && defaults.body.get("webhookSecret").is_none(),
-        json!({ "webhook": r.body, "defaults": defaults.body }),
-    );
+    s.ok("and a rotate that names nothing renews both links", defaults.status == 200 && defaults.body["rotated"] == json!(["inbox", "view"]), &defaults);
     let r = hand_for_paul("DELETE", &format!("members/{bob_id}"), None)?;
     let bobs = listed(api, &bob, &app)?;
     s.ok("and removes Bob, whose list no longer has it", r.status == 200 && bobs.is_none(), json!({ "removed": r.body, "listed": bobs }));

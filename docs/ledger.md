@@ -266,21 +266,26 @@ mark sends the same batch again, which answers as before.
   theirs.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
-- **Operator keys** (decision 37): before the call the computer asks the
-  owner's ledger whether they may spend (`may_spend(agent_turn)`); after
-  the provider answered (under 500), the intercept meters one `key` call
-  (`key:<computer>:<12 hex>`), as the agent, to its owner, and the
-  computer counts it with its charge (docs/computers.md).
+- **Operator keys** (decision 37): reserved and settled the same way as
+  model calls. Before the call, the intercept reserves one `key` call at
+  its price (`key:<computer>:<12 hex>`, as the agent, on its owner's
+  ledger). A refusal, or a ledger that does not answer, refuses the call:
+  a key is the operator's money. Once the provider answered (under 500),
+  the call settles at that one call, and the computer counts it with its
+  charge (docs/computers.md). A call the provider did not answer is
+  released. A settle or release that does not land is charged by the
+  sweep.
 - **Compute** (the Computer DO). It meters each awake interval at sleep,
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
   ledger waives an always-on seat's awake time; no wake starts when
   `may_spend(wake)` refuses.
 - **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
-  SQLite (its own and its app facet's) and its blobs, and meters `bytes ×
-  hours since the last sample` (`store:<fragment>@<incarnation>:<class>:<at>`)
-  to the fragment's owner. Its git repository is not sampled yet (the
-  debt ledger). A computer's backups bill the computer's owner.
+  own SQLite and its blobs, and meters `bytes × hours since the last
+  sample` (`store:<fragment>@<incarnation>:<class>:<at>`) to the
+  fragment's owner. Its app facet's database and its git repository are
+  not sampled (the debt ledger). A computer's backups bill the computer's
+  owner.
 - **Requests** (the Fragment DO, which sees each one the router hands
   it): a row per minute (`req:<fragment>@<incarnation>:<minute>`) to the
   fragment's owner, closed once the minute has passed.
@@ -333,5 +338,4 @@ the batch, so a guest's fragments are billed nothing.
   concurrent browsers ($2.00 a month for each past 10, the month's
   average of each day's peak). That is a deployment-wide charge no one
   shot causes, so it is not metered per person; the margin carries it
-  (each fragment has at most one shot out, and a consumer batch takes its
-  shots one at a time).
+  (each fragment has at most one shot out: its alarm takes it).

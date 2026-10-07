@@ -42,7 +42,7 @@ pub fn mime_for_path(path: &str) -> &'static str {
     }
 }
 
-/// The fragment's own organs, hidden from `__tree` and `__file`.
+/// The fragment's own organs, hidden from `__files` and `__file`.
 pub fn is_machinery(path: &str) -> bool {
     matches!(path, "fragment.json" | "app.mjs" | "rooms.mjs" | "_index.md")
         || ["workflows/", "applib/", "lib/", "node_modules/"].iter().any(|p| path.starts_with(p))

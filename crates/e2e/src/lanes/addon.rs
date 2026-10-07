@@ -62,7 +62,7 @@ pub fn addon(s: &mut Suite, api: &Api) -> Result<()> {
     let name = s.named(api, &owner, "calories")?;
     let made = api.create_with(&owner, json!({ "name": name, "template": "calories" }))?;
     anyhow::ensure!(made.status == 200, "calories from its template: {made}");
-    s.hook(api, &made.body);
+    s.owned(&made.body, &owner);
     // the visitor opens its link, signed in: no member, a viewer by the link
     let link = format!("fragview={}", made.body["viewToken"].as_str().unwrap_or(""));
     let visiting = format!("fragment_site={}; {link}", site_cookie(api, &visitor_session, &name)?);
