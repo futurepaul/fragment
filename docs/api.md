@@ -1,13 +1,13 @@
 # fragment wire contract
 
-The cell (`cell/`, Rust on Cloudflare Workers) answers everything below; the CLI and
-the browser library are its clients. Errors are `{"error": "<code>",
-"message": "..."}` (codes in `crates/proto`). `cargo xtask e2e` proves
-every route. The TypeScript runtime this replaced was deleted (its
-contract is in git history, last at `35f5e18`). Hermes,
-computers, the desktop, and the personal agent's chat went at the cut
-(docs/cloudflare-v1.md, decision 33); their contract is at the tag
-`celld-final`.
+The cell (`cell/`, Rust on Cloudflare Workers) answers everything below;
+the CLI and the browser library are its clients. Errors are `{"error":
+"<code>", "message": "..."}` (codes in `crates/proto`). `cargo xtask e2e`
+proves every route. The TypeScript runtime this replaced was deleted
+(its contract is in git history, last at `35f5e18`). The desktop and the
+personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
+33; their contract is at the tag `celld-final`); computers came back
+(Computers, below), with Hermes as our image's agent runtime.
 
 ## Configuration
 
@@ -515,7 +515,7 @@ and styles only inline and images only from the platform
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed and the agent it declares has joined (`fragment deploy` asks it). A fragment reads the branches it has no pin for once, on its first request (a push may predate its webhook); after that a move arrives by the webhook, this, or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
-| `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files and 256 KiB; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
+| `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it, and the agent its `agent` block declares joins, at once |
 | `POST /api/f/{name}/webhook` | code.storage | signed with the fragment's webhook secret (`X-Pierre-Signature`, 5 minutes); validate, remember (redeliveries are acknowledged), then move the pin to the branch's head as read now |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, release?}]}` at main; a pointer's `size` is its bytes'. A fragment on a blessed template lists that template's data from the release beneath its own files (`release: true`, `lastCommitSha` `release:<hash of its bytes>`: templates/skills/README.md) |

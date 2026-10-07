@@ -1,7 +1,8 @@
-//! The deployment's keys are Worker secrets in the platform Worker's env
-//! (cell/src/keys.rs): an app's env, which the platform builds, holds only
-//! its capabilities, and what one fragment seals another cannot open (a
-//! sealed value names the Durable Object that sealed it).
+//! The deployment's keys are Secrets Store bindings in the platform
+//! Worker's env (cell/src/keys.rs): an app's env, which the platform
+//! builds, holds only its capabilities, and what one fragment seals
+//! another cannot open (a sealed value names the Durable Object that
+//! sealed it).
 
 use anyhow::Result;
 use serde_json::json;
