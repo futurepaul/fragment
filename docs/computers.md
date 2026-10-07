@@ -732,11 +732,13 @@ and how a runtime finds them, is the image's.
   in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
   synced both ways: an agent's own skills are versioned in its fragment).
   Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. Hermes' bundled skills
-  are the default profile's only; an agent's profile has its own, the
-  managed set, which is what the shell's Skills section lists, and the
-  platform skill. A managed skill a session has not yet seen appears at its
-  next session.
+  managed one, and either over the platform skill. An agent's profile has
+  its own, the managed set, which is what the shell's Skills section
+  lists, and the platform skill. The image carries none of Hermes' bundled
+  skills: Hermes copies them only into the home its sync runs in, the
+  gateway's default profile, which runs no turns (and stage2 and the
+  gateway then sync nothing at a boot). A managed skill a session has not
+  yet seen appears at its next session.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner

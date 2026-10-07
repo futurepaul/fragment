@@ -614,23 +614,20 @@ fragment.club until cutover (decisions 34–35).
 
 ## The Hermes image patches Hermes' own boot
 
-- **Observed:** phase 4 (`images/hermes/Dockerfile`, `preload.py`).
-  Spike S3b's cuts need upstream changes Hermes v0.21.5 does not have,
-  so the image makes them: a `sed` gates stage2's config migration and
-  skills sync on `hermes-boot stamped` (the build fails unless both
-  lines patch), `02-reconcile-profiles` is replaced with a no-op (the
-  preloaded gateway is the main program), and `preload.py` replaces
-  `tools.skills_sync.sync_skills` and `_sync_bundled_skills_quietly`
-  when the skills stamp matches.
-- **Risk:** a Hermes release moves those lines or names: the build
-  fails on the stage2 patch (loudly), but the preload's replacement
-  stops applying (silently, about 0.5 s slower), or applies to a changed
-  function.
+- **Observed:** phase 4 (`images/hermes/Dockerfile`). Spike S3b's cuts
+  need upstream changes Hermes v0.21.5 does not have, so the image makes
+  them: a `sed` gates stage2's config migration on `hermes-boot stamped`
+  (the build fails unless the line patches), and `02-reconcile-profiles`
+  is replaced with a no-op (the preloaded gateway is the main program).
+- **Risk:** a Hermes release moves that line or renames that script: the
+  build fails on the stage2 patch (loudly), but a renamed reconciler runs
+  (silently), and starts a second gateway from a restored
+  `gateway_state.json`.
 - **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream keys its setup and bundled-skills syncs on
-  the image revision and ships a preloadable, unsupervised gateway main
-  program (S3b's "Upstream Hermes" list), proven by the real-Hermes lane
-  on an unpatched image at the same READY time.
+- **Delete when:** upstream keys its setup on the image revision and
+  ships a preloadable, unsupervised gateway main program (S3b's "Upstream
+  Hermes" list), proven by the real-Hermes lane on an unpatched image at
+  the same READY time.
 
 ## A Hermes turn's end is read from its reactions
 

@@ -103,14 +103,20 @@ COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 RUN sed -i 's#/opt/data#/data/hermes#g' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run \
  && ! grep -q '/opt/data' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run
 
-# Setup gated on stamps (S3b, cut d): the config migration and the bundled
-# skills sync run once per (Hermes revision, their input). The build fails
-# if upstream's script no longer reads as patched.
+# Setup gated on stamps (S3b, cut d): the config migration runs once per
+# (Hermes revision, its input). The build fails if upstream's script no
+# longer reads as patched.
 RUN sed -i \
       -e 's#^    s6-setuidgid hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/scripts/docker_config_migrate.py" \\$#    /opt/fragment/bin/hermes-boot stamped migrate "$HERMES_HOME/config.yaml" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \\#' \
-      -e 's#^    as_hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/tools/skills_sync.py" \\$#    /opt/fragment/bin/hermes-boot stamped skills "$HERMES_HOME/skills/.bundled_manifest" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \\#' \
       /opt/hermes/docker/stage2-hook.sh \
- && test "$(grep -c 'hermes-boot stamped' /opt/hermes/docker/stage2-hook.sh)" = 2
+ && test "$(grep -c 'hermes-boot stamped' /opt/hermes/docker/stage2-hook.sh)" = 1
+
+# None of Hermes' bundled skills: Hermes copies them only into the home
+# its sync runs in, the gateway's default profile, which runs no turns (an
+# agent's profile has its own, the managed set and the platform skill:
+# docs/computers.md). Without them stage2 runs no sync (it syncs only when
+# `/opt/hermes/skills` is there) and the gateway's two return at once.
+RUN rm -r /opt/hermes/skills
 
 # The gateway is hermes-boot's main program (preloaded): no per-profile s6
 # gateway services, which would start a second gateway (S3b, cut b).
