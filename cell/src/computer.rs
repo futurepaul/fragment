@@ -1928,7 +1928,7 @@ impl ComputerEgress {
         let answered = match route.as_str() {
             "api" => egress_api(req, &env, &ctx, &computer).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
-            "swap" => egress_swap(req, &env, &computer).await,
+            "swap" => egress_swap(req, &env, &ctx, &computer).await,
             r => Err(CellError::new(ErrorCode::NotFound, format!("no egress route {r}"))),
         };
         // one line per refusal (lesson 14): the guest's requests never reach
@@ -2085,10 +2085,13 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
 /// go to no provider. An operator key's call is held on the agent's
-/// owner's ledger before it is made (`hold_keys`) and settled once the
-/// provider answered, or released (`end_holds`); each call it answered is
-/// counted as the agent's (`computer/used`).
-async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<Response> {
+/// owner's ledger before it is made (`hold_keys`, awaited: no hold, no
+/// call). After the answer is handed back, the hold is settled if the
+/// provider answered, or released (`end_holds`), and each call it answered
+/// is counted as the agent's (`computer/used`). Both run in `wait_until`:
+/// a hold that never ends is charged by the ledger's sweep, so deferring
+/// the settle loses nothing.
+async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
@@ -2149,15 +2152,21 @@ async fn egress_swap(mut req: Request, env: &Env, computer: &str) -> CellResult<
     let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
     let status = sent.as_ref().ok().map(Response::status_code);
     let answered = status.is_some_and(|s| s < 500);
-    if let Some((_, owner, _)) = &payer {
-        end_holds(env, owner, &holds, answered).await;
-    }
-    // each call the provider answered is the agent's (decision 37), a key's at its price
-    if let (Some((agent, _, _)), true) = (&payer, answered) {
+    // after the answer, never in its way: a hold that does not end is the
+    // ledger's to charge (its sweep), so nothing here goes unaccounted
+    if let Some((agent, owner, _)) = payer {
+        // each call the provider answered is the agent's (decision 37), a key's at its price
         let uses: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "micros": holds.iter().find(|h| h.provider == p.provider).map_or(0, |h| h.amount) })).collect();
-        if let Err(e) = ask(env, computer, "computer/used", &json!({ "agent": agent, "at": js::now_ms(), "uses": uses })).await {
-            console_error!("{}", json!({ "egress": "swap", "used": e.message }));
-        }
+        let (env, computer) = (env.clone(), computer.to_string());
+        ctx.wait_until(async move {
+            end_holds(&env, &owner, &holds, answered).await;
+            if !answered {
+                return;
+            }
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": js::now_ms(), "uses": uses })).await {
+                console_error!("{}", json!({ "egress": "swap", "used": e.message }));
+            }
+        });
     }
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
