@@ -174,7 +174,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let op_session = api.sign_in("operator@e2e.test")?;
     api.approve(&op_session, &s.operator)?;
     let owned = s.named(api, &mistaken, "mine")?;
-    s.create(api, &mistaken, &owned)?;
+    let mine = s.create(api, &mistaken, &owned)?;
     let r = api.signed(&s.operator, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
     s.ok("not while its person owns a fragment under it (its URLs name it)", r.status == 409 && r.message().contains(&owned), &r);
     api.signed(&mistaken, "DELETE", &format!("/api/f/{owned}"), None)?;
@@ -182,6 +182,19 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let chosen = format!("{mistaken_u}b");
     let again = api.signed(&mistaken, "PUT", "/api/identities/me/username", Some(&json!({ "username": chosen })))?;
     s.ok("released, its person chooses again", r.status == 200 && r.body["released"] == true && again.status == 200 && again.body["username"] == chosen.as_str(), format!("{r} {again}"));
+    // the username's next holder makes the same label under it: a repo of
+    // their own, never its earlier holder's (a repo's name carries its owner)
+    let took = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": mistaken_u })))?;
+    let remade = api.create(&nameless, &owned)?;
+    let theirs = fragment_core::codestorage::repo_name("", &owned, &api.identity(&nameless)?).unwrap_or_default();
+    s.ok(
+        "another identity under a released username, the same label: a fresh repo, named for its owner",
+        took.status == 200
+            && remade.status == 200
+            && remade.body["repo"] != mine["repo"]
+            && s.fake.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
+        format!("{took} {remade} (the earlier holder's repo {})", mine["repo"]),
+    );
     let r = api.unsigned("GET", &format!("/api/users/{owner_u}"), None)?;
     s.ok("anyone sees who a username is", r.status == 200 && r.body["id"] == api.identity(&owner)?.as_str() && r.body["picture"].is_null(), &r);
     let png: &[u8] = b"\x89PNG\r\n\x1a\n-a-tiny-picture";
@@ -208,10 +221,13 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
+    // the one derivation of a repo's name (crates/core codestorage.rs):
+    // `<label>--<username>--<12 hex of its owner>`; a local node has no prefix
+    let named = fragment_core::codestorage::repo_name("", &name, &api.identity(&owner)?).unwrap_or_default();
     s.ok(
-        "the repo exists in code.storage as <label>--<username>",
-        s.fake.repo_url(&format!("{label}--{owner_u}")).as_deref() == Some(repo.as_str()),
-        &repo,
+        "the repo exists in code.storage as <label>--<username>--<its owner's 12 hex>",
+        named.starts_with(&format!("{label}--{owner_u}--")) && s.fake.repo_url(&named).as_deref() == Some(repo.as_str()),
+        format!("{repo} ({named})"),
     );
     s.ok(
         "create returns the fragment's own origin",

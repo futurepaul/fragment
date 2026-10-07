@@ -27,6 +27,9 @@ runtime. A change that would have to is a design bug (the rule).
   starts and stops it, saves and restores `/data`, runs the egress
   intercepts below, proxies its ports, and wakes it. It never reads what
   the image runs.
+- A computer is deleted only with its owner, by an operator's wipe of them
+  (docs/api.md, Operators; below, "Deleted with its owner"). A new
+  identity is a new computer: its id is its owner's.
 
 ## Lifecycle
 
@@ -263,6 +266,35 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   back to a save older than that life's newest, so what that life did
   since some save is in none. A start from the save its life's sleep took
   is none. Nothing's correctness depends on the guest reading either.
+
+### Deleted with its owner
+
+An operator's wipe of its owner (docs/api.md, Operators) asks the Computer
+DO to wipe itself (`computer/wipe`, an internal route), until it says
+nothing is left:
+
+- it is **marked wiped first**, in its storage: from the mark on no write
+  of its lands (a save, a start's report, a meter under way when the wipe
+  began fails at its next write), its alarm is gone, and every route
+  answers as a computer never made (404), so nothing wakes or starts it
+  again;
+- its **container is destroyed**, whichever start runs it, and waited
+  out;
+- **every save goes from R2**: each record its saves name (kept, and let
+  go of and not yet deleted), through the same `DirectoryBackup` delete a
+  save's own `forget` makes, then whatever else is under its saves'
+  prefix (`computers/<object id>/backups/`: an upload its destroy cut
+  short), ten pages a call;
+- once none is left, **its record is emptied** (its tables dropped and
+  made again empty, its mark kept): its saves, lifecycle, agents, uses,
+  own keys, tickets and sessions, and the **snapshot's** id.
+
+Cloudflare deletes no container snapshot: the Worker's container binding
+takes one (`snapshotContainer`) and starts from one, and has no delete,
+and Cloudflare keeps one for 30 days after it was last restored. A wiped
+computer's snapshot is forgotten, so nothing ever restores it, and it
+expires within 30 days. The container application is the deployment's
+(every computer on an image shares it), so a wipe leaves it.
 
 ### The fragment API
 
@@ -653,9 +685,18 @@ settings and state):
   own `hermes backup --quick` was not used: it copies a fixed list of files
   under one home, and its `_safe_copy_db` copies 256 pages a step with
   0.1 s between, which a busy database restarts. Once the hold goes the
-  copies go. At a start, before the gateway opens a database, the copies
-  go back over their live paths (each one's `-wal`, `-shm` and `-journal`
-  removed, its owner and mode as they were): after a restore its
+  copies go. Held, Hermes' gateway still writes on its own timers: its
+  heartbeat (every 30 s), its status and its cron ticker's stamps (every
+  60 s), its logs, and once per changed config its known-good copy of it.
+  Each is replaced whole, appended, or read only as a broken config's
+  fallback, so the save keeps it as it reads it. Its model-catalog
+  refresh, the one such writer that fetched from outside, is off
+  (`model_catalog.enabled: false` in the managed overlay). Node's compile
+  cache, which npm put in Hermes' home (its `TMPDIR`), is under /tmp
+  (`NODE_COMPILE_CACHE`). docs/durable-computers.md, "What changes under
+  the hold", has each writer and why. At a start, before the gateway
+  opens a database, the copies go back over their live paths (each one's
+  `-wal`, `-shm` and `-journal` removed, its owner and mode as they were): after a restore its
   `computer-check` does it, then `quick_check`s every database but its work's as the
   hermes user and exits 3 on one that fails; after a snapshot, `pre-init`
   does it, so both wakes leave the same `/data`.
@@ -960,6 +1001,12 @@ for a host) and finds the same `HOME`, `~` and modes.
   (`fail-saves`), and so is an always-on plan (`always-on`). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays.
+- The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
+  whose `/data` holds a file its agent wrote and a save, wiped with its
+  owner (its first step alone, then across a node's crash): no computer
+  from that step, its saves gone, its owner's next identity's computer a
+  new one that restores nothing and reads no such file; hosted, the same
+  on the deployment's own image.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
   first's turn runs included, and an install as root (a `.deb` through

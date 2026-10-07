@@ -106,6 +106,14 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
+    // Hermes' remote model catalogs are off: every profile's model is the
+    // platform's route, and they serve only its `/model` picker (which a
+    // person never reaches: the bridge keeps a leading `/` from reading as a
+    // command) and OpenRouter's and Nous' routes. On, the gateway fetched
+    // them from four hosts 30 s after it started and every 20 minutes, and
+    // rewrote four caches in its home while the computer was held
+    // (docs/durable-computers.md, "What changes under the hold").
+    y.push_str("model_catalog:\n  enabled: false\n");
     // Each agent's desktop starts for its screen's first viewer (the
     // bridge's `screen-start`), or at the agent's first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
@@ -622,6 +630,7 @@ mod tests {
             "mode: \"smart\"",
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
+            "\nmodel_catalog:\n  enabled: false\n",
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }

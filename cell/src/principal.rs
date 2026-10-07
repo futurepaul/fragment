@@ -40,6 +40,15 @@
 //!   learns only that something changed. A socket closed or lost misses
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
+//!
+//! **Wiped** (docs/api.md, Operators): a wipe of its person (or of the
+//! person who owns its agent) closes its sockets and empties it in one
+//! step, leaving one row that says so (`wiped`). From then it takes
+//! nothing and lists nothing: a change still on its way from a fragment's
+//! outbox is taken (so the outbox forgets it) and kept nowhere, so nothing
+//! of a wiped person's list comes back. An identity is never made again.
+
+use std::cell::Cell;
 
 use fragment_core::npub;
 use fragment_core::search::{self, Query};
@@ -68,6 +77,15 @@ CREATE TRIGGER IF NOT EXISTS search_entries_dropped AFTER DELETE ON search_entri
 END;
 ";
 
+/// The one row a wiped list keeps: when it was wiped. Apart from `SCHEMA`,
+/// whose tables a wipe drops.
+const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
+/// `SCHEMA`'s full-text table, which `ddl::tables` does not read (a virtual
+/// table): a wipe drops it beside the rest.
+const SEARCH_TEXT: &str = "search_text";
+/// The rows one `wipe/view` page lists.
+const WIPE_VIEW_PAGE: i64 = 200;
+
 /// The tag of the sockets that watch this list (`/watch`).
 const WATCH_TAG: &str = "watch";
 /// A watching socket's first frame, as it opens.
@@ -85,6 +103,24 @@ const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
 #[durable_object]
 pub struct PrincipalCell {
     state: State,
+    /// Its person was wiped (`wiped`'s row, read as it starts): it takes
+    /// nothing more.
+    wiped: Cell<bool>,
+}
+
+/// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WipeView {
+    #[serde(default)]
+    after: Option<String>,
+}
+
+/// A row as a wipe reads it: any role, or none (a fragment left or ended).
+#[derive(Serialize, Deserialize)]
+struct WipeRow {
+    fragment: String,
+    role: Option<Role>,
 }
 
 /// A fragment's change to this key's membership. `incarnation` is the
@@ -181,7 +217,10 @@ impl DurableObject for PrincipalCell {
     fn new(state: State, _env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
-        PrincipalCell { state }
+        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
+        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
+        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
+        PrincipalCell { state, wiped: Cell::new(wiped) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -229,6 +268,18 @@ impl PrincipalCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let url = req.url()?;
+        if let Some(route) = req.path().strip_prefix("/wipe/") {
+            // only a wipe's orchestrator sets the header (routed.rs `marker`)
+            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")));
+            }
+            let route = route.to_string();
+            let body = req.bytes().await?;
+            return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
+        }
+        if self.wiped.get() {
+            return self.wiped_answer(&req);
+        }
         match (req.method(), req.path().as_str()) {
             (Method::Post, "/index") => {
                 let c: IndexChange = serde_json::from_slice(&req.bytes().await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
@@ -261,6 +312,62 @@ impl PrincipalCell {
             }
             (Method::Get, "/watch") => self.watch(&req),
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
+        }
+    }
+
+    /// What a wiped list answers: a change taken and kept nowhere, an empty
+    /// list, a search that finds nothing, and no socket or archiving.
+    fn wiped_answer(&self, req: &Request) -> CellResult<Response> {
+        assert!(self.wiped.get(), "only a wiped list answers so");
+        match (req.method(), req.path().as_str()) {
+            (Method::Post, "/index") => Ok(Response::from_json(&json!({ "ok": true, "applied": false }))?),
+            (Method::Get, "/list") => Ok(Response::from_json(&FragmentList { fragments: vec![] })?),
+            (Method::Post, "/search/entries") => Ok(Response::from_json(&SearchApplied { member: false, applied: 0 })?),
+            (Method::Get, "/search") => Ok(Response::from_json(&SearchAnswer { fragments: vec![], messages: vec![] })?),
+            (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}: this list's person was wiped", m.as_ref()))),
+        }
+    }
+
+    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs):
+    /// `view {after?}` → `{wiped, rows: [{fragment, role}], more, entries}`,
+    /// its rows a page at a time (any role, or none), and its search's
+    /// entries; `end` → `{wiped, rows}`: its sockets closed and every table
+    /// dropped and made again empty, with the row that says it was wiped,
+    /// in one step (no await). Again, it changes nothing.
+    fn wipe(&self, route: &str, body: &[u8]) -> CellResult<Value> {
+        match route {
+            "view" => {
+                let b: WipeView = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("wipe/view: {e}")))?;
+                let rows: Vec<WipeRow> = self.typed(
+                    "SELECT fragment, role FROM memberships WHERE fragment > ? ORDER BY fragment LIMIT ?",
+                    vec![b.after.unwrap_or_default().into(), SqlStorageValue::Integer(WIPE_VIEW_PAGE + 1)],
+                )?;
+                let more = rows.len() as i64 > WIPE_VIEW_PAGE;
+                let rows: Vec<WipeRow> = rows.into_iter().take(WIPE_VIEW_PAGE as usize).collect();
+                let entries = self.count("SELECT COUNT(*) AS n FROM search_entries", vec![])?;
+                Ok(json!({ "wiped": self.wiped.get(), "rows": rows, "more": more, "entries": entries }))
+            }
+            "end" => {
+                for ws in self.state.get_websockets() {
+                    let _ = ws.close(Some(4003), Some("this person was wiped"));
+                }
+                let rows = self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?;
+                // one step, no await: emptied and marked, or neither
+                let sql = self.sql();
+                for table in fragment_core::ddl::tables(SCHEMA) {
+                    sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
+                }
+                sql.exec(&format!("DROP TABLE IF EXISTS {SEARCH_TEXT}"), None)?;
+                sql.exec(SCHEMA, None)?;
+                if !self.wiped.get() {
+                    sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(crate::js::now_ms())])?;
+                }
+                self.wiped.set(true);
+                assert_eq!(self.count("SELECT COUNT(*) AS n FROM memberships", vec![])?, 0, "a wiped list holds no row");
+                assert_eq!(self.count("SELECT COUNT(*) AS n FROM wiped", vec![])?, 1, "a wiped list says so once");
+                Ok(json!({ "wiped": true, "rows": rows }))
+            }
+            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
 

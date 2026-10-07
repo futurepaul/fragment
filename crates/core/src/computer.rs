@@ -1281,6 +1281,21 @@ impl Saves {
         &self.forgetting
     }
 
+    /// Every record a wipe deletes (docs/api.md, Operators): each kept
+    /// save's, newest first, then each let go of and not deleted yet. A
+    /// record is a save's or waits to be deleted, never both.
+    pub fn every_record(&self) -> Vec<Value> {
+        let kept = self.saves.iter().flat_map(|s| s.records.iter());
+        let out: Vec<Value> = kept.chain(self.forgetting.iter()).cloned().collect();
+        assert!(out.len() <= SAVES_KEPT * SAVE_RECORDS_MAX + FORGETTING_MAX, "a computer's records are bounded");
+        out
+    }
+
+    /// Whether it keeps a snapshot's id (a cache of its current save).
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
     /// The record `id` was deleted.
     pub fn forgot(&mut self, id: &str) {
         self.forgetting.retain(|r| r["id"] != id);
@@ -1726,6 +1741,27 @@ mod tests {
         // a snapshot taken with a save that is no longer current is not kept
         assert!(!s.snapshotted("b1", "s1-late", IMAGE));
         assert_eq!(s.plan(Some(IMAGE)), Plan::Backup);
+    }
+
+    /// Goal: a wipe deletes every record a computer's saves name, the kept
+    /// saves' and those let go of and not deleted yet, each once, and sees
+    /// its snapshot. Method: saves past `SAVES_KEPT` (one let go of), a
+    /// failed delete kept, a snapshot; then each record forgotten.
+    #[test]
+    fn a_wipe_finds_every_record_its_saves_name() {
+        let mut s = Saves::default();
+        assert!(s.every_record().is_empty() && !s.has_snapshot());
+        for (n, id) in ["b0", "b1", "b2", "b3"].iter().enumerate() {
+            s.saved(1, rec(id), T + n as i64, true);
+        }
+        // b0 was pushed out of the newest three: let go of, not deleted yet
+        let ids = |s: &Saves| s.every_record().iter().map(|r| r["id"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&s), ["b3", "b2", "b1", "b0"]);
+        assert!(s.snapshotted("b3", "s3", IMAGE));
+        assert!(s.has_snapshot());
+        // once b0's delete worked it is not named again
+        s.forgot("b0");
+        assert_eq!(ids(&s), ["b3", "b2", "b1"]);
     }
 
     /// Goal (P3, decision 19): a snapshot is of the image its start ran, so

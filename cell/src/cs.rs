@@ -269,6 +269,19 @@ impl<'a> Cs<'a> {
         core_cs::repo_url(&v).ok_or_else(|| upstream("repo url", status, b"no url in the answer"))
     }
 
+    /// Deletes the repo (a wiped person's fragment's, ended: cell
+    /// ended.rs): done once code.storage says it is gone, deleted by this
+    /// call or before it (`core_cs::repo_deleted`), so asking again after a
+    /// lost answer is no error. The service deletes softly, then cleans up
+    /// its storage on its own.
+    pub async fn delete_repo(&self, repo: &str) -> CellResult<core_cs::RepoDeleted> {
+        let (status, body) = self.call(Method::Delete, &format!("/api/repos/{}", seg(repo)), repo, &["repo:write"], None).await?;
+        match core_cs::repo_deleted(status, &body) {
+            core_cs::RepoDeleted::Failed => Err(upstream("delete repo", status, &body)),
+            gone => Ok(gone),
+        }
+    }
+
     /// A branch's head, or `None` when the branch does not exist.
     pub async fn branch_head(&self, repo: &str, branch: &str) -> CellResult<Option<String>> {
         let path = format!("/api/repos/{}/branch?name={}", seg(repo), encode_q(branch));

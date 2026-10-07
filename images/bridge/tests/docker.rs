@@ -13,6 +13,7 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -655,43 +656,131 @@ async fn a_save_taken_while_it_writes_opens() {
     assert_eq!(held_torn, 0, "a held save's databases are whole");
 }
 
-/// Goal (P2): once the guest says `held`, no file its save keeps changes:
-/// the bridge claims nothing, the sync, the skills and the agents' reads
-/// start no round, and the copy is done before the answer. Hermes' gateway
-/// is not paused (P2: it cannot be asked), so the hold comes between turns,
-/// and what Hermes writes on its own while idle (its kanban dispatcher opens
-/// its board's database on a timer, making its `-wal` and `-shm`) is in the
-/// files its answer names, which the save leaves out (their copies kept).
+/// The files under `/data`, each path with its size and time, but those
+/// `leave` names (the hold's answer: anchored paths, `/` being `/data`).
+fn files(c: &Container, leave: &[String]) -> BTreeMap<String, String> {
+    let listed = c.exec_out(&["sh", "-c", "find /data -type f -printf '%s %T@ %p\\n'"]);
+    let mut all = BTreeMap::new();
+    for line in listed.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(size), Some(time), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        if !leave.iter().any(|p| path.strip_prefix("/data") == Some(p.as_str())) {
+            all.insert(path.to_string(), format!("{size} {time}"));
+        }
+    }
+    all
+}
+
+/// The paths added, removed or changed from `before` to `after`.
+fn changed(before: &BTreeMap<String, String>, after: &BTreeMap<String, String>) -> Vec<String> {
+    let paths: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    paths.into_iter().filter(|p| before.get(*p) != after.get(*p)).cloned().collect()
+}
+
+/// What Hermes' gateway writes on its own timers, which the hold cannot
+/// quiet (its gateway is not paused: P2), and which the save keeps as it
+/// reads it (docs/durable-computers.md, "What changes under the hold"): each
+/// file replaced whole (a temp file beside it, fsynced, renamed over it, so
+/// a save has the old or the new, never a mix), appended (a log), an empty
+/// lock, or a copy only a broken config would read; and those temp files as
+/// they are written. Read from Hermes v0.21.5, measured idle:
+/// - its home's loop heartbeat (`state/gateway.heartbeat`, every 30 s), its
+///   runtime status (`gateway_state.json`, every 60 s) and its channel
+///   directory (`channel_directory.json`, every 5 minutes);
+/// - in its home and each profile's, its cron ticker's stamps and lock
+///   (`cron/ticker_*`, `cron/.tick.lock`, every 60 s, though its cron tool is
+///   off), its logs, and its last-known-good copy of the profile's config
+///   (`backups/config/config.yaml.good.<time>`): made once, in place, by the
+///   first read of a `config.yaml` whose bytes its newest copy lacks (on a
+///   first start, the gateway's catalog watcher's tick 30 s after it starts,
+///   which reads the config with the catalog off), and read only when that
+///   `config.yaml` will not parse, which the boot's never fail to do (each
+///   written whole at every start).
+fn kept_hot(path: &str) -> bool {
+    let Some(rel) = path.strip_prefix("/data/hermes/") else { return false };
+    let (home, rel) = match rel.strip_prefix("profiles/") {
+        Some(p) => (false, p.split_once('/').map_or("", |(_, r)| r)),
+        None => (true, rel),
+    };
+    let (dir, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let temp = name.starts_with('.') && name.ends_with(".tmp");
+    let home_only = home && (matches!(rel, "state/gateway.heartbeat" | "gateway_state.json" | "channel_directory.json") || (temp && matches!(dir, "" | "state")));
+    let each_home = matches!(rel, "cron/ticker_heartbeat" | "cron/ticker_last_success" | "cron/ticker_last_error" | "cron/.tick.lock")
+        || (temp && dir == "cron")
+        || (dir == "logs" && name.contains(".log"))
+        || (dir == "backups/config" && name.starts_with("config.yaml.good."));
+    home_only || each_home
+}
+
+/// What changed under `/data` while held that `kept_hot` does not explain.
+fn unexplained(changed: &[String]) -> Vec<&String> {
+    changed.iter().filter(|p| !kept_hot(p)).collect()
+}
+
+/// Each of `paths` Hermes replaces whole, a state or a stamp, read now:
+/// whole, it parses as JSON (a stamp's epoch is a number).
+fn whole(c: &Container, paths: &[String]) {
+    let replaced = |p: &&String| p.ends_with(".json") || ["/gateway.heartbeat", "/ticker_heartbeat", "/ticker_last_success", "/ticker_last_error"].iter().any(|s| p.ends_with(s));
+    for p in paths.iter().filter(replaced) {
+        let (code, text) = c.exec_code(&["cat", p]);
+        if code == 0 {
+            assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok(), "{p} is whole: {text:?}");
+        }
+    }
+}
+
+/// The caches Hermes' model-catalog refresh writes into the gateway's home.
+const CATALOG_CACHES: [&str; 4] = ["model_catalog.json", "openrouter_curated_catalog.json", "nous_recommended_cache.json", "reasoning_caps.json"];
+
+/// A hold kept this long, and until Hermes' heartbeat (every 30 s) and its
+/// cron ticker (every 60 s, as its status is) have both run inside it, sees
+/// each of Hermes' own idle timers but its 5-minute one, and the image's own
+/// repo sync (every 60 s) were the hold not to quiet it: every run sees the
+/// same. Past `HELD_MAX_MS` without them, the test fails.
+const HELD_MS: u64 = 65_000;
+const HELD_MAX_MS: u64 = 150_000;
+/// Two of Hermes' timers, each seen rewritten inside the hold.
+const TIMERS: [&str; 2] = ["/data/hermes/state/gateway.heartbeat", "/data/hermes/cron/ticker_heartbeat"];
+
+/// Goal (P2): once the guest says `held`, no file its save keeps changes
+/// but what Hermes' gateway rewrites on its own timers, each whole
+/// (`kept_hot`): the bridge claims nothing, the sync, the skills and the
+/// agents' reads start no round, and the copy is done before the answer.
+/// Hermes' gateway is not paused (P2: it cannot be asked), so the hold comes
+/// between turns; what Hermes writes on its own while idle in a database
+/// (its kanban dispatcher opens its board's on a timer, making its `-wal`
+/// and `-shm`) is in the files its answer names, which the save leaves out
+/// (their copies kept). Its model-catalog refresh, which on 2026-10-07
+/// rewrote four caches inside this test's hold (then 5 s, landing in it
+/// only in a slow run), is off, and Node's compile cache is out of `/data`.
 /// Method: an idle Hermes held, a listing of the files under `/data` (each
-/// path, size and time) but those the answer names, then another five
-/// seconds later. Then a message said while it is held is not claimed
-/// until the hold goes (its bridge records it, unclaimed: its state file
-/// is rewritten, whole).
+/// path, size and time) but those the answer names, then another at least
+/// `HELD_MS` later, once Hermes' heartbeat and cron ticker have both run:
+/// past every one of those timers, so every run sees them inside the hold,
+/// whenever it began. Then a message said while it is held is not
+/// claimed until the hold goes (its bridge records it, unclaimed: its state
+/// file is rewritten, whole).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn held_nothing_under_data_changes() {
     let (fake, _model, chat, c) = hermes_running().await;
-    let files = |leave: &[String]| -> Vec<String> {
-        let listed = c.exec_out(&["sh", "-c", "find /data -type f -printf '%p %s %T@\\n' | sort"]);
-        listed.lines().filter(|l| !leave.iter().any(|p| l.starts_with(&format!("/data{p} ")))).map(str::to_string).collect()
-    };
     // between turns: once Hermes' start-up writes are done (its lazy
     // packages; its kanban dispatcher makes its board's database some
     // seconds after the gateway starts), two windows of three seconds with
-    // no file but a database's journal changed
-    let journals = |l: &String| [".db-wal ", ".db-shm ", ".db-journal "].iter().any(|s| l.contains(s));
-    let settled = |all: Vec<String>| all.into_iter().filter(|l| !journals(l)).collect::<Vec<_>>();
+    // no file changed but a database's journal and what Hermes' timers keep
+    let journals = |p: &String| [".db-wal", ".db-shm", ".db-journal"].iter().any(|s| p.ends_with(s));
+    let settled = |all: BTreeMap<String, String>| all.into_iter().filter(|(p, _)| !journals(p) && !kept_hot(p)).collect::<BTreeMap<_, _>>();
     let quiet = Instant::now();
     // bounded: two minutes
     while !c.exec(&["test", "-f", "/data/hermes/kanban.db"]) {
         assert!(quiet.elapsed() < Duration::from_secs(120), "Hermes never made its kanban board's database");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    let mut last = settled(files(&[]));
+    let mut last = settled(files(&c, &[]));
     let mut still = 0;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let now = settled(files(&[]));
+        let now = settled(files(&c, &[]));
         still = if now == last { still + 1 } else { 0 };
         if still >= 2 {
             break;
@@ -702,11 +791,29 @@ async fn held_nothing_under_data_changes() {
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
     assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper-paul/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
     assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
-    let before = files(&left_out);
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    let after = files(&left_out);
-    let changed: Vec<_> = before.iter().zip(after.iter()).filter(|(a, b)| a != b).collect();
-    assert!(before == after, "a file the save keeps changed while held ({} before, {} after): {changed:?}", before.len(), after.len());
+    let before = files(&c, &left_out);
+    let held = Instant::now();
+    // bounded by HELD_MAX_MS
+    let seen = loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let seen = changed(&before, &files(&c, &left_out));
+        let fired = TIMERS.iter().all(|t| seen.iter().any(|p| p == t));
+        if fired && held.elapsed() >= Duration::from_millis(HELD_MS) {
+            break seen;
+        }
+        assert!(held.elapsed() < Duration::from_millis(HELD_MAX_MS), "Hermes' timers ran inside the hold ({TIMERS:?}): {seen:?}");
+    };
+    eprintln!("hermes: changed in {} ms held: {seen:?}", held.elapsed().as_millis());
+    assert!(unexplained(&seen).is_empty(), "a file the save keeps changed while held, not one Hermes' timers rewrite whole: {:?} (all changed: {seen:?})", unexplained(&seen));
+    whole(&c, &seen);
+    // its catalogs, refreshed 30 s after the gateway started had they been
+    // on, are not; Node's compile cache (its `npx --version` probes ran with
+    // the first turn) is under /tmp
+    for cache in CATALOG_CACHES {
+        assert!(!c.exec(&["test", "-e", &format!("/data/hermes/cache/{cache}")]), "no catalog refresh wrote {cache}");
+    }
+    assert_eq!(c.exec_out(&["find", "/data", "-name", "node-compile-cache"]).trim(), "", "Node's compile cache is not under /data");
+    assert!(!c.exec_out(&["find", "/tmp/node-compile-cache", "-type", "f"]).trim().is_empty(), "it is under /tmp, where npm's start put it");
     // a message as it is held: recorded, never claimed while held
     let said = fake.say(&chat, &person("paul"), json!({ "text": "said while held" }));
     let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
@@ -1572,4 +1679,106 @@ async fn a_turn_cut_by_a_restart_is_closed_and_told() {
     let (asked_after, _) = asked_with(&calls, "and after that").expect("a request for the message after");
     assert!(!asked_after.contains("cut short"), "the turn after is told nothing: {asked_after:?}");
     eprintln!("cut: {closed}\ncut: the boundary the model saw: {before:?}\ncut: the message: {asked:?}");
+}
+
+// ---- Hermes' catalog refresh under the hold (2026-10-07:
+// `held_nothing_under_data_changes` failed once, in a parallel run, when the
+// refresh landed inside its hold) ----
+
+/// Python in Hermes' own environment, as its gateway runs it (the hermes
+/// user, its home), with `env` added: the JSON of its last line.
+fn hermes_python(c: &Container, env: &[&str], code: &str) -> serde_json::Value {
+    let mut cmd = vec!["/command/s6-setuidgid", "hermes", "env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes"];
+    cmd.extend_from_slice(env);
+    cmd.extend_from_slice(&["/opt/hermes/.venv/bin/python", "-c", code]);
+    let (code, said) = c.exec_code(&cmd);
+    assert_eq!(code, 0, "Hermes' Python: {said}");
+    let last = said.lines().rev().find(|l| l.starts_with('{')).unwrap_or_else(|| panic!("no JSON from Hermes' Python: {said}"));
+    serde_json::from_str(last).unwrap_or_else(|e| panic!("{e}: {last}"))
+}
+
+/// What the gateway's `_model_catalog_refresh_watcher` (Hermes'
+/// gateway/run_watchers.py) runs at each tick, 30 s after it starts and
+/// every 20 minutes: `refresh_catalogs`, which first refreshes the manifest
+/// (`get_catalog(force_refresh=True)`), then OpenRouter's and Nous' lists.
+const REFRESH: &str = "import json\nfrom hermes_cli import model_catalog as m\nenabled = m._load_catalog_config()['enabled']\nrefreshed = m.refresh_catalogs()\nprint(json.dumps({'enabled': enabled, 'refreshed': refreshed, 'catalog': m.get_catalog(force_refresh=True)}))";
+
+/// Goal: Hermes' model-catalog refresh, which wrote four caches in its home
+/// whenever its timer landed inside a hold (2026-10-07), writes nothing in
+/// our image, held or not: `model_catalog.enabled: false` in the managed
+/// overlay (docs/durable-computers.md, "What changes under the hold"); and a
+/// wake from a save whose catalog caches are torn answers as any other, so
+/// a torn cache never breaks Hermes on wake.
+/// Method: Hermes held; the watcher's own refresh forced inside the hold,
+/// as the gateway runs it, with the image's overlay: it reads the catalog
+/// off, fetches and writes nothing, and nothing the save keeps changes but
+/// what Hermes' timers rewrite whole (`kept_hot`). Then the same manifest
+/// refresh with the catalog on (a managed overlay of this test's, the
+/// manifest a local file, so no network): the write the failure saw, a
+/// cache file the save keeps, rewritten under the hold. Then each of the
+/// four torn as an older save could carry them (invalid UTF-8 cut short,
+/// JSON cut short, empty, not JSON, and a temp file caught mid-write), the
+/// save taken, the computer stopped and woken from it as the platform does
+/// (`RESTORE_PENDING`, its check, the gate), and a message answered.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
+    let (x, c) = Expiry::start().await;
+    let (fake, chat) = (&x.fake, x.chat.as_str());
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; {}", told(fake, chat, &c)));
+    let before = files(&c, &left_out);
+    let forced = hermes_python(&c, &[], REFRESH);
+    let after = files(&c, &left_out);
+    let changed_off = changed(&before, &after);
+    eprintln!("catalog: forced under the hold, off: {forced}; changed: {changed_off:?}");
+    assert_eq!(forced["enabled"], false, "Hermes reads its catalog off, from the image's overlay: {forced}");
+    assert_eq!(forced["refreshed"], false, "the refresh fetched nothing: {forced}");
+    assert_eq!(forced["catalog"], json!({}), "and has no catalog: {forced}");
+    assert!(unexplained(&changed_off).is_empty(), "nothing the save keeps changed but what Hermes' timers rewrite whole: {:?}", unexplained(&changed_off));
+    for cache in CATALOG_CACHES {
+        assert!(!c.exec(&["test", "-e", &format!("/data/hermes/cache/{cache}")]), "no {cache}");
+    }
+
+    // what the failure saw: the catalog on, its manifest a local file
+    let manifest = json!({ "version": 1, "providers": { "openrouter": { "models": [{ "id": "fragment/test", "description": "a test's" }] } } });
+    let overlay = "model_catalog:\n  enabled: true\n  url: \"file:///tmp/catalog-on/model-catalog.json\"\n";
+    let setup = "mkdir -p /tmp/catalog-on && printf '%s' \"$1\" > /tmp/catalog-on/config.yaml && printf '%s' \"$2\" > /tmp/catalog-on/model-catalog.json && chmod -R a+rX /tmp/catalog-on";
+    assert!(c.exec(&["sh", "-c", setup, "sh", overlay, &manifest.to_string()]), "the test's overlay");
+    let before = files(&c, &left_out);
+    let on = hermes_python(&c, &["HERMES_MANAGED_DIR=/tmp/catalog-on"], "import json\nfrom hermes_cli import model_catalog as m\nprint(json.dumps({'enabled': m._load_catalog_config()['enabled'], 'catalog': m.get_catalog(force_refresh=True)}))");
+    let after = files(&c, &left_out);
+    let changed_on = changed(&before, &after);
+    eprintln!("catalog: forced under the hold, on: {on}; changed: {changed_on:?}");
+    assert_eq!(on["enabled"], true, "{on}");
+    assert_eq!(on["catalog"], manifest, "the manifest fetched: {on}");
+    assert_eq!(unexplained(&changed_on), vec!["/data/hermes/cache/model_catalog.json"], "on, the refresh rewrites a cache the save keeps, under the hold");
+    whole(&c, &changed_on);
+
+    // the four torn, as an older save could carry them; then a sleep and a wake
+    let tear = "cd /data/hermes/cache && printf '{\"version\": 1, \"providers\": {\"openrouter\": {\"mo\\377\\376' > model_catalog.json && printf '{\"fetched_at\": 17' > openrouter_curated_catalog.json && : > nous_recommended_cache.json && printf 'not json' > reasoning_caps.json && printf '{\"version\": 1, \"prov' > .model_catalog_torn.tmp";
+    let (code, said) = c.exec_code(&["/command/s6-setuidgid", "hermes", "sh", "-c", tear]);
+    assert_eq!(code, 0, "the caches torn: {said}");
+    let torn = c.exec_out(&["sh", "-c", "cd /data/hermes/cache && sha256sum model_catalog.json openrouter_curated_catalog.json nous_recommended_cache.json reasoning_caps.json .model_catalog_torn.tmp"]);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("catalog-torn");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("asleep.tar");
+    save_data(&c, &left_out, &save);
+    let (took, _) = c.sigterm();
+    eprintln!("catalog: held, saved with torn caches, stopped ({} ms to exit)", took.as_millis());
+    drop(c);
+    fake.until(30_000, "its sockets closed", |w| w.live_sockets() == 0).await;
+    let next = x.say("good morning");
+    let c = x.container(&[("RESTORE_PENDING", "1")]);
+    let tar = std::fs::File::open(&save).expect("the save");
+    let cp = Command::new(docker()).args(["cp", "-a", "-", &format!("{}:/data", c.id)]).stdin(tar).output().expect("docker runs");
+    assert!(cp.status.success(), "the restore: {}", String::from_utf8_lossy(&cp.stderr));
+    let (code, said) = c.exec_code(&["/usr/local/bin/computer-check"]);
+    assert_eq!(code, 0, "the save checks: {said}");
+    assert_eq!(c.exec_out(&["sh", "-c", "cd /data/hermes/cache && sha256sum model_catalog.json openrouter_curated_catalog.json nous_recommended_cache.json reasoning_caps.json .model_catalog_torn.tmp"]), torn, "the wake has the torn caches");
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    within(fake, chat, &c, 240_000, "the message after the wake answered", |w| x.reply(w, &next).is_some()).await;
+    let woke = hermes_python(&c, &[], REFRESH);
+    assert_eq!(woke["catalog"], json!({}), "woken, its catalog is still off, the torn caches unread: {woke}");
+    fake.with(|w| assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}", x.reply(w, &next)));
 }

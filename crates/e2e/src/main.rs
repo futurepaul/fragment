@@ -224,6 +224,10 @@ pub struct Suite {
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
+    /// An operator key no person holds (`FRAGMENT_OPERATORS` lists it, and
+    /// nothing ever approves it): a wipe's (`Need::Operator`). Local: made
+    /// per run; hosted: `--operator-key-file`'s, or none.
+    pub wiper: Option<Keys>,
     pub cli: PathBuf,
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
@@ -473,7 +477,9 @@ impl Suite {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain => format!("http://127.0.0.1:{}", self.port),
             },
-            operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
+            operators: Some(
+                std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
+            ),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             // the levers, as a preview has them: each request carries the secret
             test_secret: Some(self.test_secret.clone()),
@@ -829,7 +835,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         None => (needs::Rung::Local, api::Run::new(test_secret.clone(), 0)),
         Some(paid_calls) => {
             // its computers answer through the scripted model: no real agent
-            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false };
+            let offers = needs::Offers { levers: true, computers: true, models: paid_calls > 0, chrome: browser::chrome().is_some(), real_agent: false, operator: true };
             (needs::Rung::Hosted(offers), api::Run::signing_in_by_levers(test_secret.clone(), paid_calls))
         }
     };
@@ -866,6 +872,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
         operator: Keys::generate(),
+        wiper: Some(Keys::generate()),
         cli,
         scratch,
         project,

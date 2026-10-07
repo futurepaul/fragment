@@ -20,6 +20,7 @@ a vendor's product beyond the credential it holds.
 | Connections and the egress swap | Security: it holds the route to your accounts' tokens and the operator's keys. | WorkOS Pipes; the computer's intercepts |
 | Usage, credit and plans | Billing integrity. | The ledger API (read-only to fragments) |
 | The share sheet and invites (`/share/<name>`, `/join/<name>`) | Security: it acts as the fragment's owner, so no fragment's code (which its author or an agent rewrites) may frame, fetch or script it (docs/api.md, Sharing). | The members and invites API |
+| An operator's wipe of a person (`/api/people/{person}/wipe`, `fragment operator wipe`) | Security and account integrity: only the deployment's operators delete a person, and it reaches every object of theirs (their fragments, computer, ledger, lists and registry rows), which no fragment may (docs/api.md, Operators). | The registry, and each object's own end (a fragment's delete, a computer's saves) |
 | Test levers and the e2e's sign-in (`/api/test/*`; previews and the local e2e only, 404 elsewhere) | Proof: the hosted e2e signs `@e2e.test` people in and pulls levers on a preview's real vendors, with no real account. A secret only a branch deploy takes gates it, and on a preview it reaches the e2e's own fragments and people alone (docs/secrets.md). | The registry, the ledger, and the fragment cells' test controls |
 
 ## Interim, until phase 5
