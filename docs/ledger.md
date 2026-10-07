@@ -266,11 +266,15 @@ mark sends the same batch again, which answers as before.
   theirs.
 - **The in-fragment agent's turns**: as model calls, the fragment's owner
   paying.
-- **Operator keys** (decision 37): before the call the computer asks the
-  owner's ledger whether they may spend (`may_spend(agent_turn)`); after
-  the provider answered (under 500), the intercept meters one `key` call
-  (`key:<computer>:<12 hex>`), as the agent, to its owner, and the
-  computer counts it with its charge (docs/computers.md).
+- **Operator keys** (decision 37): reserved and settled the same way as
+  model calls. Before the call, the intercept reserves one `key` call at
+  its price (`key:<computer>:<12 hex>`, as the agent, on its owner's
+  ledger). A refusal, or a ledger that does not answer, refuses the call:
+  a key is the operator's money. Once the provider answered (under 500),
+  the call settles at that one call, and the computer counts it with its
+  charge (docs/computers.md). A call the provider did not answer is
+  released. A settle or release that does not land is charged by the
+  sweep.
 - **Compute** (the Computer DO). It meters each awake interval at sleep,
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
