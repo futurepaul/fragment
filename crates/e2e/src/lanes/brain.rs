@@ -143,9 +143,14 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its repo names the template and its face, nothing else", m.body == json!({ "template": "brain", "meta": { "title": "Garden" } }), &m);
     let st = api.status(&keys, &name)?;
     let ops = &st.body["code"]["operations"];
+    let release = fragment_templates::blessed::release("brain").map(|r| format!("blessed:brain@{r}"));
     s.ok(
-        "the release's code runs on it: search, its index, and the job its file trigger starts",
-        st.body["code"]["error"].is_null() && ops["search"]["kind"] == "query" && ops["changed"]["kind"] == "job" && ops["reindex"]["role"] == "editor",
+        "the release's code runs on it, as its status names it: search, its index, and the job its file trigger starts",
+        st.body["code"]["error"].is_null()
+            && st.body["code"]["id"].as_str() == release.as_deref()
+            && ops["search"]["kind"] == "query"
+            && ops["changed"]["kind"] == "job"
+            && ops["reindex"]["role"] == "editor",
         &st.body["code"],
     );
     let t = api.signed(&keys, "GET", &format!("/api/f/{name}/triggers"), None)?;
