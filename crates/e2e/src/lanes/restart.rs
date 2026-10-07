@@ -59,7 +59,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let paid = s.named(&api, &owner, "restart-paid")?;
     let pc = s.create(&api, &owner, &paid)?;
     ship(s, &pc, LEDGER_APP, LEDGER_JSON);
-    // the deploy lands by the webhook: a query answers once it has
+    // the deploy lands: a query answers once it has
     s.eventually(Duration::from_secs(30), || api.op(&owner, &paid, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
     let r = api.op(&owner, &paid, "summarize", "before", json!({ "text": "before the restart" }))?;
     jobs::settle(&api, &owner, &paid, jobs::started(&r), &["succeeded"], Duration::from_secs(40));
@@ -204,9 +204,9 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("after a crash the member's list survives", r.text.contains(&name), &r);
     s.ok("and a person's search, both messages in it", found(&api, "kale") == 2, "");
-    s.commit(&c, &[("after.md", Some(b"webhooks still land"))]);
+    s.commit(&c, &[("after.md", Some(b"refreshes still land"))]);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=after.md"), None)?;
-    s.ok("after a crash webhooks still move the pins", r.status == 200 && r.text == "webhooks still land", &r);
+    s.ok("after a crash a refresh still moves the pins", r.status == 200 && r.text == "refreshes still land", &r);
     let (cleaned, last) = s.ended_cleaned(&api, &ended);
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;

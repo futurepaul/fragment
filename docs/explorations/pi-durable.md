@@ -3,9 +3,11 @@
 Exploration, 2026-10-05, read against master at `d4c2d09`. Written for
 the agent who implements it and the one who reviews it: it carries the
 motivation, where each claim comes from, and the tests that would prove
-each failure and each fix. Nothing here is built. Where it disagrees
-with docs/cloudflare-v1.md, that file wins until Paul changes it; the
-decisions this would change are listed under "Decisions that are
+each failure and each fix. It is the analysis, as of `d4c2d09`:
+docs/durable-computers.md is the design of record built from it, and
+says which proposals are built (P1, P2 and P5 among them). Where this
+file disagrees with that one or with docs/cloudflare-v1.md, they win;
+the decisions this would change are listed under "Decisions that are
 Paul's".
 
 How each claim was checked is said beside it:

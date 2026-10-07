@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::api::Api;
@@ -26,9 +26,10 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let home = s.dir("sync-home");
     s.login(api, &home);
+    let keys = s.cli_keys(&home).context("the CLI logged in")?;
     let create = |s: &Suite, base: &str| -> Result<(String, Value)> {
         let c = s.cli_json(api, &home, &["create", &s.name(base), "--show-tokens", "--json"])?;
-        s.hook(api, &c);
+        s.owned(&c, &keys);
         Ok((c["name"].as_str().unwrap_or("").to_string(), c))
     };
     let dir_of = |p: &Path| p.to_str().expect("utf-8 path").to_string();
@@ -156,7 +157,7 @@ pub fn folder_sync(s: &mut Suite, api: &Api) -> Result<()> {
 /// whose pins may lag its repo (a storage token was minted for it in the
 /// last day) is polled every interval, so an editor's push through
 /// code.storage syncs within it; one nothing touches is never polled, its
-/// daily pass included, and a webhook leaves it so.
+/// daily pass included, and a refresh leaves it so.
 fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let name = s.named(api, &owner, "quiet")?;
@@ -202,11 +203,11 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
         &alarm,
     );
     let reads = s.fake.requests(&repo, "GET branch");
-    s.fake.silent_commit(&repo, "main", &[("quiet.md", Some(b"no webhook"))], "silent");
+    s.fake.external_commit(&repo, "main", &[("quiet.md", Some(b"unannounced"))], "unannounced");
     std::thread::sleep(interval * 4);
     let asked = s.fake.requests(&repo, "GET branch") - reads;
     s.ok(
-        "and asks code.storage nothing for four poll intervals: a commit no webhook announced waits",
+        "and asks code.storage nothing for four poll intervals: a commit no one announced waits",
         asked == 0 && !read("quiet.md"),
         format!("{asked} branch reads"),
     );
@@ -225,7 +226,7 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     let found = s.eventually(interval * 5, || read("quiet.md"));
     let alarm = hook("alarm", None);
     s.ok(
-        "a storage token minted brings the poll back to its interval, which finds a commit no webhook announced",
+        "a storage token minted brings the poll back to its interval, which finds a commit no one announced",
         r.status == 200 && found && ahead(&alarm, "pollAt") <= interval_ms,
         &alarm,
     );
@@ -235,8 +236,8 @@ fn quiet_poll(s: &mut Suite, api: &Api) -> Result<()> {
     hook("age-outside", Some(day_ms));
     let quiet = s.eventually(interval * 5, || ahead(&hook("alarm", None), "pollAt") > day_ms - 60_000);
     s.ok("a day after the token, its next pass is a day away again", quiet, hook("alarm", None));
-    s.commit(&c, &[("announced.md", Some(b"by webhook"))]);
+    s.commit(&c, &[("announced.md", Some(b"refreshed"))]);
     let alarm = hook("alarm", None);
-    s.ok("a webhook moves the pin and leaves the poll quiet: the move it announced is followed", read("announced.md") && ahead(&alarm, "pollAt") > day_ms - 120_000, &alarm);
+    s.ok("a refresh moves the pin and leaves the poll quiet: the move it announced is followed", read("announced.md") && ahead(&alarm, "pollAt") > day_ms - 120_000, &alarm);
     Ok(())
 }

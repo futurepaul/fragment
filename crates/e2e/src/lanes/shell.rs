@@ -269,7 +269,9 @@ fn query(q: &str) -> String {
 /// Search): a message's words find it, for the chat's people only, in
 /// fragments they are in now; a query is words, never FTS5 syntax; a
 /// person archives a fragment for themselves alone, twice the same as
-/// once, and only one of theirs. Goal: the person's list is a fenced
+/// once, and only one of theirs; a chat's row names its agents and shows
+/// its newest message from each person's own search, so the shell's
+/// sidebar is one read, told when a new message comes. Goal: the person's list is a fenced
 /// projection (lesson 12). Method: three people (the shell's person, a
 /// member who is removed and comes back, and an outsider with a chat of
 /// their own), each asking their own list through the API.
@@ -300,8 +302,30 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     );
     let r = search("TOMAT tues")?;
     s.ok("every word, ignoring case, each a prefix", hits_in(&r, &chat).len() == 1, &r);
+
+    // the chat's row in the person's list shows its newest message, from
+    // their search, and their open shell is told when a new one arrives
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat.as_str()).cloned()).unwrap_or(Value::Null);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let r = mine()?;
+    s.ok("the chat's row shows its newest message (the agent's step after it is none)", row(&r)["preview"] == said, &r);
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = watching(Socket::connect(api, &url, None, Some(&format!("fragment_session={session}")), Some(&api.base)).map(|(socket, _)| socket));
+    if let Ok(w) = tab.as_mut() {
+        w.patience(SEARCH_WAIT)?;
+    }
     let basil = post("m2", "chat", json!({ "text": "Basil wants water too" }))?;
     anyhow::ensure!(basil.status == 200, "posting again: {basil}");
+    let told_new = told(&mut tab);
+    let r = mine()?;
+    s.ok(
+        "a new message is told to the person's open shell, and their list's row then shows it",
+        told_new == json!({ "type": "changed" }) && row(&r)["preview"] == "Basil wants water too",
+        json!([told_new, row(&r)]),
+    );
+    if let Ok(w) = tab {
+        w.close();
+    }
     let both = s.eventually(SEARCH_WAIT, || search("water").is_ok_and(|r| hits_in(&r, &chat).len() == 2));
     let r = search("water")?;
     let snippets: Vec<Value> = hits_in(&r, &chat).iter().map(|h| h["snippet"].clone()).collect();
@@ -341,6 +365,27 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     let theirs = |keys: &fragment_nip98::Keys, q: &str| api.signed(keys, "GET", &format!("/api/search?q={}", query(q)), None);
     let found = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
     s.ok("a new member's search finds what the chat said before they joined (signed, with their key)", found, theirs(&member, "tomatoes")?);
+
+    // the chat's agents, the first added first, are named in every member's row
+    let rows = || -> Result<(Value, Value)> { Ok((row(&mine()?), row(&api.signed(&member, "GET", "/api/fragments", None)?))) };
+    let (_, lead) = super::delegation::agent_of(api, &member)?;
+    let (_, second) = super::delegation::agent_of(api, &member)?;
+    let added = [&lead, &second].map(|a| shell(api, session, "PUT", &format!("/api/f/{chat}/members/{a}"), Some(&json!({ "role": "viewer" })), &[]));
+    let (my_row, their_row) = rows()?;
+    s.ok(
+        "agents added are named in every member's row, the first added first; the member's row shows the newest message from their own search",
+        added.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200))
+            && my_row["agents"] == json!([lead, second])
+            && their_row["agents"] == json!([lead, second])
+            && their_row["preview"] == "Basil wants water too",
+        json!([my_row, their_row]),
+    );
+    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok("the lead removed, every row names the agent left", removed.status == 200 && my_row["agents"] == json!([second]) && their_row["agents"] == json!([second]), json!([my_row, their_row]));
+    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{second}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok("and the last, none", removed.status == 200 && my_row["agents"].is_null() && their_row["agents"].is_null(), json!([my_row, their_row]));
     let own = s.named(api, &outsider, "plot")?;
     let r = api.create_with(&outsider, json!({ "name": own, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "the outsider's chat: {r}");
@@ -623,7 +668,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
-    backfill_ui(s, api, &mut b, &page, &session)?;
+    add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     b.color_scheme(&page, "dark")?;
@@ -850,12 +895,12 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
     Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
 }
 
-/// The skills fragment backfilled (decision 17): a person whose agents were
-/// made before setup made one (2026-10-03) has an agent and no skills
-/// fragment. Valid: the shell makes one as it loads, from the blessed
-/// template, before settings reads it. Replay: loaded again, it makes no
-/// second. Method: the person's own is deleted, then the shell reloaded.
-fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+/// The managed skills added from settings (decision 17): a person with an
+/// agent and no skills fragment (theirs deleted here; people set up before
+/// 2026-10-03 have none). Valid: their settings offer the managed skills,
+/// and the button makes the fragment from the blessed template and lists
+/// it. Replay: loaded again, there is no second. Loading makes none unasked.
+fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
     let Some(old) = before.first().cloned() else {
@@ -863,9 +908,12 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
         return Ok(());
     };
     let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
-    let gone = own_skills(api, session)?.is_empty();
-    s.ok("with it deleted, the person has an agent and no skills fragment, as people set up before 2026-10-03 do", r.status == 200 && gone, &r);
     b.reload(page)?;
+    let add = "[...document.querySelectorAll('#settings-skills button')].find((b) => b.textContent === 'Add the managed skills')";
+    let offered = b.until(page, &format!("!!{add}"), wait);
+    let none = own_skills(api, session)?;
+    s.ok("with it deleted, their settings offer the managed skills, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
+    b.eval(page, &format!("({add}.click(), true)"))?;
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
@@ -875,14 +923,14 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let manifest = manifest_of()?;
     let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
     s.ok(
-        "the shell, loaded, makes them one from the blessed template, silently, and their settings list it",
+        "the button makes them one from the blessed template, and their settings list it",
         made && manifest.body["template"] == "skills" && listed,
         json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
     );
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
     let again = own_skills(api, session)?;
-    s.ok("loaded again, it makes no second", again == now, json!(again));
+    s.ok("loaded again, there is no second", again == now, json!(again));
     Ok(())
 }
 

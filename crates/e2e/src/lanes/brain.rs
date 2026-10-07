@@ -131,7 +131,6 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     let name = made.body["name"].as_str().unwrap_or("").to_string();
     s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && name.starts_with(&format!("{label}.")), &made);
     anyhow::ensure!(made.status == 200, "no brain to test: {made}");
-    s.hook(api, &made.body);
     let repo = made.body["repo"].as_str().unwrap_or("").to_string();
     let listed = s.eventually(WAIT, || {
         shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| {

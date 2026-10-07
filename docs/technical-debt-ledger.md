@@ -59,19 +59,6 @@ fragment.club until cutover (decisions 34–35).
   rather than every run (or an automatic pause expires), or a chat's push
   fires once a turn, on its last reply.
 
-## A deleted fragment can linger in a person's list
-
-- **Observed:** phase 2 slice B. Each person's list of fragments is an
-  index in their `Principal` cell, fed from the fragment's outbox with
-  retries. Deleting a fragment delivers the removals once and then wipes
-  the fragment, outbox included: a delivery that fails then is never
-  retried.
-- **Risk:** `fragment list` shows a fragment the person no longer has
-  (calls to it answer 404; nothing leaks).
-- **First proof:** a Principal cell unreachable during a delete.
-- **Delete when:** the list checks each entry against the fragment (or
-  the platform keeps delete tombstones and retries them), with an e2e
-  that fails a delivery during a delete.
 
 ## The effects sweep has no fault-injection test
 
@@ -227,73 +214,6 @@ fragment.club until cutover (decisions 34–35).
   tag or label (not the image ID) and its sidecars with them, or lets
   workerd drain at shutdown: then `scope_images`, `remove`, and their
   calls in the e2e and `xtask dev` go. Moving the wrangler pin checks it.
-
-## Fly's remote builders cannot push the node image
-
-- **Observed:** phase 3 slice B. `flyctl deploy` (0.3.145) builds the
-  image on Fly's builder and on Depot, and both pushes to the registry
-  are refused (401 from the builder's registry proxy) with the org token
-  that pushes fine from this machine. `cargo xtask deploy --nodes` builds
-  with the local Docker (OrbStack, `linux/amd64` under Rosetta: a cold
-  build is about 20 minutes) and pushes directly.
-- **Risk:** a node deploy needs this machine (or one like it) with Docker.
-- **First proof:** already present.
-- **Delete when:** a remote build pushes (a newer flyctl, or a token the
-  builders accept), or CI builds the image.
-
-## Three fleet secrets that sat in the bucket are not rotated yet
-
-- **Observed:** phase 3 slice A until the hardening pass (H1). The fleet's
-  secrets were Worker `vars`, stored in each deployment's manifest in the
-  bucket in plaintext and written into every isolate. H1 moved them to
-  the node's environment (only `KEYS` reads them; a cell deploy refuses a
-  var that holds one). On 2026-09-24 Paul deleted the earlier
-  deployments' manifests from the bucket, and the host secret was rotated
-  (the old one stays as `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS`, so values
-  sealed under it still open and are resealed as they are read). The
-  WorkOS API key, the OpenRouter management key, and the code.storage org
-  key are the same values that sat in those manifests; the node's Tigris
-  key is the project-wide one `flyctl storage create` made.
-- **Risk:** a copy of the bucket taken before the clean-up (a backup, a
-  replica) still reveals those three keys; a leak of the node's Tigris
-  key reaches every bucket in the Tigris project.
-- **First proof:** any bucket copy outside the fleet, or a node compromise.
-- **Delete when:** new values for the three keys at their issuers (written
-  over their files, then `cargo xtask deploy fragment-club --secrets`,
-  then the old ones revoked), and a Tigris key scoped to
-  `fragment-club-ord` in the credentials file the same way. Drop
-  `FRAGMENT_KEYS_HOST_SECRET_PREVIOUS` only once no value sealed under it
-  is left (a sweep that reseals every cell's values, then a check).
-
-## The fleet shares Fly's default private network
-
-- **Observed:** the hardening pass (H4, deferred with Paul's agreement
-  2026-09-24). fragment-club's Machines are on the `personal` org's
-  default private network (6PN), which every app in the org can reach.
-  Since H3 the nodes' internal listener answers only fleet-signed peers,
-  so what an app in the org reaches is the peer routes (which refuse it)
-  and the public port.
-- **Risk:** another app in the org, if compromised, can probe the fleet's
-  private addresses; a celld bug in a peer route would be reachable from
-  there.
-- **First proof:** another app in the `personal` org that runs code we
-  did not write, or strangers' code on the fleet.
-- **Delete when:** the fleet runs as an app created on its own network
-  (`flyctl apps create --network`: a new app, new volumes, certificates,
-  and a DNS change), done with Tier 3's cordons (a fleet per trust tier)
-  before public sign-up; proven by a check from another app in the org
-  that the fleet's private address does not answer.
-
-## celld runs as root in the node image
-
-- **Observed:** H4, deferred. `fragment-node` and celld run as root in
-  the Machine (a Firecracker VM).
-- **Risk:** small: a celld compromise already holds the node's keys (its
-  environment) and data; root adds the rest of the VM.
-- **First proof:** a node deploy that touches the image anyway.
-- **Delete when:** the image has a `celld` user that owns `/data`
-  (`fragment-node` chowns it once, then drops privileges before exec),
-  shipped in a node deploy and checked on the fleet.
 
 ## The cell signs code.storage tokens for any repo a fragment names
 
@@ -453,7 +373,7 @@ fragment.club until cutover (decisions 34–35).
   (`cell/src/cs.rs`, `cli/src/sync.rs`), reached only through its REST
   API: repos, repo urls, branches, file metadata and
   reads, commits, commit packs with expected-parent CAS, merges,
-  restore commits, and signed push webhooks, under ES256 JWTs minted with
+  and restore commits, under ES256 JWTs minted with
   the org key. No git smart-HTTP is used. The only other implementation
   is the test fake (`crates/fakes/src/codestorage.rs`), which keeps its
   state in memory or one JSON file.
@@ -495,7 +415,7 @@ fragment.club until cutover (decisions 34–35).
   --hosted`, crates/e2e/src/hosted.rs): it runs on a preview the sections
   whose declared needs a preview meets. The rest are skips there, each
   saying why: those that script a vendor fake (the model: ai, ledger,
-  chat; code.storage's git or webhooks: create, files,
+  chat; code.storage's git: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
   lockdown, isolation, share), and the whole deployment's
@@ -672,9 +592,16 @@ fragment.club until cutover (decisions 34–35).
 ## Each agent's Hermes profile config is rewritten at every boot
 
 - **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
-  its model block (tier, the model intercept, `x-fragment-agent`),
+  its model block (tier, the model intercept, `x-fragment-agent`), its
+  skills' directories, its vision model, its browser and its terminal,
   written whole at each boot; anything Hermes or the agent wrote there
-  is lost.
+  is lost. Hermes' managed scope (`/etc/hermes/config.yaml`, which the
+  boot writes for what every profile shares) cannot carry the rest: it
+  is one layer for every profile, its `${VAR}`s expand against the
+  gateway's own environment, never a profile's `.env`, and Hermes v0.21.5
+  reads some keys (`browser.*`) with `read_raw_config`, past it. A merge
+  into the profile's file would need a YAML parser in the boot, or
+  Hermes' own Python per profile per boot.
 - **Risk:** an agent's own `hermes config set` lasts until the computer
   sleeps.
 - **First proof:** an agent that changes its own Hermes settings.
@@ -803,8 +730,8 @@ fragment.club until cutover (decisions 34–35).
   their merge base, then merges main in, which then takes main's files
   whole (`fragment_core::codestorage::Promotion`). Every deploy is the
   cell's (`go_live`, `POST /api/f/{name}/deploy`; `fragment deploy` asks
-  it), which holds its plane lock across both moves, so a push webhook
-  for the first waits and pins the second: the first is never served.
+  it), which holds its plane lock across both moves, so a refresh or poll
+  between them waits and pins the second: the first is never served.
 - **Risk:** `fragment rollback` without `--to` right after such a deploy
   restores the first move's files (the deploy the earlier rollback
   undid), not the files the rollback served (by first parents, as the
@@ -867,3 +794,34 @@ fragment.club until cutover (decisions 34–35).
   work (`/data/work/<profile>`, as the desktop's browser already does: the
   seam's rule, docs/computers.md), so nothing under Hermes' home is held
   locked by one, and `locked` is empty on the real-Hermes lanes.
+
+## Preview cards drive Browser Rendering over a CDP client of our own
+
+- **Observed:** 2026-10-06 (issue #156, head scratcher 4). A card's shot
+  (cell/src/card.rs, `take`) acquires a Browser Rendering session, drives
+  it over a CDP client of ours, and closes it. The same binding now has
+  `quickAction("screenshot", {url, viewport, screenshotOptions,
+  gotoOptions, waitForTimeout})`: one call, the image back, its browser
+  time in `X-Browser-Ms-Used`, billed by the browser hour alone (no
+  concurrent browsers). It is not used because `wrangler dev`'s local
+  binding (wrangler 4.145.0, miniflare 5.20260930.0-alpha) answers only
+  the session routes (Cloudflare: "not yet supported in local development
+  mode"; it throws "The RPC receiver does not implement the method
+  'quickAction'"), so dev and the e2e would lose their local shot; and it
+  needs a compatibility date of 2026-03-24 or later, where the cell's is
+  2026-01-01 (moving it brings ~25 flags, `delete_all_deletes_alarm` and
+  `websocket_close_reason_byte_limit` among them).
+- **Risk:** the CDP client is ours to keep speaking Browser Rendering's
+  session routes as `@cloudflare/puppeteer` does; a change there fails
+  every try (`card.failed`) while the pages serve on. The deployment pays
+  the concurrent-browser charge quick actions do not have (docs/ledger.md,
+  Assumptions).
+- **First proof:** `card.failed` events on a preview whose message is a
+  CDP or session error.
+- **Delete when:** `wrangler dev` answers `quickAction` locally (or a fake
+  at the vendor boundary stands in for it there, `FRAGMENT_BROWSER_URL`
+  as `FRAGMENT_AI_URL` does for the model route) and the cell's
+  compatibility date reaches 2026-03-24: `take` becomes one
+  `quickAction("screenshot", …)` billed from `X-Browser-Ms-Used`, and the
+  session's acquire and release, `Cdp`, `billed_ms`'s keep-alive and the
+  concurrent-browser assumption go.

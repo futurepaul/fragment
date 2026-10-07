@@ -195,7 +195,9 @@ speaking Cloudflare's APIs) returns once this product works.
       managed or own `fragment` wins (docs/computers.md). The shell makes
       a skills fragment, once, for a person with an agent and none (set up
       before 2026-10-03), and an awake computer looks for one every minute
-      while its owner has none.
+      while its owner has none. (That backfill was cut since: such a person
+      adds one from settings, "Add the managed skills", which shell-ui
+      drives.)
     - Evidence: hermes-boot's tests (the platform skill with no skills
       fragment, a managed one shadowing it); shell-ui (the backfill); the
       real-Hermes lane (with no skills fragment Hermes lists `fragment` in
@@ -398,7 +400,7 @@ speaking Cloudflare's APIs) returns once this product works.
     brain. There is no encryption.
 31. **Sites are fragment apps.** Every deploy takes a screenshot with
     Browser Rendering for the app's preview card.
-    Status, 2026-10-03 (branch `claude/screenshots`): built, on the delivery queue after live moves, as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
+    Status, 2026-10-03 (branch `claude/screenshots`): built, taken by the fragment's own alarm after live moves (off the delivery queue since issue #156), as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
 32. **SimpleX on $200 seats only.** The `simplex-chat` daemon runs on
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram

@@ -666,15 +666,24 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-    let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
-    let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
-    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    // A tier the platform did not answer for is said, and the config the
+    // last boot wrote stays, its tier with it: never a tier the agent did
+    // not choose, but for a profile with no config yet.
+    let config = dir.join("config.yaml");
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
+        ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
+        (!config.exists()).then_some(hermes::Tier::Medium)
+    });
+    if let Some(tier) = tier {
+        write_whole(&config, &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    }
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
     match sync::round(api, a, &dir, &own).await {
-        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
+        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.map(hermes::Tier::name), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
 }

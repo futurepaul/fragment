@@ -338,5 +338,4 @@ the batch, so a guest's fragments are billed nothing.
   concurrent browsers ($2.00 a month for each past 10, the month's
   average of each day's peak). That is a deployment-wide charge no one
   shot causes, so it is not metered per person; the margin carries it
-  (each fragment has at most one shot out, and a consumer batch takes its
-  shots one at a time).
+  (each fragment has at most one shot out: its alarm takes it).

@@ -2,9 +2,9 @@
 
 A **fragment** is one small place on the web: a folder of files in git,
 an app of named operations over its own SQLite, channels that pages
-follow live, members with roles, and URLs. Fragments live on a celld
-host, fragment.club (invite-only for now), and sleep when idle; a
-request, a trigger, or an inbox delivery wakes them.
+follow live, members with roles, and URLs. Fragments live on
+fragment.club (invite-only for now), on Cloudflare, and sleep when idle;
+a request, a trigger, or an inbox delivery wakes them.
 
 ## Install and pair
 
@@ -174,7 +174,6 @@ fragment sync my-thing --dir . --watch      # continuous: OS events + the change
 fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
 fragment sync my-thing --dir . --mode push  # local → repo only
 fragment sync my-thing --dir . --live       # what is live, not main: repo → folder, deletions included
-fragment sync my-thing --dir . --install    # keep syncing after logout (LaunchAgent / systemd unit)
 fragment verify my-thing --dir .            # full-content audit
 ```
 
@@ -487,7 +486,7 @@ fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
 fragment manifest <name>                 fragment invite create|list|revoke ...
 fragment join <name> <token>
-fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
+fragment sync <name> [--dir D] [--watch] [--mode M | --live]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]

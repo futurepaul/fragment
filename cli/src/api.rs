@@ -59,8 +59,7 @@ impl Code {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
             ErrorCode::Forbidden | ErrorCode::NotConnected => Code::Forbidden,
-            // the CLI calls the platform's host, which never moves
-            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode | ErrorCode::Moved => Code::NotFound,
+            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
             ErrorCode::ConflictingBody => Code::ConflictingBody,
             ErrorCode::TooLarge => Code::TooLarge,
@@ -646,7 +645,6 @@ mod tests {
             (ErrorCode::StorageFull, "storage_full"),
             (ErrorCode::NodeFull, "unavailable"),
             (ErrorCode::WontWake, "unavailable"),
-            (ErrorCode::Moved, "not_found"),
             (ErrorCode::NotConnected, "forbidden"),
         ];
         for (error, cli) in table {

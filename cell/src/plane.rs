@@ -1,19 +1,21 @@
 //! The file plane (docs/api.md): every file is in the fragment's
 //! code.storage repo. The cell pins `main` (the working copy) and `live`
 //! (what is served and whose `app.mjs` runs), keeps a tree index of each
-//! pin (metadata only), and moves a pin when a signed push webhook, an
-//! editor's `refresh`, or the poll backstop sees its branch move. Editors
-//! write to git directly with a storage token; deploy, preview, and
-//! rollback are ref moves the CLI makes. The cell follows each move it
-//! makes or is told of at once; the poll backstop runs only while the pins
-//! may lag the repo (`pins_may_lag`: a storage token minted, or a move that
-//! failed to follow, in the last day), so a fragment no one pushes to asks
-//! code.storage nothing.
+//! pin (metadata only), and moves a pin when it moves the branch itself
+//! (a commit, a deploy), an editor's `refresh`, or the poll backstop sees
+//! its branch move. Editors write to git directly with a storage token and
+//! then refresh (the CLI does); deploy, preview, and rollback are ref moves
+//! the CLI makes. The poll backstop runs only while the pins may lag the
+//! repo (`pins_may_lag`: a storage token minted, or a move that failed to
+//! follow, in the last day), so a fragment no one pushes to asks
+//! code.storage nothing. code.storage's push webhooks are not taken: its
+//! subscription is one per org (docs/phase-3.md, D), and every push the
+//! platform makes or hears of is followed without one.
 
 use std::collections::BTreeMap;
 
 use fragment_core::tree::{self, Indexed, TreeDiff};
-use fragment_core::{manifest, npub, site, webhook};
+use fragment_core::{manifest, npub, site};
 use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
 use fragment_templates::blessed;
 use serde::Deserialize;
@@ -28,9 +30,6 @@ use crate::js;
 
 /// Platform code that runs in the facet around the author's App class.
 pub const PLATFORM_JS: &str = include_str!("../platform.mjs");
-/// Webhook deliveries remembered for deduplication.
-const DELIVERIES_KEPT: i64 = 10_000;
-const DELIVERY_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Tree rows per insert statement.
 const TREE_BATCH: usize = 20;
 /// How far apart a quiet fragment's passes (its housekeeping) are: a day.
@@ -122,32 +121,6 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
     Ok(())
 }
 
-/// Who may post to a channel came after the channel table (phase 7 slice
-/// B1), then whether they must be signed in, and ephemeral mutations after
-/// the operation table: a table from before gains the columns, and its
-/// channels take no posts, from anyone, and its mutations keep ledger rows.
-/// A blob's served type came after the blob table (blobs.rs): one from
-/// before is served untyped. A channel trigger's posters (`from`) came
-/// after the trigger table: one from before fires for every record, as it
-/// was installed to. A run's code came after the run table (jobs.rs
-/// `advance`): a run in flight from before starts over at its next step.
-/// Runs in the constructor, before anything reads these tables.
-pub(crate) fn migrate_code(sql: &SqlStorage) {
-    for (table, column, decl) in [
-        ("code_channels", "post", "TEXT"),
-        ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"),
-        ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
-        ("blobs", "mime", "TEXT"),
-        ("code_triggers", "from_kind", "TEXT"),
-        ("runs", "code", "TEXT"),
-    ] {
-        let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
-        if !cols.iter().any(|c| c["name"] == column) {
-            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), None).expect("a table migrates");
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct OpRow {
     op: String,
@@ -199,7 +172,7 @@ struct TriggerRow {
 
 impl FragmentCell {
     pub(crate) fn cs(&self) -> CellResult<Cs<'_>> {
-        Ok(Cs::new(self.cfg.codestorage()?, &self.env))
+        Ok(Cs::new(self.cfg.codestorage(), &self.env))
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {
@@ -287,8 +260,8 @@ impl FragmentCell {
 
     /// What follows a pin: the manifest from main, the code from live.
     /// Each records the commit it was read from, so a read that failed
-    /// (code.storage down) is retried by the next refresh, webhook, or poll
-    /// even though the pin itself already moved.
+    /// (code.storage down) is retried by the next refresh or poll even
+    /// though the pin itself already moved.
     async fn follow(&self, which: &str) -> CellResult<()> {
         let done_key = MetaKey::read_at(which);
         let [pin, done] = self.metas([MetaKey::pin(which), done_key])?;
@@ -423,13 +396,12 @@ impl FragmentCell {
             return Ok(());
         };
         assert!(!loader_id.is_empty(), "installed code has an identity");
-        let notify = serde_json::to_string(&manifest.notify_urls).expect("urls serialize");
         let module_count = modules.len();
         // The code row and its tables, in one step: no await until they are all written.
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, cpu_ms, installed_at, modules, notify) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, cpu_ms, installed_at, modules) VALUES (1, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
-               cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules, notify = excluded.notify",
+               cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules",
             vec![
                 sha.into(),
                 loader_id.as_str().into(),
@@ -437,7 +409,6 @@ impl FragmentCell {
                 SqlStorageValue::Integer(limits::APP_CPU_MS.into()),
                 SqlStorageValue::Integer(js::now_ms()),
                 serde_json::to_string(&modules).expect("modules serialize").into(),
-                notify.into(),
             ],
         )?;
         let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
@@ -552,14 +523,9 @@ impl FragmentCell {
     /// card, shot later from the alarm (card.rs).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
-        // the file triggers' runs, the notifyUrls, and the alarm for newly installed schedules
+        // the file triggers' runs, and the alarm for newly installed schedules
         self.launch_queued().await;
         for (which, moved) in &out {
-            if which == "main" && moved.changed {
-                if let Err(e) = self.notify_urls(moved.to.as_deref(), &moved.paths).await {
-                    self.event("notify.failed", &e.message, json!({ "code": e.code }));
-                }
-            }
             // a move of live wants its preview card, which the alarm shoots (card.rs)
             if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
                 if let Err(e) = self.card_wanted(live) {
@@ -594,13 +560,13 @@ impl FragmentCell {
         Ok(out)
     }
 
-    /// Pins read before either branch has been announced (a fragment
-    /// whose first push predates its webhook) are fetched on the first
-    /// request, once: after that, a branch that is still absent is left to
-    /// the webhook, `refresh`, and the poll backstop, so a fragment with
-    /// nothing deployed (or with data only) asks code.storage nothing, and
-    /// takes no plane lock, per request. A check that fails is not
-    /// recorded, so the next request asks again. `facts` follows what moved.
+    /// Pins the fragment never read (a name made again keeps its repo, and
+    /// its branches) are fetched on the first request, once: after that, a
+    /// branch that is still absent is left to `refresh` and the poll
+    /// backstop, so a fragment with nothing deployed (or with data only)
+    /// asks code.storage nothing, and takes no plane lock, per request. A
+    /// check that fails is not recorded, so the next request asks again.
+    /// `facts` follows what moved.
     pub(crate) async fn ensure_pins(&self, facts: &mut Facts) -> CellResult<()> {
         if facts.pins_checked {
             return Ok(());
@@ -623,9 +589,10 @@ impl FragmentCell {
         }
     }
 
-    /// The backstop for lost webhooks, from the alarm's pass while the pins
-    /// may lag the repo: every other move was followed when it was made or
-    /// announced, so a quiet pass asks code.storage nothing.
+    /// The backstop for a push no one announced and a follow that failed,
+    /// from the alarm's pass while the pins may lag the repo: every other
+    /// move was followed when it was made or refreshed, so a quiet pass
+    /// asks code.storage nothing.
     pub(crate) async fn poll(&self) {
         if let Err(e) = self.interpret(&REFS).await {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
@@ -658,9 +625,8 @@ impl FragmentCell {
     }
 
     /// Whether the pins may lag the repo: in the last day a storage token
-    /// was minted for it (its holder pushes when they like, and a push's
-    /// webhook can be lost), or a move the cell made or was told of failed
-    /// to follow.
+    /// was minted for it (its holder pushes when they like, and may not
+    /// refresh after), or a move the cell made failed to follow.
     pub(crate) fn pins_may_lag(&self) -> CellResult<bool> {
         let at = self.meta(MetaKey::OutsideAt)?.and_then(|at| at.parse::<i64>().ok());
         Ok(at.is_some_and(|at| js::now_ms() - at < MAY_LAG_MS))
@@ -687,50 +653,6 @@ impl FragmentCell {
             })
             .collect();
         json_response(&json!({ "ok": true, "refs": refs }))
-    }
-
-    /// A code.storage push delivery: validate, then remember (redeliveries
-    /// are acknowledged, not interpreted twice), then interpret. The pin
-    /// moves to the branch's head as read now, so a late or out-of-order
-    /// delivery never moves it backwards. One that fails to follow is the
-    /// poll backstop's.
-    pub(crate) async fn webhook(&self, event: &str, signature: &str, body: &[u8]) -> CellResult<Response> {
-        self.name()?;
-        let secret = self.must(MetaKey::WebhookSecret)?;
-        if let Err(why) = webhook::verify(body, signature, &secret, js::now_ms() / 1000, limits::WEBHOOK_WINDOW_S) {
-            self.event("webhook.rejected", &format!("{event}: {why}"), Value::Null);
-            return Err(CellError::new(ErrorCode::Unauthenticated, why));
-        }
-        let payload: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("webhook body: {e}")))?;
-        let Some(push) = webhook::parse_push(event, &payload) else {
-            return json_response(&json!({ "ok": true, "ignored": event }));
-        };
-        let key = webhook::dedupe_key(event, &payload);
-        if !self.rows("SELECT key FROM deliveries WHERE key = ?", vec![key.as_str().into()])?.is_empty() {
-            self.event("webhook.redelivery", &format!("{}: {} (already seen)", push.branch, short(Some(&push.after))), Value::Null);
-            return json_response(&json!({ "ok": true, "interpreted": false, "redelivery": true }));
-        }
-        let now = js::now_ms();
-        self.exec("INSERT INTO deliveries (key, at) VALUES (?, ?)", vec![key.into(), SqlStorageValue::Integer(now)])?;
-        self.exec("DELETE FROM deliveries WHERE at < ?", vec![SqlStorageValue::Integer(now - DELIVERY_TTL_MS)])?;
-        self.exec(
-            "DELETE FROM deliveries WHERE key NOT IN (SELECT key FROM deliveries ORDER BY at DESC LIMIT ?)",
-            vec![SqlStorageValue::Integer(DELIVERIES_KEPT)],
-        )?;
-        self.event(
-            "webhook.push",
-            &format!("{}: {} → {}", push.branch, short(Some(&push.before)), short(Some(&push.after))),
-            json!({ "ref": push.branch }),
-        );
-        if !REFS.contains(&push.branch.as_str()) {
-            return json_response(&json!({ "ok": true, "interpreted": false, "redelivery": false }));
-        }
-        if let Err(e) = self.interpret(&[push.branch.as_str()]).await {
-            // remembered, so its redelivery is acknowledged, not followed
-            self.may_lag().await?;
-            return Err(e);
-        }
-        json_response(&json!({ "ok": true, "interpreted": true, "redelivery": false }))
     }
 
     pub(crate) async fn storage_token(&self, caller: &Caller) -> CellResult<Response> {

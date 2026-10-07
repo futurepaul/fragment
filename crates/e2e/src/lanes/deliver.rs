@@ -1,7 +1,7 @@
 //! Deliveries and AI (slice F): web push from mutations and jobs through
 //! the delivery queue to a push service that checks VAPID and decrypts as
 //! a browser would; subscriptions that are gone, retries, the dead-letter
-//! report; `notifyUrls`; and AI as a job's steps: text through the model
+//! report; and AI as a job's steps: text through the model
 //! route and images on its transport (both the Workers AI fake, a lower
 //! rung at the vendor boundary), generated images stored as files, video
 //! steps refused, and the calories template's text step. What each paid
@@ -41,9 +41,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let owner = api.person()?;
     let name = s.named(api, &owner, "push")?;
     let c = s.create(api, &owner, &name)?;
-    let mut manifest: Value = serde_json::from_slice(MEDIA_JSON)?;
-    manifest["notifyUrls"] = json!([format!("{}/notify", s.push.url)]);
-    ship(s, &c, MEDIA_APP, manifest.to_string().as_bytes());
+    ship(s, &c, MEDIA_APP, MEDIA_JSON);
     let view = c["viewToken"].as_str().unwrap_or("").to_string();
     let site = |path: &str, body: Option<Value>| -> Result<Reply> {
         api.call(Call {
@@ -176,12 +174,6 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let r = site("__push-unsub", Some(json!({ "endpoint": format!("{}/push/a", s.push.url) })))?;
     s.ok("a page unsubscribes by its endpoint", r.status == 200 && r.body["removed"] == 1, &r);
 
-    // notifyUrls: a frame per move of main
-    s.commit(&c, &[("notes/today.md", Some(b"# today"))]);
-    let got = s.eventually(wait, || s.push.notified().iter().any(|f| f["paths"] == json!(["notes/today.md"])));
-    let frame = s.push.notified().into_iter().find(|f| f["paths"] == json!(["notes/today.md"])).unwrap_or_default();
-    s.ok("notifyUrls get a changed frame when main moves", got && frame["type"] == "changed" && frame["fragment"] == name.as_str(), &frame);
-
     // out of retries: the dead-letter queue reports to the fragment
     subscribe(s, "c", "doomed", 7)?;
     s.push.fail("c", 1000);
@@ -308,7 +300,6 @@ fn calories(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let name = s.named(api, &owner, "calories")?;
     let made = api.create_with(&owner, json!({ "name": name, "template": "calories" }))?;
     anyhow::ensure!(made.status == 200, "calories from its template: {made}");
-    s.hook(api, &made.body);
     let replies = || {
         let r = api.signed(&owner, "GET", &format!("/api/f/{name}/channels/replies?after=0"), None);
         r.ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default()

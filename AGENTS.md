@@ -2,7 +2,7 @@
 
 Fragment is the product: stateful, multiplayer web apps published from
 the CLI. Agents are fragments a computer of your own runs (today, Hermes
-profiles; docs/cloudflare-v1.md, decisions 14 and 15).
+profiles; docs/computers.md).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
@@ -11,7 +11,8 @@ cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
 `wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
 took Hermes, computers, the desktop, the personal agent's chat,
 sandcastle, and the fleet's deploy path off master; they live at the tag
-`celld-final`.
+`celld-final`. Computers came back in its phase 4, Hermes as their
+image's agent runtime.
 
 ## Read first
 
@@ -22,31 +23,26 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    fragments, and why; keep it short.
 1. `docs/ROADMAP.md` — decisions, truth map, phases (and what is live),
    escalations.
-2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
+2. `docs/MODEL.md` — the core model, in Cloudflare's primitives.
    `docs/api.md` — the wire contract the cell answers.
+   `docs/computers.md` — the platform's contract with a computer's image;
+   `docs/bridge.md` — the bridge, the one process an image runs between
+   its agent runtime and the fragment API;
+   `docs/chat-records.md` — a chat's records, which the bridge writes
+   and the chat template reads;
+   `docs/durable-computers.md` — how a computer's state survives a
+   sleep, a crash or a rolled-back disk: the design of record;
+   `docs/ledger.md` — the usage ledger: what is metered, at what price,
+   and who pays;
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — usernames and flat hosts, templates (its
-   desktop, computers and goose agents went at the cuts);
-   `docs/phase-4.md` — sign-in, identities, budgets (live);
-   `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
-   the isolation findings;
-   `docs/phase-5.md` — agents as members (the record: its goose agents
-   went on 2026-10-07);
-   `docs/durable-computers.md` — how a computer's state survives a
-   sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
-   (its connector went at the cut);
-   `docs/phase-3.md` — hosting on fragment.club;
-   `docs/phase-2.md` — the record of the core cut (slices A–G);
-   `docs/operate.md` — the operator runbook (the `celld` branch's).
-3. `docs/finite-next-lessons.md` — what to port from finite-next and the
-   gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
-4. `docs/published-fragments.md` — primitives that must stay expressible.
+   (its connector went at the cut).
+3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
-5. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
-6. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
+4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
+5. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
    engineering-style.md` (hard cuts, limits, assertions on in release,
    typed errors, valid/invalid/replay/restart tests, Rust for tooling).
 

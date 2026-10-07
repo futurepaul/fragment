@@ -272,7 +272,10 @@ pub const DEFAULT_NEURONS: i64 = 11_000;
 ///   5% of 2 vCPU (an idle guest) × $0.000020 a vCPU-second = $0.0072 an hour.
 ///
 /// $0.064224 an awake hour, about $46 for an always-on month.
-pub const DEFAULT_INSTANCES: [(&str, i64); 1] = [("2vcpu-6gib", 64_224)];
+pub const DEFAULT_INSTANCES: [(&str, i64); 1] = [(INSTANCE, 64_224)];
+/// The instance every computer runs on: its container starts at its size
+/// (`instance_size`), and its awake time is priced by the book's row for it.
+pub const INSTANCE: &str = "2vcpu-6gib";
 
 /// The size a computer's container starts at (`ctx.container.start`'s
 /// `instance`): one of Containers' named types, or a size of its own.
@@ -549,7 +552,7 @@ mod tests {
     /// they are; a size Containers refuses is refused here first.
     #[test]
     fn instance_sizes() {
-        assert_eq!(instance_size(DEFAULT_INSTANCES[0].0), Ok(InstanceSize::Custom { vcpu: 2, memory_mib: 6144, disk_mb: 12_000 }));
+        assert_eq!(instance_size(INSTANCE), Ok(InstanceSize::Custom { vcpu: 2, memory_mib: 6144, disk_mb: 12_000 }));
         assert_eq!(serde_json::to_value(instance_size("2vcpu-6gib").unwrap()).unwrap(), serde_json::json!({ "vcpu": 2, "memoryMib": 6144, "diskMb": 12000 }));
         assert_eq!(instance_size("standard-3"), Ok(InstanceSize::Named("standard-3".into())));
         assert_eq!(serde_json::to_value(instance_size("standard-3").unwrap()).unwrap(), serde_json::json!("standard-3"));

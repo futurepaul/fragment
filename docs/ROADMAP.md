@@ -107,7 +107,7 @@ rollback), members and invites, call (operations), and read and follow
    Cloudflare host path is deleted (celld only). *Amended 2026-09-26:*
    celld v0.6.0 plus our fork (`futurepaul/celld` branch
    `hardening-v0.6.0`): the `KEYS` seam and the hardening settings
-   (docs/hardening.md). v0.6.0 shipped the alarm fix upstream (#228), so
+   (docs/hardening.md at the tag). v0.6.0 shipped the alarm fix upstream (#228), so
    the fork no longer carries it.
 9. fragment.club's published fragments are not migrated; every primitive
    they used stays expressible and proven (`docs/published-fragments.md`).
@@ -182,7 +182,7 @@ person who started the turn and a cap: the agent's own membership, or
 through an agent (since 2026-10-04, sharing does, for the agent's own
 owner: docs/cloudflare-v1.md, decision 36). Replaces decision 3's "a
 chat guest has the owner's full authority", which let a guest reach
-everything the owner has. `docs/phase-7.md`.
+everything the owner has. `docs/phase-7.md` at the tag.
 
 ### 18. Channels a fragment declares postable (Paul, 2026-09-25)
 
@@ -277,7 +277,7 @@ cut: a fragment's old host redirects to its new one (a write there is
 records and certificates stay at least a year. The fragments are one
 site with each other until the Public Suffix List lists
 `fragment.boats`, which waits for thousands of people
-(docs/fragment-boats.md; the fleet: docs/operate.md).
+(docs/fragment-boats.md; the fleet: docs/operate.md on the `celld` branch).
 
 ### 24. Chat → agent: the brain in the cell, the hands on a computer (Paul, 2026-09-27)
 
@@ -354,7 +354,7 @@ designed).
 | Thing | Source of truth | Derived/copies must be |
 |---|---|---|
 | File bytes + history + live pointer | code.storage git | local folder = disposable working copy; cell RAM = LRU cache, never persisted |
-| Tree index (path, size, sha per pinned commit) | derived from git | cell SQLite; names its pinned SHA; invalidated by webhook/poll; serves pinned until refreshed |
+| Tree index (path, size, sha per pinned commit) | derived from git | cell SQLite; names its pinned SHA; moved by the platform's own moves, a refresh, or the poll; serves pinned until refreshed |
 | Manifest and declared operations | `fragment.json` in git | cell caches the pinned copy; an invalid manifest at a new pin keeps the last good cache and records an event |
 | Members, roles, invites | the fragment's supervisor cell | grants and revokes are transactional; the `events` channel records each change |
 | Cell state (supervisor tables, operation ledger, channels, the app facet's SQL) | the S3 bucket (Tigris), via celld replication | — |
@@ -362,8 +362,8 @@ designed).
 | Identities ↔ keys, designated owners | the registry cell (BANKS's shape; BANKS itself later, `docs/finite-integration.md`) | sessions and caches name an identity and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | effects dedupe at their owners by tool-call id |
-| Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
-| Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
+| Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
+| Compute/audit trail | the `events` channel | pin moves recorded as events |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live
 in git, or, at 1 MiB and above, in the bucket as content-addressed blobs
@@ -382,7 +382,8 @@ that a pointer in git names.
   repo-scoped storage token (editor+, minted per request, audited).
 - Fragment identity: the npub secret is generated client-side at create,
   crosses the wire once, and is stored wrapped.
-- Webhooks: validate → persist (dedupe) → interpret; a poll backstop,
+- Pins: every move the platform makes it follows, and a writer to git
+  refreshes after its push (the CLI does); no push webhook; a poll backstop,
   every 5 minutes, only while the pins may lag the repo (a storage token
   minted, or a move that failed to follow, in the last day).
 
@@ -432,7 +433,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 
 ### 2. The core cut (done 2026-09-23)
 - Done in seven slices on Paul's go; the record (what landed, every
-  decision, what was deferred and to whom) is `docs/phase-2.md`. The
+  decision, what was deferred and to whom) is `docs/phase-2.md` at the tag. The
   Rust e2e passes 444 of 444; the TypeScript runtime, `scripts/`,
   `deploy/`, `notify-relay/`, and the Node packages are deleted.
 - Operations, channels, membership, the app facet, blob pointers, and
@@ -463,7 +464,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   passes the e2e on its `fly.dev` address, then `fragment.club` and
   `*.fragment.club` move to it (Paul adds the records at Namecheap; the
   VPS keeps running until he retires it). *Cut over 2026-09-23; the
-  record is `docs/phase-3.md`.* Until sign-in exists, only
+  record is `docs/phase-3.md` at the tag.* Until sign-in exists, only
   Paul's key may create fragments. An outbound firewall keeps jobs off
   the fleet's private network. Live checks: one OpenRouter call (text,
   one small image) and a push to a real phone.
@@ -477,7 +478,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 ### 4. Friends alpha: invite-only sign-in and budgets (built 2026-09-24)
 - Pulled forward so Paul can share fragment.club with friends without an
   obvious problem (2026-09-23); reshaped to finite.computer's identity
-  model (decision 15, 2026-09-24; slices in `docs/phase-4.md`; slices A,
+  model (decision 15, 2026-09-24; slices in `docs/phase-4.md` at the tag; slices A,
   the registry and identities, B, sign-in and sessions, and C, budgets,
   built 2026-09-24; D, the deploy, live on fragment.club the same day). A
   registry of identities (person, agent, fragment), their public keys,
@@ -521,11 +522,11 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 - **Acceptance:** the goose spike's checks, ported to the Rust e2e (steer
   mid-tool, stop, SIGKILL mid-tool runs the effect once, SIGKILL between
   steps); an agent uses the todo fragment only through its operations.
-  *Met 2026-09-23 (`docs/phase-5.md`); hosted since phase 6, co-hosted
+  *Met 2026-09-23 (`docs/phase-5.md` at the tag); hosted since phase 6, co-hosted
   on the cell's nodes, on the owner's budget.*
 
 ### 6. The desktop (built 2026-09-24)
-- **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
+- **Reframed 2026-09-24 (Paul): `docs/phase-6.md` at the tag is the plan.** Fragment
   is the core product and the desktop is a template anyone deploys with a
   click; people get usernames and fragments live at
   `<label>--<username>.fragment.club` (decision 16); the phase also brings
@@ -542,7 +543,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   reorders and closes panes, collapses both sides, and works at phone
   width; the layout survives a reload. **Met 2026-09-24** (e2e lane
   `desktop`, 17 checks; the desktop is `templates/desktop`), and live on
-  fragment.club the same day with the rest of `docs/phase-6.md`.
+  fragment.club the same day with the rest of `docs/phase-6.md` at the tag.
 
 ### 7. Chats and sharing (built 2026-09-25, except the share header)
 - A chat template (a `chat` channel) whose agent member answers new
@@ -553,7 +554,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   revoking closes the guest's socket and returns 403; a rewritten
   desktop cannot share without the sheet click.
 - *Built:* the chat template, the owner's agent in every new chat, the
-  share sheet, invites, direct URLs, and shared badges (`docs/phase-7.md`,
+  share sheet, invites, direct URLs, and shared badges (`docs/phase-7.md` at the tag,
   e2e `phase7`). *Not built:* the share header (decision 4), unscheduled.
 - *Folded 2026-09-26 (decision 19):* the chat half becomes the agent
   add-on (D) and the desktop rebuilt on it (F).
@@ -602,7 +603,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 
 ### C. Declutter
 - Take the desktop's and chats' special cases out of the core
-  (`docs/platform.md`: the chat page, the owner's agent in every chat,
+  (`docs/platform.md` at the tag: the chat page, the owner's agent in every chat,
   the `work` channel, "is it a chat", the new desktop's visibility and
   framing). Each becomes something any fragment may declare, moves into
   its template, or waits behind one seam that D replaces.
@@ -614,7 +615,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   The new desktop's visibility stayed (`publish.rs`, `first_visibility`):
   fragment.json holds no access. *Since `pet-followups`:* it reads what
   the template declares (a computer, or any capability), naming no
-  template; platform.md's row for it is gone. The chat's three wait for D.
+  template; platform.md's row for it went. The chat's three wait for D.
 
 ### D. The agent add-on
 - *Built 2026-09-26 (#47, #48; decision 20 says what):* the `agent`
@@ -696,7 +697,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   agent (and a computer, after E) and uses only what any fragment may
   declare. Phase 6's look and quality; no new features.
 - **Acceptance:** the desktop lane and the phase7 flow pass, and
-  `docs/platform.md` has no special case for the desktop.
+  `docs/platform.md` at the tag has no special case for the desktop.
 - *Built 2026-09-26 (PR `desktop-computers`):* the sidebar's Computers.
   New computer makes a pet fragment (`computer-…`) through `__fragments`,
   told apart by its name as chats are; it opens as a pane and is awake
@@ -704,7 +705,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   (`job.computer.exec`) is how your agent runs commands there, from any
   chat, through the platform's verbs; a job's call now answers what the
   job answered (docs/computers.md at the tag). Since #60 keyed `first_visibility` on
-  what a template declares, docs/platform.md names the desktop only as the
+  what a template declares, docs/platform.md (at the tag) named the desktop only as the
   first user of `fragments` and `frame`: no special case is left. *Since
   `agent-handoff`:* your agent hands work to a computer from any chat (a
   pet you name, or a throwaway builder).

@@ -2,7 +2,7 @@
 
 Fragment publishes stateful, multiplayer web apps from the CLI. Sign up
 (invite-only for now), pair the `fragment` CLI, and publish. fragment.club
-lists your fragments, and serves them until they move to fragment.boats.
+lists your fragments, and fragment.boats serves them.
 Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
@@ -11,7 +11,8 @@ Your **agents** are fragments too, run by a computer of your own (today,
 Hermes profiles), and act on other fragments as their members.
 Fragments run on Cloudflare: each is a Durable Object that sleeps when
 idle, its app in a Worker of its own
-([docs/cloudflare-v1.md](docs/cloudflare-v1.md)).
+([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers
+([docs/computers.md](docs/computers.md)).
 
 This repo holds:
 
@@ -127,5 +128,5 @@ crates/e2e     the end-to-end suite
 templates/     blank, calories, inbox, notes, todo; the blessed agent, brain, chat, skills
 xtask/         build, dev, try, check, e2e, deploy, teardown
 deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
-docs/          model, contract, roadmap, phase records, the debt ledger
+docs/          the plan (cloudflare-v1.md), model, contract, the debt ledger
 ```

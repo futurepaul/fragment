@@ -22,7 +22,10 @@
 //! owner's row also carries the fragment's sharing (`Sharing`: who may
 //! open it, its members and guests), made when the row is sent: a change
 //! to members or visibility sends it again (`sharing_changed`), so the
-//! platform's page reads the owner's list alone. A person's search cursor
+//! platform's page reads the owner's list alone. Every row carries the
+//! fragment's face (its kind and title) and its agents, the first added
+//! first: an install that changes the face, or an agent joining or
+//! leaving, sends every row again (`reindex`). A person's search cursor
 //! (search.rs) follows their row: made with a role, gone without one.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
@@ -125,15 +128,6 @@ fn invite_json(r: &Value) -> Invite {
     }
 }
 
-/// An invites table from before invites could name their invitee gains
-/// the column (every invite made before is anyone's who holds its token).
-pub(crate) fn migrate(sql: &SqlStorage) {
-    let cols: Vec<Value> = sql.exec("PRAGMA table_info(invites)", None).and_then(|c| c.to_array()).unwrap_or_default();
-    if !cols.iter().any(|c| c["name"] == "invitee") {
-        sql.exec("ALTER TABLE invites ADD COLUMN invitee TEXT", None).expect("the invites table migrates");
-    }
-}
-
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
     /// in the caller's turn, beside the membership write it mirrors. Their
@@ -151,8 +145,9 @@ impl FragmentCell {
     }
 
     /// What its members' lists show of it, at each install of live: its
-    /// kind and title. A change is sent to every member's list (at most
-    /// `MEMBERS_MAX`) and its owner's.
+    /// kind and title (and its agents, read as each row is sent). A change
+    /// is sent to every member's list (at most `MEMBERS_MAX`) and its
+    /// owner's, as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>) -> CellResult<()> {
         let face = face(kind, title);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
@@ -179,8 +174,7 @@ impl FragmentCell {
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
-        self.index_change(&owner, Some(Role::Owner))?;
-        self.set_meta(MetaKey::SharingSent, "1")
+        self.index_change(&owner, Some(Role::Owner))
     }
 
     /// Sends one index change to `principal`'s list: whether it took it.
@@ -203,21 +197,18 @@ impl FragmentCell {
     /// request that flushes sends its own change and waits one round,
     /// whatever its members; the alarm sends the rest, a batch a pass. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
-    /// A fragment from before the owner's row carried its sharing sends it
-    /// once, here (on its next change, or its alarm).
     pub(crate) async fn flush_index(&self) {
         let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.must(MetaKey::Owner)) else { return };
-        if matches!(self.meta(MetaKey::SharingSent), Ok(None)) {
-            if let Err(e) = self.sharing_changed() {
-                console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
-            }
-        }
         if let Err(e) = self.search_fence() {
             console_error!("{name}: its search was not fenced to the channels searched now ({:?}): {}", e.code, e.message);
         }
         let searched = match self.searched_channels() {
             Ok(searched) => searched,
             Err(e) => return console_error!("{name}: its searched channels did not read ({:?}): {}", e.code, e.message),
+        };
+        let agents = match self.listed_agents() {
+            Ok(agents) => agents,
+            Err(e) => return console_error!("{name}: its agents did not read ({:?}): {}", e.code, e.message),
         };
         let due = self
             .rows(
@@ -236,12 +227,13 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
-            // every row a role names: the channels searched and the
-            // fragment's face, as they are now
+            // every row a role names: the channels searched, and the
+            // fragment's face and its agents, as they are now
             if row["role"].is_string() {
                 body["searched"] = json!(searched);
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
                     body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
+                    body["face"]["agents"] = json!(agents);
                 }
             }
             // the owner's row: the sharing now, which no later change undoes
@@ -367,6 +359,16 @@ impl FragmentCell {
         Ok(MemberList { members: rows.iter().map(member_json).collect::<CellResult<Vec<_>>>()? })
     }
 
+    /// Its agent members as every list's row names them: the first added
+    /// first, at most `LISTED_AGENTS_MAX`.
+    fn listed_agents(&self) -> CellResult<Vec<String>> {
+        let rows = self.rows(
+            "SELECT principal FROM members WHERE kind = 'agent' ORDER BY added_at, principal LIMIT ?",
+            vec![SqlStorageValue::Integer(limits::LISTED_AGENTS_MAX as i64)],
+        )?;
+        Ok(rows.iter().filter_map(|r| r["principal"].as_str().map(str::to_string)).collect())
+    }
+
     /// A new member needs room under `MEMBERS_MAX`; a role change does not.
     fn check_room(&self, current: Option<Role>) -> CellResult<()> {
         if current.is_none() && self.count("SELECT COUNT(*) AS n FROM members")? >= limits::MEMBERS_MAX as u64 {
@@ -424,10 +426,11 @@ impl FragmentCell {
         )?;
         self.index_change(&target.id, Some(body.role))?;
         self.sharing_changed()?;
-        // a new agent member's computer hears it joined (runs_on.rs); a
-        // role change is no join
+        // a new agent member's computer hears it joined (runs_on.rs), and
+        // every list's row names it; a role change is no join
         if current.is_none() && target.kind == IdentityKind::Agent {
             self.agent_added(&target.id, target.owner.as_deref(), now)?;
+            self.reindex()?;
         }
         // sharing with an agent says so: its owner reads what it reads (FIN-11)
         let summary = match &target.owner {
@@ -476,13 +479,17 @@ impl FragmentCell {
                 Some(_) => refusal(actor.role == Some(Role::Owner), why),
             });
         }
-        let owner = self.rows("SELECT owner FROM members WHERE principal = ?", vec![target.as_str().into()])?;
-        let owner = owner.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
+        let removed = self.rows("SELECT owner, kind FROM members WHERE principal = ?", vec![target.as_str().into()])?;
+        let owner = removed.first().and_then(|r| r["owner"].as_str()).map(str::to_string);
         self.exec("DELETE FROM members WHERE principal = ?", vec![target.as_str().into()])?;
         self.drop_subscriptions(&target)?;
         self.agent_removed(&target)?;
         self.index_change(&target, None)?;
         self.sharing_changed()?;
+        // every list's row names the agents left
+        if removed.first().is_some_and(|r| r["kind"] == "agent") {
+            self.reindex()?;
+        }
         self.close_sockets(&format!("p:{target}"), "membership revoked");
         // an agent's owner who read through it, and has no standing of their own now
         if let Some(owner) = owner {
@@ -638,6 +645,7 @@ impl FragmentCell {
         // an agent that accepts an invite joins as one added does (runs_on.rs)
         if current.is_none() && caller.kind() == Some(IdentityKind::Agent) {
             self.agent_added(&who, caller.owner(), now)?;
+            self.reindex()?;
         }
         self.event("member.joined", &format!("{} joined as {} (invite {id})", npub::display(&who), role.as_str()), json!({ "principal": npub::display(&who), "role": role, "invite": id }));
         self.flush_index().await;
@@ -685,27 +693,20 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "visibility": body.visibility }))
     }
 
-    /// New share-link token, inbox token, or webhook secret (default: all three).
+    /// New share-link token or inbox token (default: both). An agent
+    /// shares for its owner: it renews them as its owner does.
     pub(crate) fn rotate(&self, caller: &Caller, body: Value) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        let all = ["inbox", "view", "webhook"];
-        // an agent shares: it renews the links people and apps hold (the
-        // inbox, the share link), never code.storage's webhook secret
-        let agent = actor.for_owner.is_some();
-        let defaults: &[&str] = if agent { &["inbox", "view"] } else { &all };
+        let all = ["inbox", "view"];
         let want: Vec<String> = match &body["scopes"] {
-            Value::Null => defaults.iter().map(|s| s.to_string()).collect(),
             Value::Array(a) if !a.is_empty() => a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect(),
-            Value::Array(_) => defaults.iter().map(|s| s.to_string()).collect(),
-            _ => return Err(CellError::invalid("scopes must be an array of inbox, view, webhook")),
+            Value::Null | Value::Array(_) => all.iter().map(|s| s.to_string()).collect(),
+            _ => return Err(CellError::invalid("scopes must be an array of inbox, view")),
         };
         if let Some(bad) = want.iter().find(|s| !all.contains(&s.as_str())) {
-            return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view, webhook)")));
+            return Err(CellError::invalid(format!("unknown scope {bad:?} (inbox, view)")));
         }
-        if agent && want.iter().any(|w| w == "webhook") {
-            return Err(CellError::new(ErrorCode::Forbidden, "an agent rotates the inbox and share links, never the webhook secret: its owner does"));
-        }
-        for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>()), ("webhook", MetaKey::WebhookSecret, js::random_hex::<16>())] {
+        for (scope, key, fresh) in [("inbox", MetaKey::InboxToken, js::random_hex::<16>()), ("view", MetaKey::ViewToken, js::random_hex::<12>())] {
             if want.iter().any(|w| w == scope) {
                 self.set_meta(key, &fresh)?;
             }
@@ -718,7 +719,6 @@ impl FragmentCell {
         json_response(&Rotated {
             inbox_token: self.must(MetaKey::InboxToken)?,
             view_token: self.must(MetaKey::ViewToken)?,
-            webhook_secret: if agent { None } else { Some(self.must(MetaKey::WebhookSecret)?) },
             rotated: rotated.iter().map(|s| s.to_string()).collect(),
         })
     }

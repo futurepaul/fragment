@@ -27,7 +27,6 @@
 //!   PUT    /api/secrets/<KEY>  GET /api/secrets  DELETE /api/secrets/<KEY>   editor
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
-//!   POST   /api/webhook                   code.storage (HMAC)
 //!   GET    /api/files  /api/file?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
@@ -45,7 +44,6 @@
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
-//!   POST   /card/report                   the delivery consumer, for a card's shot (card.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
@@ -110,11 +108,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS records_effect ON records (op, idx) WHERE op I
 CREATE TABLE IF NOT EXISTS tree (
   ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL,
   PRIMARY KEY (ref, path));
-CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
+  modules TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
@@ -150,8 +147,8 @@ CREATE TABLE IF NOT EXISTS pending (
   depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
 CREATE TABLE IF NOT EXISTS delivery_outbox (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push', 'notify')),
-  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, url TEXT, body TEXT,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')),
+  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT,
   after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);
@@ -208,8 +205,6 @@ impl DurableObject for FragmentCell {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Fragment schema applies");
         sql.exec(crate::ended::SCHEMA, None).expect("the ended lives' schema applies");
-        crate::plane::migrate_code(&sql);
-        crate::members::migrate(&sql);
         let cfg = Config::from_env(&env);
         let rate = fragment_core::ratelimit::Rate::new(limits::PUBLIC_CALLS_PER_MIN, limits::PUBLIC_CALLS_PER_MIN_FRAGMENT);
         let app = crate::ops::app_loader(&raw, env.as_ref(), sql.clone());
@@ -356,17 +351,13 @@ pub(crate) enum MetaKey {
     /// The share link's token.
     ViewToken,
     InboxToken,
-    WebhookSecret,
     /// Its code.storage repo.
     Repo,
     /// Its app facet's name, `app@<incarnation>`: each life of a name has
-    /// its own app database (`app_facet`). None: `app`, made before.
+    /// its own app database (`app_facet`).
     AppFacet,
     /// The latest members index change (members.rs).
     IndexVersion,
-    /// The owner's row in their list has been sent this fragment's sharing
-    /// (members.rs); a fragment from before sends it once.
-    SharingSent,
     /// When the next pass runs (a day after the last, or within the poll
     /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
@@ -381,7 +372,7 @@ pub(crate) enum MetaKey {
     PinMain,
     PinLive,
     /// When a request first asked code.storage for the pins (plane.rs
-    /// `ensure_pins`); after it, moves arrive by webhook, refresh, or poll.
+    /// `ensure_pins`); after it, moves arrive by refresh or poll.
     PinsCheckedAt,
     /// The commit main's manifest was read from.
     MainReadAt,
@@ -456,10 +447,8 @@ impl MetaKey {
             MetaKey::Visibility => "visibility",
             MetaKey::ViewToken => "view_token",
             MetaKey::InboxToken => "inbox_token",
-            MetaKey::WebhookSecret => "webhook_secret",
             MetaKey::Repo => "repo",
             MetaKey::IndexVersion => "index_version",
-            MetaKey::SharingSent => "sharing_sent",
             MetaKey::PollAt => "poll_at",
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
@@ -665,10 +654,9 @@ impl FragmentCell {
         self.meta(key)?.ok_or_else(|| missing(key))
     }
 
-    /// The app facet's name: this life's (`MetaKey::AppFacet`), or `app` for
-    /// a fragment made before each life had its own.
+    /// The app facet's name: this life's (`MetaKey::AppFacet`).
     pub(crate) fn app_facet(&self) -> CellResult<String> {
-        Ok(self.meta(MetaKey::AppFacet)?.unwrap_or_else(|| js::APP_FACET.to_string()))
+        self.must(MetaKey::AppFacet)
     }
 
     pub(crate) fn count(&self, q: &str) -> CellResult<u64> {
@@ -878,14 +866,6 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
-        if path == "/card/report" {
-            // Only the delivery consumer sets the header; the router never passes it.
-            if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let report = body_json(&mut req).await?;
-            return json_response(&self.card_report(report).await?);
-        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
@@ -995,12 +975,6 @@ impl FragmentCell {
             (Method::Delete, ["api", "secrets", key]) => self.delete_secret(&caller, key),
             (Method::Get, ["api", "storage-token"]) => self.storage_token(&caller).await,
             (Method::Post, ["api", "refresh"]) => self.refresh(&caller).await,
-            (Method::Post, ["api", "webhook"]) => {
-                let event = req.headers().get("x-pierre-event")?.unwrap_or_default();
-                let signature = req.headers().get("x-pierre-signature")?.unwrap_or_default();
-                let body = req.bytes().await?;
-                self.webhook(&event, &signature, &body).await
-            }
             (Method::Get, ["api", "files"]) => self.files(&caller).await,
             (Method::Post, ["api", "files"]) => {
                 let body = body_json(&mut req).await?;
@@ -1094,7 +1068,7 @@ impl FragmentCell {
                 return Err(CellError::invalid("a title is 1 to 120 characters"));
             }
         }
-        let cs_cfg = self.cfg.codestorage()?;
+        let cs_cfg = self.cfg.codestorage();
         // Claim the name before the first await: a concurrent create for the
         // same name reaches this same object and must see it taken.
         // A claim left by a create that crashed mid-flight expires.
@@ -1124,7 +1098,7 @@ impl FragmentCell {
         let now = js::now_ms();
         let fragment_npub = npub::encode(&fragment_pub);
         let visibility = body.visibility.unwrap_or(Visibility::Link);
-        let (view_token, inbox_token, webhook_secret) = (js::random_hex::<12>(), js::random_hex::<16>(), js::random_hex::<16>());
+        let (view_token, inbox_token) = (js::random_hex::<12>(), js::random_hex::<16>());
         let poll_at = (now + self.cfg.poll_interval_ms).to_string();
         let created_at = now.to_string();
         for (k, v) in [
@@ -1134,7 +1108,6 @@ impl FragmentCell {
             (MetaKey::Visibility, visibility.as_str()),
             (MetaKey::ViewToken, view_token.as_str()),
             (MetaKey::InboxToken, inbox_token.as_str()),
-            (MetaKey::WebhookSecret, webhook_secret.as_str()),
             (MetaKey::Repo, repo.as_str()),
             (MetaKey::IndexVersion, "0"),
             (MetaKey::PollAt, poll_at.as_str()),
@@ -1181,7 +1154,6 @@ impl FragmentCell {
             visibility,
             view_token,
             inbox_token,
-            webhook_secret,
             repo,
             canonical: self.cfg.canonical(&caller.url, &body.name),
         })
@@ -1224,7 +1196,7 @@ impl FragmentCell {
             code: self.code_status()?,
             view_token: Some(facts.view_token),
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
-            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform(&caller.url) },
+            urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
             name: facts.name,
         })
@@ -1267,7 +1239,9 @@ impl FragmentCell {
     /// trims, the poll backstop (while the pins may lag), the blob
     /// collection, running runs checked, and the storage sample. The next
     /// pass is a day away, or within the poll interval while the fragment
-    /// is busy (`arm`). Then it re-arms.
+    /// is busy (`arm`). Last, a preview card due is shot (card.rs): the
+    /// seconds a browser takes hold up only the work that comes due
+    /// meanwhile. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1281,9 +1255,6 @@ impl FragmentCell {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;
-        if let Err(e) = self.drain_card().await {
-            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
-        }
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
         }
@@ -1311,6 +1282,9 @@ impl FragmentCell {
             self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
+        }
+        if let Err(e) = self.drain_card().await {
+            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
         }
         self.schedule().await
     }

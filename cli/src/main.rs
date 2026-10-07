@@ -100,7 +100,7 @@ enum Cmd {
         /// Its title (a blessed template's fragment only)
         #[arg(long, requires = "template")]
         title: Option<String>,
-        /// Show the share link, the webhook URL and the webhook secret (they
+        /// Show the share link and the webhook URL (they
         /// are credentials: `fragment open` shows the links later)
         #[arg(long)]
         show_tokens: bool,
@@ -139,21 +139,11 @@ enum Cmd {
         prune: bool,
         /// Pull what is live (the files served), not main: into the folder
         /// only, deletions included
-        #[arg(long, conflicts_with_all = ["mode", "watch", "install", "uninstall", "mirror_from"])]
+        #[arg(long, conflicts_with_all = ["mode", "watch"])]
         live: bool,
-        /// Overlay this read-only source folder into --dir before each
-        /// pass (new/changed files copy in; source never written)
-        #[arg(long)]
-        mirror_from: Option<PathBuf>,
         /// Allow a mass deletion to propagate (the guard refuses otherwise)
         #[arg(long)]
         apply_mass_delete: bool,
-        /// Install (or, with --uninstall, remove) a LaunchAgent/systemd
-        /// unit that keeps this folder syncing after logout/reboot
-        #[arg(long, conflicts_with = "uninstall")]
-        install: bool,
-        #[arg(long)]
-        uninstall: bool,
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
@@ -912,7 +902,7 @@ fn run(cli: Cli) -> Result<()> {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
                 let mut data = serde_json::to_value(&v)?;
                 if !show_tokens {
-                    for token in ["viewToken", "inboxToken", "webhookSecret"] {
+                    for token in ["viewToken", "inboxToken"] {
                         data.as_object_mut().expect("Created is an object").remove(token);
                     }
                 }
@@ -963,18 +953,13 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Cmd::Sync { name, dir, watch, mode, prune, live, mirror_from, apply_mass_delete, install, uninstall } => {
+        Cmd::Sync { name, dir, watch, mode, prune, live, apply_mass_delete } => {
             // never stream JSON envelopes mid-run: watch prints progress
             // lines forever; a json consumer would choke on line 2
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
             }
-            if install || uninstall {
-                install_sync_unit(&name, &dir, install, mirror_from.as_deref())?;
-                return Ok(());
-            }
             let opts = SyncOptions {
-                mirror_from,
                 mode: match mode.as_deref() {
                     _ if live => Mode::Pull,
                     Some("push") => Mode::Push,
@@ -1254,8 +1239,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
-            // flags narrow the default both-scopes rotation (the webhook
-            // secret is code.storage's to know: rotate it only by asking the cell)
+            // flags narrow the default both-scopes rotation
             let scopes = match (inbox, view) {
                 (true, false) => vec!["inbox"],
                 (false, true) => vec!["view"],
@@ -1263,9 +1247,6 @@ fn run(cli: Cli) -> Result<()> {
             };
             let body = json!({ "scopes": scopes });
             let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
-            // the whole answer, webhook secret included: the code.storage
-            // push HMAC is only ever visible at create/rotate, and machine
-            // consumers (dev harnesses registering push webhooks) need it
             json_exit(j, &v);
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             println!("rotated: {}", v.rotated.join(", "));
@@ -1564,103 +1545,6 @@ fn chrono_like(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z", secs % 86_400 / 3600, secs % 3600 / 60, secs % 60)
 }
 
-// ---------- sync unit (keep a folder live without a terminal) ----------
-// Writes a LaunchAgent (macOS) or systemd user unit (Linux) for one
-// fragment+folder pair. Uses the CLI's own absolute path and an explicit
-// PATH — launchd and systemd both run with minimal environments (the
-// agent-built watch.sh failed on exactly this).
-
-fn install_sync_unit(name: &str, dir: &Path, install: bool, mirror_from: Option<&Path>) -> Result<()> {
-    let dir = match dir.canonicalize() {
-        Ok(d) => d,
-        Err(_) => anyhow::bail!("no such directory: {}", dir.display()),
-    };
-    // the unit runs in `dir`, so a relative source is made absolute here
-    let mirror_from = match mirror_from.filter(|_| install) {
-        Some(m) => Some(m.canonicalize().with_context(|| format!("no such directory: {}", m.display()))?),
-        None => None,
-    };
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let exe = std::env::current_exe()
-        .and_then(|p| p.canonicalize())
-        .context("cannot resolve the fragment binary path")?;
-    let log = dir.join(".fragment").join("watch.log");
-
-    if cfg!(target_os = "macos") {
-        let label = format!("sh.finite.fragment-sync.{name}");
-        let plist_dir = PathBuf::from(&home).join("Library").join("LaunchAgents");
-        let plist = plist_dir.join(format!("{label}.plist"));
-        let _ = std::process::Command::new("launchctl")
-            .arg("bootout")
-            .arg(format!("gui/{}/{}", uid()?, label))
-            .status();
-        if install {
-            std::fs::create_dir_all(&plist_dir)?;
-            std::fs::create_dir_all(dir.join(".fragment"))?;
-            std::fs::write(&plist, sync_unit_file(true, name, &exe, &dir, mirror_from.as_deref(), &home))?;
-            // bootstrap can race the bootout above (async port teardown) —
-            // give it a beat and retry once before giving up
-            let mut ok = false;
-            for attempt in 0..2 {
-                if attempt > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
-                }
-                let status = std::process::Command::new("launchctl")
-                    .arg("bootstrap")
-                    .arg(format!("gui/{}", uid()?))
-                    .arg(&plist)
-                    .status()
-                    .context("launchctl bootstrap failed")?;
-                if status.success() {
-                    ok = true;
-                    break;
-                }
-            }
-            if !ok {
-                anyhow::bail!("launchctl bootstrap failed — try: launchctl bootstrap gui/{} {}", uid()?, plist.display());
-            }
-            println!("installed LaunchAgent {label}");
-            println!("  syncs {name} <-> {} every 3s, starting now and after reboot", dir.display());
-            println!("  log: {}", log.display());
-            println!("  remove with: fragment sync {name} --dir {} --uninstall", dir.display());
-        } else {
-            let _ = std::fs::remove_file(&plist);
-            println!("removed LaunchAgent {label}");
-        }
-    } else {
-        let unit = format!("fragment-sync-{name}.service");
-        let dir_units = PathBuf::from(&home).join(".config").join("systemd").join("user");
-        let path = dir_units.join(&unit);
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", "--now", &unit])
-            .status();
-        if install {
-            std::fs::create_dir_all(&dir_units)?;
-            std::fs::create_dir_all(dir.join(".fragment"))?;
-            std::fs::write(&path, sync_unit_file(false, name, &exe, &dir, mirror_from.as_deref(), &home))?;
-            let run = |args: &[&str]| -> Result<()> {
-                let st = std::process::Command::new("systemctl")
-                    .arg("--user")
-                    .args(args)
-                    .status()
-                    .with_context(|| format!("systemctl --user {:?}", args))?;
-                if !st.success() { anyhow::bail!("systemctl --user {:?} failed", args); }
-                Ok(())
-            };
-            run(&["daemon-reload"])?;
-            run(&["enable", "--now", &unit])?;
-            println!("installed systemd user unit {unit}");
-            println!("  log: journalctl --user -u {unit} -f");
-            println!("  remove with: fragment sync {name} --dir {} --uninstall", dir.display());
-        } else {
-            let _ = std::fs::remove_file(&path);
-            let _ = std::process::Command::new("systemctl").args(["--user", "daemon-reload"]).status();
-            println!("removed systemd user unit {unit}");
-        }
-    }
-    Ok(())
-}
-
 /// Writes a template's files into `dir`, never over a file that exists:
 /// the paths it wrote, and how many it left alone.
 fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
@@ -1680,68 +1564,6 @@ fn scaffold(dir: &Path, tpl_name: &str) -> Result<(Vec<&'static str>, usize)> {
         created.push(*rel);
     }
     Ok((created, skipped))
-}
-
-/// The unit file that keeps `dir` synced: a LaunchAgent plist on macOS, a
-/// systemd user unit elsewhere. It runs this CLI by its absolute path with
-/// `sync --watch`, and with `--mirror-from` when the install had one.
-fn sync_unit_file(macos: bool, name: &str, exe: &Path, dir: &Path, mirror_from: Option<&Path>, home: &str) -> String {
-    let mut args = vec![exe.display().to_string(), "sync".into(), name.into(), "--dir".into(), dir.display().to_string(), "--watch".into()];
-    if let Some(m) = mirror_from {
-        args.extend(["--mirror-from".into(), m.display().to_string()]);
-    }
-    let homebin = format!("{home}/.local/bin:{home}/.cargo/bin");
-    if !macos {
-        return r#"[Unit]
-Description=fragment sync __NAME__
-After=network-online.target
-
-[Service]
-ExecStart=__ARGS__
-WorkingDirectory=__DIR__
-Environment=PATH=__HOMEBIN__:/usr/local/bin:/usr/bin:/bin
-Restart=always
-
-[Install]
-WantedBy=default.target
-"#
-        .replace("__NAME__", name)
-        .replace("__ARGS__", &args.join(" "))
-        .replace("__DIR__", &dir.display().to_string())
-        .replace("__HOMEBIN__", &homebin);
-    }
-    r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>__LABEL__</string>
-  <key>ProgramArguments</key>
-  <array>
-__ARGS__  </array>
-  <key>WorkingDirectory</key><string>__DIR__</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>__HOMEBIN__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>HOME</key><string>__HOME__</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>__LOG__</string>
-  <key>StandardErrorPath</key><string>__LOG__</string>
-</dict>
-</plist>
-"#
-    .replace("__LABEL__", &format!("sh.finite.fragment-sync.{name}"))
-    .replace("__ARGS__", &args.iter().map(|a| format!("    <string>{a}</string>\n")).collect::<String>())
-    .replace("__DIR__", &dir.display().to_string())
-    .replace("__HOMEBIN__", &homebin)
-    .replace("__HOME__", home)
-    .replace("__LOG__", &dir.join(".fragment").join("watch.log").display().to_string())
-}
-
-fn uid() -> Result<String> {
-    let out = std::process::Command::new("id").arg("-u").output().context("id -u failed")?;
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 #[cfg(test)]
@@ -1904,20 +1726,5 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
         assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
         assert_eq!(after, config("http://127.0.0.1:2"));
-    }
-
-    /// Goal: `sync --install --mirror-from <src>` installs a unit that runs
-    /// with `--mirror-from <src>`, as a LaunchAgent and as a systemd unit.
-    /// Method: both unit files, with a source and without. Neither template
-    /// had a place for it, so an installed watcher never overlaid its
-    /// source.
-    #[test]
-    fn an_installed_unit_carries_its_mirror_source() {
-        let unit = |macos, src: Option<&str>| sync_unit_file(macos, "n", Path::new("/bin/fragment"), Path::new("/notes"), src.map(Path::new), "/home/p");
-        let plist = unit(true, Some("/vault"));
-        assert!(plist.contains("    <string>--watch</string>\n    <string>--mirror-from</string>\n    <string>/vault</string>\n  </array>"), "{plist}");
-        let systemd = unit(false, Some("/vault"));
-        assert!(systemd.contains("\nExecStart=/bin/fragment sync n --dir /notes --watch --mirror-from /vault\n"), "{systemd}");
-        assert!(!unit(true, None).contains("--mirror-from") && !unit(false, None).contains("--mirror-from"));
     }
 }

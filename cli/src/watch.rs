@@ -138,7 +138,7 @@ impl<'a> Watcher<'a> {
         if !(due.local || due.remote || due.sweep) {
             return Ok(Served::Nothing);
         }
-        let local = sync::read_local(self.dir, self.name, self.opts)?;
+        let local = sync::read_local(self.dir, self.name)?;
         let full = due.remote || !local.matches_journal() || (due.sweep && (!live_up || self.head_moved()?));
         if !full {
             return Ok(if due.sweep { Served::Checked } else { Served::Nothing });
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(journal(), written, "and writes no journal");
 
         // a commit whose frame never came: the sweep's head read finds it
-        mock.silent_commit("t", "main", &[("b.md", Some(b"b"))], "missed");
+        mock.external_commit("t", "main", &[("b.md", Some(b"b"))], "missed");
         assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Passed(r) if r.pulled == ["b.md"]));
         assert_eq!(fs::read(dir.join("b.md")).unwrap(), b"b");
 

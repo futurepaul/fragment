@@ -1,4 +1,4 @@
-//! A platform form's token (phase 7, decision 4): bound to the browser's
+//! A platform form's token (docs/api.md, Sharing): bound to the browser's
 //! session and to what the form does, and good only from a short delay
 //! after the form was shown until it goes stale.
 //!

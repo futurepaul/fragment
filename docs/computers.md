@@ -590,7 +590,11 @@ settings and state):
   "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
-  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
+  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23). One the
+  platform does not answer for (no 200, 403 or 404) is said
+  (`profile.tier_unread`), and the profile's config stays as the last boot
+  wrote it, its tier with it; a profile with none yet takes the medium
+  tier.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -712,10 +716,10 @@ and how a runtime finds them, is the image's.
   `/data` keeps the last install, so a wake fetches only what a release
   changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all (`skills.rs`);
   a file past one, or at a path that is no safe relative path, is refused
-  and the rest installs. A person whose agents predate their skills
-  fragment (setup makes it since 2026-10-03) gets one as the shell loads,
-  once, from the blessed template, as setup makes it (shell.js,
-  `backfillSkills`); their awake computers install it within the minute.
+  and the rest installs. A person without one (setup makes it since
+  2026-10-03) adds it from settings ("Add the managed skills", from the
+  blessed template, as setup makes it); their awake computers install it
+  within the minute.
 - **The platform skill**, `fragment`, is every profile's, whatever the
   skills fragment holds: what an agent knows of the platform it is on. It
   is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
@@ -815,8 +819,8 @@ persisted)".
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
-  `FRAGMENT_COMPUTER_INSTANCE` names the price book's instance (default
-  `2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
+  every computer is the price book's instance `fragment_core::price::INSTANCE`
+  (`2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
   as `instance` (`fragment_core::price::instance_size`: a Containers type
   by name, or `<n>vcpu-<m>gib`, a custom size with 2 GB of disk a GiB).
 - Awake time is metered at the instance's rate to the computer's owner (decision 24):

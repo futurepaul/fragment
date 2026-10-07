@@ -1,4 +1,4 @@
-//! A fragment's files from the platform (docs/phase-6.md, step 2): a
+//! A fragment's files from the platform (docs/api.md, Control API): a
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
@@ -102,15 +102,15 @@ impl FragmentCell {
                 None => cs.create_branch(&repo, &main, "live").await?,
                 Some(tip) if tip == main => Some(tip),
                 Some(_) => {
-                    // Held across the steps: a push webhook for the first of
-                    // two waits, then pins the second, so the files live
+                    // Held across the steps: a refresh or a poll between them
+                    // waits, then pins the second, so the files live
                     // holds between them are never served.
                     let _held = self.plane.lock().await;
                     cs.promote_live(&repo, message, (&author, &email)).await?
                 }
             };
             if let Some(tip) = moved {
-                // the pin follows now; failing that, the webhook or the poll backstop
+                // the pin follows now; failing that, the poll backstop
                 if let Err(e) = self.interpret(&["live"]).await {
                     self.event("deploy.refresh-failed", &e.message, json!({ "live": tip }));
                     self.may_lag().await?;

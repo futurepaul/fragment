@@ -29,10 +29,9 @@
 //!
 //! A call answers the text a test set for it (`say_next`), else an echo of
 //! its last message, or, for a real agent runtime (`transcripts`),
-//! `transcript_reply`: a pure function of the transcript
-//! (lesson 13), which an agent's own auxiliary calls (titles, its approval
-//! guardian) cannot put out of order; its answer after a tool's result
-//! waits `FOLLOW_UP_MS`.
+//! `transcript_reply`: a pure function of the transcript (lesson 13), which
+//! an agent's own auxiliary calls (titles, its approval guardian) cannot put
+//! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
 //! report (`set_usage`), and a stream cut before its usage (`break_next`).

@@ -141,9 +141,8 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
         host_suffix: "fragment.localhost".into(),
-        legacy_host_suffix: None,
         host_label_suffix: None,
-        // No webhooks reach dev fragments (the CLI's refresh and this poll do).
+        // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
@@ -156,7 +155,7 @@ fn dev(args: &[String]) -> Result<()> {
         delivery_retry_s: None,
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
         signins_pending_max: None,
         test_secret: None,
