@@ -71,7 +71,7 @@ A static `site/` can be previewed before a deploy:
 - Vite / React (its dev server):
   `setsid sh -lc 'npm run dev -- --host 127.0.0.1 --port 3000 >/tmp/project-qa.log 2>&1 < /dev/null' >/dev/null 2>&1 & echo $! >/tmp/project-qa.pid`
 
-Avoid plain `nohup ... &` preview one-liners in Hermes terminal tools
+Avoid plain `nohup ... &` preview one-liners in an agent's terminal tool
 because they can leave the terminal wrapper hanging. Verify the local
 server with `curl http://127.0.0.1:PORT` before opening the browser, and
 stop it after QA. Operations, channels and `__fragment.js` answer only on

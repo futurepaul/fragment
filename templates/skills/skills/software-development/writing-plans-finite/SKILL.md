@@ -5,9 +5,8 @@ version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
 metadata:
-  hermes:
-    tags: [planning, design, implementation, workflow, documentation]
-    related_skills: [subagent-driven-development-finite, test-driven-development-finite, requesting-code-review-finite]
+  tags: [planning, design, implementation, workflow, documentation]
+  related_skills: [subagent-driven-development-finite, test-driven-development-finite, requesting-code-review-finite]
 ---
 
 # Writing Implementation Plans
@@ -70,7 +69,7 @@ Every plan MUST start with:
 ```markdown
 # [Feature Name] Implementation Plan
 
-> **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
+> **For the agent:** Use subagent-driven-development skill to implement this plan task-by-task.
 
 **Goal:** [One sentence describing what this builds]
 
@@ -140,7 +139,7 @@ Read and understand:
 
 ### Step 2: Explore the Codebase
 
-Use Hermes tools to understand the project:
+Use your tools to understand the project:
 
 ```python
 # Understand project structure
