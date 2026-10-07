@@ -99,7 +99,6 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
-| `BRIDGE_RELAY_SETTLE_MS`, `BRIDGE_RELAY_EMPTY_SETTLE_MS` | 1 500, 20 000 | the end of a Hermes turn (below) |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
@@ -316,11 +315,13 @@ get_chat_info`.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
   waiting on words never sees it, so a Stop while the turn asks is
   followed by the words "Stop.", which let the wait go.
-- The end: `👀` on, `👀` off, then `✅` or `❌`. Hermes' multiplexed
-  gateway brackets a message twice, an empty dispatch bracket first, so
-  a turn ends at `✅` only once it said something, after
-  `BRIDGE_RELAY_SETTLE_MS` when stopped, and an empty one after
-  `BRIDGE_RELAY_EMPTY_SETTLE_MS` with no new `👀`.
+- The end: `👀` on, `👀` off, then `✅` or `❌`. A turn ends at its `❌`,
+  at its `✅` once it said something, and, stopped, at its `👀` off.
+  Hermes brackets a message it took while its gateway was starting
+  twice, the first empty (docs/hermes-relay.md), and ends no person's
+  turn without saying something, so an empty bracket's `✅` ends
+  nothing. No clock: a turn whose bracket never ends is the idle
+  bound's (`BRIDGE_TURN_IDLE_MS`: "the agent stopped answering").
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
 for Slack chats (`gateway/run_turn.py`), so steps come from progress

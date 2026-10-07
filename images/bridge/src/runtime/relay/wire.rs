@@ -26,7 +26,9 @@ pub const MESSAGE_MAX_CHARS: u64 = 16_000;
 /// What Hermes appends to a message while it streams by edits.
 pub const CURSOR: &str = " ▉";
 /// The reactions that bracket a turn: `👀` on as it starts, off as it
-/// ends, then `✅` or `❌` (Hermes has no other end-of-turn signal).
+/// ends, then `✅` or `❌` (Hermes has no other end-of-turn signal): its
+/// `RelayAdapter` processing hooks, with `_ACK_EMOJI_DEFAULT`, which every
+/// platform but Telegram gets.
 pub const STARTED: &str = "👀";
 pub const DONE: &str = "✅";
 pub const FAILED: &str = "❌";
