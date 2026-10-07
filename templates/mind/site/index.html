@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#14110f">
+  <title>Mind</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Sans:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=JetBrains+Mono:wght@400;500&display=swap">
+  <!-- the blessed mind template (docs/optchat.md, "The page"): every URL
+       here is relative, so it works on a fragment's host, under /f/<name>/,
+       and served from the platform's release -->
+  <link rel="stylesheet" href="./mind.css">
+</head>
+<body>
+  <script type="module">
+    // The page's dev mode: `?mock` stands an in-memory mind (./mock.js) in
+    // for the fragment, never on a fragment's own host (whose first label
+    // holds `--`), so a mind's page never loads it.
+    const mock = new URLSearchParams(location.search).has("mock") && !location.hostname.includes("--");
+    const [fragment, { mount }] = await Promise.all([import(mock ? "./mock.js" : "./__fragment.js"), import("./mind.js")]);
+    mount(document.body, fragment);
+  </script>
+</body>
+</html>
