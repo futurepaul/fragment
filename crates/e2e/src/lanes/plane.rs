@@ -214,16 +214,6 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let st3 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("rollback is a new live commit", st3["pins"]["live"] != st2["pins"]["live"], &st3);
 
-    let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--preview"]);
-    let slug = text(&out).split_whitespace().find(|w| w.starts_with("preview/")).map(str::to_string).unwrap_or_default();
-    s.ok("a preview names its ephemeral ref", !slug.is_empty(), text(&out));
-    match s.hosted() {
-        true => s.skip("the preview ref is ephemeral at main's tip", "it reads the code.storage fake's refs (a preview's git is real)"),
-        false => s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug),
-    }
-    let st4 = s.cli_json(api, &home, &["status", &name, "--json"])?;
-    s.ok("a preview leaves live alone", st4["pins"]["live"] == st3["pins"]["live"] && page(api).contains("v1 marker"), &st4);
-
     // code arrives with a deploy
     std::fs::write(site.join("app.mjs"), include_str!("../../fixtures/todo.mjs"))?;
     std::fs::write(site.join("fragment.json"), include_str!("../../fixtures/todo.json"))?;

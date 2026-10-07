@@ -117,7 +117,7 @@ struct Watcher<'a> {
 
 impl<'a> Watcher<'a> {
     fn new(client: &'a Client, name: &'a str, dir: &'a Path, opts: &'a SyncOptions) -> Watcher<'a> {
-        Watcher { client, name, dir, opts, storage: Held::new(name, opts.codestorage.as_deref()), head: None }
+        Watcher { client, name, dir, opts, storage: Held::new(name), head: None }
     }
 
     /// Folds one wakeup into its batch.
@@ -188,8 +188,9 @@ fn next_batch(rx: &Receiver<Wakeup>, gate: &Debounced, watcher: &Watcher<'_>) ->
     due
 }
 
-/// Syncs `dir` until the process ends; `live` also listens on the cell's change feed.
-pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bool) -> Result<()> {
+/// Syncs `dir` until the process ends, woken by the OS's events, the
+/// cell's change feed, and a sweep.
+pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<()> {
     let _lock = SyncLock::acquire(dir)?; // one watcher per folder, ever
     let debounce = Duration::from_millis(DEBOUNCE_MS);
     let gate = Debounced { pending: Arc::new(AtomicBool::new(false)), debounce, max_latency: debounce * 3 };
@@ -215,16 +216,12 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bo
 
     // ---- backend 2: live channel from the cell ----
     let live_up = Arc::new(AtomicBool::new(false));
-    let mut live_state = "off";
-    if live {
-        let url = watch_url(&client.host, &client.signer, name, view_token(client, name).as_deref());
-        let (signer, feed, up) = (client.signer.clone(), tx.clone(), live_up.clone());
-        std::thread::spawn(move || live_listener(&url, &signer, feed, up));
-        live_state = "connecting";
-    }
+    let url = watch_url(&client.host, &client.signer, name, view_token(client, name).as_deref());
+    let (signer, feed, up) = (client.signer.clone(), tx.clone(), live_up.clone());
+    std::thread::spawn(move || live_listener(&url, &signer, feed, up));
 
     println!(
-        "sync {name} ({}) — watch: {backend_in_use}, live: {live_state}, sweep: every {}s",
+        "sync {name} ({}) — watch: {backend_in_use}, live: connecting, sweep: every {}s",
         dir.display(),
         RESCAN_SECS
     );
@@ -245,13 +242,13 @@ pub fn run(client: &Client, name: &str, dir: &Path, opts: &SyncOptions, live: bo
                 err_backoff = 1;
                 if let Served::Passed(report) = served {
                     if !report.pulled.is_empty() || !report.pushed.is_empty() || !report.deleted_remote.is_empty() || !report.deleted_local.is_empty() || !report.conflicts.is_empty() {
-                        let at = chrono_like();
+                        let at = now_utc();
                         println!("{at} pushed {} pulled {} deleted {} conflicts {}", report.pushed.len(), report.pulled.len(), report.deleted_remote.len() + report.deleted_local.len(), report.conflicts.len());
                     }
                 }
             }
             Err(e) => {
-                let at = chrono_like();
+                let at = now_utc();
                 eprintln!("{at} sync failed (retrying in {err_backoff}s): {e}");
                 std::thread::sleep(Duration::from_secs(err_backoff));
                 err_backoff = (err_backoff * 2).min(60);
@@ -370,10 +367,9 @@ fn live_listener(url: &str, signer: &crate::api::Signer, tx: Sender<Wakeup>, up:
     }
 }
 
-/// The log's UTC wall-clock prefix, HH:MM:SS.
-fn chrono_like() -> String {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    format!("{:02}:{:02}:{:02}", (secs % 86400) / 3600, (secs % 3600) / 60, secs % 60)
+/// The log's UTC wall-clock prefix.
+fn now_utc() -> String {
+    crate::chrono_like(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
 }
 
 /// Streams a channel's records as JSON lines from the fragment's live
