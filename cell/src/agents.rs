@@ -1,5 +1,5 @@
-//! The agents' script (`agent/`), co-hosted in this fleet (docs/phase-6.md,
-//! step 4). It has no ingress of its own: this router authenticates each
+//! The agents' script (`agent/`), co-hosted in this fleet (docs/api.md,
+//! Agents). It has no ingress of its own: this router authenticates each
 //! request as it does its own (a signature resolved to an identity by the
 //! registry) and hands it on with the caller's identity, which the script
 //! trusts. An inbox delivery passes as it came: its token is the
@@ -44,7 +44,7 @@ pub(crate) const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPA
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&str]) -> CellResult<Response> {
     // an inbox delivery carries its own capability, its token
     if let (Method::Post, ["api", "a", _, "inbox", _]) = (req.method(), segments) {
-        return js::service_fetch(env.as_ref(), "AGENTS", req).await;
+        return Ok(env.service("AGENTS")?.fetch_request(req).await?);
     }
     let body = read_body(&mut req, fragment_proto::limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
@@ -96,7 +96,7 @@ pub(crate) async fn ask(env: &Env, method: Method, path: &str, principal: &str, 
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let req = Request::new_with_init(&format!("https://agents.internal{path}"), &init)?;
-    js::service_fetch(env.as_ref(), "AGENTS", req).await
+    Ok(env.service("AGENTS")?.fetch_request(req).await?)
 }
 
 /// `ask`, for its JSON answer; a refusal comes back as its error.
@@ -154,7 +154,8 @@ pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellRes
         .filter_map(|f| {
             // a people-only share is the fragment's to know: a call decides again
             let cap = Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
-            listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, kind: f.kind, title: f.title, sharing: None, archived: false })
+            // the asker's own view (their search's preview, their archiving) stays theirs
+            listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, ..f })
         })
         .collect();
     Ok(FragmentList { fragments })
@@ -269,7 +270,7 @@ impl FragmentCell {
                 Some(Joined { agent, name: agent_name, channel: live.decl.channel.clone() })
             }
         };
-        let as_owner = Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), mode: None };
+        let as_owner = Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false };
         if let Some(before) = joined.filter(|j| Some(j) != wanted.as_ref()) {
             if wanted.as_ref().is_some_and(|w| w.agent == before.agent) {
                 self.exec("DELETE FROM subs WHERE principal = ? AND channel = ?", vec![before.agent.as_str().into(), before.channel.as_str().into()])?;

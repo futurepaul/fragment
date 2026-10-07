@@ -111,7 +111,6 @@ export function createLayout({ grid, gutters: [gutterLeft, gutterRight], onChang
     toggle,
     show: (side) => toggle(side, true),
     hide: (side) => toggle(side, false),
-    isOpen: (side) => grid.classList.contains(`${side}-open`),
     get narrow() { return narrow.matches; },
   };
 }

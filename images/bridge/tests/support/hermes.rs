@@ -6,8 +6,9 @@
 //! - dials `<url>/relay` with its token, says `hello`, reads the descriptor,
 //!   and dials again (with backoff) whenever the socket ends, unless away;
 //! - each inbound is acked, then its turn runs concurrently with other
-//!   chats': first an empty bracket (`👀`, off, `✅`: the multiplexed
-//!   gateway's dispatch, as the real one sends it), then `👀`; its tool progress (`tool`) as a send answering nothing
+//!   chats': first an empty bracket (`👀`, off, `✅`: the real one's for a
+//!   message it took while its gateway was starting, sent here before
+//!   every turn), then `👀`; its tool progress (`tool`) as a send answering nothing
 //!   and an edit adding a line; an approval (`risky`) as a `prompt` op whose
 //!   `prompt_response` answer resolves it mid-turn, confirmed by an interim
 //!   send, or that times out after `approval_ms` (its `approvals.timeout`)
@@ -16,6 +17,8 @@
 //!   `draft` frames, then one `send` answering the
 //!   message; `👀` off; `✅`. An `interrupt_inbound` mid-turn stops it: `👀`
 //!   off only;
+//! - `fail` fails as Hermes' handler does when it raises: `👀` off, `❌`
+//!   with nothing said, then its notice as a send answering nothing;
 //! - `narrate` says text beside a tool call as Hermes' stream consumer
 //!   does: drafts, then a send answering the message at the tool boundary,
 //!   and the tool's progress after it (`late`: before it); `only`, the
@@ -173,6 +176,8 @@ type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
 /// What a `narrate` turn says beside its tool call.
 pub const NARRATION: &str = "Let me check that.";
+/// What a `fail` turn says after its `❌`.
+pub const FAILURE: &str = "Sorry, I encountered an error (RuntimeError).\nno details available\nTry again or use /reset to start a fresh session.";
 
 /// What a turn hears while it runs.
 enum Heard {
@@ -303,15 +308,27 @@ async fn turn(gw: &Gateway, event: Value, mut rx: mpsc::UnboundedReceiver<Heard>
     let chat = event["source"]["chat_id"].as_str().unwrap_or("").to_string();
     let mid = event["message_id"].as_str().unwrap_or("").to_string();
     let react = |emoji: &str, remove: bool| json!({ "op": "react", "chat_id": chat, "message_id": mid, "emoji": emoji, "remove": remove });
-    // Hermes' multiplexed gateway brackets the message once as it dispatches
-    // it to its profile, with nothing inside, before the turn's own bracket
-    // (seen in the real image: 👀, 👀 off, ✅, then the turn ~3 s later).
+    // A message Hermes takes while its gateway starts is bracketed once,
+    // with nothing inside, as its startup restore queues it, before the
+    // turn's own bracket when it runs (v0.21.5's `_handle_message` and
+    // `_drain_startup_restore_queue`; seen in the real image for the first
+    // turn of a boot only: 👀, 👀 off, ✅, then the turn 1.3 s later). Here
+    // every turn has it, so every test passes the rule that ends a turn.
     gw.act(react("👀", false)).await;
     gw.act(react("👀", true)).await;
     gw.act(react("✅", false)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     gw.act(react("👀", false)).await;
     let message = event["text"].as_str().unwrap_or("").trim_start_matches('\u{200b}').to_string();
+    if message.contains("fail") {
+        // v0.21.5 when its handler raises (`_process_message_background`):
+        // `❌` with nothing said, then its notice as a send answering nothing
+        // (`_notify_turn_error`)
+        gw.act(react("👀", true)).await;
+        gw.act(react("❌", false)).await;
+        gw.act(json!({ "op": "send", "chat_id": chat, "content": FAILURE, "reply_to": null, "metadata": {} })).await;
+        return;
+    }
     let user = event["source"]["user_name"].as_str().unwrap_or("?").to_string();
     // as v0.21.5 renders a shared chat's message: the sender, after the
     // inbound's read-only context when it has one

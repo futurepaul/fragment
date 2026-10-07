@@ -20,7 +20,7 @@
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs).
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
-  // Deliveries: web push and notifyUrls, sent outside any request (deliveries.rs).
+  // Deliveries: channel records and web push, sent outside any request (deliveries.rs).
   // Meters: each fragment's batches of usage rows to its owner's ledger (meter.rs).
   "queues": {
     "producers": [
@@ -36,9 +36,9 @@
   },
   // The model route (models.rs): Workers AI through the deployment's AI Gateway.
   "ai": { "binding": "AI" },
-  // Preview cards (card.rs): Browser Rendering, driven over CDP from the
-  // delivery queue's consumer. `wrangler dev` runs it locally, on a Chrome
-  // for Testing it downloads into its cache on the first shot.
+  // Preview cards (card.rs): Browser Rendering, driven over CDP from each
+  // fragment's alarm. `wrangler dev` runs it locally, on a Chrome for
+  // Testing it downloads into its cache on the first shot.
   "browser": { "binding": "BROWSER" },
   // AGENTS is the agents' Worker (agent/): it has no route of its own, and
   // the router hands it /api/agents and /api/a/*.

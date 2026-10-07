@@ -543,7 +543,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "tungstenite",
- "walkdir",
 ]
 
 [[package]]
@@ -573,7 +572,6 @@ dependencies = [
  "fragment-core",
  "libc",
  "reqwest",
- "serde",
  "serde_json",
  "sha2",
  "tar",
@@ -609,7 +607,6 @@ dependencies = [
  "fragment-nip98",
  "hex",
  "hkdf",
- "hmac",
  "p256",
  "serde",
  "serde_json",

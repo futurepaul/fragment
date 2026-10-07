@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::fmt;
 
 /// Working files live on `main`; `live` is the blessed serve point
-/// (ROADMAP wire contract: one repo per fragment, preview = ephemeral ref,
-/// promote = move live, rollback = re-point live).
+/// (ROADMAP wire contract: one repo per fragment, promote = move live,
+/// rollback = re-point live).
 pub const MAIN: &str = "main";
 pub const LIVE: &str = "live";
 
@@ -102,10 +102,10 @@ struct Minted {
 /// The fragment host mints a short-lived, repo-scoped code.storage JWT
 /// (`StorageToken`); the CLI never sees the org key. Its `api` is the
 /// spec's server URL (endpoints append /api/repos/...).
-fn mint_from_host(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<Minted, CsError> {
+fn mint_from_host(host: &HostClient, name: &str) -> Result<Minted, CsError> {
     let resp = host.get(&format!("/api/f/{name}/storage-token")).map_err(host_error)?;
     let minted: StorageToken = host.call_as(resp).map_err(host_error)?;
-    let server = override_url.unwrap_or(&minted.api).trim_end_matches('/').to_string();
+    let server = minted.api.trim_end_matches('/').to_string();
     if server.is_empty() || minted.repo.is_empty() || minted.token.is_empty() {
         return Err(CsError::Malformed(format!("a storage token needs a token, a repo, and an api (repo {:?}, api {server:?})", minted.repo)));
     }
@@ -154,10 +154,9 @@ pub struct CodeStorage {
 }
 
 impl CodeStorage {
-    /// Mint a scoped token from the fragment host and build the client
-    /// (`override_url`: main.rs `codestorage_override`).
-    pub fn connect(host: &HostClient, name: &str, override_url: Option<&str>) -> Result<CodeStorage, CsError> {
-        let Minted { server, repo, token, expires_at_ms } = mint_from_host(host, name, override_url)?;
+    /// Mint a scoped token from the fragment host and build the client.
+    pub fn connect(host: &HostClient, name: &str) -> Result<CodeStorage, CsError> {
+        let Minted { server, repo, token, expires_at_ms } = mint_from_host(host, name)?;
         Ok(CodeStorage {
             server,
             repo,
@@ -309,19 +308,6 @@ impl CodeStorage {
         core_cs::committed(&v).ok_or_else(|| CsError::Malformed(format!("commit-pack result not ok: {v}")))
     }
 
-    /// Create a branch (or ephemeral ref) at a base ref. Returns its SHA.
-    pub fn create_branch(&self, base_ref: &str, target_branch: &str, ephemeral: bool) -> Result<String, CsError> {
-        let body = serde_json::json!({
-            "base_ref": base_ref,
-            "target_branch": target_branch,
-            "target_is_ephemeral": ephemeral,
-        });
-        let (status, rbody) = self.req("POST", "/branches/create", Some(body.to_string().into_bytes()), Some("application/json"))?;
-        self.check(status, &rbody)?;
-        let v = Self::json(&rbody)?;
-        sha_at(&v["commit_sha"]).ok_or_else(|| CsError::Malformed(format!("branches/create without a commit sha: {v}")))
-    }
-
     /// Rollback: append a restore commit on `live` whose tree matches
     /// `base_ref` (must be an ancestor of the current tip, else 412, as is
     /// a restore that changes nothing).
@@ -358,13 +344,12 @@ impl CodeStorage {
 /// command connects once: `CodeStorage::connect`.)
 pub struct Held {
     name: String,
-    override_url: Option<String>,
     client: Option<CodeStorage>,
 }
 
 impl Held {
-    pub fn new(name: &str, override_url: Option<&str>) -> Held {
-        Held { name: name.to_string(), override_url: override_url.map(str::to_string), client: None }
+    pub fn new(name: &str) -> Held {
+        Held { name: name.to_string(), client: None }
     }
 
     /// The client, with a token that has time left: the first call
@@ -372,8 +357,8 @@ impl Held {
     pub fn get(&mut self, host: &HostClient) -> Result<&CodeStorage, CsError> {
         if !self.client.as_ref().is_some_and(CodeStorage::fresh) {
             match self.client.as_mut() {
-                Some(client) => client.renew(mint_from_host(host, &self.name, self.override_url.as_deref())?),
-                None => self.client = Some(CodeStorage::connect(host, &self.name, self.override_url.as_deref())?),
+                Some(client) => client.renew(mint_from_host(host, &self.name)?),
+                None => self.client = Some(CodeStorage::connect(host, &self.name)?),
             }
         }
         // a token minted just now is used whatever it has left: a host whose
@@ -404,7 +389,7 @@ mod tests {
 
     fn cs_for(mock: &MockServer, repo: &str) -> CodeStorage {
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        CodeStorage::connect(&host, repo, None).expect("connect")
+        CodeStorage::connect(&host, repo).expect("connect")
     }
 
     fn author() -> Author {
@@ -511,19 +496,15 @@ mod tests {
     }
 
     #[test]
-    fn preview_and_rollback_flow() {
+    fn rollback_flow() {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("v1.txt", b"1")]);
         let cs = cs_for(&mock, "t");
         // live at main's second commit, where a deploy leaves it (the
         // platform moves live: POST …/deploy)
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
-        let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        let live2 = cs.create_branch(&tip2, LIVE, false).unwrap();
-        assert_eq!(live2, tip2);
-        // preview: ephemeral ref at main's tip
-        let p = cs.create_branch(&tip2, "preview/abc123", true).unwrap();
-        assert_eq!(p, tip2);
+        let live2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
+        mock.set_branch("t", LIVE, &live2);
         // rollback: restore live to tip1 (an ancestor) with CAS on live
         let restored = cs.restore_live(&tip1, &live2, "rollback", &author()).unwrap();
         assert_ne!(restored, live2);
@@ -547,7 +528,7 @@ mod tests {
         let cs = cs_for(&mock, "t");
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        cs.create_branch(&tip2, LIVE, false).unwrap();
+        mock.set_branch("t", LIVE, &tip2);
         let err = cs.restore_live(&tip1, &tip1, "rollback", &author()).unwrap_err();
         assert!(matches!(err, CsError::CasRejected { .. }), "got: {err}");
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
@@ -565,7 +546,7 @@ mod tests {
         let short = crate::mockcs::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
         short.seed_repo("t", &[("a", b"1")]);
         let host = crate::api::Client::new(&short.url, auth::fixed(7));
-        let mut held = Held::new("t", None);
+        let mut held = Held::new("t");
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert_eq!(short.take_requests("").get("GET storage-token"), Some(&2), "a token inside the margin is minted again");
@@ -573,19 +554,10 @@ mod tests {
         // a token a minute old is minted again, though it has long left:
         // a removed editor's watcher pushes for at most that long
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        let mut held = Held::new("t", None);
+        let mut held = Held::new("t");
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         held.client.as_mut().expect("connected").minted_at_ms -= TOKEN_REUSE_MAX_MS;
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert_eq!(mock.take_requests("").get("GET storage-token"), Some(&2), "a token past its reuse is minted again");
-    }
-
-    #[test]
-    fn storage_token_override_wins() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"1")]);
-        let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        let cs = CodeStorage::connect(&host, "t", Some(&mock.url)).unwrap();
-        assert!(cs.branch_head(MAIN).unwrap().is_some());
     }
 }

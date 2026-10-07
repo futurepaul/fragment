@@ -1,4 +1,4 @@
-//! One-click fragments (docs/phase-6.md, step 2): a create from one of the
+//! One-click fragments (docs/api.md, Control API): a create from one of the
 //! platform's templates, the server-side commit and deploy routes (an
 //! agent's tools use them too), and the shell's list and its "new" app.
 
@@ -38,7 +38,6 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["name"] == todo.as_str() && r.body["visibility"] == "link",
         &r,
     );
-    s.hook(api, &r.body);
     let todo_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     let st = api.status(&owner, &todo)?;
     s.ok("its template is main's first commit, and live", st.body["pins"]["live"].is_string() && st.body["pins"]["live"] == st.body["pins"]["main"], &st);
@@ -65,7 +64,6 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     // the files and deploy routes
     let blank = s.named(api, &owner, "tblank")?;
     let r = api.create_with(&owner, json!({ "name": blank, "template": "blank" }))?;
-    s.hook(api, &r.body);
     let blank_cookie = format!("fragview={}", r.body["viewToken"].as_str().unwrap_or(""));
     for (k, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         let r = api.signed(&owner, "PUT", &format!("/api/f/{blank}/members/{}", npub_of(k)), Some(&json!({ "role": role })))?;
@@ -194,9 +192,9 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let skill_names: Vec<&str> = want.iter().filter_map(|(p, _)| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).collect();
     s.ok(
         "the managed set is decision 17's: the rewritten skills there, shared-skills and what they replace gone",
-        skill_names.len() == 42
+        skill_names.len() == 41
             && ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"].iter().all(|n| skill_names.contains(n))
-            && !skill_names.iter().any(|n| ["shared-skills-finite", "finite-sites-publishing-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite"].contains(n)),
+            && !skill_names.iter().any(|n| ["shared-skills-finite", "finite-sites-publishing-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "powerpoint-finite"].contains(n)),
         format!("{skill_names:?}"),
     );
     let apps = "skills/software-development/apps-finite/SKILL.md";

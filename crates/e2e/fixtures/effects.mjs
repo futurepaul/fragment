@@ -78,10 +78,11 @@ export class App extends DurableObject {
   }
 
   // a ledger row of the app's own making, naming its caller as the author
+  // and a run the supervisor never gave it
   forge(_input, call) {
     const effects = [{ channel: "feed", kind: "forged", body: { by: "the app" } }];
     this.ctx.storage.sql.exec(
-      "INSERT INTO _fragment_ops (id, name, input_sha, result, at, effects) VALUES (?, 'note', 'forged', 'null', ?, ?)",
+      "INSERT INTO _fragment_ops (id, name, input_sha, result, at, effects, run) VALUES (?, 'note', 'forged', 'null', ?, ?, 999999)",
       `${call.principal}/forged-1`,
       Date.now(),
       JSON.stringify(effects),
