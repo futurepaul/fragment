@@ -23,7 +23,12 @@
 //! reads the answers back from there, so an advance carries a count, not
 //! every answer so far. A step the Workflow tries again because its reply
 //! was lost (a timeout, a crash) is answered from what was kept, not
-//! performed again: a fetch reaches its upstream once. Only an answer the
+//! performed again. One that was cut short before its answer was kept is
+//! performed again, so a step runs at least once, as a Workflow step does:
+//! each effect is keyed by its run and step (a call's operation id, a
+//! publish's record, a commit, a push, an `Idempotency-Key` on a fetch that
+//! may change something), so a repeat changes nothing twice where its
+//! receiver honours the key. Only an answer the
 //! cell never gave comes from the Workflow: a step that ran out of its
 //! retries, whose error the next advance carries (`failed`). The Workflow
 //! records each callback, so a crash resumes at the step it was on, and a
@@ -66,6 +71,8 @@ use crate::{js, keys};
 pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
+/// What a fetch that is not a GET or a HEAD names its step by (`step_fetch`).
+const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
 
@@ -403,12 +410,19 @@ impl FragmentCell {
         Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_u64()).expect("COUNT(*) answers one integer"))
     }
 
-    /// A Workflow instance id: unique across the fleet (the binding is shared
-    /// by every fragment) and across a deleted fragment's reincarnations.
-    fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
+    /// A run's name beyond this fragment: unique across the fleet (the
+    /// Workflow binding is shared by every fragment, and a vendor scopes
+    /// idempotency keys by account) and across a deleted fragment's
+    /// reincarnations.
+    fn run_key(&self, run: i64) -> CellResult<String> {
         let [npub, created_at] = self.metas([MetaKey::Npub, MetaKey::CreatedAt])?;
         let (npub, created_at) = (npub.ok_or_else(|| missing(MetaKey::Npub))?, created_at.ok_or_else(|| missing(MetaKey::CreatedAt))?);
-        Ok(format!("{}-{}-r{run}-a{attempt}", &npub[5..25], created_at))
+        Ok(format!("{}-{}-r{run}", &npub[5..25], created_at))
+    }
+
+    /// A Workflow instance id: one per attempt of a run.
+    fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
+        Ok(format!("{}-a{attempt}", self.run_key(run)?))
     }
 
     /// Starts the Workflows of queued runs. A failure leaves them queued for
@@ -771,7 +785,7 @@ impl FragmentCell {
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
-            Step::Fetch(f) => self.step_fetch(run, f).await,
+            Step::Fetch(f) => self.step_fetch(run, index, f).await,
             Step::Publish { channel, kind, body } => self.step_publish(run, index, &channel, &kind, body).await,
             Step::Push { who, payload } => {
                 let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
@@ -847,8 +861,12 @@ impl FragmentCell {
 
     /// `job.fetch(url, init)`: the fragment's one way out. Header values
     /// may name secrets as `{{NAME}}`; they are opened here, at the egress
-    /// point, and never reach the app.
-    async fn step_fetch(&self, run: &RunRow, f: Fetch) -> Result<Value, StepFail> {
+    /// point, and never reach the app. A step is performed at least once (a
+    /// crash after the request, before its answer is kept, sends it again),
+    /// so a request that may change something names its step in an
+    /// `Idempotency-Key`, the same on every try and replay, unless the job
+    /// named its own: a vendor that honours the header acts on it once.
+    async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
         let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
         let method = match f.method.to_ascii_uppercase().as_str() {
             "GET" => Method::Get,
@@ -878,6 +896,10 @@ impl FragmentCell {
                 value = value.replace(&format!("{{{{{name}}}}}"), &secret);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
+        }
+        if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
+            let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
+            headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
         }
         headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
         let mut init = RequestInit::new();

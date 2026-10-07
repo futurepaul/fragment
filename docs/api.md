@@ -988,7 +988,10 @@ and the AI steps (`job.ai.*`), all above:
   `.internal` addresses are refused (and a Worker's fetch reaches only
   the public internet: a name with no public address fails the step); redirects are answered, not
   followed; a body of at most 256 KiB, a response of at most 1 MiB, 120
-  seconds. Every fetch carries `x-fragment-hops`.
+  seconds. Every fetch carries `x-fragment-hops`; one that is not a GET
+  or a HEAD carries `Idempotency-Key: <fragment>-<life>-r<run>-s<step>`
+  (the same on every try and replay of the step, never another
+  fragment's), unless the job set its own.
 - `job.publish(channel, body, kind)`: a record, once per step.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.agent({prompt, conversation?, channel?})` → `{text, turn}`: one
@@ -1021,9 +1024,14 @@ far, so it must reach its steps in the same order each time and change
 nothing except through steps. The platform keeps each step's answer
 before the job's Workflow hears it, and the method reads the answers back
 from there; a step tried again because its answer was lost on the way (a
-timeout, a crash) is answered from what was kept, not performed again (a
-fetch reaches its upstream once); a run whose answers are missing is
-held. A step that fails for a reason that may
+timeout, a crash) is answered from what was kept, not performed again; a
+run whose answers are missing is held. A step cut short before its
+answer was kept (a crash between a fetch's request and its answer) is
+performed again: a step runs **at least once**, as a Workflow step does.
+Calls, publishes, file writes, pushes and agent turns are keyed by the
+run and step, so a repeat applies nothing twice; a fetch's repeat
+reaches its upstream again, with the same `Idempotency-Key`, so an
+upstream that honours it acts once. A step that fails for a reason that may
 pass (an upstream 429 or 5xx, a timeout, a platform error) is retried 4
 times with doubling delays; one that fails for good (a refused URL, an
 unknown operation, a call that threw), or runs out of retries, makes the
