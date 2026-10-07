@@ -5,7 +5,7 @@
 //! Workers AI fake, scripted, and its owner's ledger pays. Turns steer,
 //! stop, and survive a killed node without running an operation twice (the
 //! spike's checks, on the product). An agent acts for whoever asked,
-//! capped (ROADMAP decision 17): at the platform and through its turns.
+//! capped (decision R17): at the platform and through its turns.
 
 use std::time::{Duration, Instant};
 
@@ -123,7 +123,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a membership gives it that fragment's operations as tools", tools.contains(&add) && tools.contains(&fragment_core::tools::tool_name(&todo, "list").expect("a tool name")), &r);
     s.ok("and nothing of a fragment it is not in", !tools.iter().any(|t| t.starts_with(&format!("{}__", other.replace('.', "--")))), &r);
 
-    // decision 17 at the platform: an agent acts for whoever asked, capped.
+    // decision R17 at the platform: an agent acts for whoever asked, capped.
     // A key the owner registered as an agent of theirs signs `for` itself
     // here (the agent above signs in its cell; its turns are checked below).
     let hand = Keys::generate();

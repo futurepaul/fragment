@@ -1,4 +1,4 @@
-//! Frames (docs/api.md, Frame sessions; docs/fragment-boats.md, design C):
+//! Frames (docs/api.md, Frame sessions):
 //! the platform's own page, the shell, frames fragments signed in, as its
 //! tabs do, through its mint (`/auth/frame`), and nothing else mints. The
 //! lane loads the shell at `/` and adds the frames with a script of its

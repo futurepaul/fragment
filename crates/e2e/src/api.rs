@@ -516,7 +516,7 @@ impl Api {
         let r = self.approve_link(session, &self.approval_link(keys, 0))?;
         anyhow::ensure!(r.status == 200, "approving a key: {r}");
         let me = self.signed(keys, "GET", "/api/identities/me", None)?;
-        // every person the e2e makes takes a username at once (decision 16),
+        // every person the e2e makes takes a username at once (decision R16),
         // named after their identity
         if me.status == 200 && me.body["kind"] == "person" && me.body["username"].is_null() {
             let id = me.body["id"].as_str().unwrap_or("id:0000000000");

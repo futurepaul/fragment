@@ -2,7 +2,7 @@
 //! uses (NIP-98), with the agent's own key. An agent can do on a fragment
 //! exactly what its membership lets it, and nothing through a side door.
 //!
-//! A turn's calls act for whoever started it (ROADMAP decision 17): its
+//! A turn's calls act for whoever started it (decision R17): its
 //! fleet names them in `for=<identity>` inside the signed URL, and the
 //! platform acts with the lower of their role and the agent's cap. The
 //! agent's own calls (listening, its registration, its owner's model key,

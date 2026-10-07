@@ -433,7 +433,7 @@ fragment.club until cutover (decisions 34–35).
 - **Risk:** fragment is not self-hostable while one of its planes is a
   vendor's hosted service; an outage, a price change, or a deprecation
   at code.storage stops every fragment's files at once, and a
-  self-hoster (bring your own compute, ROADMAP phase 10) must hold a
+  self-deployer (docs/cloudflare-v1.md, decision 4) must hold a
   code.storage org.
 - **First proof:** the first deployment that cannot or will not use
   code.storage (a self-hosted or air-gapped fleet), or a code.storage
@@ -878,3 +878,42 @@ fragment.club until cutover (decisions 34–35).
   `quickAction("screenshot", …)` billed from `X-Browser-Ms-Used`, and the
   session's acquire and release, `Cdp`, `billed_ms`'s keep-alive and the
   concurrent-browser assumption go.
+
+## A fragment's sign-in can be forced to someone else's session
+
+- **Observed:** the fragment.boats design (2026-09-25; its "Not in
+  scope"). `__signin?token=` sets a fragment's site cookie from any
+  redemption its link carries, and checks nothing the browser began
+  first.
+- **Risk:** someone mints a redemption for themselves on X and sends a
+  victim to `X/__signin?token=…` within its 60 s. The victim is then
+  signed in on X as them, and what they type there lands in the
+  attacker's account (login CSRF). It reaches no one's own data.
+- **First proof:** a report of someone finding themselves signed in on a
+  fragment as another person.
+- **Delete when:** `__signin` sets a nonce cookie before the platform hop
+  and the redemption must carry it, with an e2e that redeems another
+  browser's token and is refused.
+
+## An app's own answers may set cookies named as the platform's
+
+- **Observed:** the fragment.boats design (its "Not in scope"). An app's
+  `fetch` answer reaches the browser with its own `Set-Cookie` headers
+  (`cell/src/js.rs`, `Facet::fetch`), platform names included
+  (`__Host-fragment_site`, `fragment_anon`, `fragview`).
+- **Risk:** only to its own fragment. It can sign its visitors out
+  there, or give two anonymous visitors one `anon:` principal. It cannot
+  mint a session the registry knows.
+- **First proof:** an app that sets or clears a platform cookie.
+- **Delete when:** the router strips the platform's cookie names from an
+  app's answer, with an e2e app that tries.
+
+## Neither domain sends HSTS
+
+- **Observed:** the fragment.boats design (its "Not in scope"). No answer
+  carries `Strict-Transport-Security`, and neither zone is preloaded.
+- **Risk:** a first visit over http on a hostile network can be held to
+  http. Session cookies are `Secure` and `__Host-`, so none is sent there.
+- **First proof:** any report of a downgrade.
+- **Delete when:** both zones send HSTS (at cutover, when they move to
+  Cloudflare), checked by the hosted lane.

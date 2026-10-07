@@ -64,7 +64,7 @@ fn platform() -> &'static Platform {
 pub(crate) struct Invocation<'a> {
     /// Who the ledger records: an identity, an anonymous visitor, or the fragment itself (its key).
     pub principal: &'a str,
-    /// Whom an agent calls for (`for`, ROADMAP decision 17): the app's
+    /// Whom an agent calls for (`for`, decision R17): the app's
     /// `call.principal`, so what it does for someone is theirs, while the
     /// ledger and the records name the agent (`call.agent`).
     pub asker: Option<&'a str>,

@@ -165,7 +165,7 @@ acts through it: a mutation or a job needs a membership of their own
 (403, saying so), and they get nothing the agent's own role opens beyond
 `viewer` (an editor's channels, tokens, or secrets).
 
-An agent acts for whoever asked, capped (ROADMAP decision 17). A request
+An agent acts for whoever asked, capped (docs/cloudflare-v1.md, R17). A request
 signed by an agent may name an identity in `for=<id:…>` in its URL's
 query (inside the signed URL, so the signature covers it): the request
 acts with the lower of the role that identity holds in the fragment (its
@@ -235,7 +235,7 @@ the new key and meant it for this signer.
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
 | `DELETE /api/users/{username}` | the fleet's operators | → `{username, identity, released}`: undoes a username taken by mistake, so its person chooses again; refused (409) while they own a fragment under it (its URLs name it) |
 
-## Names (decision 16)
+## Names (docs/cloudflare-v1.md, R16)
 
 A person chooses a **username** once (above; the platform's page asks
 after the first sign-in, and `fragment username <name>` does too). A
@@ -322,13 +322,13 @@ on. The cookies are cleared whatever the registry answers; when it
 cannot end the sessions, the failure is logged and a copy lasts until
 the session expires or its platform session ends (`/auth/logout`).
 
-### Which cookies count (docs/fragment-boats.md, decision 3)
+### Which cookies count
 
 Every fragment's origin is one site with the others (all of them are
-under `fragment.boats`, which the Public Suffix List does not list:
-docs/fragment-boats.md), so a SameSite=Lax cookie rides along on another
-fragment's images, scripts, fetches, and forms. The router counts a
-browser's cookies on a fragment's origin by the Fetch Metadata it sends
+under `fragment.boats`, which the Public Suffix List does not list), so
+a SameSite=Lax cookie rides along on another fragment's images,
+scripts, fetches, and forms. The router counts a browser's cookies on
+a fragment's origin by the Fetch Metadata it sends
 (`Sec-Fetch-Site`, `-Mode`, `-Dest`, which no page's script sets); a
 request whose cookies do not count is served as to a stranger:
 
@@ -359,11 +359,28 @@ A fragment shows signed in only in the platform's page, and in another
 fragment's page not at all. A signed request (the CLI's, an agent's)
 carries no cookies and is unchanged.
 
+These rules do not wait for the Public Suffix List. Listing
+`fragment.boats` there would make browsers keep fragments apart
+themselves: no cookie of one sent to another, `Domain=fragment.boats`
+cookies refused, and storage and processes split per fragment. But the
+list declines projects that serve fewer than thousands of people,
+reviews take weeks to months, browsers pick a change up only in their
+own releases, and a listing is slow to undo. So it comes last, once
+fragment.boats serves that many. Its requirements (a `_psl` TXT record
+kept for as long as the entry is listed, more than two years of
+registration, a role address, and an abuse contact) are in
+docs/fragment-boats.md at the tag `celld-final`.
+
 ### Frame sessions
 
 A frame session is a fragment's session in a frame of the platform's
 own page (the shell's tabs: docs/cloudflare-v1.md, decision 6), bound to
-the platform's origin (docs/fragment-boats.md, design C):
+the platform's origin. A frame cannot sign in through the platform as a
+tab does: a browser sends no SameSite=Lax cookie into a cross-site
+frame, and Safari blocks every third-party cookie. A page's own code
+must never hold a sign-in token either. So platform code mints the
+session for a frame of the platform's page alone, and the frame keeps
+it in a partitioned cookie (CHIPS):
 
 - `GET <platform>/auth/frame?name=&return=` mints it, for a frame of the
   platform's own page only: its Fetch Metadata, which no page's script
@@ -410,7 +427,7 @@ then they are a visitor there. The yes is remembered for that person
 and fragment (their newest 1000) until they sign out of it there
 (`POST __signout`), which makes the next sign-in ask again.
 
-### Opening a fragment by its URL (ROADMAP decision 4)
+### Opening a fragment by its URL (docs/cloudflare-v1.md, R4)
 
 A browser's top-level visit to a fragment's page (a GET or HEAD
 navigation whose `Accept` names `text/html`) that no session there
@@ -578,8 +595,8 @@ the code the fragment's own.
   400 naming the JSON pointer (`input /text: is required`).
 - `channels` declares the app's channels and their readers (default
   `viewer`); `events`, `ops`, and `inbox` are built in (readers: viewers).
-  A channel may also name who may post to it, `"post": <role>` (ROADMAP
-  decision 18): the platform appends a poster's record itself
+  A channel may also name who may post to it, `"post": <role>`
+  (docs/cloudflare-v1.md, R18): the platform appends a poster's record itself
   (`POST /api/f/{name}/channels/{channel}`, `fragment.post`), so a
   fragment whose live commit has channels and no `app.mjs` (a chat) runs
   no worker at all. A `post` role looser than the channel's `read` is
@@ -1585,7 +1602,7 @@ there, or the fragment's own: the `agent` block, above):
     JSON (at most 140 characters), whether it worked, at most 300
     characters of its result, and the model's text before the call (at
     most 300) on the first call of a message. A result can hold what the
-    asker reaches in other fragments (decision 1: they could read it
+    asker reaches in other fragments (R17: they could read it
     anyway), so only this excerpt is posted;
   - `{kind: "turn.end", turn, outcome, error?}`: `idle` (answered),
     `stopped`, `yielded`, or `error` (at most 300 characters of it).
