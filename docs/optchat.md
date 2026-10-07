@@ -402,30 +402,45 @@ One screen at a time, and calm. Dark, warm, generous type.
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 
-- **The image:** Debian slim, with:
+- **The image:** Debian trixie-slim, 152 MB compressed, with:
+  - tini as PID 1;
   - the sandbox-shim (docs/computers.md);
-  - the bridge (`BRIDGE_RUNTIME=goose`);
+  - the bridge (`BRIDGE_RUNTIME=goose`, built for musl);
   - the fragment CLI;
-  - goose, built from `futurepaul/goose` branch `fragment/optmem`, a
-    pinned rev;
-  - git, curl, python3, ripgrep, Node (pinned, checksummed);
-  - Chromium, later.
+  - goose, built in a stage of its own from `futurepaul/goose` at a pinned
+    rev of `fragment/optmem`;
+  - git, curl, jq, python3, ripgrep;
+  - no Node, no Chromium and no display yet: port 6080 serves a "no
+    screen yet" page.
 - **The runtime** (`images/bridge/src/runtime/goose.rs`):
-  - It speaks ACP over stdio to one `goose acp` process, started at
-    boot and restarted when it dies.
-  - Each turn is `session/new`, with cwd `/data/work`. Its first
-    `session/prompt` is the framing, then the view (fetched as above),
-    then the task text.
+  - It runs one `goose acp` per agent, because goose's custom headers
+    and its shell's environment are per process. Each goose starts at
+    its agent's first turn and again at the turn after it dies.
+  - Each turn is `session/new` (cwd `/data/work`), then `session/close`.
+  - In a mind:
+    - the framing and VIEW_DOC go in through
+      `_goose/unstable/session/system-prompt/set` (append, the same bytes
+      every turn);
+    - the prompt is two text blocks, the view (fetched as above) and then
+      the task;
+    - `mcpServers` adds `fragment mcp <mind>`.
+  - In any other fragment, the task goes alone.
   - goose's events map to the runtime's: message chunks become `Draft`,
-    the final message becomes `Reply`, tool calls become `Step`, and the
-    prompt's end becomes `End`. Stop is `session/cancel`.
-  - Fresh context per turn: no session is ever loaded again.
-- **Model:** goose's OpenAI provider, pointed at `FRAGMENT_MODEL`
-  (`http://model.fragment.internal/v1/chat/completions`), model
-  `medium`, with `x-fragment-agent: <agent>` on every call (goose's
-  custom headers, or a loopback proxy in the bridge).
-- **Extensions:** developer (shell, edit), and `fragment mcp <mind>`
-  (read-only) for zoom, date and search.
+    and a finished tool call becomes a `Step` (carrying the words said
+    before it).
+  - **Exactly one `Reply` per turn:** the words after the last tool
+    call, or `(ended: <outcome>: <why>)` when there are none. That one
+    reply is the hand-off's report. Stop is `session/cancel`.
+  - Fresh context per turn: no session is ever loaded again. goose's
+    state lives in `/tmp/goose/<agent>`, outside `/data` and its saves.
+- **Model:** goose's OpenAI provider, pointed at `FRAGMENT_MODEL`, model
+  `medium`, with `OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`.
+  Compaction is off (`GOOSE_AUTO_COMPACT_THRESHOLD=0`,
+  `GOOSE_NO_COMPACTION=1`), and `GOOSE_STABLE_SYSTEM_PROMPT=1` keeps the
+  system prompt fixed.
+- **Extensions:** `EXTENSIONS={}`, which leaves `developer` (shell,
+  edit, tree), plus the session's `mind` MCP server (read-only: view,
+  zoom, date, search).
 - **Hermes is gone** on this branch: `images/hermes`, the bridge's
   Relay runtime, the hermes and agent-smoke lanes, and the docs about
   them. The deploy config's default image is `goose`.

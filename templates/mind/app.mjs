@@ -188,10 +188,10 @@ async function turnOf(agentFragment, fragment, channel, seq) {
 }
 
 // A hand-off's state from its one reply: goose's `(ended: <outcome>: <why>)`
-// when it stopped or failed, else done.
+// when it had no final words (idle: done), stopped, or failed; else done.
 function endedBy(text) {
   const m = /^\(ended: ([a-z]+)/.exec(text.trim());
-  return m === null ? "done" : m[1] === "stopped" ? "stopped" : "error";
+  return m === null || m[1] === "idle" ? "done" : m[1] === "stopped" ? "stopped" : "error";
 }
 
 // A run's steps, counted with the size of their answers, so a run stays
