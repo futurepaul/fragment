@@ -64,7 +64,10 @@ struct Deployment {
     host_secret_previous: Option<String>,
     codestorage: CodeStorage,
     workos: WorkOs,
-    /// Who may grant credit, set plans, and release usernames (npubs).
+    /// Who may grant credit, set plans, release usernames, and wipe a
+    /// person (npubs, or identities). The hosted e2e's `wipe` signs with an
+    /// operator key among them, its file named on its command line
+    /// (`--operator-key-file`), never here: the key is the runner's.
     #[serde(default)]
     operators: Vec<String>,
     /// The AI Gateway the model route calls through (its id, named: never
@@ -627,8 +630,12 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
 /// offers (computers, models). A deployment of its own is refused: the
 /// hosted lane runs on a preview.
 pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>]");
-    let (mut config, mut branch, mut passed) = (None, None, vec![]);
+    let usage = || {
+        anyhow::anyhow!(
+            "usage: cargo xtask e2e --hosted --config <file> --branch <name> [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all] [--max-paid-calls <n>] [--operator-key-file <file>]"
+        )
+    };
+    let (mut config, mut branch, mut passed, mut operator_key_file) = (None, None, vec![], None);
     let mut it = rest.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(a) = it.next() {
@@ -636,6 +643,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
             "--hosted" => {}
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
+            // an operator key's file (`fragment operator key` makes one): the
+            // runner reads it by path; the deployment lists its npub
+            "--operator-key-file" => operator_key_file = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--only" | "--except" | "--max-paid-calls" => {
                 passed.push(a.clone());
                 passed.push(it.next().ok_or_else(usage)?.clone());
@@ -657,6 +667,11 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     let mut args = vec!["--hosted".to_string(), "--zone".into(), d.zone.clone(), "--branch".into(), branch.clone()];
     if let Some(file) = test_secret_file(&d, Some(&branch))? {
         args.extend(["--secret-file".to_string(), expand(file).to_string_lossy().into_owned()]);
+    }
+    // the run reads the key, and checks it is one of these
+    if let Some(file) = &operator_key_file {
+        anyhow::ensure!(!d.operators.is_empty(), "--operator-key-file names a key the deployment's operators list: its config's operators are empty");
+        args.extend(["--operator-key-file".to_string(), expand(file).to_string_lossy().into_owned(), "--operators".into(), d.operators.join(",")]);
     }
     let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
@@ -789,6 +804,15 @@ mod tests {
         assert_eq!(sweep(&["--sweep"]), with(&["--sweep"]));
         assert_eq!(sweep(&["--sweep", "--max-paid-calls", "0"]), with(&["--sweep", "--max-paid-calls", "0"]), "a flag after it is not its run");
         assert_eq!(sweep(&["--sweep-all"]), with(&["--sweep-all"]));
+        // an operator key's file (named, not read) and the operators it is among
+        let npub = fragment_core::npub::encode(&"ab".repeat(32));
+        v["operators"] = json!([npub]);
+        let path = config_file("hosted-args-operator", &v);
+        let got = args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--operator-key-file", "/run/secrets/p5-operator"]).unwrap();
+        assert_eq!(got, with(&["--operator-key-file", "/run/secrets/p5-operator", "--operators", &npub]));
+        v["operators"] = json!([]);
+        let path = config_file("hosted-args-operator-unlisted", &v);
+        assert!(args(&["--hosted", "--config", path.to_str().unwrap(), "--branch", "p5", "--operator-key-file", "/k"]).is_err(), "a key among no operators");
         // production: a deployment of its own runs no hosted lane
         v["platform_host"] = json!("fragment.club");
         v["fragment_suffix"] = json!("fragment.boats");

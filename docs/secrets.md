@@ -29,6 +29,7 @@ the old one still open, and come back resealed, which the cell stores.
 | A key an app needs (a third-party API key, a webhook signing key) | the fragment's supervisor |
 | The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
+| An operator key (a wipe's: docs/api.md, Operators) | a file on the operator's machine, its secret's 64 hex (`fragment operator key <file>` makes it, 0600, and prints only its npub); the deployment holds its npub alone (`operators`), never the secret. The hosted e2e's is named on its command line (`--operator-key-file`, below) |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
 | A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks Pipes for its short-lived token on each call and holds none (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
 | The key computers' placeholders are tagged with | derived from the host secret (HKDF-SHA256, its own salt), never stored or provisioned apart: in the platform Worker alone, never in a container. Rotating the host secret rotates every placeholder (guests read theirs again within seconds; tags under `HOST_SECRET_PREVIOUS` still verify during a rotation) |
@@ -193,6 +194,30 @@ Test levers), which exist only where a test secret is.
   branch again; take it away with `wrangler secret delete
   FRAGMENT_TEST_SECRET --name fragment-<branch>` (removing
   `test_secret_file` from the config leaves the Worker secret as it was).
+
+## Operator keys (a wipe's)
+
+An operator wipes a person (docs/api.md, Operators) by signing with a key
+the deployment's `operators` lists (`FRAGMENT_OPERATORS`, a Worker
+variable: public keys only). One no person holds is the one to wipe with:
+the wipe never removes it, as it removes the keys of whom it wipes.
+
+- **Its home.** A file on the operator's machine, holding the key's
+  secret (64 hex) and nothing else, 0600: `fragment operator key <file>`
+  makes it (and refuses a path that exists) and prints its npub, which
+  goes in the deployment's config (`operators`) and reaches the Worker on
+  the next deploy. The CLI reads it by path (`--key-file`, or
+  `FRAGMENT_OPERATOR_KEY_FILE`); never on a command line, in a log, or in
+  a report.
+- **The hosted e2e's** is a file `cargo xtask e2e --hosted …
+  --operator-key-file <file>` names (Paul's machine:
+  `~/.config/finite-next/secrets/e2e-operator-key`), its npub in the e2e
+  preview's config's `operators`; the runner reads it by path and wipes
+  only the e2e people it signed in. The config names no file (a key is
+  its holder's), and the deploy reads and uploads nothing of it.
+- **Rotating** one: make a new file, list its npub, deploy, then take the
+  old npub out and deploy again. A key that leaked wipes anyone until its
+  npub is taken out of `operators`.
 
 ## How code uses a secret
 

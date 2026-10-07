@@ -42,10 +42,16 @@ pub enum Need {
     /// local run's computers answer through the scripted model (the stub,
     /// or the hermes section's Hermes), and so do a rehearsal's.
     RealAgent,
+    /// An operator key of the deployment's that no person holds (its
+    /// config's `operators` lists it; the run's `--operator-key-file` holds
+    /// it): a wipe's (docs/api.md, Operators). A local run makes one; a
+    /// hosted run has one when it is given its file.
+    Operator,
 }
 
 impl Need {
-    pub const ALL: [Need; 10] = [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent];
+    pub const ALL: [Need; 11] =
+        [Need::Fakes, Need::Node, Need::Deployment, Need::Levers, Need::LocalDocker, Need::Chrome, Need::Computers, Need::Models, Need::TwoSites, Need::RealAgent, Need::Operator];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -59,6 +65,7 @@ impl Need {
             Need::Models => "models",
             Need::TwoSites => "two-sites",
             Need::RealAgent => "real-agent",
+            Need::Operator => "operator",
         }
     }
 }
@@ -78,6 +85,9 @@ pub struct Offers {
     /// Its computers are real agents (a preview's own image on a real
     /// model, with paid calls to lend), not a rehearsal's scripted ones.
     pub real_agent: bool,
+    /// The run holds an operator key the deployment lists and no person
+    /// holds (`--operator-key-file`).
+    pub operator: bool,
 }
 
 /// Where a run runs.
@@ -110,7 +120,10 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::RealAgent if !offers.real_agent => {
             Some("it needs a real agent (the deployment's own image on a real model), and this run has none: a rehearsal's computers answer through the scripted model, or the deployment makes no computers or calls no models")
         }
-        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent => None,
+        Need::Operator if !offers.operator => {
+            Some("it needs an operator key the deployment lists and no person holds (`--operator-key-file <file>`, its npub in the config's `operators`), and the run has none")
+        }
+        Need::Levers | Need::Chrome | Need::Computers | Need::Models | Need::RealAgent | Need::Operator => None,
     }
 }
 
@@ -128,8 +141,8 @@ pub fn unmet(needs: &[Need], rung: Rung) -> Option<(Need, &'static str)> {
 mod tests {
     use super::*;
 
-    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true, real_agent: true };
-    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false, real_agent: false };
+    const EVERYTHING: Offers = Offers { levers: true, computers: true, models: true, chrome: true, real_agent: true, operator: true };
+    const NOTHING: Offers = Offers { levers: false, computers: false, models: false, chrome: false, real_agent: false, operator: false };
 
     /// A local run has everything but a real agent: every other need is
     /// met, as before.
@@ -167,7 +180,7 @@ mod tests {
     /// Levers, Chrome, computers, models and a real agent are there when offered.
     #[test]
     fn a_hosted_run_has_what_its_deployment_offers() {
-        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models, Need::RealAgent] {
+        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Models, Need::RealAgent, Need::Operator] {
             assert_eq!(missing(need, Rung::Hosted(EVERYTHING)), None, "{need:?}");
             assert!(missing(need, Rung::Hosted(NOTHING)).is_some(), "{need:?}");
         }

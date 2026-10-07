@@ -7,6 +7,7 @@
 //! the config and runs this binary with:
 //!
 //!   --hosted --zone <zone> --branch <b> [--secret-file <file>]
+//!       [--operator-key-file <file> --operators <npub,...>]
 //!       [--offers computers,models] [--max-paid-calls <n>]
 //!       [--only <section>[,...] | --except <section>[,...]]
 //!       [--dry-run | --sweep [<run>] | --sweep-all]
@@ -15,6 +16,11 @@
 //!   (`POST /api/test/signin`, the deployment's test secret in its header):
 //!   `<name>@e2e.test`, a seat under the e2e issuer, which no real sign-in
 //!   reaches. No real account, and no credential typed anywhere.
+//! - **The operator.** A section that wipes a person (`Need::Operator`)
+//!   signs as the deployment's operator with the key in the file
+//!   `--operator-key-file` names (read when the run starts, never
+//!   printed), whose npub the config's `operators` lists; it wipes only
+//!   people it signed in.
 //! - **Sections.** Each says what it needs (needs.rs); one that needs what a
 //!   preview lacks is a skip that says why, counted. Its fragments are
 //!   labelled `e2e-<run>-…`: the run's id, 6 hex digits, printed as it
@@ -56,7 +62,7 @@ pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
-       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--offers computers,models]
+       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
                     [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
 /// The suite's command line.
@@ -81,6 +87,11 @@ pub struct Hosted {
     /// The file holding the deployment's test secret: read when the run
     /// starts, never printed, never on a command line.
     pub secret_file: Option<PathBuf>,
+    /// The file holding an operator key the deployment lists
+    /// (`--operator-key-file`): read when the run starts, never printed.
+    pub operator_key_file: Option<PathBuf>,
+    /// The deployment's operators (its config's `operators`, public).
+    pub operators: Vec<String>,
     /// The deployment makes computers (its config's `computers`).
     pub computers: bool,
     /// The deployment calls models (its config's `ai_gateway`).
@@ -115,6 +126,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let list = |names: &str| names.split(',').filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>();
     let (mut only, mut except) = (None, vec![]);
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
+    let (mut operator_key_file, mut operators) = (None, vec![]);
     let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
     let mut shard = None;
     let mut it = args.iter().peekable();
@@ -129,6 +141,8 @@ pub fn parse(args: &[String]) -> Result<Args> {
             "--zone" => zone = Some(value()?),
             "--branch" => branch = Some(value()?),
             "--secret-file" => secret_file = Some(PathBuf::from(value()?)),
+            "--operator-key-file" => operator_key_file = Some(PathBuf::from(value()?)),
+            "--operators" => operators = list(&value()?),
             "--offers" => offers = Some(value()?),
             "--max-paid-calls" => max_paid_calls = Some(value()?.parse::<u64>().map_err(|_| anyhow::anyhow!("--max-paid-calls is a whole number"))?),
             "--dry-run" => dry_run = true,
@@ -153,9 +167,9 @@ pub fn parse(args: &[String]) -> Result<Args> {
         Ok(n)
     };
     if !hosted {
-        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep.is_some();
+        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep.is_some() || operator_key_file.is_some() || !operators.is_empty();
         if hosted_only || (max_paid_calls.is_some() && !rehearse) {
-            bail!("--zone, --branch, --secret-file, --offers, --dry-run, --sweep and --sweep-all are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
+            bail!("--zone, --branch, --secret-file, --operator-key-file, --operators, --offers, --dry-run, --sweep and --sweep-all are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
         }
         if rehearse && shard.is_some() {
             // a rehearsal ends with its sweep, which belongs to no shard
@@ -200,9 +214,13 @@ pub fn parse(args: &[String]) -> Result<Args> {
             other => bail!("--offers is computers and models, not {other:?}"),
         }
     }
+    if operator_key_file.is_some() && operators.is_empty() {
+        bail!("--operator-key-file needs --operators: the deployment's (its config's `operators`), among which its key is");
+    }
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
-    Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None })
+    let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, models, max_paid_calls, action };
+    Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None })
 }
 
 /// `--sweep <run>`'s run: the id a run prints as it starts, the 6 hex
@@ -247,7 +265,8 @@ pub fn run(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> Re
 /// installed.
 fn offers(hosted: &Hosted) -> Offers {
     let models = hosted.models && hosted.max_paid_calls > 0;
-    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models }
+    let operator = hosted.operator_key_file.is_some();
+    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models, operator }
 }
 
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
@@ -286,6 +305,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         upstream: Fake::absent("upstream"),
         // no operator the deployment names: a section that needs one declares Need::Deployment
         operator: Keys::generate(),
+        // read as the run starts (`sections`): a dry run reads no secret
+        wiper: None,
         cli,
         scratch,
         project: PathBuf::new(),
@@ -351,6 +372,16 @@ fn read_secret(file: &Path) -> Result<String> {
     Ok(secret)
 }
 
+/// The deployment's operator key, from its file: a key whose npub the
+/// deployment's operators list, read once and never printed.
+fn read_operator(file: &Path, operators: &[String]) -> Result<Keys> {
+    let text = std::fs::read_to_string(file).with_context(|| format!("read the operator key file {}", file.display()))?;
+    let keys = Keys::from_secret_hex(text.trim()).with_context(|| format!("{} holds no key (64 hex: `fragment operator key` makes one)", file.display()))?;
+    let listed = operators.iter().filter_map(|o| fragment_core::npub::parse(o)).any(|k| k == keys.pubkey_hex());
+    anyhow::ensure!(listed, "the key in {} is none the deployment's operators list ({}): add its npub, {}, and deploy", file.display(), operators.join(", "), fragment_core::npub::encode(keys.pubkey_hex()));
+    Ok(keys)
+}
+
 /// The preview answers, and its levers take the secret: answers its deploy.
 fn preflight(api: &Api) -> Result<String> {
     // a route just deployed answers 52x at Cloudflare's edge for a moment:
@@ -381,6 +412,7 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
     let deploy = preflight(&Api::hosted(&hosted.preview, &shared))?;
     let cli = crate::cli_binary()?;
     let mut s = suite(only, except, &hosted, shared, cli, PathBuf::new());
+    s.wiper = hosted.operator_key_file.as_deref().map(|file| read_operator(file, &hosted.operators)).transpose()?;
     let run = s.run.clone();
     println!("hosted: {} (deploy {deploy}), run {run} (its fragments e2e-{run}-…); at most {} paid calls", hosted.preview.platform(), hosted.max_paid_calls);
     s.scratch = devstack::repo_root().join("target/e2e").join(format!("hosted-{run}"));

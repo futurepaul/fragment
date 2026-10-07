@@ -21,6 +21,8 @@
 //! there is a host fault, not a 404.
 //!
 //! People come from sign-in, and browsers hold sessions: `signin.rs`.
+//! An operator's wipe of a person is recorded here, locks them while it
+//! runs, and ends with their rows: `wipe.rs`.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -51,11 +53,12 @@ macro_rules! username_join {
 
 pub(crate) mod calls;
 mod signin;
+pub(crate) mod wipe;
 use calls::{
     Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
     Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
-    Resolve, RevokeKey, Session, SetPicture, TestHook, View, TEST_HOLD_MAX_MS,
+    Resolve, RevokeKey, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -103,6 +106,7 @@ impl DurableObject for RegistryCell {
     fn new(state: State, env: Env) -> Self {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
+        state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -279,13 +283,18 @@ impl RegistryCell {
         Ok(self.row::<UsernameRow>("SELECT username FROM usernames WHERE identity = ?", vec![id.into()])?.map(|r| r.username))
     }
 
-    /// Whoever asks, resolved in this turn (`calls::By`).
+    /// Whoever asks, resolved in this turn (`calls::By`): never a person a
+    /// wipe of whom runs, nor an agent of theirs (wipe.rs; their keys and
+    /// sessions are gone already, so this refuses an identity the platform
+    /// names).
     fn by(&self, by: &By) -> CellResult<Identity> {
-        match by {
-            By::Key(key) => self.key_holder(key),
-            By::Session(token) => Ok(self.live_session(token, None, false)?.session.identity),
-            By::Identity(id) => self.named_identity(id),
-        }
+        let who = match by {
+            By::Key(key) => self.key_holder(key)?,
+            By::Session(token) => self.live_session(token, None, false)?.session.identity,
+            By::Identity(id) => self.named_identity(id)?,
+        };
+        self.not_wiping(&who)?;
+        Ok(who)
     }
 
     /// A person's username, chosen once: taken names and reserved words are refused.
@@ -610,15 +619,20 @@ impl RegistryCell {
     fn lookup(&self, b: Lookup) -> CellResult<Identity> {
         let who = b.who;
         let missing = || CellError::new(ErrorCode::NotFound, format!("{who} names no one on this fleet (they register with `fragment login`)"));
-        match npub::parse_named(&who) {
-            Some(npub::Named::Identity(id)) => self.identity(&id)?.ok_or_else(missing),
+        let found = match npub::parse_named(&who) {
+            Some(npub::Named::Identity(id)) => self.identity(&id)?.ok_or_else(missing)?,
             Some(npub::Named::Key(key)) => match self.key_row(&key)? {
-                Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}")),
-                Some(_) => Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
-                None => Err(missing()),
+                Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}"))?,
+                Some(_) => return Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
+                None => return Err(missing()),
             },
-            None => Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
+            None => return Err(CellError::invalid(format!("{who:?} is not an identity (id:…), an npub, or a 64-hex key"))),
+        };
+        // no one adds a person being wiped (or their agent) to a fragment
+        if self.wiping(found.owner.as_deref().unwrap_or(&found.id))? {
+            return Err(missing());
         }
+        Ok(found)
     }
 
     fn view_for(&self, b: View) -> CellResult<IdentityView> {
@@ -703,6 +717,9 @@ impl RegistryCell {
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
+            WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
+            WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}"))),
         }
     }

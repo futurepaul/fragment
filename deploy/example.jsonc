@@ -57,8 +57,10 @@
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
-  // npubs that grant credit, set plans, seats and overdrafts, and release
-  // usernames.
+  // The operators (npubs or identities): they grant credit, set plans,
+  // release usernames, and wipe a person (docs/api.md, Operators). Wipe
+  // with an operator key no person holds (`fragment operator key <file>`
+  // makes one and prints the npub to list here).
   "operators": [],
   // Computers (docs/computers.md): the images they run, by name, relative
   // to the repo, and the one a new computer is pinned to. Without this
