@@ -480,6 +480,28 @@ pub async fn blob_list(env: &Env, prefix: &str) -> CellResult<(Vec<String>, bool
     Ok((listed.objects().iter().map(|o| o.key()).collect(), listed.truncated()))
 }
 
+/// Deletes what BLOBS holds under `prefix`, at most `pages` pages (R2's
+/// list, up to 1000 keys each) a call: how many it deleted, and whether
+/// any are left (the caller's to call again). A deleted fragment's blobs
+/// (ended.rs) and a wiped computer's saves (computer.rs) go so.
+pub async fn blob_delete_under(env: &Env, prefix: &str, pages: usize) -> CellResult<(u64, bool)> {
+    assert!(prefix.ends_with('/') && pages > 0, "a prefix of its own, a bounded number of pages");
+    let mut deleted = 0u64;
+    for _ in 0..pages {
+        // each page listed is deleted, so the next list starts afresh
+        let (keys, more) = blob_list(env, prefix).await?;
+        assert!(keys.iter().all(|k| k.starts_with(prefix)), "a listing under a prefix answers keys under it");
+        if !keys.is_empty() {
+            blob_delete(env, &keys).await?;
+            deleted += keys.len() as u64;
+        }
+        if !more {
+            return Ok((deleted, false));
+        }
+    }
+    Ok((deleted, true))
+}
+
 /// Runs `f` as one `storage.transactionSync` of the Durable Object whose
 /// state is `state` (workers-rs 0.8.5 has no synchronous transaction): it
 /// commits when `f` answers `Ok`, and rolls back when `f` answers `Err`,

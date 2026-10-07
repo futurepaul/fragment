@@ -3,6 +3,7 @@ mod ask;
 mod auth;
 mod blobs;
 mod codestorage;
+mod operator;
 mod sync;
 mod watch;
 
@@ -189,6 +190,11 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
+    /// The deployment's operators: an operator key, and wiping a person
+    Operator {
+        #[command(subcommand)]
+        sub: OperatorCmd,
+    },
     /// Your usage ledger: your credit, your plan, what you may still
     /// spend, and this month's spend by fragment (your fragments' hosting
     /// and AI, and your agents' models, bill you)
@@ -342,6 +348,31 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OperatorCmd {
+    /// Make an operator key: a new key's secret in a file of its own (0600,
+    /// never overwritten, never printed); prints its npub, to list in the
+    /// deployment's `operators`. It is held by no person, so a wipe never
+    /// removes it
+    Key { path: PathBuf },
+    /// Wipe a person (a username, or id:…): everything theirs and their
+    /// agents' is deleted, and their username and sign-in freed, so their
+    /// next sign-in is a new person. --dry-run says what it deletes and
+    /// changes nothing; --yes deletes it (again: it goes on where it
+    /// stopped)
+    Wipe {
+        person: String,
+        #[arg(long, conflicts_with = "yes")]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        /// The operator key's file (else FRAGMENT_OPERATOR_KEY_FILE, else
+        /// this machine's own key)
+        #[arg(long)]
+        key_file: Option<PathBuf>,
     },
 }
 
@@ -820,6 +851,44 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Skill => {
             print!("{SKILL}");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Key { path } } => {
+            let npub = operator::make_key(&path, write_secret_file)?;
+            json_exit(j, &json!({ "npub": npub, "path": path.display().to_string() }));
+            println!("{npub}");
+            println!("its secret is in {} (0600): list the npub in the deployment's `operators`, and wipe with --key-file {}", path.display(), path.display());
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Wipe { person, dry_run, yes, key_file } } => {
+            let c = match operator::key_file(key_file.as_deref(), std::env::var(operator::KEY_FILE_ENV).ok()) {
+                Some(file) => {
+                    let mut c = api::Client::new(&resolve_host(&cli.host, &load_config()), operator::read_key(&file)?);
+                    c.verbose = cli.verbose;
+                    c
+                }
+                None => require_client(&cli.host, cli.verbose)?,
+            };
+            if dry_run || !yes {
+                let r = operator::dry_run(&c, &person)?;
+                json_exit(j, &r);
+                operator::print(&r);
+                if !dry_run {
+                    println!("a wipe deletes all of it: say --dry-run to only see it, --yes to delete it");
+                }
+                return Ok(());
+            }
+            let (r, calls) = operator::wipe(&c, &person, |n, r| {
+                if !j {
+                    for ran in &r.ran {
+                        let note = ran.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default();
+                        println!("  call {n}: {} {} ({} deleted){note}", ran.step, if ran.done { "done" } else { "not done" }, ran.deleted);
+                    }
+                }
+            })?;
+            json_exit(j, &json!({ "report": r, "calls": calls }));
+            operator::print(&r);
+            println!("wiped in {calls} call(s): nothing of theirs is left; their next sign-in is a new person");
             return Ok(());
         }
         Cmd::New { dir, template, list } => {
@@ -1531,7 +1600,7 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "visibility": visibility }));
             println!("{name}: {}", visibility.as_str());
         }
-        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } => unreachable!(),
+        Cmd::Login { .. } | Cmd::Host { .. } | Cmd::Guide | Cmd::Skill | Cmd::New { .. } | Cmd::Operator { .. } => unreachable!(),
     }
     Ok(())
 }

@@ -301,6 +301,83 @@ impl Call for SetPicture {
     type Answer = Picture;
 }
 
+// ------------------------------------------------------------- wipes
+
+/// `POST /wipe/look`: whom a wipe names (a username, or an identity) and
+/// what the registry holds of them; it changes nothing (docs/api.md,
+/// Operators). A person never wiped whom nothing names is 404; an agent
+/// is 400 (it is wiped with its owner).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeLook {
+    pub person: String,
+}
+
+/// A picture a wiped person set, and whether another identity set the
+/// same bytes (`pictures/<sha>` is theirs too, and stays).
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct WipePicture {
+    pub sha: String,
+    pub shared: bool,
+}
+
+/// What the registry holds of a person a wipe names, and how far a wipe of
+/// them has got (`done`, of `fragment_core::wipe::STEPS`; `None`: no wipe
+/// began). A wiped person's answer holds nothing but their agents' ids
+/// (each list and ledger of theirs a wipe checks again) and `done`.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeFacts {
+    pub identity: String,
+    pub username: Option<String>,
+    pub agents: Vec<String>,
+    /// The agent fragments their agents were made from.
+    pub agent_fragments: Vec<String>,
+    pub sign_ins: u64,
+    pub keys: u64,
+    pub sessions: u64,
+    pub pictures: Vec<WipePicture>,
+    pub done: Option<u32>,
+}
+
+impl Call for WipeLook {
+    const PATH: &'static str = "/wipe/look";
+    type Answer = WipeFacts;
+}
+
+/// `POST /wipe/begin`: a wipe of `identity` begins (or goes on): the
+/// person is locked (no sign-in, no agent made, no key or session works,
+/// their username held), their and their agents' sessions and keys end
+/// at once. Again, it changes nothing more. `by` is the operator, for the
+/// record.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeBegin {
+    pub identity: String,
+    pub by: String,
+}
+
+impl Call for WipeBegin {
+    const PATH: &'static str = "/wipe/begin";
+    type Answer = WipeFacts;
+}
+
+/// `POST /wipe/step`: a step of a wipe is done (`fragment_core::wipe::Step`,
+/// by name); the last, `registry`, deletes the registry's rows of the person
+/// and their agents in the same turn. Answers how many steps are done.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeStep {
+    pub identity: String,
+    pub step: fragment_core::wipe::Step,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WipeDone {
+    pub done: u32,
+}
+
+impl Call for WipeStep {
+    const PATH: &'static str = "/wipe/step";
+    type Answer = WipeDone;
+}
+
 /// `POST /test`: the levers of a fleet with a test secret
 /// (`FRAGMENT_TEST_SECRET`; cell/src/levers.rs).
 #[derive(Serialize, Deserialize)]

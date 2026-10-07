@@ -261,18 +261,8 @@ impl FragmentCell {
     /// `prefix` (its key's), at most `pages` pages of them a call. Whether
     /// none is left.
     pub(crate) async fn delete_blobs_under(&self, prefix: &str, pages: usize) -> CellResult<bool> {
-        assert!(prefix.ends_with('/') && pages > 0, "a life's blobs, a bounded number of pages");
-        for _ in 0..pages {
-            // each page listed is deleted, so the next list starts afresh
-            let (keys, more) = js::blob_list(&self.env, prefix).await?;
-            if !keys.is_empty() {
-                js::blob_delete(&self.env, &keys).await?;
-            }
-            if !more {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let (_, more) = js::blob_delete_under(&self.env, prefix, pages).await?;
+        Ok(!more)
     }
 
     /// Serves a file at a pin that is a pointer: its bytes, typed by the path.

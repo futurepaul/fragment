@@ -16,6 +16,12 @@
 //! `Route`'s request (the core's types, or proto's), answered with its
 //! `Route::Answer`; a refusal is `ErrorBody` with the typed `Refused`
 //! beside it, so a caller can tell a read-only owner from a guest.
+//!
+//! **Wiped** (docs/api.md, Operators): a wipe of its person empties it in
+//! one step and leaves one row that says so (`wiped`). From then every
+//! route is refused as `Refused::Wiped` (404), which a caller reads as a
+//! refusal, not an outage: a meter batch still in the queue is acknowledged
+//! and kept nowhere, so nothing makes the ledger again.
 
 use std::cell::Cell;
 
@@ -44,6 +50,10 @@ CREATE TABLE IF NOT EXISTS commands (id TEXT PRIMARY KEY, command TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS spend (month INTEGER NOT NULL, fragment TEXT NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, fragment));
 CREATE TABLE IF NOT EXISTS caps (fragment TEXT PRIMARY KEY, micros INTEGER NOT NULL);
 ";
+
+/// The one row a wiped ledger keeps: when it was wiped. Apart from
+/// `SCHEMA`, whose tables a wipe drops.
+const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
 
 /// The person a ledger call is for; only platform code sets it, and the
 /// ledger keeps the first it is told and refuses another.
@@ -77,15 +87,21 @@ pub struct LedgerCell {
     /// When this activation last set the alarm for (the ledger's clock):
     /// a call that needs it no later leaves it.
     armed: Cell<Option<i64>>,
+    /// Its person was wiped (`wiped`'s row, read as it starts).
+    wiped: Cell<bool>,
 }
 
 impl DurableObject for LedgerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
-        state.storage().sql().exec(SCHEMA, None).expect("the Ledger schema applies");
+        let sql = state.storage().sql();
+        sql.exec(SCHEMA, None).expect("the Ledger schema applies");
+        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
+        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
+        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
         let cfg = Config::from_env(&env);
-        LedgerCell { state, raw, cfg, armed: Cell::new(None) }
+        LedgerCell { state, raw, cfg, armed: Cell::new(None), wiped: Cell::new(wiped) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -97,6 +113,10 @@ impl DurableObject for LedgerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // a wiped ledger has nothing to sweep (its alarm went with it)
+        if self.wiped.get() {
+            return Response::ok("");
+        }
         if let Err(e) = self.swept().await {
             console_error!("{}", json!({ "event": "ledger.sweep-failed", "message": e.message }));
             // tried again within the minute, never spinning
@@ -570,6 +590,16 @@ impl LedgerCell {
     }
 
     async fn route(&self, mut req: Request) -> Result<Value, Failed> {
+        if let Some(route) = req.path().strip_prefix("/wipe/") {
+            // only a wipe's orchestrator sets the header (routed.rs `marker`)
+            if req.headers().get(crate::wipe::WIPE_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route /wipe/{route}")).into());
+            }
+            return Ok(self.wipe(route).await?);
+        }
+        if self.wiped.get() {
+            return Err(Failed::Refused(Refused::Wiped));
+        }
         let payer = req.headers().get(PAYER_HEADER)?.filter(|p| fragment_core::npub::is_identity(p)).ok_or_else(|| CellError::host("a ledger call names its payer"))?;
         match self.meta("payer")? {
             None => self.set_meta("payer", &payer)?,
@@ -642,6 +672,46 @@ impl LedgerCell {
             }
             TestHook::PATH if self.cfg.test_hooks => self.test_hook(decode(&body)?).await,
             p => Err(CellError::new(ErrorCode::NotFound, format!("no route {p}")).into()),
+        }
+    }
+
+    /// A wipe's calls (docs/api.md, Operators; the router's cell/src/wipe.rs):
+    /// `view` → `{wiped, held}`, whether it holds anything; `end` →
+    /// `{wiped, held}`: every table dropped and made again empty, with the
+    /// row that says it was wiped, in one step (no await), and its alarm
+    /// deleted. Again, it changes nothing.
+    async fn wipe(&self, route: &str) -> CellResult<Value> {
+        let held = || -> CellResult<bool> {
+            let rows: Vec<Value> = self
+                .sql()
+                .exec(
+                    "SELECT (SELECT COUNT(*) FROM meta) + (SELECT COUNT(*) FROM head) + (SELECT COUNT(*) FROM entries) + (SELECT COUNT(*) FROM batches)
+                       + (SELECT COUNT(*) FROM commands) + (SELECT COUNT(*) FROM spend) + (SELECT COUNT(*) FROM caps) AS n",
+                    None,
+                )?
+                .to_array()?;
+            Ok(rows.first().and_then(|r| r["n"].as_i64()).ok_or_else(|| CellError::host("COUNT answered no row"))? > 0)
+        };
+        match route {
+            "view" => Ok(json!({ "wiped": self.wiped.get(), "held": held()? })),
+            "end" => {
+                let had = held()?;
+                // one step, no await: emptied and marked, or neither
+                let sql = self.sql();
+                for table in fragment_core::ddl::tables(SCHEMA) {
+                    sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
+                }
+                sql.exec(SCHEMA, None)?;
+                if !self.wiped.get() {
+                    sql.exec("INSERT INTO wiped (at) VALUES (?)", vec![SqlStorageValue::Integer(js::now_ms())])?;
+                }
+                self.wiped.set(true);
+                assert!(!held()?, "a wiped ledger holds nothing");
+                self.state.storage().delete_alarm().await?;
+                self.armed.set(None);
+                Ok(json!({ "wiped": true, "held": had }))
+            }
+            other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
 

@@ -366,6 +366,11 @@ pub enum Refused {
     /// The fragment spent its cap this month (counting what is held in
     /// it): only its owner spends in it until the next month.
     CapReached { cap: i64, spent: i64 },
+    /// The person was wiped (docs/api.md, Operators): their ledger keeps
+    /// nothing but that, and takes nothing more. Not the core's to decide:
+    /// the cell answers it for a ledger it emptied, so a row still on its
+    /// way (a meter batch in the queue) is acknowledged, not retried.
+    Wiped,
 }
 
 /// The rule a request broke.
@@ -418,7 +423,7 @@ impl Refused {
         match self {
             Refused::Invalid { .. } | Refused::Ended | Refused::StaleBook { .. } | Refused::NoPrice | Refused::Stale => ErrorCode::InvalidRequest,
             Refused::ConflictingBody => ErrorCode::ConflictingBody,
-            Refused::UnknownRef => ErrorCode::NotFound,
+            Refused::UnknownRef | Refused::Wiped => ErrorCode::NotFound,
             Refused::TooManyHolds => ErrorCode::RateLimited,
             Refused::TooLarge => ErrorCode::TooLarge,
             // what a guest's plan does not allow, as a role does not: no
@@ -454,6 +459,7 @@ impl Refused {
             Refused::CapReached { cap, spent } => {
                 format!("this fragment spent {} of its {} cap this month: only its owner spends in it until next month", dollars(spent), dollars(cap))
             }
+            Refused::Wiped => "this person was wiped: their ledger takes nothing more".into(),
         }
     }
 }

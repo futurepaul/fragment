@@ -11,6 +11,21 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## A wipe finds a person's fragments through their lists
+
+- **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
+  No index names every fragment under a username: a wipe finds the ones a
+  person owns on their and their agents' lists (each fragment's own
+  outbox delivers its rows) and the agent fragments the registry names.
+- **Risk:** a fragment whose create its owner's list never took (the
+  delivery failing from the create on, and still at the wipe) is not
+  ended, and outlives its owner, its repo with it; once their list is
+  wiped, a late delivery is taken and kept nowhere.
+- **First proof:** a wiped person's fragment answering after their wipe
+  said nothing was left.
+- **Delete when:** the registry (or a per-username index) records each
+  fragment as it is made, and the wipe reads it beside the lists.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end

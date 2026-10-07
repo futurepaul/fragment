@@ -89,8 +89,12 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui,
+  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
+  `wipe` wipes a person it made (docs/api.md, Operators) with an
+  operator key no person holds: the local node's own, or, hosted, the
+  file `--operator-key-file <file>` names (its npub in the config's
+  `operators`; a skip without one).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
@@ -141,7 +145,7 @@ prebuilt bundle is in the debt ledger).
   of the node, beside the Rust: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
   … | --except …] [--dry-run | --sweep [<run>] | --sweep-all]
-  [--max-paid-calls <n>]`: the hosted
+  [--max-paid-calls <n>] [--operator-key-file <file>]`: the hosted
   lane, the same sections against the branch deployment
   `https://<b>.<zone>` on its real vendors (crates/e2e/src/hosted.rs). Its
   people sign in through the preview's levers as `<name>@e2e.test` (the

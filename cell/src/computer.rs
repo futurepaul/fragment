@@ -31,6 +31,14 @@
 //!   agent of its was added to): the agent's own fragment posts `joined`
 //!   on its `tasks`, and the fragment that added it then wakes the
 //!   computer (`Wake::Joined`; docs/computers.md).
+//! - **A wipe of its owner** (docs/api.md, Operators: `computer/wipe`)
+//!   marks it wiped before anything else, destroys its container, deletes
+//!   every save from R2 (each record, then whatever else is under its saves'
+//!   prefix) and empties its record, the snapshot's id with it (Cloudflare
+//!   deletes no snapshot: forgotten, it is never restored, and expires in
+//!   30 days). From the mark on it starts, saves and writes nothing, and
+//!   answers as a computer never made: an event already under way (a save,
+//!   a start) fails at its next write.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -87,6 +95,12 @@ CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, identity TEXT NOT NU
 CREATE TABLE IF NOT EXISTS uses (month INTEGER NOT NULL, provider TEXT NOT NULL, agent TEXT NOT NULL, calls INTEGER NOT NULL, micros INTEGER NOT NULL, PRIMARY KEY (month, provider, agent));
 CREATE TABLE IF NOT EXISTS own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
+/// The one row a wiped computer keeps: when it was wiped. Apart from
+/// `SCHEMA`, whose tables the wipe drops.
+const WIPED_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS wiped (at INTEGER NOT NULL);";
+/// R2 pages (up to 1000 keys each) one `computer/wipe` deletes under its
+/// saves' prefix; the rest are the next call's.
+const WIPE_PAGES_PER_CALL: usize = 10;
 /// The Durable Object class a sealed own key names (`keys::scope`).
 const SEAL_CLASS: &str = "Computer";
 /// Months of uses kept (this one and the twelve before it).
@@ -247,15 +261,22 @@ pub struct ComputerCell {
     /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
     /// the guest's view lists: a token is asked of Pipes for each swap.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
+    /// Its owner was wiped (`wiped`'s row, read as it starts, or set by
+    /// the wipe): no write lands, and it answers as no computer.
+    wiped: std::cell::Cell<bool>,
 }
 
 impl DurableObject for ComputerCell {
     fn new(state: State, env: Env) -> Self {
         let raw: JsValue = state._inner().into();
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
-        state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
+        let sql = state.storage().sql();
+        sql.exec(SCHEMA, None).expect("the Computer schema applies");
+        sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
+        let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
+        let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default(), wiped: std::cell::Cell::new(wiped) }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -266,7 +287,7 @@ impl DurableObject for ComputerCell {
     }
 
     async fn alarm(&self) -> Result<Response> {
-        if self.meta(MetaKey::Id).ok().flatten().is_some() {
+        if !self.wiped.get() && self.meta(MetaKey::Id).ok().flatten().is_some() {
             if let Err(e) = self.drive(Event::Alarm).await {
                 console_error!("{{\"computer\":\"alarm\",\"error\":{}}}", json!(e.message));
             }
@@ -295,6 +316,11 @@ impl DurableObject for ComputerCell {
         self.keepalive_closed(&ws).await;
         Ok(())
     }
+}
+
+/// A wiped computer's answer: as no computer.
+fn wiped_computer() -> CellError {
+    CellError::new(ErrorCode::NotFound, "no such computer (its owner was wiped)")
 }
 
 /// `computer/init`'s body.
@@ -448,7 +474,13 @@ impl ComputerCell {
         Ok(self.sql().exec(q, binds)?.to_array::<Value>()?)
     }
 
+    /// Every write the computer makes (its meta, saves, lifecycle, agents,
+    /// meters): none once it is wiped, so nothing under way when its wipe
+    /// began (a save, a start's report) writes it again.
     fn exec(&self, q: &str, binds: Vec<SqlStorageValue>) -> CellResult<()> {
+        if self.wiped.get() {
+            return Err(wiped_computer());
+        }
         self.sql().exec(q, binds)?;
         Ok(())
     }
@@ -781,6 +813,11 @@ impl ComputerCell {
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
+        // a wipe that began while this start awaited starts nothing: the
+        // check and the start are one turn (the host's start is synchronous)
+        if self.wiped.get() {
+            return Err(wiped_computer().into());
+        }
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
         if armed.as_bool() != Some(true) {
@@ -1288,6 +1325,67 @@ impl ComputerCell {
         })
     }
 
+    /// Where its saves are in R2: entry.mjs's `DirectoryBackup` prefix,
+    /// named by this object's id.
+    fn backups_prefix(&self) -> String {
+        format!("computers/{}/backups/", self.state.id())
+    }
+
+    /// Its owner's wipe (docs/api.md, Operators): marked wiped first (from
+    /// here no write lands and it answers as no computer), its alarm and
+    /// its container gone, each save's record deleted (the delete a save's
+    /// own `forget` makes), then whatever else is under its saves' prefix
+    /// (an upload its destroy cut short), at most `WIPE_PAGES_PER_CALL`
+    /// pages a call; once none is left, its tables dropped and made again
+    /// empty, the snapshot's id with them. Answers `{destroyed, records,
+    /// objects, more}`: `more`, its prefix holds more (call again). Each
+    /// part is idempotent: a wipe cut anywhere is done by the next call.
+    async fn wipe(&self) -> CellResult<Value> {
+        let id = self.meta(MetaKey::Id)?;
+        if !self.wiped.get() {
+            self.sql().exec("INSERT INTO wiped (at) VALUES (?)", vec![js::now_ms().into()])?;
+            self.wiped.set(true);
+            console_log!("{}", json!({ "computer": id, "wipe": "marked" }));
+        }
+        self.state.storage().delete_alarm().await?;
+        // whatever start runs it (`0`), and waited out
+        let destroyed = self.call("destroy", &[JsValue::from_f64(0.0), "its owner was wiped".into()]).await?.as_bool() == Some(true);
+        if !destroyed {
+            return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
+        }
+        let records = self.saves()?.every_record();
+        // bounded: a computer's records are (Saves::every_record)
+        for record in &records {
+            self.call("forget", &[js::to_js(record)]).await?;
+        }
+        let (objects, more) = js::blob_delete_under(&self.env, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        if !more {
+            // one step, no await: its record emptied, the mark kept
+            let sql = self.sql();
+            for table in fragment_core::ddl::tables(SCHEMA) {
+                sql.exec(&format!("DROP TABLE IF EXISTS {table}"), None)?;
+            }
+            sql.exec(SCHEMA, None)?;
+            assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
+        }
+        console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
+        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more }))
+    }
+
+    /// What a wipe finds of it (docs/api.md, Operators): whether it is
+    /// wiped, made, its phase, its saves, how many objects its saves' prefix
+    /// holds (one page: `more` past it), and whether it keeps a snapshot.
+    async fn wipe_view(&self) -> CellResult<Value> {
+        let made = self.meta(MetaKey::Id)?.is_some();
+        let phase = match made {
+            true => Some(self.view()?.phase),
+            false => None,
+        };
+        let saves = self.saves()?;
+        let (keys, more) = js::blob_list(&self.env, &self.backups_prefix()).await?;
+        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.all().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
+    }
+
     /// A test fleet's lever on this computer (`POST /api/test/computer`,
     /// docs/api.md): `kill` sends SIGKILL to the guest's PID 1, so its
     /// container exits as a crash does and its real exit is reported;
@@ -1342,6 +1440,10 @@ impl ComputerCell {
 
     async fn route(&self, mut req: Request) -> CellResult<Response> {
         let path = req.path();
+        // a wiped computer answers as none, its wipe's own calls aside
+        if self.wiped.get() && !matches!(path.as_str(), "/computer/wipe" | "/computer/wipe-view") {
+            return Err(wiped_computer());
+        }
         match req.headers().get(KIND_HEADER)?.as_deref() {
             Some("keepalive") => return self.keepalive(&req).await,
             Some("port") => return self.port(req).await,
@@ -1370,6 +1472,8 @@ impl ComputerCell {
                 json_response(&self.view()?)
             }
             "computer/view" => json_response(&self.view()?),
+            "computer/wipe" => json_response(&self.wipe().await?),
+            "computer/wipe-view" => json_response(&self.wipe_view().await?),
             "computer/wake" => {
                 let b: WakeBody = body_json(&mut req).await?;
                 self.must(MetaKey::Id)?;

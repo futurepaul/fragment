@@ -212,6 +212,9 @@ pub struct Run {
     levers_sign_in: bool,
     /// Lanes call from threads of their own (site.rs): shared under locks.
     people: Mutex<Vec<String>>,
+    /// The people a lane wiped (docs/api.md, Operators): their ledgers went
+    /// with them, so the run's spend counts them apart.
+    wiped: Mutex<Vec<String>>,
     budget: Mutex<Budget>,
 }
 
@@ -236,12 +239,17 @@ impl Run {
 
     fn make(secret: String, levers_sign_in: bool, paid_calls: u64) -> Arc<Run> {
         assert!(secret.len() >= fragment_core::levers::SECRET_BYTES_MIN, "a test secret is long");
-        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
+        Arc::new(Run { secret, levers_sign_in, people: Mutex::new(vec![]), wiped: Mutex::new(vec![]), budget: Mutex::new(Budget { left: paid_calls, lent: 0 }) })
     }
 
     /// The people this run signed in (hosted), oldest first.
     pub fn people(&self) -> Vec<String> {
         self.people.lock().expect("the people's lock").clone()
+    }
+
+    /// The people a lane wiped, oldest first.
+    pub fn wiped(&self) -> Vec<String> {
+        self.wiped.lock().expect("the wiped people's lock").clone()
     }
 
     /// The paid calls the run may still lend, and those it lent.
@@ -315,6 +323,15 @@ impl Api {
         }
         api.http = builder.build().expect("http client");
         api
+    }
+
+    /// A lane wiped `identity`, one of the run's people, who was lent no
+    /// paid call: their ledger is gone, and the run's spend says so.
+    pub fn wiped(&self, identity: &str) {
+        let mut wiped = self.run.wiped.lock().expect("the wiped people's lock");
+        if !wiped.iter().any(|p| p == identity) {
+            wiped.push(identity.to_string());
+        }
     }
 
     /// Whether people sign in through the levers (the hosted lane's rules).
