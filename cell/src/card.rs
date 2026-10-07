@@ -5,41 +5,36 @@
 //! - **After live moves** (plane.rs `interpret`) the fragment wants a card
 //!   of the new live, in the same turn, and nothing more: the deploy's
 //!   request shoots nothing.
-//! - **Its alarm** sends the shot: it asks whether the live is shot at all
-//!   (an app or a brain, not members-only, an owner who pays), then puts
-//!   one message on the delivery queue (`fragment-deliveries`). One shot is
-//!   out per fragment at a time; a deploy meanwhile is shot next, and the
-//!   shot out lands stale (newest wins).
-//! - **The queue's consumer** (deliveries.rs) takes the shot with the
-//!   `BROWSER` binding: a Browser Rendering session driven over CDP, the
-//!   page opened as a visitor without an account sees it (a link
-//!   fragment's with its share link), at 1280×800, as a JPEG; the session
-//!   closed whatever happens. It reports to the fragment, with the image
-//!   and the browser time, and acks the message: a report that is lost is
-//!   a shot lost, which the fragment's lease turns into a failed try.
-//! - **The report** meters the browser time to the fragment's owner (a
-//!   `browser` row in the fragment's meter outbox: meter.rs), checks the
-//!   image, stores it as one of the fragment's blobs, and makes it the
+//! - **Its alarm** takes the shot, after the rest of its work: it asks
+//!   whether the live is shot at all (an app or a brain, not members-only,
+//!   an owner who pays), then takes it with the `BROWSER` binding: a
+//!   Browser Rendering session driven over CDP, the page opened as a
+//!   visitor without an account sees it (a link fragment's with its share
+//!   link), at 1280×800, as a JPEG; the session closed whatever happens.
+//!   One shot is out per fragment at a time (a Durable Object runs one
+//!   alarm at a time); a deploy meanwhile is shot next, and the shot out
+//!   lands stale (newest wins). A try counts as failed from when it
+//!   begins, so one lost with the object (a restart) is tried again.
+//! - **As it lands** the browser time is metered to the fragment's owner
+//!   (a `browser` row in the fragment's meter outbox: meter.rs), and the
+//!   image is checked, stored as one of the fragment's blobs, and made the
 //!   card; a failure is tried again from the alarm with a doubling wait,
 //!   then given up with one `card.failed` event, the card before kept.
 //!
 //! Each read-modify-write of the schedule is one synchronous stretch: a
-//! report, a deploy and the alarm interleave at their awaits, never inside
-//! one.
+//! deploy and the alarm interleave at their awaits, never inside one.
 
 use std::time::Duration;
 
-use fragment_core::card::{self, Cards, Next, Outcome, Pace, Skip, Ticket, Verdict};
+use fragment_core::card::{self, Cards, Next, Outcome, Pace, Skip, Verdict};
 use fragment_core::ledger::{Refused, Spend};
 use fragment_core::price::Usage;
 use fragment_proto::{ErrorCode, FragmentKind, Role};
 use futures_util::future::{select, Either};
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use worker::*;
 
-use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
 use crate::fragment::{Caller, FragmentCell, MetaKey};
 use crate::js;
@@ -56,31 +51,6 @@ const CARD_CACHE: &str = "private, no-cache";
 const TEST_UNREACHABLE: &str = "http://127.0.0.1:9/";
 /// A session id from the binding: what goes into its routes' paths.
 const SESSION_ID_MAX: usize = 128;
-
-/// One try at a card, as it travels on the delivery queue
-/// (`Delivery::card`).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct CardShot {
-    pub ticket: Ticket,
-    /// The page the renderer opens. A link fragment's carries its share
-    /// link, so it is never logged or reported.
-    pub page: String,
-}
-
-/// What the consumer tells the fragment of one try (`POST card/report`).
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct CardReport {
-    incarnation: String,
-    ticket: Ticket,
-    /// The browser time it is billed for (0: no session was acquired).
-    ms: u64,
-    /// The JPEG, base64; or why there is none, and whether another try may
-    /// get one.
-    image: Option<String>,
-    error: Option<String>,
-    retry: bool,
-}
 
 impl FragmentCell {
     /// The card and its schedule, as kept (none yet: the default).
@@ -102,7 +72,7 @@ impl FragmentCell {
     }
 
     /// `live` moved to `live` (plane.rs `interpret`): its card is wanted,
-    /// the newest winning. The alarm sends the shot; nothing waits here.
+    /// the newest winning. The alarm takes the shot; nothing waits here.
     pub(crate) fn card_wanted(&self, live: &str) -> CellResult<()> {
         let mut cards = self.cards()?;
         let before = cards.clone();
@@ -118,25 +88,17 @@ impl FragmentCell {
         Ok(self.cards()?.due_at())
     }
 
-    /// From the alarm: a shot whose lease ended counts as failed; a live
-    /// due is let go (`Skip`) or shot, one at a time.
+    /// From the alarm, after the rest of its work: a live due is let go
+    /// (`Skip`) or shot, here, and the shot lands.
     pub(crate) async fn drain_card(&self) -> CellResult<()> {
         let now = js::now_ms();
-        let mut cards = self.cards()?;
-        if cards.due_at().is_none_or(|at| at > now) {
-            return Ok(());
-        }
-        if let Some(v) = cards.expire(now, self.card_pace()) {
-            self.card_verdict(&v, "its shot was lost: no word came within its lease");
-            self.keep_cards(&cards)?;
-        }
-        let Some(due) = cards.due(now).map(|w| (w.live.clone(), w.since)) else { return Ok(()) };
+        let Some(due) = self.cards()?.due(now).map(|w| (w.live.clone(), w.since)) else { return Ok(()) };
         // asked between the reads: what it learns is applied to the schedule as it is then
         let page = self.card_page().await?;
         let mut cards = self.cards()?;
         if cards.due(now).map(|w| (w.live.clone(), w.since)) != Some(due.clone()) {
-            // a deploy or a report came meanwhile: the next look decides
-            return self.schedule().await;
+            // a deploy came meanwhile: the next look decides
+            return Ok(());
         }
         let page = match page {
             Ok(_) if self.test_countdown(MetaKey::TestFailCards, "a card's shot").is_err() => TEST_UNREACHABLE.to_string(),
@@ -148,16 +110,53 @@ impl FragmentCell {
                 return Ok(());
             }
         };
-        let Next::Shoot(ticket) = cards.next(now) else { unreachable!("a live due with no shot out is shot") };
+        let shot = match cards.next(now, self.card_pace()) {
+            Next::Shoot(shot) => shot,
+            Next::GaveUp { failures } => {
+                self.keep_cards(&cards)?;
+                self.card_failed(failures, "its last try was lost with the fragment's object");
+                return Ok(());
+            }
+            Next::Idle => unreachable!("a live due is shot or let go"),
+        };
         self.keep_cards(&cards)?;
-        let delivery = self.card_delivery(&ticket, page)?;
-        if let Err(e) = self.enqueue(&[delivery]).await {
-            // not out after all: tried again from the alarm, costing no try
-            let mut cards = self.cards()?;
-            cards.unsend(&ticket);
-            self.keep_cards(&cards)?;
-            console_error!("{}", json!({ "event": "card.deferred", "fragment": self.name()?, "message": e.message }));
-            return self.schedule_by(js::now_ms() + 30_000).await;
+        // the life it is billed to and kept in: a delete meanwhile ends it
+        let (life, meter) = (self.must(MetaKey::CreatedAt)?, card::meter_ref(&self.meter_key()?, &shot));
+        let t0 = js::now_ms();
+        let (closed, image) = take(&self.env, &page).await;
+        // no session acquired: nothing to bill
+        let ms = closed.map_or(0, |closed| card::billed_ms(u64::try_from(js::now_ms() - t0).unwrap_or(0), closed));
+        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(life.as_str()) {
+            return Ok(());
+        }
+        if ms > 0 {
+            self.outbox(&meter, Usage::Browser { ms }, js::now_ms())?;
+        }
+        let image = image.and_then(|bytes| card::check_image(&bytes).map(|()| bytes).map_err(|f| Failure { why: f.message(), retry: false }));
+        let (outcome, why) = match image {
+            Ok(bytes) => {
+                let (blob, size) = (hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)), bytes.len() as u64);
+                // stored before the schedule says it is the card: a shot
+                // that then lands stale leaves a blob the collection takes
+                if self.cards()?.current(&shot) {
+                    self.put_blob_typed(&blob, bytes, Some(card::MEDIA_TYPE)).await?;
+                }
+                (Outcome::Image { blob, size }, String::new())
+            }
+            Err(f) => (Outcome::Failed { retry: f.retry }, f.why),
+        };
+        let mut cards = self.cards()?;
+        let verdict = cards.landed(&shot, outcome, js::now_ms(), self.card_pace()).map_err(|_| CellError::host("a card's blob is its SHA-256"))?;
+        self.keep_cards(&cards)?;
+        console_log!("{}", json!({ "card": self.name()?, "attempt": shot.attempt, "ms": ms, "verdict": format!("{verdict:?}") }));
+        match verdict {
+            Verdict::Kept => {
+                let card = cards.card.as_ref().expect("a kept shot is the card");
+                self.event("card.made", &format!("a card of live {} ({} bytes)", &card.live[..12], card.size), json!({ "live": card.live, "blob": card.blob, "attempt": card.attempt }));
+            }
+            Verdict::GaveUp { failures } => self.card_failed(failures, &why),
+            // a retry and a stale shot are quiet
+            Verdict::Retry { .. } | Verdict::Stale => {}
         }
         Ok(())
     }
@@ -187,70 +186,9 @@ impl FragmentCell {
         Ok(Ok(card::page_url(&origin, visitor, &self.must(MetaKey::ViewToken)?)))
     }
 
-    fn card_delivery(&self, ticket: &Ticket, page: String) -> CellResult<Delivery> {
-        let (fragment, incarnation) = (self.name()?, self.must(MetaKey::CreatedAt)?);
-        Ok(Delivery {
-            fragment,
-            incarnation,
-            kind: DeliveryKind::Card,
-            // the page's origin alone: its query may hold the share link
-            url: url::Url::parse(&page).map(|u| u.origin().ascii_serialization()).unwrap_or_default(),
-            headers: vec![],
-            body: String::new(),
-            sub: None,
-            card: Some(CardShot { ticket: ticket.clone(), page }),
-        })
-    }
-
-    /// What a verdict says in the fragment's event log: only a card kept,
-    /// and a live given up, are said; a retry and a stale shot are quiet.
-    fn card_verdict(&self, v: &Verdict, why: &str) {
-        if let Verdict::GaveUp { failures } = v {
-            self.event("card.failed", &format!("no card for this deploy after {failures} tries: {why}"), json!({ "failures": failures }));
-        }
-    }
-
-    /// `POST card/report` from the delivery consumer: the browser time is
-    /// metered (always: it was spent), then the try lands.
-    pub(crate) async fn card_report(&self, report: CardReport) -> CellResult<Value> {
-        if Some(report.incarnation.as_str()) != self.meta(MetaKey::CreatedAt)?.as_deref() {
-            return Ok(json!({ "ok": true, "verdict": "another life" }));
-        }
-        if !card::valid_live(&report.ticket.live) {
-            return Err(CellError::invalid("a card report names a commit"));
-        }
-        let now = js::now_ms();
-        if report.ms > 0 {
-            self.outbox(&card::meter_ref(&self.meter_key()?, &report.ticket), Usage::Browser { ms: report.ms }, now)?;
-        }
-        let (outcome, why, bytes) = match report.image.as_deref().map(decode_image) {
-            Some(Ok(bytes)) => {
-                let blob = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes));
-                (Outcome::Shot { blob, size: bytes.len() as u64 }, String::new(), Some(bytes))
-            }
-            Some(Err(fault)) => (Outcome::Failed { retry: false }, fault, None),
-            None => (Outcome::Failed { retry: report.retry }, report.error.unwrap_or_else(|| "the shot failed".into()), None),
-        };
-        // the image is stored before the schedule says it is the card; a
-        // shot that then lands stale leaves a blob the collection takes
-        if let (Outcome::Shot { blob, .. }, Some(bytes)) = (&outcome, bytes) {
-            let out = self.cards()?.flight.as_ref().is_some_and(|f| f.ticket() == report.ticket);
-            if out {
-                self.put_blob_typed(blob, bytes, Some(card::MEDIA_TYPE)).await?;
-            }
-        }
-        let mut cards = self.cards()?;
-        let verdict = cards.landed(&report.ticket, outcome, js::now_ms(), self.card_pace()).map_err(|_| CellError::host("a card's blob is its SHA-256"))?;
-        self.keep_cards(&cards)?;
-        match &verdict {
-            Verdict::Kept => {
-                let card = cards.card.as_ref().expect("a kept shot is the card");
-                self.event("card.made", &format!("a card of live {} ({} bytes)", &card.live[..12], card.size), json!({ "live": card.live, "blob": card.blob, "attempt": card.attempt }));
-            }
-            v => self.card_verdict(v, &why),
-        }
-        self.schedule().await?;
-        Ok(json!({ "ok": true, "verdict": format!("{verdict:?}") }))
+    /// A live given up, said once in the fragment's event log.
+    fn card_failed(&self, failures: u32, why: &str) {
+        self.event("card.failed", &format!("no card for this deploy after {failures} tries: {why}"), json!({ "failures": failures }));
     }
 
     /// `GET /api/f/{name}/card` (viewers and up): the card's JPEG, tagged by
@@ -274,17 +212,6 @@ impl FragmentCell {
     }
 }
 
-/// A report's image: base64 of a card (`card::check_image`), or why not.
-fn decode_image(b64: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine;
-    if b64.len() > card::BYTES_MAX.div_ceil(3) * 4 {
-        return Err(card::ImageFault::TooLarge { size: b64.len() / 4 * 3 }.message());
-    }
-    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| "the shot is not base64".to_string())?;
-    card::check_image(&bytes).map_err(card::ImageFault::message)?;
-    Ok(bytes)
-}
-
 /// Why a try got no image, and whether another may.
 struct Failure {
     why: String,
@@ -295,34 +222,6 @@ impl Failure {
     fn retry(why: impl Into<String>) -> Failure {
         Failure { why: why.into(), retry: true }
     }
-}
-
-/// The queue's consumer, for one card's message: the shot, then its report.
-/// The message is acked whatever comes of it (deliveries.rs): a report lost
-/// is a shot lost, which the fragment tries again when its lease ends.
-pub async fn consume(env: &Env, d: &Delivery, shot: &CardShot) {
-    let t0 = js::now_ms();
-    let (closed, image) = take(env, &shot.page).await;
-    let elapsed = u64::try_from(js::now_ms() - t0).unwrap_or(0);
-    let ms = match closed {
-        // no session was acquired: nothing to bill
-        None => 0,
-        Some(closed) => card::billed_ms(elapsed, closed),
-    };
-    let (image, error, retry) = match image {
-        Ok(bytes) => (Some(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)), None, false),
-        Err(f) => (None, Some(f.why), f.retry),
-    };
-    let ok = image.is_some();
-    let report = CardReport { incarnation: d.incarnation.clone(), ticket: shot.ticket.clone(), ms, image, error, retry };
-    let body = serde_json::to_string(&report).expect("a card report serializes");
-    let sent = async {
-        let req = crate::routed::internal_request("card/report", &body)?;
-        let resp = env.durable_object("FRAGMENT")?.get_by_name(&d.fragment)?.fetch_with_request(req).await?;
-        Ok::<u16, CellError>(resp.status_code())
-    };
-    let status = sent.await;
-    console_log!("{}", json!({ "card": d.fragment, "attempt": shot.ticket.attempt, "ms": ms, "image": ok, "report": status.as_ref().map_err(|e| e.message.clone()) }));
 }
 
 /// One shot: a Browser Rendering session (`POST /v1/devtools/browser`),

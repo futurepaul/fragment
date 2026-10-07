@@ -729,21 +729,22 @@ fragment's page, which the shell's Apps list shows. The schedule and its
 rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
 
 - **Never in the deploy's request.** The move records the card it wants;
-  the fragment's alarm sends the shot as a message on the delivery queue
-  (`fragment-deliveries`), whose consumer takes it with the `BROWSER`
-  binding: a Browser Rendering session, CDP over its socket, the page at
-  1280×800 and a device scale of 1, its load waited for (at most 15 s),
-  then 1 s for its scripts, a JPEG at quality 70 (40 if that is over 512
-  KiB; over the cap at both, the deploy gets no card), and the session
-  closed whatever happens. It reports to the fragment, which stores the
-  image as one of its blobs (`image/jpeg`, kept while it is the card) and
-  makes it the card.
+  the fragment's alarm, after the rest of its work, takes the shot itself
+  with the `BROWSER` binding: a Browser Rendering session, CDP over its
+  socket, the page at 1280×800 and a device scale of 1, its load waited
+  for (at most 15 s), then 1 s for its scripts, a JPEG at quality 70 (40
+  if that is over 512 KiB; over the cap at both, the deploy gets no
+  card), and the session closed whatever happens (at most 45 s in all).
+  It stores the image as one of its blobs (`image/jpeg`, kept while it is
+  the card) and makes it the card.
 - **Bounded per fragment: one shot out at a time, the newest live wins.**
-  A deploy while a shot is out is shot next; the shot out lands stale and
-  is dropped. Two deploys before a shot are one shot, of the second.
+  A fragment runs one alarm at a time. A deploy while a shot is out is
+  shot next; the shot out lands stale and is dropped. Two deploys before
+  a shot are one shot, of the second.
 - **Retried with backoff, then quiet.** A failed try (no browser, a page
-  that does not open, a socket that fails, a shot lost: no report within
-  3 minutes) is tried again after `FRAGMENT_DELIVERY_RETRY_S`, doubling to
+  that does not open, a socket that fails, a try lost with the
+  fragment's object: each counts as failed from when it begins) is tried
+  again after `FRAGMENT_DELIVERY_RETRY_S`, doubling to
   `FRAGMENT_DELIVERY_RETRY_MAX_S`, at most 5 tries in all. Then the live is
   given up: one `card.failed` event, and the card before stays.
 - **As a visitor without an account sees it.** The renderer has no
