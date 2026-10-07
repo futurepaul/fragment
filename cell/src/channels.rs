@@ -669,10 +669,9 @@ impl FragmentCell {
                 return Ok(false);
             }
         };
-        // Only this run's row: an older run of the same id holds its own
-        // number (or none, from before runs were numbered).
+        // Only this run's row: an older run of the same id holds its own number.
         match row {
-            Some(row) if row.run == Some(p.seq) => Ok(self.apply(p, &row.effects).await.is_ok()),
+            Some(row) if row.run == p.seq => Ok(self.apply(p, &row.effects).await.is_ok()),
             _ => {
                 self.forget(p)?;
                 Ok(false)
