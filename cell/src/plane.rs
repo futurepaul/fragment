@@ -297,6 +297,7 @@ impl FragmentCell {
             ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
             (_, live) => {
                 self.install_code(live).await?;
+                self.search_fence()?;
             }
         }
         match pin {
@@ -547,6 +548,7 @@ impl FragmentCell {
             }
             let live = self.meta(MetaKey::PinLive)?;
             self.install_code(live.as_deref()).await?;
+            self.search_fence()?;
         }
         // the release's cron triggers, if it declares any, are due from now
         self.schedule().await

@@ -408,6 +408,9 @@ pub(crate) enum MetaKey {
     Blessed,
     /// What its members' lists show of it (`{kind, title}`), as last sent.
     Face,
+    /// The channels its people's search holds, as the rows last named
+    /// them (search.rs `search_fence`): a JSON array of names.
+    Searched,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -488,6 +491,7 @@ impl MetaKey {
             MetaKey::MetaLive => "meta_live",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
+            MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
