@@ -725,9 +725,16 @@ fragment.club until cutover (decisions 34–35).
 ## Each agent's Hermes profile config is rewritten at every boot
 
 - **Observed:** phase 4 (`hermes-boot`). A profile's `config.yaml` is
-  its model block (tier, the model intercept, `x-fragment-agent`),
+  its model block (tier, the model intercept, `x-fragment-agent`), its
+  skills' directories, its vision model, its browser and its terminal,
   written whole at each boot; anything Hermes or the agent wrote there
-  is lost.
+  is lost. Hermes' managed scope (`/etc/hermes/config.yaml`, which the
+  boot writes for what every profile shares) cannot carry the rest: it
+  is one layer for every profile, its `${VAR}`s expand against the
+  gateway's own environment, never a profile's `.env`, and Hermes v0.21.5
+  reads some keys (`browser.*`) with `read_raw_config`, past it. A merge
+  into the profile's file would need a YAML parser in the boot, or
+  Hermes' own Python per profile per boot.
 - **Risk:** an agent's own `hermes config set` lasts until the computer
   sleeps.
 - **First proof:** an agent that changes its own Hermes settings.
