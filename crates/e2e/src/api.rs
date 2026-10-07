@@ -273,7 +273,7 @@ pub struct Api {
     http: reqwest::blocking::Client,
     pub base: String,
     pub port: u16,
-    pub suffix: Option<String>,
+    pub suffix: String,
     /// A branch's mark on its fragments' hosts (`--<branch>`), on a local
     /// node shaped as a branch deployment (the hosted lane's rehearsal).
     label_suffix: String,
@@ -282,10 +282,10 @@ pub struct Api {
 }
 
 impl Api {
-    /// The local node's API (`suffix`: fragments on their own hosts).
-    pub fn new(port: u16, suffix: Option<&str>, run: &Arc<Run>) -> Api {
+    /// The local node's API (`suffix`: where fragments have their hosts).
+    pub fn new(port: u16, suffix: &str, run: &Arc<Run>) -> Api {
         let base = format!("http://127.0.0.1:{port}");
-        Api { http: client(), base, port, suffix: suffix.map(str::to_string), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
+        Api { http: client(), base, port, suffix: suffix.to_string(), label_suffix: String::new(), target: Target::Local, run: Arc::clone(run) }
     }
 
     /// The local node's API, the node shaped as the branch `branch`.
@@ -297,7 +297,7 @@ impl Api {
     /// A preview's API, at its own hosts over https.
     pub fn hosted(preview: &Preview, run: &Arc<Run>) -> Api {
         let (base, label_suffix) = (preview.platform(), String::new());
-        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: Some(preview.zone.clone()), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
+        Api { http: client(), base, port: preview.port.unwrap_or(443), suffix: preview.zone.clone(), label_suffix, target: Target::Hosted(preview.clone()), run: Arc::clone(run) }
     }
 
     /// `hosted`, each of `hosts` resolved to `at`: the client's own tests,
@@ -318,19 +318,15 @@ impl Api {
         self.run.levers_sign_in
     }
 
-    /// The URL of `path` on a fragment's own host (or its `/f/<name>/` path
-    /// when the fleet has no suffix).
-    /// A fragment's page: on its own host (`<label>--<username>.<suffix>`)
-    /// when the fleet has a suffix, else by path.
+    /// The URL of `path` on a fragment's own host (`<label>--<username>.<suffix>`).
     pub fn site_url(&self, name: &str, path: &str) -> String {
         let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
-        match (&self.target, &self.suffix) {
-            (Target::Hosted(preview), _) => match preview.fragment(name) {
+        match &self.target {
+            Target::Hosted(preview) => match preview.fragment(name) {
                 Some(origin) => format!("{origin}/{path}"),
                 None => format!("{}://{host}--{}.{}{}/{path}", preview.scheme, preview.branch, preview.zone, preview.port_part()),
             },
-            (Target::Local, Some(s)) => format!("http://{host}{}.{s}:{}/{path}", self.label_suffix, self.port),
-            (Target::Local, None) => format!("{}/f/{name}/{path}", self.base),
+            Target::Local => format!("http://{host}{}.{}:{}/{path}", self.label_suffix, self.suffix, self.port),
         }
     }
 
@@ -520,7 +516,7 @@ impl Api {
         let r = self.approve_link(session, &self.approval_link(keys, 0))?;
         anyhow::ensure!(r.status == 200, "approving a key: {r}");
         let me = self.signed(keys, "GET", "/api/identities/me", None)?;
-        // every person the e2e makes takes a username at once (decision 16),
+        // every person the e2e makes takes a username at once (decision R16),
         // named after their identity
         if me.status == 200 && me.body["kind"] == "person" && me.body["username"].is_null() {
             let id = me.body["id"].as_str().unwrap_or("id:0000000000");
@@ -649,9 +645,7 @@ pub struct Socket(tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std
 
 impl Socket {
     /// Opens `/f/<name>/<path>` (reachable in place on every fleet);
-    /// `keys` signs the upgrade, `cookie` rides along like a browser's. A
-    /// `__live` socket speaks the current protocol (`?v=2`), as the browser
-    /// library's does; `__live?v=1` opens one as a page from before it.
+    /// `keys` signs the upgrade, `cookie` rides along like a browser's.
     pub fn open(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<Socket> {
         Socket::open_answered(api, name, path, keys, cookie).map(|(socket, _)| socket)
     }
@@ -661,7 +655,6 @@ impl Socket {
     /// which the upgrade names (one that names none is no browser's, and
     /// its cookies count for nothing).
     pub fn open_answered(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>) -> Result<(Socket, Vec<String>)> {
-        let path = if path == "__live" { "__live?v=2" } else { path };
         let origin = cookie.map(|_| api.site_origin(name));
         Socket::connect(api, &format!("{}/f/{name}/{path}", api.base), keys, cookie, origin.as_deref())
     }
@@ -669,7 +662,6 @@ impl Socket {
     /// A socket to `path` on the fragment's own host, opened as a page on
     /// `origin` opens one (`None`: a client that names no page, as the CLI).
     pub fn on_host(api: &Api, name: &str, path: &str, keys: Option<&Keys>, cookie: Option<&str>, origin: Option<&str>) -> Result<Socket> {
-        let path = if path == "__live" { "__live?v=2" } else { path };
         Socket::connect(api, &api.site_url(name, path), keys, cookie, origin).map(|(socket, _)| socket)
     }
 

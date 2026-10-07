@@ -28,9 +28,9 @@ fn hosted(args: &[&str]) -> Hosted {
 /// hosted lane's rules on the local node.
 #[test]
 fn a_local_run_reads_as_before() {
-    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, summary: None });
-    let only = parse(&strings(&["--only", "agents,addon"])).unwrap();
-    assert_eq!((only.only, only.hosted), (Some(strings(&["agents", "addon"])), None));
+    assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None });
+    let only = parse(&strings(&["--only", "ledger,ai"])).unwrap();
+    assert_eq!((only.only, only.hosted), (Some(strings(&["ledger", "ai"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
     assert_eq!(parse(&strings(&["--rehearse"])).unwrap().rehearse, Some(MAX_PAID_CALLS_DEFAULT));
     assert_eq!(parse(&strings(&["--rehearse", "--max-paid-calls", "3", "--only", "computers"])).unwrap().rehearse, Some(3));
@@ -39,17 +39,15 @@ fn a_local_run_reads_as_before() {
     }
 }
 
-/// A local run takes one shard of the table's split, as CI runs it, and
-/// a file for its summary; a shard is never beside `--only`, `--except`,
-/// a rehearsal, a hosted run, or a split the table does not have.
+/// A local run takes one shard of the table's split, as CI runs it; a
+/// shard is never beside `--only`, `--except`, a rehearsal, a hosted run,
+/// or a split the table does not have.
 #[test]
-fn a_local_run_takes_one_shard_and_a_summary_file() {
+fn a_local_run_takes_one_shard() {
     let n = crate::lanes::SHARDS.len();
-    let args = parse(&strings(&["--shard", &format!("2/{n}"), "--summary", "target/e2e-summary/shard-2.json"])).unwrap();
-    assert_eq!(args.shard, Some(Shard { k: 2, n: n as u32 }));
-    assert_eq!(args.summary.as_deref(), Some(Path::new("target/e2e-summary/shard-2.json")));
-    assert_eq!((args.only, args.except, args.hosted, args.rehearse), (None, vec![], None, None));
-    assert_eq!(parse(&strings(&["--summary", "s.json"])).unwrap().summary.as_deref(), Some(Path::new("s.json")), "a whole run writes one too");
+    let args = parse(&strings(&["--shard", &format!("2/{n}")])).unwrap();
+    assert_eq!((args.shard, args.only, args.except, args.hosted, args.rehearse), (Some(2), None, vec![], None, None));
+    assert_eq!(parse(&strings(&["--shard", &format!("{n}/{n}")])).unwrap().shard, Some(n as u32));
     let split = format!("1/{n}");
     for bad in [
         strings(&["--shard", &split, "--only", "auth"]),
@@ -60,9 +58,10 @@ fn a_local_run_takes_one_shard_and_a_summary_file() {
         strings(&["--shard", &format!("{}/{n}", n + 1)]),
         strings(&["--shard", "0/4"]),
         strings(&["--shard"]),
-        strings(&["--summary", "a.json", "--summary", "b.json"]),
+        strings(&["--shard", "1"]),
+        strings(&["--shard", "a/b"]),
+        strings(&["--summary", "s.json"]),
         strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--shard", &split]),
-        strings(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run", "--summary", "s.json"]),
     ] {
         assert!(parse(&bad).is_err(), "{bad:?}");
     }
@@ -125,7 +124,7 @@ fn the_plan_follows_what_each_section_needs() {
     for section in ["computers", "templates", "members", "delegation", "secrets", "auth", "cli", "deploy", "keys", "watch", "routes", "public"] {
         assert!(runs(section), "{section} runs on a preview: {}", why(section));
     }
-    for (section, need) in [("ops", "fakes"), ("agents", "fakes"), ("restart", "node"), ("identities", "deployment"), ("lockdown", "node"), ("frames", "two-sites"), ("chat", "fakes")] {
+    for (section, need) in [("ops", "fakes"), ("ai", "fakes"), ("restart", "node"), ("identities", "deployment"), ("lockdown", "node"), ("frames", "two-sites"), ("chat", "fakes")] {
         assert!(!runs(section) && why(section).contains(need), "{section} is skipped for {need}: {}", why(section));
     }
     assert!(why("hermes").contains("fakes"), "the real-Hermes lane scripts its model: {}", why("hermes"));
@@ -331,7 +330,7 @@ fn a_preview_names_its_hosts() {
     assert_eq!(api.site_url("todo.paul", "x?y=1"), "https://todo--paul--p5.finite.place/x?y=1");
     assert_eq!(api.site_origin("todo.paul"), "https://todo--paul--p5.finite.place");
     assert!(api.signs_in_by_levers());
-    let local = Api::new(8790, Some("fragment.localhost"), &Run::new(SECRET.into(), 0));
+    let local = Api::new(8790, "fragment.localhost", &Run::new(SECRET.into(), 0));
     assert_eq!(local.site_url("todo.paul", ""), "http://todo--paul.fragment.localhost:8790/");
     assert_eq!(local.branch("rh").site_url("todo.paul", ""), "http://todo--paul--rh.fragment.localhost:8790/", "a rehearsal's node is shaped as a branch");
 }

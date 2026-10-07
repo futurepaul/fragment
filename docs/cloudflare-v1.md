@@ -2,10 +2,10 @@
 
 Status: **decided 2026-10-02** (Paul, in a grilling session that merged
 the "Self-hosted sandbox service" and "cloudflare-ify" threads, then
-revised the same day by the rule below). This supersedes the celld/Fly
-hosting decisions in `docs/ROADMAP.md` (decisions 6, 8, 24, 25 and the
-sandcastle lane), `docs/one-home.md`, `docs/two-substrates.md` and
-`docs/runtime-seam.md` wherever they disagree. The explainer is the
+revised the same day by the rule below). It superseded
+`docs/ROADMAP.md`, whose decisions that still hold are below ("Carried
+from the ROADMAP", R4 to R18), `docs/one-home.md`,
+`docs/two-substrates.md` and `docs/runtime-seam.md`. The explainer is the
 "Fragment on Cloudflare" artifact; the design prototype is the
 "Fragment on Cloudflare: v1" canvas.
 
@@ -64,8 +64,8 @@ speaking Cloudflare's APIs) returns once this product works.
    They are Rust in the cell, with thin JS shims where workers-rs lacks
    an API (Worker Loader and Facets, the container's `exec` and
    intercepts, the Sandbox helpers). The shell is a small TypeScript
-   SPA. The in-fragment goose agent stays a Rust Worker, and the CLI
-   stays Rust.
+   SPA, and the CLI stays Rust. The cell is the one Worker (the
+   in-fragment goose agent's went: decision 33).
 3. **Accounts.** Dev and previews run on Paul's personal Cloudflare
    account. Production gets its own account before cutover. CI deploys
    from a clean configuration, the way a stranger would. WorkOS'
@@ -150,8 +150,8 @@ speaking Cloudflare's APIs) returns once this product works.
     boot script checks out the agent fragments assigned to its computer
     into profiles, and commits Hermes' changes back. One Hermes gateway
     serves every profile (`gateway.multiplex_profiles`). Memories and
-    custom skills are versioned, can be undone, and a future goose agent
-    can read them.
+    custom skills are versioned, can be undone, and another runtime can
+    read them.
 16. **Making an agent** starts the agent template: "What's this agent's
     job?", an optional name (otherwise it chooses), which connections it
     may use, and its model tier. It draws its own avatar in the
@@ -195,7 +195,9 @@ speaking Cloudflare's APIs) returns once this product works.
       managed or own `fragment` wins (docs/computers.md). The shell makes
       a skills fragment, once, for a person with an agent and none (set up
       before 2026-10-03), and an awake computer looks for one every minute
-      while its owner has none.
+      while its owner has none. (That backfill was cut since: such a person
+      adds one from settings, "Add the managed skills", which shell-ui
+      drives.)
     - Evidence: hermes-boot's tests (the platform skill with no skills
       fragment, a managed one shadowing it); shell-ui (the backfill); the
       real-Hermes lane (with no skills fragment Hermes lists `fragment` in
@@ -229,15 +231,15 @@ speaking Cloudflare's APIs) returns once this product works.
     image waits for before its own init runs. The DO retries a
     "temporarily unavailable" start (spike S3b).
 
-    The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. It
-    stays the image's, for whatever it keeps outside `/data`. The agent's
-    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
-    it with Litestream, for disaster recovery, until step 1 of
-    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
-    Its replicas were never read, no restore drill existed, and a restore
-    would have put a `state.db` of seconds ago into a `/data` of the last
-    save. The saves themselves now carry Hermes' databases whole.)
+    The agent's self is in its fragment. (The Hermes image streamed
+    Hermes' SQLite with Litestream, for disaster recovery, to an S3
+    endpoint the platform gave every computer over its own R2 prefix,
+    until step 1 of docs/durable-computers.md cut it: P4 of
+    docs/explorations/pi-durable.md. Its replicas were never read, no
+    restore drill existed, and a restore would have put a `state.db` of
+    seconds ago into a `/data` of the last save. The saves themselves now
+    carry Hermes' databases whole. The endpoint went after it, #156: no
+    image used it.)
 
     *The design of record is now docs/durable-computers.md (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
@@ -383,8 +385,8 @@ speaking Cloudflare's APIs) returns once this product works.
 
 29. **All of today's fragment model is ported**, core first.
     - Core: operations over the app's SQLite (Loader and Facets), live
-      updates, members and invites, files in git and deploys, isolation
-      on fragment.boats, and the in-fragment goose agent.
+      updates, members and invites, files in git and deploys, and
+      isolation on fragment.boats.
     - Then: jobs and cron (Workflows); deliveries, webhooks and push
       (Queues); blobs (R2); secrets and outbound fetch; and AI steps.
 
@@ -398,7 +400,7 @@ speaking Cloudflare's APIs) returns once this product works.
     brain. There is no encryption.
 31. **Sites are fragment apps.** Every deploy takes a screenshot with
     Browser Rendering for the app's preview card.
-    Status, 2026-10-03 (branch `claude/screenshots`): built, on the delivery queue after live moves, as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
+    Status, 2026-10-03 (branch `claude/screenshots`): built, taken by the fragment's own alarm after live moves (off the delivery queue since issue #156), as a visitor without an account sees the page (members-only fragments, chats and agents get none), metered as `browser` time to the owner, shown in the shell's Apps list (docs/api.md, Cards); proven on `wrangler dev`'s local Browser Rendering, Cloudflare's own browsers are the hosted lane's.
 32. **SimpleX on $200 seats only.** The `simplex-chat` daemon runs on
     the always-on computer, and Hermes' SimpleX adapter runs next to the
     bridge. A wake service for sleeping computers comes later. Telegram
@@ -419,7 +421,17 @@ speaking Cloudflare's APIs) returns once this product works.
       - every e2e lane for them.
     - The chat and agent templates are rebuilt on the rule above.
     - The krun engine moves to its own repo, which Paul creates.
-    - Kept: the in-fragment goose agent.
+    - The in-fragment goose agent went too (Paul, 2026-10-07; issue
+      #156's head scratcher 6): the `agent/` Worker on the goose fork, a
+      fragment's `agent` block, `job.agent`, `fragment agent`, and their
+      e2e sections. Agents are fragments a computer runs (decisions 14
+      and 15): one runtime, with one set of turn, tool, progress and
+      recovery semantics. An app's own model calls are its AI steps: the
+      calories template reads what someone ate with a text step its
+      channel's trigger runs. goose may come back later, as a
+      fragment-native alternative to Hermes. A deployment made before
+      keeps an unbound `fragment-agent[-<branch>]` Worker that no deploy
+      or teardown touches: Paul's to remove (`wrangler delete --name …`).
     - Nothing on fragment.club migrates. People sign in again with the
       same WorkOS identity, and one seed carries usernames across.
 34. **Infra comes down after cutover**, one irreversible step at a
@@ -557,6 +569,51 @@ speaking Cloudflare's APIs) returns once this product works.
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
 
+### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
+
+`docs/ROADMAP.md` (2026-09-23, before this plan) is gone; it is in git
+history and at the tag `celld-final`. These of its decisions still hold
+and are cited by their old numbers, as R-labels. The others were
+superseded by the decisions above or went at the cut.
+
+- **R4. Sharing is the platform's.** The share sheet and accepting an
+  invite are platform pages, which no fragment's code can drive
+  (docs/api.md, Sharing). A fragment's page is code its author or an
+  agent rewrites, so it never grants anything. A direct URL signs you
+  in: at once on your own fragments and those shared with you. On anyone
+  else's, the platform asks once ("Continue to X as you?") before X
+  learns who you are, and signing out of X there makes it ask again
+  (docs/api.md, Asking first; Opening a fragment by its URL). The share
+  header over a fragment is not built.
+- **R15. Identity follows finite.computer's BANKS model (FIN-11).**
+  People, agents and fragments have stable identities, and grants name
+  identities. Each identity holds one or more public keys, each added
+  with proof of possession and revoked on its own. Every agent has one
+  human owner, who can read what the agent can read. Keys stay with
+  their callers: browsers hold sessions, the CLI and agents sign.
+  Lookups are live and fail visibly. What Core will own is a stand-in
+  in V3's shape (docs/finite-integration.md). `link` means anyone with
+  the unguessable link is a viewer; `public` means anyone.
+- **R16. Usernames, and fragments under them.** A person chooses a
+  username once. A fragment's name is `<label>.<username>`, served at
+  `<label>--<username>.<suffix>`. That is one DNS label, so the suffix's
+  one wildcard certificate covers every fragment (a certificate per host
+  ran into Let's Encrypt's limit of about 50 new names a week).
+  Sessions are `__Host-` cookies. Fragments from before usernames were
+  cut, not migrated (docs/api.md, Names).
+- **R17. An agent acts for whoever asked, capped.** Each call in a turn
+  acts with the lower of two roles: the asker's, and a cap. The cap is
+  the agent's own role, or its owner's on a fragment the owner belongs
+  to, and never above `editor` (docs/api.md, Principals and access;
+  decision 36 adds its limits). So a guest who drives someone's agent
+  reaches only what the guest could.
+- **R18. Channels a fragment declares postable.** A declared channel may
+  name a `post` role. The platform then appends a member's record
+  itself, with the role check, a rate limit, a size cap, and dedup by
+  principal and id. A chat therefore needs no app code. This is the one
+  exception to "clients never append" (docs/MODEL.md). `"signedIn":
+  true` refuses an anonymous poster.
+
 ## Lessons from cloudflare/agents
 
 Read 2026-10-02 at commit `2f3176b`: `agents` 0.26.0, especially
@@ -659,11 +716,10 @@ browser ── fragment.club (the shell) ─┐      ┌── <label>--<user>.f
                                      own SQLite)        + simplex-chat on $200 seats
  egress intercepts (generic, configured per computer):
    model route → AI Gateway (+ usage)   connections → WorkOS Pipes tokens
-   storage → its R2 prefix (S3)         fragment API → the computer's identity
- R2: blobs, site copies, screenshots, backups, replicas
+   fragment API → the computer's identity
+ R2: blobs, site copies, screenshots, backups
  code.storage: every fragment's git (apps, chats, agents, brains, skills)
  Queues: deliveries, push, ledger batches   Workflows: jobs and cron runs
- goose agent Worker (Rust): a fragment's own agent, behind a service binding
 ```
 
 The shell talks to the platform's public API and frames fragments. The
@@ -1101,9 +1157,12 @@ What didn't help:
 What goes where:
 - **The Hermes image's boot list** (phase 4): bytecode with
   `unchecked-hash`, `plugins.disabled` for platforms and dashboard auth,
-  a gateway preloaded before the restore gate, setup gated on stamps,
-  the CA appended rather than regenerated, a readahead list, a
-  single-layer image, and the dashboard and screen lazy.
+  a gateway preloaded before the restore gate, the CA appended rather
+  than regenerated, a readahead list, a single-layer image, and the
+  dashboard and screen lazy. (Setup gated on stamps went on 2026-10-06,
+  issue 156: the image carries no bundled skills, so nothing syncs them,
+  and the config migration runs at every boot, a no-op of 0.07 s on a
+  desktop CPU.)
 - **Upstream Hermes:** load only the configured platforms, key the skills
   sync on the image revision, use lazy imports, and ship bytecode.
 - **The generic Computer DO:** snapshot-backed wakes (decision 18) and a

@@ -1,6 +1,6 @@
 //! The fleet's settings, from Worker variables (`cell/.dev.vars` in dev,
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
-//! (ROADMAP decision 13): the hostname suffix and the code.storage org
+//! (docs/cloudflare-v1.md, decision 4): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
 //! code.storage key, and WorkOS's client id and API key are Secrets Store
 //! bindings, read only by keys.rs.
@@ -32,15 +32,11 @@ pub struct WorkOsConfig {
 }
 
 pub struct Config {
-    codestorage: Option<CodeStorageConfig>,
-    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<label>--<username>.<suffix>`.
-    /// Unset (dev without hostnames), they are served from `/f/<name>/`.
-    pub host_suffix: Option<String>,
-    /// `FRAGMENT_LEGACY_HOST_SUFFIX`: where fragments were served before the
-    /// suffix changed (fragment.club, before fragment.boats): a fragment's
-    /// host under it sends a browser to its host under the suffix. It counts
-    /// only beside a suffix, and one that differs from it.
-    legacy_host_suffix: Option<String>,
+    /// `CODESTORAGE_ORG` (required) and the settings beside it.
+    codestorage: CodeStorageConfig,
+    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from
+    /// `<label>--<username>.<suffix>`. Every deployment names one.
+    pub host_suffix: String,
     /// `FRAGMENT_HOST_LABEL_SUFFIX` (`--<branch>`): a branch deployment's
     /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
     /// other branches' in one zone.
@@ -59,7 +55,7 @@ pub struct Config {
     /// docs/explorations/pi-durable.md). Thirty minutes by default, a
     /// default for Paul to confirm (`fragment_core::computer`).
     pub computer_unsaved_max_ms: i64,
-    /// `FRAGMENT_POLL_INTERVAL_S`: the webhook backstop (default 300).
+    /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
     /// addresses (dev and e2e fleets, which call local fakes). Never on a
@@ -68,14 +64,11 @@ pub struct Config {
     /// `FRAGMENT_BLOB_GRACE_S`: how long a blob no branch names is kept
     /// (default 7 days: a rollback within it still has its bytes).
     pub blob_grace_ms: i64,
-    /// `FRAGMENT_PUSH_SUBJECT`: who push services may contact about this
-    /// fleet's pushes (a `mailto:` or https URL, RFC 8292).
-    pub push_subject: String,
-    /// `FRAGMENT_DELIVERY_RETRY_S`: the shortest wait before a delivery is
-    /// tried again (default 10; the wait grows with the delivery's age).
+    /// The shortest wait before a delivery, or a card's shot, is tried
+    /// again (10 s; the wait grows with the delivery's age, and a shot's
+    /// doubles), and the longest (an hour). `FRAGMENT_DELIVERY_RETRY_S`
+    /// pins both: a test fleet's fixed pace.
     pub delivery_retry_s: u32,
-    /// `FRAGMENT_DELIVERY_RETRY_MAX_S`: the longest (default an hour, and
-    /// never under the shortest; a test fleet sets both, for a fixed pace).
     pub delivery_retry_max_s: u32,
     /// `AI_GATEWAY_ID`: the AI Gateway the model route calls through
     /// (models.rs): the deployment's own, named, since `default` makes a
@@ -86,11 +79,12 @@ pub struct Config {
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
     workos: Option<WorkOsConfig>,
-    /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
-    /// and the platform session live (default: the hostname suffix itself,
-    /// e.g. https://fragment.club; without a suffix, the origin a request
-    /// arrived on).
-    pub platform_url: Option<String>,
+    /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
+    /// sign-in and the platform session live (e.g. https://fragment.club).
+    /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
+    /// a push service may refuse one it cannot reach (Apple's answers 403
+    /// `BadJwtToken`).
+    pub platform_url: String,
     /// `FRAGMENT_DEFAULT_PLAN`: a new person's plan (docs/ledger.md):
     /// `guest`, the default and production's, or `seat` or
     /// `seat_always_on` (dev and the e2e: `seat`).
@@ -129,10 +123,6 @@ pub struct Config {
     /// every change to a key's price, or ledgers made before keep their book.
     pub providers: fragment_core::catalog::Catalog,
     pub price_book_version: u32,
-    /// `FRAGMENT_COMPUTER_INSTANCE`: the price book's name for the
-    /// deployment's computer instance (default the book's own default,
-    /// decision 13's 2 vCPU and 6 GiB), its awake time priced by it.
-    pub computer_instance: String,
     /// `FRAGMENT_VISION_MODEL` (the deploy config's `vision_model`): the
     /// model the route's `vision` runs, for a runtime's calls about an
     /// image (Hermes' screenshots: docs/computers.md, Models). GLM-5.3
@@ -204,10 +194,9 @@ impl Config {
     }
 
     fn build(env: &Env) -> Config {
-        let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
+        let pinned_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1);
         let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
-        let host_suffix = suffix("FRAGMENT_HOST_SUFFIX");
-        let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| host_suffix.as_ref().is_some_and(|s| s != l));
+        let host_suffix = suffix("FRAGMENT_HOST_SUFFIX").expect("FRAGMENT_HOST_SUFFIX names where fragments are served");
         // a branch deployment's fragments share its zone with other branches'
         let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
         assert!(
@@ -216,20 +205,15 @@ impl Config {
         );
         // the platform's origin is named in frames' `frame-ancestors` and
         // messages' targets (fragment_core::frames), so it is one exactly
-        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string());
-        assert!(
-            platform_url.as_deref().is_none_or(fragment_core::frames::is_origin),
-            "FRAGMENT_PLATFORM_URL is an origin (scheme://host[:port], lower case, no path)"
-        );
-        assert!(
-            host_suffix.as_deref().is_none_or(|s| fragment_core::frames::is_origin(&format!("https://{s}"))),
-            "FRAGMENT_HOST_SUFFIX is a host name"
-        );
+        let platform_url = var(env, "FRAGMENT_PLATFORM_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_default();
+        assert!(fragment_core::frames::is_origin(&platform_url), "FRAGMENT_PLATFORM_URL (required) is an origin (scheme://host[:port], lower case, no path)");
+        assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
         Config {
-            codestorage: var(env, "CODESTORAGE_ORG").map(|org| {
+            codestorage: {
+                let org = var(env, "CODESTORAGE_ORG").unwrap_or_else(|| panic!("CODESTORAGE_ORG names the deployment's code.storage org"));
                 let api =
                     var(env, "CODESTORAGE_API_URL").map(|a| a.trim_end_matches('/').to_string()).unwrap_or_else(|| fragment_core::codestorage::default_api(&org));
                 let repo_prefix = var(env, "CODESTORAGE_REPO_PREFIX").unwrap_or_default();
@@ -238,9 +222,8 @@ impl Config {
                     "CODESTORAGE_REPO_PREFIX is a branch name and `--`"
                 );
                 CodeStorageConfig { org, api, repo_prefix }
-            }),
+            },
             host_suffix,
-            legacy_host_suffix,
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
@@ -250,9 +233,8 @@ impl Config {
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,
-            push_subject: var(env, "FRAGMENT_PUSH_SUBJECT").unwrap_or_else(|| "mailto:webpush@fragment.invalid".into()),
-            delivery_retry_s,
-            delivery_retry_max_s: var(env, "FRAGMENT_DELIVERY_RETRY_MAX_S").and_then(|s| s.parse::<u32>().ok()).unwrap_or(3600).max(delivery_retry_s),
+            delivery_retry_s: pinned_retry_s.unwrap_or(10),
+            delivery_retry_max_s: pinned_retry_s.unwrap_or(3600),
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
@@ -277,7 +259,6 @@ impl Config {
             price_book_version: var(env, "FRAGMENT_PRICE_BOOK_VERSION")
                 .map(|v| v.parse().unwrap_or_else(|_| panic!("FRAGMENT_PRICE_BOOK_VERSION is a whole number")))
                 .unwrap_or(1),
-            computer_instance: var(env, "FRAGMENT_COMPUTER_INSTANCE").unwrap_or_else(|| fragment_core::price::DEFAULT_INSTANCES[0].0.into()),
             vision_model: fragment_core::models::vision_model(var(env, "FRAGMENT_VISION_MODEL").as_deref(), &fragment_core::price::PriceBook::defaults())
                 .unwrap_or_else(|e| panic!("FRAGMENT_VISION_MODEL: {e}")),
             swap_upstream: var(env, "FRAGMENT_SWAP_UPSTREAM").map(|u| u.trim_end_matches('/').to_string()),
@@ -306,39 +287,25 @@ impl Config {
             .ok_or_else(|| CellError::new(ErrorCode::HostFailed, format!("sign-in is not configured on this fleet (no {} binding)", fragment_core::secrets_store::WORKOS_CLIENT)))
     }
 
-    /// The platform's origin, given the URL a request arrived on.
-    pub fn platform(&self, arrived: &url::Url) -> String {
-        if let Some(p) = &self.platform_url {
-            return p.clone();
-        }
-        let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        match &self.host_suffix {
-            Some(suffix) => format!("{}://{suffix}{port}", arrived.scheme()),
-            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
-        }
+    /// The platform's origin (`FRAGMENT_PLATFORM_URL`).
+    pub fn platform(&self) -> String {
+        self.platform_url.clone()
     }
 
-    /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s, else
-    /// the suffix's own name, as `platform` says), which the router takes
-    /// before any fragment's under the suffix.
+    /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s),
+    /// which the router takes before any fragment's under the suffix.
     pub fn is_platform_host(&self, host: &str) -> bool {
-        let named = match &self.platform_url {
-            Some(u) => url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_string)),
-            None => self.host_suffix.clone(),
-        };
-        named.is_some_and(|h| h.eq_ignore_ascii_case(host))
+        url::Url::parse(&self.platform_url).is_ok_and(|u| u.host_str().is_some_and(|h| h.eq_ignore_ascii_case(host)))
     }
 
     /// Whether `host` is the suffix's own name. Past `is_platform_host`, it
     /// is no one's: the platform is elsewhere.
     pub fn is_suffix(&self, host: &str) -> bool {
-        self.host_suffix.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(host))
+        self.host_suffix.eq_ignore_ascii_case(host)
     }
 
-    pub fn codestorage(&self) -> CellResult<&CodeStorageConfig> {
-        self.codestorage.as_ref().ok_or_else(|| {
-            CellError::new(ErrorCode::HostFailed, "code.storage is not configured on this fleet (CODESTORAGE_ORG)")
-        })
+    pub fn codestorage(&self) -> &CodeStorageConfig {
+        &self.codestorage
     }
 
     /// The fragment a hostname names, when it is `<label>--<username>.<suffix>`
@@ -346,7 +313,7 @@ impl Config {
     /// fragment). This is the only way a host becomes a fragment: an exact
     /// single label under the suffix (with a branch's mark, its own).
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
-        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let label = label_under(host, &self.host_suffix)?;
         let flat = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?,
             None => &label,
@@ -357,7 +324,7 @@ impl Config {
     /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
     /// branch's mark before the dot): its own origin, where its ports are.
     pub fn computer_of_host(&self, host: &str) -> Option<String> {
-        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let label = label_under(host, &self.host_suffix)?;
         let label = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?.to_string(),
             None => label,
@@ -366,64 +333,42 @@ impl Config {
     }
 
     /// A computer's own origin (its ports are served there), on the
-    /// platform's scheme and port.
+    /// platform's scheme and port; `None` for an id that is no computer's.
     pub fn computer_origin(&self, id: &str) -> Option<String> {
-        let suffix = self.host_suffix.as_deref()?;
+        let suffix = &self.host_suffix;
         let label = fragment_proto::computer::computer_label(id)?;
-        let platform = self.platform_url.as_deref().and_then(|p| url::Url::parse(p).ok());
-        let scheme = platform.as_ref().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into());
-        let port = platform.and_then(|u| u.port()).map(|p| format!(":{p}")).unwrap_or_default();
-        Some(format!("{scheme}://{label}{}.{suffix}{port}", self.host_label_suffix()))
+        let platform = url::Url::parse(&self.platform_url).ok()?;
+        let port = platform.port().map(|p| format!(":{p}")).unwrap_or_default();
+        Some(format!("{}://{label}{}.{suffix}{port}", platform.scheme(), self.host_label_suffix()))
     }
 
-    /// The fragment an old host names (`<label>--<username>.<legacy
-    /// suffix>`): it is served under the suffix now.
-    pub fn fragment_of_legacy_host(&self, host: &str) -> Option<String> {
-        from_flat_name(&label_under(host, self.legacy_host_suffix.as_deref()?)?)
-    }
-
-    /// The label a host has under the suffix or the old one (`x` of
-    /// `x.<suffix>`), if it is one: such a host is a fragment's or no one's,
-    /// never the platform's.
+    /// The label a host has under the suffix (`x` of `x.<suffix>`), if it
+    /// is one: such a host is a fragment's or no one's, never the platform's.
     pub fn subdomain(&self, host: &str) -> Option<String> {
-        [&self.host_suffix, &self.legacy_host_suffix].into_iter().flatten().find_map(|s| label_under(host, s))
+        label_under(host, &self.host_suffix)
     }
 
     /// Where a fragment is served, given the URL a request arrived on (its
     /// scheme and port carry over).
     pub fn canonical(&self, arrived: &url::Url, name: &str) -> String {
-        let origin = self.origin(arrived, name);
-        match &self.host_suffix {
-            Some(_) => format!("{origin}/"),
-            None => format!("{origin}/f/{name}/"),
-        }
+        format!("{}/", self.origin(arrived, name))
     }
 
     /// A fragment's own origin as a visitor from outside reaches it, with
     /// no request to take a scheme and port from (card.rs: the renderer
-    /// opens it): the platform's (`FRAGMENT_PLATFORM_URL`'s), else https.
-    /// `None` without a suffix: fragments served by path have no origin of
-    /// their own.
-    pub fn outside_origin(&self, name: &str) -> Option<String> {
-        self.host_suffix.as_ref()?;
-        let base = self.platform_url.as_deref().unwrap_or("https://platform.invalid");
-        let arrived = url::Url::parse(base).ok()?;
-        Some(self.origin(&arrived, name))
+    /// opens it): the platform's (`FRAGMENT_PLATFORM_URL`'s) scheme and port.
+    pub fn outside_origin(&self, name: &str) -> String {
+        let arrived = url::Url::parse(&self.platform_url).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
+        self.origin(&arrived, name)
     }
 
     /// A fragment's own origin, as a browser on its page names it in
-    /// `Origin` (`scheme://host[:port]`): its host's, or, without a suffix,
-    /// the one every fragment shares.
+    /// `Origin` (`scheme://host[:port]`).
     pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        match &self.host_suffix {
-            Some(suffix) => {
-                let host = flat_name(name).unwrap_or_else(|| name.to_string());
-                let branch = self.host_label_suffix.as_deref().unwrap_or("");
-                format!("{}://{host}{branch}.{suffix}{port}", arrived.scheme())
-            }
-            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
-        }
+        let host = flat_name(name).unwrap_or_else(|| name.to_string());
+        let branch = self.host_label_suffix.as_deref().unwrap_or("");
+        format!("{}://{host}{branch}.{}{port}", arrived.scheme(), self.host_suffix)
     }
 }
 

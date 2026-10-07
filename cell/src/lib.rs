@@ -19,17 +19,14 @@
 //! has no CORS, is taken only from the fragment's own page
 //! (`own_page_socket`), and its cookies count only when it names one.
 //!
-//! With a suffix configured, `/f/<name>/…` redirects to the fragment's own
+//! `/f/<name>/…` on the platform's host redirects to the fragment's own
 //! host: fragments sharing one origin could act as each other's visitors.
-//! `__watch` and `__live` stay reachable there for the CLI, which carries
-//! no cookies.
+//! `__watch` and `__live` stay reachable there for the CLI and the
+//! bridge, served as on the fragment's host.
 //!
-//! When the suffix moves (`FRAGMENT_LEGACY_HOST_SUFFIX`: fragment.club's
-//! fragments to fragment.boats, the platform staying on fragment.club), a
-//! fragment's old host sends a browser to its new one, and the suffix's own
-//! name sends it to the platform.
+//! The suffix's own name, when the platform is elsewhere, sends a browser
+//! to the platform.
 
-mod agents;
 mod ai;
 mod auth;
 mod blobs;
@@ -72,8 +69,9 @@ use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
 use fragment_nip98::Payload;
-use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
+use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, FragmentList, IdentityKind, ListedFragment, Register, Role};
 use futures_util::TryStreamExt;
+use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -81,7 +79,7 @@ use worker::*;
 use config::Config;
 use error::{CellError, CellResult};
 use registry::calls::{self, Call};
-use routed::{Credential, Mode, Routed, Signed};
+use routed::{Credential, Routed, Signed};
 
 pub use computer::{ComputerCell, ComputerEgress};
 pub use fragment::FragmentCell;
@@ -91,8 +89,8 @@ pub use registry::RegistryCell;
 
 /// Client headers a fragment's supervisor sees; everything else, and any
 /// `x-fragment-*` a client sends, stays at the router.
-const PASSED_HEADERS: [&str; 9] =
-    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "x-pierre-event", "x-pierre-signature", "range"];
+const PASSED_HEADERS: [&str; 7] =
+    ["content-type", "cookie", "origin", "accept", "if-none-match", "upgrade", "range"];
 
 /// A WebSocket upgrade's own handshake, passed too, so the fragment's
 /// Durable Object accepts the upgrade the client asked for.
@@ -175,7 +173,7 @@ fn shell_session(cfg: &Config, req: &Request, url: &Url) -> CellResult<Option<St
         return Ok(None);
     }
     if !matches!(req.method(), Method::Get | Method::Head) {
-        let platform = cfg.platform(url);
+        let platform = cfg.platform();
         if req.headers().get("origin")?.is_none_or(|o| o.trim_end_matches('/') != platform) {
             return Ok(None);
         }
@@ -227,7 +225,7 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
 }
 
 /// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (ROADMAP decision 17). At most one, an identity.
+/// for whoever asked it (decision R17). At most one, an identity.
 fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
@@ -278,13 +276,12 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) ->
 /// browser, its session on this origin, as far as its cookies count
 /// (`Fetched`), a frame's navigation by its frame cookie first. `payload`
 /// is the body a signature covers (a blob upload's, streamed: its hash).
-fn site_credential(req: &Request, url: &Url, payload: Payload<'_>, name: &str, mode: Mode, fetched: Fetched) -> CellResult<Option<Credential>> {
+fn site_credential(req: &Request, url: &Url, payload: Payload<'_>, fetched: Fetched) -> CellResult<Option<Credential>> {
     if req.headers().get("authorization")?.is_some() {
         return Ok(Some(Credential::Key(authenticate(req, url, payload)?)));
     }
-    let path_mode = mode == Mode::Path;
-    let site = if fetched.site { auth::site_token(req, name, url, path_mode)?.map(Credential::Session) } else { None };
-    let frame = if fetched.frame { auth::frame_token(req, name, url, path_mode)?.map(Credential::Frame) } else { None };
+    let site = if fetched.site { auth::site_token(req, url)?.map(Credential::Session) } else { None };
+    let frame = if fetched.frame { auth::frame_token(req, url)?.map(Credential::Frame) } else { None };
     Ok(if fetched.framed { frame.or(site) } else { site.or(frame) })
 }
 
@@ -312,7 +309,7 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 
 /// Which of a browser's cookies count on a fragment's origin, from the
 /// Fetch Metadata it sends (`Sec-Fetch-*`, which no page's script sets;
-/// docs/fragment-boats.md, decision 3). Every fragment is one site with
+/// docs/api.md, Which cookies count). Every fragment is one site with
 /// the others, so a SameSite=Lax cookie rides along on another fragment's
 /// images, scripts, fetches, and forms; these headers say whose page asked:
 ///
@@ -422,18 +419,18 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         }
     };
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
-    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
+    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform())))?;
     create.name = qualify(&create.name, &username)?;
     may_create(env, &maker.id).await?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
     let bare = Request::new(url.as_str(), Method::Post)?;
-    let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker.clone()), credential: None };
+    let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker.clone()), credential: None };
     let made = forward(env, &bare, bytes_body(body), Forward { routed, inner: "/create".into(), extra: vec![] }).await?;
     if let (Some(agent), 200) = (agent, made.status_code()) {
         let put = Request::new(url.as_str(), Method::Put)?;
         let role = serde_json::to_vec(&json!({ "role": "editor" })).map_err(|e| CellError::host(e.to_string()))?;
-        let routed = Routed { name: create.name.clone(), url: url.clone(), mode: None, signed: Some(maker), credential: None };
+        let routed = Routed { name: create.name.clone(), url: url.clone(), signed: Some(maker), credential: None };
         let mut added = forward(env, &put, bytes_body(role), Forward { routed, inner: format!("/api/members/{agent}"), extra: vec![] }).await?;
         if added.status_code() != 200 {
             return Err(CellError::host(format!("{} was made, but its agent was not made an editor: {}", create.name, added.text().await.unwrap_or_default())));
@@ -457,7 +454,7 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
     let identity = match req.headers().get("authorization")? {
         Some(_) => signer(env, req, url, &[]).await?.identity.id,
         None => {
-            let platform = cfg.platform(url);
+            let platform = cfg.platform();
             let own_page = cfg.is_platform_host(url.host_str().unwrap_or_default())
                 && req.headers().get("origin")?.is_some_and(|o| o.trim_end_matches('/') == platform);
             let token = if own_page { auth::platform_session_token(req, url)? } else { None };
@@ -539,7 +536,7 @@ async fn users(env: &Env, rest: &[&str]) -> CellResult<Response> {
                 return Err(CellError::new(ErrorCode::NotFound, format!("{username} has no picture")));
             };
             let blob =
-                js::blob_get(env.as_ref(), &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
+                js::blob_get(env, &format!("pictures/{}", picture.sha), None).await?.ok_or_else(|| CellError::host("a picture's bytes are missing"))?;
             let headers = Headers::new();
             headers.set("content-type", &picture.mime)?;
             headers.set("cache-control", "public, max-age=300")?;
@@ -567,6 +564,34 @@ fn proven_key(proof: &str, req: &Request, url: &Url, signer_key: &str) -> CellRe
 
 fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
+}
+
+/// An identity's fragments, as its `Principal` cell lists them.
+async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+    let list = Request::new("https://principal.internal/list", Method::Get)?;
+    Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
+}
+
+/// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
+/// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
+/// agent or its owner is in too, each with the role the agent acts with
+/// there (`access::listed_role`). A call decides again, live.
+async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
+    let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
+    let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
+    let (own, owners) = (roles(own?), roles(owners?));
+    let fragments = askers?
+        .fragments
+        .into_iter()
+        .filter_map(|f| {
+            // a people-only share is the fragment's to know: a call decides again
+            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
+            // the asker's own view (their search's preview, their archiving) stays theirs
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, archived: false, ..f })
+        })
+        .collect();
+    Ok(FragmentList { fragments })
 }
 
 /// Whose ledger a signer reads: a person's own; an agent's owner's.
@@ -698,7 +723,7 @@ async fn identities(mut req: Request, env: &Env, url: &Url, rest: &[&str]) -> Ce
             // registry names them, so no one it does not know stores any.
             ask_registry(env, &calls::View { identity: None, by: by() }).await?;
             let sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
-            js::blob_put_bytes(env.as_ref(), &format!("pictures/{sha}"), &body).await?;
+            js::blob_put_bytes(env, &format!("pictures/{sha}"), &body).await?;
             json_answer(&ask_registry(env, &calls::SetPicture { by: by(), sha, mime: mime.to_string() }).await?)
         }
         (Method::Get, [id]) => {
@@ -837,20 +862,20 @@ fn unmarked(resp: Response) -> CellResult<Response> {
 
 /// A request on a fragment's site; a refusal a browser navigated to is
 /// answered as a page: the router's own here, the fragment's in `site`.
-async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode) -> CellResult<Response> {
+async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str) -> CellResult<Response> {
     check_name(name)?;
     let fetched = fetched(&req)?;
     let page = shows_page(&req, fetched)?;
-    match site(req, env, cfg, url, name, rest, mode, fetched, page).await {
+    match site(req, env, cfg, url, name, rest, fetched, page).await {
         Err(e) if page && auth::is_refusal(e.code) => auth::refused(cfg, url, name, rest, fetched.framed, &e),
         answered => answered,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, mode: Mode, fetched: Fetched, page: bool) -> CellResult<Response> {
+async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched, page: bool) -> CellResult<Response> {
     if auth::is_fragment_route(rest) {
-        return auth::fragment(&req, env, cfg, url, name, rest, mode == Mode::Path, fetched).await;
+        return auth::fragment(&req, env, cfg, url, name, rest, fetched).await;
     }
     own_page_socket(&req, cfg, url, name)?;
     // a page's blob upload streams through, as the API's does: the router
@@ -872,12 +897,12 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(sha) => Payload::Streamed { sha256_hex: sha },
         None => Payload::Read(&body),
     };
-    let mut credential = site_credential(&req, url, payload, name, mode, fetched)?;
+    let mut credential = site_credential(&req, url, payload, fetched)?;
     // a frame's page shows only in the page its session was made for: that
     // session is asked for here, for the page's origin (`bound`). Only the
     // platform's page has one (its mint names it): a session for any
     // other is no one's, so no answer names another page.
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
         if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
@@ -896,7 +921,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     if framed == Framed::Stranger && fetched.site {
         framed = Framed::OwnPage;
     }
-    let routed = Routed { name: name.to_string(), url: url.clone(), mode: Some(mode), signed, credential };
+    let routed = Routed { name: name.to_string(), url: url.clone(), signed, credential };
     let body = match upload {
         Some(_) => req.inner().body().map(worker::wasm_bindgen::JsValue::from),
         None => bytes_body(body),
@@ -926,8 +951,8 @@ fn path_and_query(url: &Url) -> String {
     }
 }
 
-/// A move's redirect (docs/fragment-boats.md, slice 2). No cache keeps it,
-/// so the move can still be undone: a browser caches a bare `308` for good.
+/// The suffix's own name's redirect to the platform. No cache keeps it, so
+/// the platform can still move: a browser caches a bare `308` for good.
 fn moved(to: &str) -> CellResult<Response> {
     let mut resp = Response::empty()?.with_status(308);
     resp.headers_mut().set("location", to)?;
@@ -946,7 +971,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     // routes there); the platform API answers on the platform's host.
     if let Some(name) = host.and_then(|h| cfg.fragment_of_host(h)) {
         let rest = path.trim_start_matches('/').to_string();
-        return serve(req, env, cfg, &url, &name, &rest, Mode::Host).await;
+        return serve(req, env, cfg, &url, &name, &rest).await;
     }
     // a computer's own origin: its ports, for its owner (computer.rs)
     if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
@@ -958,19 +983,9 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     }
     // the suffix's own name, with the platform elsewhere, is the platform's
     if host.is_some_and(|h| cfg.is_suffix(h)) {
-        return moved(&format!("{}{}", cfg.platform(&url), path_and_query(&url)));
+        return moved(&format!("{}{}", cfg.platform(), path_and_query(&url)));
     }
-    // A fragment's old host: a browser's visit goes on to its new one. A
-    // write or a socket is refused, so nothing acts where no one looks: a
-    // page loaded before the move reloads onto the new host.
-    if let Some(name) = host.and_then(|h| cfg.fragment_of_legacy_host(h)) {
-        let to = format!("{}{}", cfg.origin(&url, &name), path_and_query(&url));
-        if matches!(req.method(), Method::Get | Method::Head) && !is_socket(&req)? {
-            return moved(&to);
-        }
-        return Err(CellError::new(ErrorCode::Moved, format!("this fragment moved to {to}")));
-    }
-    // any other name under the suffix, or the old one, is no one's: the platform answers on its own host only
+    // any other name under the suffix is no one's: the platform answers on its own host only
     if host.and_then(|h| cfg.subdomain(h)).is_some() {
         return Err(CellError::new(ErrorCode::NotFound, "no fragment here: a fragment's host is <label>--<username>.<suffix>"));
     }
@@ -1017,16 +1032,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             create_fragment(env, cfg, &url, create, principal).await
         }
-        // the agents' script, co-hosted: authenticated here, like the rest
-        (_, ["api", "agents"]) | (_, ["api", "a", ..]) => {
-            let segs = segments.clone();
-            agents::route(req, env, &url, &segs).await
-        }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {
-                return json_answer(&agents::reachable(env, &principal, asker).await?);
+                return json_answer(&reachable(env, &principal, asker).await?);
             }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)
@@ -1098,7 +1108,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
             let name = named_fragment(name, Some(&principal))?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);
-            let routed = Routed { name, url: url.clone(), mode: None, signed: Some(principal), credential: None };
+            let routed = Routed { name, url: url.clone(), signed: Some(principal), credential: None };
             forward(env, &req, body, Forward { routed, inner: format!("/api/blobs/{sha}"), extra: vec![] }).await
         }
         (method, ["api", "f", name, rest @ ..]) => {
@@ -1112,11 +1122,9 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 _ => format!("/api/{}", rest.join("/")),
             };
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
-            // code.storage signs its deliveries with the fragment's webhook
-            // secret, and the inbox takes its token, instead of a signature.
+            // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
-                "/api/webhook" => None,
                 "/api/inbox" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
@@ -1140,7 +1148,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                 }
             }
             let name = named_fragment(name, principal.as_ref())?;
-            let routed = Routed { name, url: url.clone(), mode: None, signed: principal, credential: None };
+            let routed = Routed { name, url: url.clone(), signed: principal, credential: None };
             forward(env, &req, bytes_body(body), Forward { routed, inner, extra }).await
         }
         (_, ["f", name]) => {
@@ -1151,16 +1159,16 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
         (method, ["f", name, rest @ ..]) => {
             check_name(name)?;
             let rest = rest.join("/");
-            if cfg.host_suffix.is_some() && rest != "__watch" && rest != "__live" {
-                if !matches!(method, Method::Get | Method::Head) {
-                    return Err(CellError::new(ErrorCode::NotFound, "fragments are served from their own origin"));
-                }
-                let mut to = Url::parse(&cfg.canonical(&url, name)).map_err(|e| CellError::host(e.to_string()))?;
-                to.set_path(&format!("/{rest}"));
-                to.set_query(url.query());
-                return Ok(Response::redirect_with_status(to, 308)?);
+            if rest == "__watch" || rest == "__live" {
+                return serve(req, env, cfg, &url, name, &rest).await;
             }
-            serve(req, env, cfg, &url, name, &rest, Mode::Path).await
+            if !matches!(method, Method::Get | Method::Head) {
+                return Err(CellError::new(ErrorCode::NotFound, "fragments are served from their own origin"));
+            }
+            let mut to = Url::parse(&cfg.canonical(&url, name)).map_err(|e| CellError::host(e.to_string()))?;
+            to.set_path(&format!("/{rest}"));
+            to.set_query(url.query());
+            Ok(Response::redirect_with_status(to, 308)?)
         }
         _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {path}"))),
     }

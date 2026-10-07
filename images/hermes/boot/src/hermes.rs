@@ -34,6 +34,17 @@ impl Tier {
         }
     }
 
+    /// An agent's tier as the platform answered for its fragment's
+    /// `agent.json`: the file's (`of`), or the medium tier when it has none
+    /// (403, 404); `None` when the platform did not answer for it.
+    pub fn read(answer: &Result<bytes::Bytes, fragment_bridge::api::ApiError>, high_on: bool) -> Option<Tier> {
+        match answer {
+            Ok(b) => Some(Tier::of(Some(b), high_on)),
+            Err(e) if e.gone() => Some(Tier::of(None, high_on)),
+            Err(_) => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Tier::Cheap => "cheap",
@@ -353,7 +364,11 @@ pub fn gateway_env(listen: &str, gateway_id: &str, secret: &str) -> String {
     // bridge ends: docs/chat-records.md; the boot closes them in their
     // sessions, CLOSE_CUT_TURNS, and the bridge tells the next turn what was
     // cut instead, from the journal).
-    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\n")
+    // HERMES_GATEWAY_MAX_STARTS: 0, so Hermes' respawn-storm breaker is off.
+    // It counts gateway starts in the home, which a save keeps, so six wakes
+    // in two minutes would sleep the seventh 10-40 s before it answers; the
+    // Computer DO already paces a computer's restarts.
+    format!("GATEWAY_RELAY_URL=http://{listen}\nGATEWAY_RELAY_ID={gateway_id}\nGATEWAY_RELAY_SECRET={secret}\nHERMES_GATEWAY_BUSY_INPUT_MODE=queue\nHERMES_GATEWAY_NO_SUPERVISE=1\nGATEWAY_MULTIPLEX_PROFILES=true\nRELAY_HOME_CHANNEL=none\nHERMES_AUTO_CONTINUE_FRESHNESS=1\nHERMES_GATEWAY_MAX_STARTS=0\n")
 }
 
 /// A profile's directory, under the Hermes home.
@@ -514,6 +529,21 @@ mod tests {
         assert_eq!(Tier::of(None, true), Tier::Medium);
     }
 
+    /// An `agent.json` the platform answered for is a tier (none there is
+    /// the medium tier); one it did not answer for is none, never the
+    /// medium tier in its place.
+    #[test]
+    fn a_tier_unread_is_no_tier() {
+        use fragment_bridge::api::ApiError;
+        let refused = |status| Err(ApiError::Refused { status, error: String::new(), message: String::new() });
+        assert_eq!(Tier::read(&Ok(bytes::Bytes::from_static(br#"{"tier":"cheap"}"#)), false), Some(Tier::Cheap));
+        assert_eq!(Tier::read(&refused(404), false), Some(Tier::Medium), "no agent.json");
+        assert_eq!(Tier::read(&refused(403), false), Some(Tier::Medium));
+        for unread in [refused(500), refused(502), Err(ApiError::Transport("no answer in 15000 ms".into())), Err(ApiError::TooLarge)] {
+            assert_eq!(Tier::read(&unread, false), None, "{unread:?}");
+        }
+    }
+
     #[test]
     fn configs_say_what_hermes_needs() {
         let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S);
@@ -570,6 +600,7 @@ mod tests {
         assert!(env.contains("GATEWAY_RELAY_URL=http://127.0.0.1:8650\n"));
         assert!(env.contains("HERMES_GATEWAY_BUSY_INPUT_MODE=queue"));
         assert!(env.contains("HERMES_AUTO_CONTINUE_FRESHNESS=1\n"), "a turn a restart cut short is never auto-continued");
+        assert!(env.contains("HERMES_GATEWAY_MAX_STARTS=0\n"), "no start is slept for the starts before it");
         assert_eq!(profile_dir(Path::new("/data/hermes"), "juniper.paul"), PathBuf::from("/data/hermes/profiles/juniper-paul"));
     }
 

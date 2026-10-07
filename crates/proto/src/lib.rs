@@ -60,8 +60,6 @@ pub mod limits {
     pub const STORAGE_TOKEN_TTL_S: i64 = 900;
     /// A file path in the repo.
     pub const PATH_MAX_BYTES: usize = 300;
-    /// A code.storage webhook's timestamp may differ from the cell's clock by this much.
-    pub const WEBHOOK_WINDOW_S: i64 = 300;
     /// Events per page of `GET events`.
     pub const EVENTS_PAGE: usize = 500;
     /// Records `events` and `ops` each keep (the oldest go first).
@@ -112,6 +110,11 @@ pub mod limits {
     /// /api/fragments/watch`: their shell's tabs, and any CLI), each told
     /// of every change to it; past this one more is refused (429).
     pub const LIST_WATCHERS_MAX: usize = 16;
+    /// A fragment's agents its row in a person's list names, the first
+    /// added first (a page that needs every one reads its members).
+    pub const LISTED_AGENTS_MAX: usize = 16;
+    /// A chat's preview in a person's list: its newest message's first line.
+    pub const LISTED_PREVIEW_MAX_BYTES: usize = 160;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -161,18 +164,11 @@ pub mod limits {
     /// A push's `who`, the tag a page subscribed with, in characters
     /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
     pub const PUSH_WHO_MAX_CHARS: usize = 64;
-    /// URLs `fragment.json`'s `notifyUrls` may name.
-    pub const NOTIFY_URLS_MAX: usize = 3;
     /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
     /// Finished runs are kept this long, and at most this many.
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
-    /// How long `GET /api/a/{name}/state?wait_ms=` may wait in the agent's
-    /// cell for its turn to end (inside a client's 30 s request timeout).
-    pub const AGENT_STATE_WAIT_MS_MAX: u64 = 25_000;
-    /// An agent's instructions.
-    pub const AGENT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
     /// Search (docs/api.md, Search): the text of one record a fragment
     /// sends its people's lists. A longer message is searched by its
     /// first 4 KiB (its record keeps all of it).
@@ -260,7 +256,7 @@ pub fn valid_username(username: &str) -> bool {
         && !RESERVED_USERNAMES.contains(&username)
 }
 
-/// A fragment's name: `<label>.<username>` (decision 16), served at
+/// A fragment's name: `<label>.<username>` (decision R16), served at
 /// `<label>--<username>.<suffix>` ([`flat_name`]).
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
@@ -375,9 +371,6 @@ pub enum ErrorCode {
     /// 503: the computer won't wake (its starts kept failing); its owner
     /// can wake it to try again.
     WontWake,
-    /// 410: the fragment moved to another host; the message names its URL
-    /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
-    Moved,
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
@@ -400,7 +393,6 @@ impl ErrorCode {
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull | ErrorCode::WontWake => 503,
-            ErrorCode::Moved => 410,
             ErrorCode::NotConnected => 403,
         }
     }
@@ -536,8 +528,7 @@ pub struct CreateFragment {
     pub title: Option<String>,
 }
 
-/// The answer to a create: the only time the webhook secret is shown
-/// besides a rotation.
+/// The answer to a create.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Created {
@@ -547,7 +538,6 @@ pub struct Created {
     pub visibility: Visibility,
     pub view_token: String,
     pub inbox_token: String,
-    pub webhook_secret: String,
     pub repo: String,
     pub canonical: String,
 }
@@ -569,8 +559,12 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
-    /// The live commit the code was read from; `None` when live has no `app.mjs`.
+    /// The live commit the code was installed from; `None` without app code.
     pub sha: Option<String>,
+    /// What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),
+    /// or `blessed:<template>@<release>` (the platform release's code, which
+    /// a fragment on a blessed template runs whatever its commit: decision 40).
+    pub id: Option<String>,
     pub operations: std::collections::BTreeMap<String, OpDecl>,
     /// Why the latest live commit's code was not installed, if it was not.
     pub error: Option<String>,
@@ -622,8 +616,16 @@ pub struct ListedFragment {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Its agent members, the first added (a chat's lead) first, at most
+    /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// A chat's newest message, its first line, as the signer's search
+    /// holds it (none when it holds none: docs/api.md, Search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
-    /// (`None` until it has: a fragment from before sends it once).
+    /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
@@ -801,24 +803,19 @@ pub struct Subject {
 }
 
 /// Headers only the router sets on a request it hands a fragment's
-/// supervisor (the cell's `routed.rs` writes and reads them) or the
-/// agents' script; the router drops any a client sends.
+/// supervisor (the cell's `routed.rs` writes and reads them); the router
+/// drops any a client sends.
 pub mod routed {
     /// The fragment's full name.
     pub const NAME: &str = "x-fragment-name";
     /// The URL the request arrived on.
     pub const URL: &str = "x-fragment-url";
-    /// How the site was addressed: `host` (its own origin) or `path` (`/f/<name>/`).
-    pub const MODE: &str = "x-fragment-mode";
     /// Who is asking (JSON: the identity and the key it signed with).
     pub const SIGNED: &str = "x-fragment-signed";
     /// Who is asking a site request, not yet resolved (JSON: the key a
     /// signature was verified for, or the origin's session token).
     pub const CREDENTIAL: &str = "x-fragment-credential";
-    pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
-    /// The caller's identity on a request the router hands the agents'
-    /// script (`agent/`), which trusts nothing else.
-    pub const AGENT_PRINCIPAL: &str = "x-agent-principal";
+    pub const ALL: [&str; 4] = [NAME, URL, SIGNED, CREDENTIAL];
 }
 
 /// `POST /api/identities`: register an agent the signer owns, with a key
@@ -858,7 +855,7 @@ pub struct IdentityView {
     /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// A person's username (decision 16): their fragments are
+    /// A person's username (decision R16): their fragments are
     /// `<label>.<username>`. An agent's fragments go under its owner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
@@ -937,18 +934,13 @@ pub struct Join {
 }
 
 /// The answer to `POST /api/f/<name>/rotate` (owner): the tokens as they
-/// are now, and which of them this rotation renewed. The webhook secret is
-/// shown only here and in `Created`.
+/// are now, and which of them this rotation renewed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rotated {
     pub inbox_token: String,
     pub view_token: String,
-    /// The owner's alone: an agent sharing for its owner rotates the links,
-    /// never the webhook secret, and is never told it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_secret: Option<String>,
-    /// The scopes renewed: `inbox`, `view`, `webhook`.
+    /// The scopes renewed: `inbox`, `view`.
     pub rotated: Vec<String>,
 }
 
@@ -1086,10 +1078,7 @@ pub struct ChannelPage {
 
 /// What a subscription's URL receives (`POST`, unsigned: the URL is the
 /// subscriber's capability): one new record of the channel it follows.
-/// A struct with its `type` as a field, not an internally tagged enum:
-/// serde buffers a tagged enum's content, and a record's raw body cannot
-/// pass through that buffer either way.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Delivery {
     #[serde(rename = "type")]
     pub kind: DeliveryType,
@@ -1099,7 +1088,7 @@ pub struct Delivery {
 }
 
 /// The kinds of `Delivery` (one so far).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryType {
     Record,
@@ -1187,54 +1176,6 @@ impl RunStatus {
     pub fn parse(s: &str) -> Option<RunStatus> {
         [RunStatus::Queued, RunStatus::Running, RunStatus::Succeeded, RunStatus::Held, RunStatus::Blocked].into_iter().find(|r| r.as_str() == s)
     }
-}
-
-/// How an agent's latest turn stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnOutcome {
-    Running,
-    /// The model answered.
-    Idle,
-    /// Its owner stopped it.
-    Stopped,
-    /// It handed control back before answering.
-    Yielded,
-    Error,
-}
-
-impl TurnOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TurnOutcome::Running => "running",
-            TurnOutcome::Idle => "idle",
-            TurnOutcome::Stopped => "stopped",
-            TurnOutcome::Yielded => "yielded",
-            TurnOutcome::Error => "error",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<TurnOutcome> {
-        [TurnOutcome::Running, TurnOutcome::Idle, TurnOutcome::Stopped, TurnOutcome::Yielded, TurnOutcome::Error].into_iter().find(|o| o.as_str() == s)
-    }
-}
-
-/// `GET /api/a/{name}/state?wait_ms=`: an agent's turn, without its
-/// conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentState {
-    /// A turn is running (or will run again for a message that came as it ended).
-    pub active: bool,
-    /// A driver works on it in the agent's cell right now.
-    pub driving: bool,
-    /// The latest turn's outcome; none before the first turn.
-    pub outcome: Option<TurnOutcome>,
-    /// Why the latest turn failed, when it did.
-    pub error: Option<String>,
-    /// The newest message, when that is the model's text: a turn's answer
-    /// once it is not active.
-    pub answer: Option<String>,
 }
 
 /// How a run started: someone's call, another run's step, or a trigger.
@@ -1533,42 +1474,15 @@ mod tests {
         assert_eq!(canonical_json(&a), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
 
-    /// Goal: a delivery names its record's place, or it does not decode.
-    /// Method: the wire shape round-trips; one without `seq`, or of another
-    /// type, is an error (an agent keyed a seq-less one `…/null`).
+    /// A delivery is its documented shape: `type` beside the record, whose
+    /// body passes as it was stored.
     #[test]
-    fn deliveries_decode_whole_or_not_at_all() {
+    fn a_delivery_is_its_documented_shape() {
         let wire = serde_json::json!({ "type": "record", "fragment": "f", "channel": "chat",
             "record": { "channel": "chat", "seq": 7, "at": 1, "principal": "id:0123456789abcdef0123456789abcdef", "kind": "say", "body": { "text": "hi" } } });
-        // from text, as a delivery arrives. A record's raw body decodes from a
-        // parsed Value as well; what cannot hold one is serde's buffer for an
-        // internally tagged enum, which is why Delivery is a struct.
-        let decode = |v: &Value| serde_json::from_str::<Delivery>(&v.to_string());
-        let delivery = decode(&wire).unwrap();
-        assert_eq!((delivery.kind, delivery.fragment.as_str(), delivery.channel.as_str(), delivery.record.seq), (DeliveryType::Record, "f", "chat", 7));
-        let encoded = serde_json::to_string(&delivery).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), wire);
-        let from_value: Delivery = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(from_value.record.body.get(), r#"{"text":"hi"}"#);
-        let mut no_seq = wire.clone();
-        no_seq["record"].as_object_mut().unwrap().remove("seq");
-        assert!(decode(&no_seq).is_err());
-        let mut other = wire.clone();
-        other["type"] = serde_json::json!("push");
-        assert!(decode(&other).is_err());
-    }
-
-    /// An agent's state answers in camelCase, its outcome in snake_case, and
-    /// every outcome's name parses back.
-    #[test]
-    fn an_agent_state_is_the_documented_shape() {
-        let state = AgentState { active: false, driving: false, outcome: Some(TurnOutcome::Idle), error: None, answer: Some("Added milk.".into()) };
-        assert_eq!(serde_json::to_value(&state).unwrap(), serde_json::json!({ "active": false, "driving": false, "outcome": "idle", "error": null, "answer": "Added milk." }));
-        for outcome in [TurnOutcome::Running, TurnOutcome::Idle, TurnOutcome::Stopped, TurnOutcome::Yielded, TurnOutcome::Error] {
-            assert_eq!(TurnOutcome::parse(outcome.as_str()), Some(outcome));
-            assert_eq!(serde_json::to_value(outcome).unwrap(), serde_json::json!(outcome.as_str()));
-        }
-        assert_eq!(TurnOutcome::parse(""), None);
+        let record: ChannelRecord = serde_json::from_value(wire["record"].clone()).unwrap();
+        let delivery = Delivery { kind: DeliveryType::Record, fragment: "f".into(), channel: "chat".into(), record };
+        assert_eq!(serde_json::to_value(&delivery).unwrap(), wire);
     }
 
     /// The contract states the step limit with the code's number (it said
@@ -1588,17 +1502,17 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, sharing: None, archived: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, sharing: None, archived: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), sharing: Some(sharing), archived: true }],
+            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["id:0123456789abcdef0123456789abcdef".into()], preview: Some("hi".into()), sharing: Some(sharing), archived: true }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["id:0123456789abcdef0123456789abcdef"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
-        // a list from before archiving reads as nothing archived
+        // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
         assert!(!read.archived);
         let found = SearchAnswer {
@@ -1622,8 +1536,8 @@ mod tests {
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {
-        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: Some("w".into()), rotated: vec!["view".into()] };
-        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), rotated: vec!["view".into()] };
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
     #[test]

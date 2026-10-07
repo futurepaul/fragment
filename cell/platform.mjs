@@ -21,7 +21,8 @@
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
 // body re-runs from the top at every step with the results so far, so it
 // must reach its steps in the same order each time and change nothing
-// except through steps (docs/api.md, Jobs).
+// except through steps (docs/api.md, Jobs); the supervisor starts a run over
+// when its code changes under it, so the results are always this code's.
 //
 // Every answer is an envelope, so no value an author returns can be
 // mistaken for a platform answer: a query's { result }, a mutation's
@@ -106,11 +107,6 @@ function base64(data) {
   for (let i = 0; i < data.length; i += 0x8000) s += String.fromCharCode(...data.subarray(i, i + 0x8000));
   return btoa(s);
 }
-
-// 2, 4, 8, 16, then 30 seconds apart: an agent's turn has about 20 minutes
-// to end, in at most 81 of a run's 256 steps.
-const AGENT_POLLS_MAX = 40;
-const AGENT_POLL_MS_MAX = 30_000;
 
 // Milliseconds, or "N seconds|minutes|hours|days"; NaN for anything else.
 function durationMs(duration) {
@@ -288,7 +284,7 @@ class Job {
       return NEVER;
     }
     if (done.kind !== kind) {
-      return Promise.reject(new Error(`step ${index} was ${done.kind} when this run took it and is ${kind} now: the job's code changed under the run`));
+      return Promise.reject(new Error(`step ${index} was ${done.kind} when this run took it and is ${kind} now: a job reaches its steps in the same order each time`));
     }
     if ("error" in done) return Promise.reject(new StepError(kind, done.error));
     return Promise.resolve(done.value);
@@ -358,23 +354,6 @@ class Job {
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };
-  }
-
-  // One turn of the fragment's own agent (fragment.json's `agent`), for
-  // the run's principal: resolves to { text, turn }. The turn is named by
-  // the run and this step, so a retried or replayed run reattaches to it;
-  // the job waits for it in polls and sleeps, all as steps. A turn that
-  // fails or is stopped throws a StepError.
-  async agent({ prompt, conversation, channel } = {}) {
-    if (typeof prompt !== "string" || prompt === "") throw new TypeError("job.agent({ prompt }): prompt is a string");
-    const { turn } = await this.#step("agent.start", JSON.parse(JSON.stringify({ prompt, conversation, channel })));
-    for (let i = 0; i < AGENT_POLLS_MAX; i++) {
-      const st = await this.#step("agent.poll", { turn });
-      if (st.ended && st.outcome === "idle") return { text: st.text ?? "", turn };
-      if (st.ended) throw new StepError("agent.poll", `the agent's turn ended ${st.outcome}${st.error ? `: ${st.error}` : ""}`);
-      await this.sleep(Math.min(2000 * 2 ** i, AGENT_POLL_MS_MAX));
-    }
-    throw new StepError("agent.poll", `the agent's turn ${turn} did not end after ${AGENT_POLLS_MAX} polls`);
   }
 
   // A web push to the subscriptions tagged `who` ("*": all).
@@ -465,12 +444,7 @@ export class App extends AuthorApp {
     const sql = ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, input_sha TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL,
-      effects TEXT NOT NULL DEFAULT '[]', run INTEGER)`);
-    // a ledger made before effects (phase 2 slice B), or before the
-    // supervisor numbered runs (older rows have none, and are never applied again)
-    const cols = sql.exec(`PRAGMA table_info(${LEDGER})`).toArray();
-    if (!cols.some((c) => c.name === "effects")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN effects TEXT NOT NULL DEFAULT '[]'`);
-    if (!cols.some((c) => c.name === "run")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN run INTEGER`);
+      effects TEXT NOT NULL, run INTEGER NOT NULL)`);
   }
 
   // Reads at `main` through the FILES capability.
@@ -514,7 +488,7 @@ export class App extends AuthorApp {
       if (prior && prior.at >= now - meta.ledgerMs) {
         if (prior.input_sha !== inputSha) return JSON.stringify({ error: "conflicting_body" });
         // the stored texts as they are: the supervisor checks them
-        return mutated(true, prior.run ?? null, prior.effects, prior.result);
+        return mutated(true, prior.run, prior.effects, prior.result);
       }
       // Older than the window, the id runs again: a new run, keyed anew.
       if (prior) sql.exec(`DELETE FROM ${LEDGER} WHERE id = ?`, id);
@@ -593,12 +567,7 @@ export class App extends AuthorApp {
     } catch {
       effects = null;
     }
-    return JSON.stringify({ result: { run: row.run ?? null, effects } });
-  }
-
-  // The app's database size, for the owner's storage meter (meter.rs).
-  __size() {
-    return this.ctx.storage.sql.databaseSize;
+    return JSON.stringify({ result: { run: row.run, effects } });
   }
 
   // Custom routes: the author's fetch, when there is one.

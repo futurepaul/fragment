@@ -10,7 +10,7 @@
 //! an agent member reads the fragment as a viewer, and never acts through
 //! it (no operations, nothing a membership would let them change).
 //!
-//! An agent acts for whoever asked, capped (ROADMAP decision 17): a request
+//! An agent acts for whoever asked, capped (decision R17): a request
 //! an agent signs `for=<identity>` acts with the lower of that identity's
 //! role and a cap. The cap is the agent's own role (its membership, or the
 //! visibility floor), or, on a fragment its owner belongs to, the owner's
@@ -56,7 +56,7 @@ pub struct Standing {
     pub held: Option<Role>,
 }
 
-/// What an agent acting for someone brings to a fragment (decision 17).
+/// What an agent acting for someone brings to a fragment (decision R17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cap {
     /// The agent's own membership.

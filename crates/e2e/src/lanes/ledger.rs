@@ -16,7 +16,6 @@ use fragment_fakes::workers_ai::{image_bytes, Used, IMAGE_MODEL};
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use super::agents::settle as settle_agent;
 use super::app::ship;
 use super::jobs::{settle, started};
 use crate::api::{url_enc, Api, Reply};
@@ -39,11 +38,18 @@ const TRIGGERS_JSON: &[u8] = br#"{
   "triggers": [{ "cron": "0 0 1 1 *", "run": "tick" }, { "files": "notes/**", "run": "filed" }]
 }"#;
 const FLASH: &str = "@cf/zai-org/glm-5.3-flash";
+/// The model route, as an agent calls it (its computer's model intercept).
+const MODEL_ROUTE: &str = "/api/models/v1/chat/completions";
 const GLM: &str = "@cf/zai-org/glm-5.3";
 const USD: i64 = 1_000_000;
 
 fn tokens(model: &str, input: u64, cached: u64, output: u64) -> Usage {
     Usage::Tokens { model: model.into(), input, cached_input: cached, cache_write: 0, output }
+}
+
+/// A model call's body as an agent sends it: the cheap tier, one message.
+fn hello() -> Value {
+    json!({ "model": "cheap", "messages": [{ "role": "user", "content": "hello" }] })
 }
 
 /// What the default book charges for `usage`.
@@ -125,7 +131,7 @@ fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
     api.unsigned("POST", "/api/test/fragment", Some(&body))
 }
 
-/// Waits for a deploy to land (by the webhook): a query answers once it has.
+/// Waits for a deploy to land: a query answers once it has.
 fn landed(s: &Suite, api: &Api, keys: &Keys, name: &str, wait: Duration) {
     s.eventually(wait, || api.op(keys, name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
 }
@@ -234,30 +240,23 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("a guest pays for nothing")) && s.ai.calls().len() == calls,
         &run,
     );
-    let agents = s.agents()?;
-    let bot = s.name("guest-bot");
-    agents.signed(&guest, "POST", "/api/agents", Some(&json!({ "name": bot })))?;
-    agents.signed(&guest, "POST", &format!("/api/a/{bot}/turns"), Some(&json!({ "text": "hello" })))?;
-    let gv = settle_agent(s, &agents, &guest, &bot, wait);
+    let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "a guest's agent turn is refused, saying why, and never reaches the model",
-        gv["outcome"] == "error" && gv["error"].as_str().is_some_and(|e| e.contains("a guest pays for nothing")) && s.ai.calls().len() == calls,
-        json!({ "outcome": gv["outcome"], "error": gv["error"] }),
+        "a guest's agent's model call is refused, 403, saying why, and never reaches the model",
+        r.status == 403 && r.message().contains("a guest pays for nothing") && s.ai.calls().len() == calls,
+        &r,
     );
     let r = api.op(&guest, &guest_app, "note", "gn-1", json!({ "text": "a guest writes" }))?;
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
     // a guest pays for nothing, so a deploy of theirs is not shot (decision
     // 31): this deploy's own skip, after any its first deploy had, and no
-    // card wanted or out once the alarm has decided (a deploy's answer
-    // comes before the alarm looks)
+    // card wanted once the alarm has decided (a deploy's answer comes
+    // before the alarm looks)
     let skips = || super::site::event_kinds(api, &guest, &guest_app).iter().filter(|k| *k == "card.skipped").count();
     let skips_before = skips();
     s.commit(&c, &[("notes/guest.md", Some(b"a guest deploys"))]);
     s.deploy(&c);
-    let unshot = || {
-        let cards = super::site::cards(api, &guest_app);
-        cards["cards"]["wanted"].is_null() && cards["cards"]["flight"].is_null()
-    };
+    let unshot = || super::site::cards(api, &guest_app)["cards"]["wanted"].is_null();
     let skipped = s.eventually(wait, || skips() > skips_before && unshot());
     s.ok(
         "a guest's deploy gets no preview card: its ledger takes no shot",
@@ -405,14 +404,15 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("agents are stopped: the credit is used up")) && s.ai.calls().len() == calls,
         &run,
     );
-    let mine = s.name("ledger-bot");
-    agents.signed(&owner, "POST", "/api/agents", Some(&json!({ "name": mine })))?;
-    agents.signed(&owner, "POST", &format!("/api/a/{mine}/turns"), Some(&json!({ "text": "hello" })))?;
-    let av = settle_agent(s, &agents, &owner, &mine, wait);
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let r = api.signed(&hand, "POST", MODEL_ROUTE, Some(&hello()))?;
     s.ok(
-        "and so is an agent's turn",
-        av["outcome"] == "error" && av["error"].as_str().is_some_and(|e| e.contains("agents are stopped")) && s.ai.calls().len() == calls,
-        json!({ "outcome": av["outcome"], "error": av["error"] }),
+        "and so is their agent's model call (402)",
+        r.status == 402 && r.message().contains("agents are stopped") && s.ai.calls().len() == calls,
+        &r,
     );
     let w = api.op(&owner, &name, "note", "n-zero", json!({ "text": "at zero" }))?;
     let q = api.op(&owner, &name, "notes", "q", json!({}))?;
@@ -533,7 +533,7 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let reg = "/api/identities";
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
-    let route = "/api/models/v1/chat/completions";
+    let route = MODEL_ROUTE;
     let chat = |stream: bool| json!({ "model": "cheap", "stream": stream, "messages": [{ "role": "user", "content": "hello" }] });
     let aig = || entries(api, &owner_id, "aig:");
     let before = aig().len();
@@ -614,7 +614,7 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
     anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
     let owner_id = owner_id.as_str();
-    let route = "/api/models/v1/chat/completions";
+    let route = MODEL_ROUTE;
     let look = |url: &str| json!({ "model": "vision", "messages": [{ "role": "user", "content": [{ "type": "text", "text": "what is on this screen?" }, { "type": "image_url", "image_url": { "url": url } }] }] });
     let aig = || entries(api, owner_id, "aig:");
     let (calls, before) = (s.ai.calls().len(), aig().len());

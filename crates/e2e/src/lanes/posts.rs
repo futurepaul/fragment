@@ -1,4 +1,4 @@
-//! Posts (ROADMAP decision 18): a channel fragment.json declares with a
+//! Posts (decision R18): a channel fragment.json declares with a
 //! `post` role takes records the platform appends for the poster, with no
 //! app code at all. Checked in the `channels` section (the rules: the role,
 //! the replay, the size, a channel without one, the deploy check, the
@@ -219,7 +219,7 @@ fn retention(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let c = s.create(api, owner, &name)?;
     ship(s, &c, WALL_APP, WALL_JSON);
     let fill = |id: &str, n: i64| api.op(owner, &name, "fill", id, json!({ "n": n }));
-    // the deploy lands by the webhook: the first fill again until it has
+    // the deploy lands: the first fill again until it has
     s.eventually(Duration::from_secs(15), || fill("f0", 64).is_ok_and(|r| r.status == 200));
     let kept = limits::POSTED_KEPT;
     let calls = kept / 64 + 1;

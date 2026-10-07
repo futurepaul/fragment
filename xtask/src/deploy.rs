@@ -9,15 +9,15 @@
 //! name: the deploy reads no secret's value. It first lists the store
 //! (read-only) and refuses, before anything is built or made, when a
 //! secret the config names is not there. From the config and the
-//! checked-in configs (`cell/wrangler.jsonc`, `agent/wrangler.jsonc`) it
-//! renders each Worker's own wrangler config under `target/deploy/<name>/`,
-//! the store secrets bound by name (`secrets_store_secrets`), makes the
-//! bucket and queues it names, and runs `wrangler deploy`. Only a branch's
+//! checked-in config (`cell/wrangler.jsonc`) it renders the Worker's own
+//! wrangler config under `target/deploy/<name>/`, the store secrets bound
+//! by name (`secrets_store_secrets`), makes the bucket and queues it
+//! names, and runs `wrangler deploy`. Only a branch's
 //! test secret is still a Worker secret, uploaded from a file of mode 600
 //! that is removed after.
 //!
 //! A branch deployment (`--branch b`) is a complete copy beside the others
-//! in one account and zone: its Workers, Durable Objects, Workflow, queues
+//! in one account and zone: its Worker, Durable Objects, Workflow, queues
 //! and bucket are named for it, its platform is `b.<zone>`, and its
 //! fragments are `<label>--<username>--b.<zone>` (one wildcard DNS record
 //! and certificate cover them all). Its repos are named `b--…` in the
@@ -97,46 +97,6 @@ struct Deployment {
     /// A file, not a store secret: the hosted e2e runner sends its value,
     /// and a store gives no value back.
     test_secret_file: Option<PathBuf>,
-}
-
-/// The fields a config named before the deployment's secrets moved to its
-/// Secrets Store (2026-10-05), each by where it sat and what replaced it:
-/// a config that still names one is refused, saying so (a hard cut: no
-/// file is read in its place).
-const REPLACED_FIELDS: [(&str, &str, &str); 4] = [
-    ("", "host_secret_file", "host_secret"),
-    ("codestorage", "private_key_file", "private_key"),
-    ("workos", "client_id_file", "client_id"),
-    ("workos", "api_key_file", "api_key"),
-];
-
-/// Refuses a config (its JSON) that names a field the store replaced
-/// (`REPLACED_FIELDS`, and a provider's `key_file`), naming its
-/// replacement and the command that moves the file it names into the store.
-fn refuse_replaced(v: &Value, config: &Path) -> Result<()> {
-    let moved = |at: String, instead: String, file: &Value| {
-        let file = file.as_str().unwrap_or("<its file>");
-        anyhow::anyhow!(
-            "{at} is gone: the deployment's secrets live in its Cloudflare Secrets Store now (docs/secrets.md). Move the file in once, \
-             `cargo xtask secret set <name> --config {} --from-file {file}`, and name that secret as {instead}",
-            config.display()
-        )
-    };
-    for (within, field, instead) in REPLACED_FIELDS {
-        let object = if within.is_empty() { Some(v) } else { v.get(within) };
-        if let Some(file) = object.and_then(|o| o.get(field)) {
-            let at = if within.is_empty() { field.to_string() } else { format!("{within}.{field}") };
-            let instead = if within.is_empty() { instead.to_string() } else { format!("{within}.{instead}") };
-            return Err(moved(at, instead, file));
-        }
-    }
-    for row in v["providers"].as_array().into_iter().flatten() {
-        if let Some(file) = row.get("key_file") {
-            let name = row["name"].as_str().unwrap_or("?");
-            return Err(moved(format!("providers: {name}'s key_file"), "its key".to_string(), file));
-        }
-    }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -316,7 +276,6 @@ fn read_secret(path: &Path) -> Result<String> {
 struct Names {
     /// `fragment` or `fragment-<branch>`: the platform Worker's.
     cell: String,
-    agent: String,
     jobs: String,
     deliveries: String,
     dead: String,
@@ -340,7 +299,6 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
             anyhow::ensure!(valid_branch(b), "a branch is 1-16 of a-z, 0-9 and single dashes inside, not {b:?}");
             Ok(Names {
                 cell: format!("fragment-{b}"),
-                agent: format!("fragment-agent-{b}"),
                 jobs: format!("fragment-jobs-{b}"),
                 deliveries: format!("fragment-deliveries-{b}"),
                 dead: format!("fragment-deliveries-dead-{b}"),
@@ -357,7 +315,6 @@ fn names(d: &Deployment, branch: Option<&str>) -> Result<Names> {
         }
         (None, Some(platform), Some(suffix)) => Ok(Names {
             cell: "fragment".into(),
-            agent: "fragment-agent".into(),
             jobs: "fragment-jobs".into(),
             deliveries: "fragment-deliveries".into(),
             dead: "fragment-deliveries-dead".into(),
@@ -399,7 +356,6 @@ fn read_test_secret(file: &Path) -> Result<String> {
 
 fn load(config: &Path) -> Result<Deployment> {
     let v = read_json(config)?;
-    refuse_replaced(&v, config).with_context(|| format!("check {}", config.display()))?;
     let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
 }
@@ -410,9 +366,9 @@ fn read_json(config: &Path) -> Result<Value> {
     serde_json::from_str(&devstack::strip_comments(&text)).with_context(|| format!("parse {}", config.display()))
 }
 
-/// What `cargo xtask secret` takes from a deployment's config: read as
-/// leniently as a migration needs (a config still naming its secrets'
-/// files works, to move them into the store).
+/// What `cargo xtask secret` takes from a deployment's config: read
+/// leniently, so a config that does not load as a deploy loads it still
+/// names its account (and `secret list` says why it does not load).
 pub(crate) struct SecretsOf {
     pub account_id: String,
     /// The host secret's names (`host_secret`, `host_secret_previous`):
@@ -518,16 +474,14 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     anyhow::ensure!(d.ai_gateway.as_deref() != Some("default"), "ai_gateway names the deployment's own gateway: `default` makes one that logs");
     let bound = bound(&d)?;
     let tools = devstack::Tools::locate()?;
-    // and every store secret the Workers are bound to is there (read-only)
+    // and every store secret the Worker is bound to is there (read-only)
     let store = preflight(&tools, &d, &config, &bound)?;
     println!("secrets: the {} the config names are in the account's Secrets Store {} ({})", named_secrets(&bound).len(), store.name, store.id);
     crate::build()?;
     let deploy_id = git_head()?;
     let dir = devstack::repo_root().join("target/deploy").join(&n.cell);
     fs::create_dir_all(&dir)?;
-    let (agent, cell) = worker_configs(&d, &n, &store.id, &deploy_id, &devstack::repo_root())?;
-    let agent_config = dir.join("agent.json");
-    fs::write(&agent_config, serde_json::to_string_pretty(&agent)?)?;
+    let cell = worker_config(&d, &n, &store.id, &deploy_id, &devstack::repo_root())?;
     let cell_config = dir.join("cell.json");
     fs::write(&cell_config, serde_json::to_string_pretty(&cell)?)?;
     let platform_url = format!("https://{}", n.platform_host);
@@ -541,8 +495,6 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     for q in [&n.dead, &n.deliveries, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "create", q]), "a queue")?;
     }
-    // its secrets are bindings in its config: no Worker secret
-    crate::run(wrangler(&tools, &d.account_id)?.arg("deploy").arg("-c").arg(&agent_config))?;
     let mut deploy_cell = wrangler(&tools, &d.account_id)?;
     deploy_cell.arg("deploy").arg("-c").arg(&cell_config);
     // a preview's levers (cell/src/levers.rs), a branch's alone (checked
@@ -568,23 +520,13 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// The agents' Worker's config and the platform Worker's, rendered from
-/// the deployment's and the checked-in ones (`root`'s `agent/` and
-/// `cell/`), their store secrets bound by name in the store `store_id`.
-/// No value of a secret is in either.
-fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<(Value, Value)> {
+/// The platform Worker's config, rendered from the deployment's and the
+/// checked-in one (`root`'s `cell/`), its store secrets bound by name in
+/// the store `store_id`. No value of a secret is in it.
+fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, root: &Path) -> Result<Value> {
     let bound = bound(d)?;
     let (catalog, _) = catalog_of(d)?;
     let platform_url = format!("https://{}", n.platform_host);
-    let mut agent = devstack::read_config(&root.join("agent"))?;
-    agent["name"] = json!(n.agent);
-    agent["main"] = json!(root.join("agent/build/index.js"));
-    agent["workers_dev"] = json!(false);
-    agent["preview_urls"] = json!(false);
-    agent["observability"] = json!({ "enabled": true });
-    agent["vars"] = json!({ "FRAGMENT_API": platform_url, "AGENT_URL": platform_url });
-    agent["secrets_store_secrets"] = devstack::store::bindings_json(store_id, &bound.agent());
-
     let mut cell = devstack::read_config(&root.join("cell"))?;
     let c = cell.as_object_mut().context("cell/wrangler.jsonc is an object")?;
     c.remove("build");
@@ -614,7 +556,6 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
             }
         }
     }
-    c.insert("services".into(), json!([{ "binding": "AGENTS", "service": n.agent }]));
     // the deployment's own images in place of the e2e's stubs, or none
     match &d.computers {
         Some(computers) => {
@@ -675,7 +616,7 @@ fn worker_configs(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, ro
     c.insert("vars".into(), vars);
     anyhow::ensure!(!c.contains_key("secrets_store_secrets"), "cell/wrangler.jsonc binds no secrets of its own: a deployment's are bound here");
     c.insert("secrets_store_secrets".into(), devstack::store::bindings_json(store_id, &bound.cell()));
-    Ok((agent, cell))
+    Ok(cell)
 }
 
 /// `cargo xtask e2e --hosted --config <file> --branch <b> [--only … |
@@ -718,7 +659,7 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// Removes a branch deployment: its Workers (their Durable Objects and
+/// Removes a branch deployment: its Worker (its Durable Objects and
 /// data with them), its Workflow and its queues. Its bucket is emptied by
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
@@ -728,9 +669,7 @@ pub fn teardown(rest: &[String]) -> Result<()> {
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
-    for worker in [&n.cell, &n.agent] {
-        ensure(wrangler(&tools, &d.account_id)?.args(["delete", "--name", worker, "--force"]), "a Worker")?;
-    }
+    ensure(wrangler(&tools, &d.account_id)?.args(["delete", "--name", &n.cell, "--force"]), "the Worker")?;
     ensure(wrangler(&tools, &d.account_id)?.args(["workflows", "delete", &n.jobs]), "the Workflow")?;
     for q in [&n.deliveries, &n.dead, &n.ledger] {
         ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q, "--force"]), "a queue")?;
@@ -843,7 +782,7 @@ mod tests {
     #[test]
     fn a_branch_names_everything_for_itself() {
         let n = names(&deployment(None, None), Some("dev")).unwrap();
-        assert_eq!((n.cell.as_str(), n.agent.as_str(), n.bucket.as_str()), ("fragment-dev", "fragment-agent-dev", "fragment-blobs-dev"));
+        assert_eq!((n.cell.as_str(), n.bucket.as_str()), ("fragment-dev", "fragment-blobs-dev"));
         assert_eq!((n.deliveries.as_str(), n.dead.as_str(), n.ledger.as_str()), ("fragment-deliveries-dev", "fragment-deliveries-dead-dev", "fragment-ledger-dev"));
 
         assert_eq!(n.platform_host, "dev.finite.place");
@@ -894,41 +833,6 @@ mod tests {
             let conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
-    }
-
-    /// The store's hard cut: a config that still names a secret's file is
-    /// refused, naming what replaced the field and the command that moves
-    /// the file in; nothing reads the file instead.
-    #[test]
-    fn a_config_naming_a_secrets_file_is_refused() {
-        let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        let fresh: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        let refused = |edit: &dyn Fn(&mut Value), test: &str| {
-            let mut v = fresh.clone();
-            edit(&mut v);
-            load(&config_file(test, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default()
-        };
-        let r = refused(&|v| v["host_secret_file"] = json!("~/.config/fragment/secrets/host-secret"), "old-host");
-        assert!(r.contains("host_secret_file is gone") && r.contains("as host_secret") && r.contains("--from-file ~/.config/fragment/secrets/host-secret"), "{r}");
-        let r = refused(&|v| v["codestorage"]["private_key_file"] = json!("~/k.pem"), "old-codestorage");
-        assert!(r.contains("codestorage.private_key_file is gone") && r.contains("as codestorage.private_key"), "{r}");
-        let r = refused(&|v| v["workos"]["client_id_file"] = json!("~/c"), "old-workos-client");
-        assert!(r.contains("workos.client_id_file is gone") && r.contains("as workos.client_id"), "{r}");
-        let r = refused(&|v| v["workos"]["api_key_file"] = json!("~/a"), "old-workos-key");
-        assert!(r.contains("workos.api_key_file is gone") && r.contains("as workos.api_key"), "{r}");
-        let r = refused(&|v| v["providers"][1]["key_file"] = json!("~/p"), "old-provider");
-        assert!(r.contains("perplexity's key_file is gone") && r.contains("as its key"), "{r}");
-        // and a config of the old shape whole (no new fields) says the same
-        let r = refused(
-            &|v| {
-                let o = v.as_object_mut().unwrap();
-                o.remove("host_secret");
-                o.insert("host_secret_file".into(), json!("~/h"));
-            },
-            "old-whole",
-        );
-        assert!(r.contains("host_secret_file is gone"), "{r}");
-        assert!(load(&config_file("fresh", &fresh)).is_ok());
     }
 
     /// Every name a config gives a store secret is one: a path (the old
@@ -984,10 +888,9 @@ mod tests {
         assert_eq!(said.matches("cargo xtask secret set ").count(), named.len(), "{said}");
     }
 
-    /// The Workers' configs a deploy writes: every secret a binding to its
-    /// store secret by name (the agents' Worker the host secrets alone),
-    /// no secret's value and no old name anywhere in either, and the WorkOS
-    /// client id no longer a variable.
+    /// The Worker's config a deploy writes: every secret a binding to its
+    /// store secret by name, no secret's value and no old name anywhere in
+    /// it, and the WorkOS client id no longer a variable.
     #[test]
     fn the_deploy_binds_its_secrets_by_name() {
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
@@ -995,14 +898,7 @@ mod tests {
         v["host_secret_previous"] = json!("fragment-host-secret-old");
         let d = load(&config_file("bindings", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
-        let (agent, cell) = worker_configs(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
-        assert_eq!(
-            agent["secrets_store_secrets"],
-            json!([
-                { "binding": "HOST_SECRET", "store_id": "0f0e0d0c", "secret_name": "fragment-host-secret" },
-                { "binding": "HOST_SECRET_PREVIOUS", "store_id": "0f0e0d0c", "secret_name": "fragment-host-secret-old" },
-            ])
-        );
+        let cell = worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap();
         let bound: Vec<(&str, &str)> = cell["secrets_store_secrets"].as_array().unwrap().iter().map(|b| (b["binding"].as_str().unwrap(), b["secret_name"].as_str().unwrap())).collect();
         assert_eq!(
             bound,
@@ -1022,21 +918,27 @@ mod tests {
         assert!(cell["vars"].get("WORKOS_CLIENT_ID").is_none(), "the client id is a binding now");
         let providers = cell["vars"]["FRAGMENT_PROVIDERS"].as_str().unwrap();
         assert!(bound[5..].iter().all(|(_, name)| !providers.contains(name)), "a key's store name is the deploy's, not the cell's");
-        let whole = format!("{agent}{cell}");
+        let whole = cell.to_string();
         for old in ["FRAGMENT_HOST_SECRET", "CODESTORAGE_PRIVATE_KEY", "WORKOS_API_KEY", "FRAGMENT_KEY_", "key_file", "secrets/"] {
             assert!(!whole.contains(old), "{old} is in a rendered config");
         }
     }
 
-    /// OpenRouter went (a hard cut): a config that still names its key is
-    /// refused, not deployed without it.
+    /// A field gone in a hard cut is refused, never deployed without:
+    /// OpenRouter's key, and the secrets' files the store replaced (a
+    /// provider's among them).
     #[test]
-    fn a_config_naming_openrouter_is_refused() {
+    fn a_config_naming_a_field_gone_is_refused() {
         let text = fs::read_to_string(devstack::repo_root().join("deploy/example.jsonc")).unwrap();
-        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
-        v["openrouter_api_key_file"] = json!("~/.config/fragment/secrets/openrouter-api-key");
-        let refused = serde_json::from_value::<Deployment>(v).err().map(|e| e.to_string()).unwrap_or_default();
-        assert!(refused.contains("unknown field `openrouter_api_key_file`"), "{refused}");
+        let fresh: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        // each field, and the object (a JSON pointer) it is added to
+        for (field, within) in [("openrouter_api_key_file", ""), ("host_secret_file", ""), ("key_file", "/providers/1")] {
+            let mut v = fresh.clone();
+            v.pointer_mut(within).and_then(Value::as_object_mut).expect("the config has it").insert(field.into(), json!("~/f"));
+            let refused = load(&config_file(field, &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
+            assert!(refused.contains(&format!("unknown field `{field}`")), "{refused}");
+        }
+        assert!(load(&config_file("fresh", &fresh)).is_ok());
     }
 
     /// The provider catalog, its keys' store names, and a default image are
@@ -1090,7 +992,7 @@ mod tests {
         let rendered = |v: &Value, test: &str| {
             let d = load(&config_file(test, v)).unwrap();
             let n = names(&d, Some("p5")).unwrap();
-            worker_configs(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap().1["vars"].clone()
+            worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"].clone()
         };
         assert!(rendered(&v, "vision-none").get("FRAGMENT_VISION_MODEL").is_none(), "unnamed: the cell's default");
         v["vision_model"] = json!("@cf/zai-org/glm-5.3-flash");
