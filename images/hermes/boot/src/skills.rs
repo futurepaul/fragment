@@ -9,17 +9,20 @@
 //!   means no managed skills, and what was installed goes: the skills a
 //!   person's settings list are their agents' (the shell reads the same
 //!   fragment).
-//! - The platform skill, `fragment`, whatever the skills fragment holds: the
-//!   `fragment` CLI's own skill (`fragment skill`) after a page of what the
-//!   computer adds (`computer.md`), written at the image's build into
+//! - The platform skill, `fragment`, unless a managed skill takes its name:
+//!   the `fragment` CLI's own skill (`fragment skill`) after a page of what
+//!   the computer adds (`computer.md`), written at the image's build into
 //!   `PLATFORM_DIR` (`hermes-boot build-info`), so it is the binary's in the
-//!   image and nothing at a boot.
+//!   image, and shown to the profiles in `PLATFORM_VIEW` (`settle_platform`,
+//!   at each start and after each install).
 //!
-//! Every profile names both in `skills.external_dirs` (hermes.rs), in
-//! `EXTERNAL_DIRS`' order. Hermes scans a profile's own `skills/` (its agent
-//! fragment's, synced: sync.rs) before its external dirs, and the first
-//! skill of a name wins: an agent's own skill wins over a managed one, and
-//! either over the platform skill.
+//! Every profile names both in `skills.external_dirs` (hermes.rs). Hermes
+//! ranks a profile's own `skills/` (its agent fragment's, synced: sync.rs)
+//! above its external dirs, so an agent's own skill wins over a managed one
+//! or the platform's. Its external dirs are one rank: two skills there of
+//! one name are ambiguous, and Hermes finds neither by it (since its main
+//! of 2026-10; v0.21.5 took the first dir's). So a managed `fragment` wins
+//! over the platform skill by the platform skill leaving the view.
 //!
 //! The plan is a pure function (`pick`, `plan`); `install` carries it out.
 
@@ -58,13 +61,17 @@ pub const ABSENT_EVERY_MS: u64 = 60_000;
 
 /// Where the platform skill is: in the image, read-only to the agents.
 pub const PLATFORM_DIR: &str = "/opt/fragment/skills";
+/// Where the profiles find it: a copy of it while no managed skill takes
+/// its name (`settle_platform`), the boot's, read-only to the agents. In
+/// the boot's run directory: made at each start, never saved.
+pub const PLATFORM_VIEW: &str = "/var/lib/fragment-run/platform-skills";
 /// Its name, which a managed or an agent's own skill of the same name
 /// shadows; and its path under `PLATFORM_DIR` (`<category>/<name>/`).
 pub const PLATFORM_NAME: &str = "fragment";
 pub const PLATFORM_PATH: &str = "platform/fragment/SKILL.md";
-/// The external dirs every profile names, in Hermes' order: the managed set
-/// first, so a managed `fragment` wins over the platform's.
-pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_DIR];
+/// The external dirs every profile names: the managed set, and the
+/// platform skill's view.
+pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_VIEW];
 /// The page the computer adds to the CLI's skill.
 const COMPUTER_PAGE: &str = include_str!("computer.md");
 /// The platform skill's description, which Hermes lists in every turn's
@@ -182,6 +189,47 @@ pub fn plan(listing: Option<&[FileEntry]>, installed: &Installed) -> Plan {
 /// Which installed paths are a skill's `SKILL.md`: what the profiles see.
 pub fn skill_names(installed: &Installed) -> BTreeSet<String> {
     installed.keys().filter_map(|p| p.strip_suffix("/SKILL.md")).filter_map(|d| d.rsplit('/').next()).map(str::to_string).collect()
+}
+
+/// The name Hermes gives the skill whose `SKILL.md` reads `text`, in a
+/// directory named `dir_name`: its frontmatter's `name` (quoted or not),
+/// else the directory's.
+pub fn skill_name(text: &str, dir_name: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text).replace("\r\n", "\n");
+    let front = text.strip_prefix("---\n").and_then(|r| r.split_once("\n---").map(|(f, _)| f.to_string())).unwrap_or_default();
+    let declared = front.lines().find_map(|l| l.strip_prefix("name:")).map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_string()).filter(|v| !v.is_empty());
+    declared.unwrap_or_else(|| dir_name.to_string())
+}
+
+/// Whether a managed skill takes the platform skill's name: a `SKILL.md`
+/// installed under `dir` (as `installed` lists them) that Hermes names
+/// `PLATFORM_NAME`.
+pub fn shadows_platform(dir: &Path, installed: &Installed) -> bool {
+    installed.keys().filter(|rel| *rel == "SKILL.md" || rel.ends_with("/SKILL.md")).any(|rel| {
+        let path = dir.join(rel);
+        let dir_name = path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        // bounded: a managed file is at most FILE_MAX_BYTES
+        std::fs::read_to_string(&path).is_ok_and(|text| skill_name(&text, &dir_name) == PLATFORM_NAME)
+    })
+}
+
+/// Shows the platform skill to the profiles: in `view`, a copy of
+/// `platform`'s (written whole when it differs) unless a managed skill
+/// installed in `dir` (as `manifest` lists them) takes its name, when it
+/// leaves the view. The view is there either way: Hermes skips an external
+/// dir it does not find until the profile's config changes. Whether it is
+/// shown.
+pub fn settle_platform(dir: &Path, manifest: &Path, platform: &Path, view: &Path) -> std::io::Result<bool> {
+    std::fs::create_dir_all(view)?;
+    if shadows_platform(dir, &load_manifest(manifest)) {
+        remove_file(view, PLATFORM_PATH);
+        return Ok(false);
+    }
+    let skill = std::fs::read(platform.join(PLATFORM_PATH))?;
+    if std::fs::read(view.join(PLATFORM_PATH)).ok().as_deref() != Some(&skill[..]) {
+        write_file(view, PLATFORM_PATH, &skill)?;
+    }
+    Ok(true)
 }
 
 pub fn load_manifest(path: &Path) -> Installed {
@@ -442,10 +490,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Hermes' rule for a profile's skills (its `_find_all_skills`): each
-    /// dir in order, each dir's `SKILL.md`s by path, the first of a
-    /// frontmatter name winning. Each name → the file that is its skill.
-    fn hermes_finds(dirs: &[PathBuf]) -> BTreeMap<String, PathBuf> {
+    /// Hermes' rule for a profile's skills (its `resolve_skill_catalog`,
+    /// `agent/skill_utils.py`, since its main of 2026-10): the profile's own
+    /// dir ranks above its external dirs, which are one rank. A skill is
+    /// known by its name, its directory's name and its path under its dir;
+    /// the best rank holding a name wins it, and two skills of that rank
+    /// holding it (not copies of one) are ambiguous: neither is found by it.
+    /// Each name found → the file that is its skill.
+    fn hermes_finds(own: &Path, external: &[PathBuf]) -> BTreeMap<String, PathBuf> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(dir) else { return };
             for e in entries.filter_map(Result::ok) {
@@ -457,19 +509,37 @@ mod tests {
                 }
             }
         }
-        let mut found = BTreeMap::new();
-        for dir in dirs {
+        // (rank, name, aliases, file)
+        let mut skills = vec![];
+        for (rank, dir) in std::iter::once((0, own)).chain(external.iter().map(|d| (1, d.as_path()))) {
             let mut files = vec![];
             walk(dir, &mut files);
-            files.sort();
             for f in files {
-                let text = std::fs::read_to_string(&f).unwrap();
-                let front = text.strip_prefix("---\n").and_then(|r| r.split_once("\n---\n")).map(|(f, _)| f).unwrap_or("");
-                let name = front.lines().find_map(|l| l.strip_prefix("name: ")).map(str::to_string).unwrap_or_else(|| f.parent().unwrap().file_name().unwrap().to_string_lossy().into());
-                found.entry(name).or_insert(f);
+                let dir_name = f.parent().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+                let name = skill_name(&std::fs::read_to_string(&f).unwrap(), &dir_name);
+                let rel = f.parent().unwrap().strip_prefix(dir).unwrap().to_string_lossy().into_owned();
+                skills.push((rank, name.clone(), BTreeSet::from([name, dir_name, rel]), f));
+            }
+        }
+        let mut found = BTreeMap::new();
+        for (rank, name, _, file) in &skills {
+            let holders: Vec<_> = skills.iter().filter(|s| s.2.contains(name)).collect();
+            let best = holders.iter().map(|s| s.0).min().unwrap();
+            let at_best: Vec<_> = holders.iter().filter(|s| s.0 == best).collect();
+            if *rank == best && at_best.len() == 1 {
+                found.insert(name.clone(), file.clone());
             }
         }
         found
+    }
+
+    #[test]
+    fn a_skills_name_is_its_frontmatters_else_its_directorys() {
+        assert_eq!(skill_name("---\nname: fragment\ndescription: x\n---\n# body\n", "other"), "fragment");
+        assert_eq!(skill_name("---\nname: \"fragment\"\n---\n", "other"), "fragment");
+        assert_eq!(skill_name("\u{feff}---\r\nname: 'fragment'\r\n---\r\n", "other"), "fragment");
+        assert_eq!(skill_name("---\ndescription: no name\n---\n", "fragment"), "fragment");
+        assert_eq!(skill_name("# no frontmatter\nname: fragment\n", "notes"), "notes", "a body's line is no name");
     }
 
     /// Hermes' skill guard: a skill whose text holds one of these is
@@ -512,11 +582,13 @@ mod tests {
         assert_eq!(next_install_ms(Some(false), 2_000), 2_000, "a test's cadence is never slowed");
     }
 
-    /// Goal: the platform skill is every profile's whatever the skills
-    /// fragment holds. Valid: with no skills fragment it is the `fragment`
-    /// Hermes finds; a managed `fragment` shadows it (the managed set is
-    /// named first). Replay: the managed one gone, it is found again, as it
-    /// was written. Method: the managed set installed against the fake API,
+    /// Goal: the platform skill is every profile's unless a managed skill
+    /// takes its name. Valid: with no skills fragment it is the `fragment`
+    /// Hermes finds; a managed `fragment` shadows it (the platform skill
+    /// leaves the view). Invalid: both in the external dirs, Hermes finds
+    /// no `fragment` at all. Replay: the managed one gone, it is found
+    /// again, as it was written. Method: the managed set installed against
+    /// the fake API, the view settled after each install as the boot does,
     /// and Hermes' rule over a profile's own dir and `EXTERNAL_DIRS`.
     #[tokio::test]
     async fn the_platform_skill_is_there_with_no_skills_fragment_and_a_managed_one_shadows_it() {
@@ -532,18 +604,20 @@ mod tests {
         let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));
         // the profile's dirs as its config names them, under the test's root
         let at = |d: &str| root.join(d.trim_start_matches('/'));
-        let dirs: Vec<PathBuf> = std::iter::once(own.clone()).chain(EXTERNAL_DIRS.iter().map(|d| at(d))).collect();
-        let (managed, platform) = (at(MANAGED_DIR), at(PLATFORM_DIR));
+        let external: Vec<PathBuf> = EXTERNAL_DIRS.iter().map(|d| at(d)).collect();
+        let (managed, platform, view) = (at(MANAGED_DIR), at(PLATFORM_DIR), at(PLATFORM_VIEW));
         let skill = platform_skill(include_str!("../../../../cli/SKILL.md")).unwrap();
         write_platform_skill(&platform, &skill).unwrap();
         std::fs::create_dir_all(own.join("garden-notes")).unwrap();
         std::fs::write(own.join("garden-notes/SKILL.md"), "---\nname: garden-notes\n---\n").unwrap();
+        let settle = || settle_platform(&managed, &manifest, &platform, &view).unwrap();
 
         // no skills fragment: no managed skills, the platform's `fragment`
         let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (None, 0));
-        let found = hermes_finds(&dirs);
-        assert_eq!(found.get("fragment"), Some(&platform.join(PLATFORM_PATH)), "{found:?}");
+        assert!(settle(), "shown");
+        let found = hermes_finds(&own, &external);
+        assert_eq!(found.get("fragment"), Some(&view.join(PLATFORM_PATH)), "{found:?}");
         assert!(found.contains_key("garden-notes"));
 
         // the skills fragment appears, holding a `fragment` of its own: it wins
@@ -552,16 +626,27 @@ mod tests {
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
         let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills.paul"), 2));
-        let found = hermes_finds(&dirs);
+        // invalid: both beside each other in one rank, Hermes finds neither
+        assert_eq!(hermes_finds(&own, &external).get("fragment"), None, "ambiguous");
+        assert!(!settle(), "shadowed");
+        assert!(view.is_dir() && !view.join(PLATFORM_PATH).exists(), "the view stays, without it");
+        let found = hermes_finds(&own, &external);
         assert_eq!(found.get("fragment"), Some(&managed.join("fragment/SKILL.md")), "the managed one shadows it: {found:?}");
         assert!(found.contains_key("grill-me") && found.contains_key("garden-notes"));
+        assert!(!settle(), "replay: still shadowed");
 
         // the managed one gone: the platform's again, untouched
         files.lock().unwrap().remove("skills/fragment/SKILL.md");
         let d = install(&api, &agent, "id:paul", &managed, &manifest).await.unwrap();
         assert_eq!((d.removed, d.skills), (1, 1));
-        assert_eq!(hermes_finds(&dirs).get("fragment"), Some(&platform.join(PLATFORM_PATH)));
+        assert!(settle());
+        assert_eq!(hermes_finds(&own, &external).get("fragment"), Some(&view.join(PLATFORM_PATH)));
+        assert_eq!(std::fs::read_to_string(view.join(PLATFORM_PATH)).unwrap(), skill, "the image's, as written");
         assert_eq!(std::fs::read_to_string(platform.join(PLATFORM_PATH)).unwrap(), skill, "no install touches it");
+        // an agent's own `fragment` wins over the platform's (its own rank)
+        std::fs::create_dir_all(own.join("fragment")).unwrap();
+        std::fs::write(own.join("fragment/SKILL.md"), "---\nname: fragment\n---\n").unwrap();
+        assert_eq!(hermes_finds(&own, &external).get("fragment"), Some(&own.join("fragment/SKILL.md")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

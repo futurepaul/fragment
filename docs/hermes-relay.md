@@ -11,7 +11,11 @@ Pinned to Hermes v0.21.5 (tag `v2026.9.24`, the newest release on
 wins over its contract document). Relay is marked experimental: it may
 change without a deprecation cycle, so a Hermes upgrade re-reads it, and
 the real-Hermes lane (`images/bridge/tests/docker.rs`) runs the real
-image against it.
+image against it. Re-read on upstream's main at `90194c64ff99`
+(`main-desktop` of 2026-10-06, the image's pin until a stable release of
+its new pipeline): `gateway/relay/` only drops its plugin-compat names
+and takes its prompts' labels from translations (English as before);
+contract version 1, the wire unchanged.
 
 ## The dial
 

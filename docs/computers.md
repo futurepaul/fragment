@@ -598,8 +598,9 @@ settings and state):
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
-  bridge as Hermes' Relay connector, the screen. One Hermes
+- `images/hermes`: Hermes' desktop image (pinned by digest in its
+  Dockerfile), `hermes-boot`, the bridge as Hermes' Relay connector, the
+  screen. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
@@ -729,12 +730,18 @@ settings and state):
   described by the route's vision model: Models), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
-  with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Its browser, and the desktop's Browser icon a
+  with no backend named, Hermes would offer Browser Use's one
+  `browser_exec` tool instead), which drive `agent-browser` (Hermes'
+  image has none: the image installs the one Hermes' lock pins, through
+  Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
-  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
+  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
+  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
+  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  (`TMPDIR`: a headless one's temporary profile, and its shared memory)
+  the container's `/tmp`, never Hermes' home's `cache/scratch` under
+  `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
@@ -781,14 +788,23 @@ and how a runtime finds them, is the image's.
   "Its computer's screen"), with a description for Hermes' skills index.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
-  agents), so it is always the binary's in the image, and costs a boot
-  nothing; the build fails if `fragment skill` is no skill named
-  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
-- **Every profile** names the managed directory, then the platform skill's,
-  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
-  synced both ways: an agent's own skills are versioned in its fragment).
-  Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. An agent's profile has
+  agents), so it is always the binary's in the image; the build fails if
+  `fragment skill` is no skill named `fragment`. A missing `fragment
+  skill` instruction belongs in cli/SKILL.md. The profiles find it in its
+  view, `/var/lib/fragment-run/platform-skills` (the boot's, read-only to
+  the agents, never saved): a copy `hermes-boot` makes at each start and
+  after each install of the managed set, unless a managed skill takes its
+  name (`fragment`), when it leaves the view (`skills.installed`'s
+  `platform`).
+- **Every profile** names the managed directory and the platform skill's
+  view in `skills.external_dirs`, below its own `skills/` (its agent
+  fragment's, synced both ways: an agent's own skills are versioned in its
+  fragment). Hermes ranks a profile's own skills above its external dirs,
+  so an agent's own wins over a managed one or the platform's; its
+  external dirs are one rank, in which two skills of one name are
+  ambiguous and Hermes finds neither by it (since its main of 2026-10;
+  v0.21.5 took the first dir's), so a managed `fragment` wins over the
+  platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, and the platform skill. The image carries none of Hermes' bundled
   skills: Hermes copies them only into the home its sync runs in, the
@@ -857,9 +873,12 @@ persisted)".
   terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
   only them, not the terminal: defense in depth, as Hermes says), for the
   scratch an install is made from; they run as its user, so `/usr/local`
-  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  is not theirs. Lazy installs are off (upstream's image turns them on;
+  `security.allow_lazy_installs: false` in the managed overlay): they are
   Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of.
+  computer configures none of. npm's global prefix is `/usr/local`
+  (`npm_config_prefix`, which sudo keeps): npm's own, since Hermes' PM
+  ships Node, is its Node's directory in Hermes' tool store, on no PATH.
 - **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer

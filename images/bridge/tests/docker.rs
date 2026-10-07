@@ -307,7 +307,7 @@ async fn the_hermes_image() {
     // The managed skills (decision 17): paul's skills fragment's `skills/`,
     // installed read-only where every profile looks after its own, read as
     // the agent acting for paul; its own skills win on a name.
-    let managed = "/data/hermes/managed-skills";
+    let (managed, view) = ("/data/hermes/managed-skills", "/var/lib/fragment-run/platform-skills");
     let installed = |path: &str| c.exec(&["test", "-f", &format!("{managed}/{path}")]);
     let t_skills = Instant::now();
     while !(installed("research/arxiv-finite/SKILL.md") && installed("grill-me/SKILL.md")) {
@@ -322,11 +322,11 @@ async fn the_hermes_image() {
         assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=id%3Apaul") && r.2.as_deref() == Some("juniper.paul") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
     });
     assert!(
-        c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"/opt/fragment/skills\"]")),
-        "its profile names the managed skills, then the platform skill"
+        c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"{view}\"]")),
+        "its profile names the managed skills and the platform skill's view"
     );
     // what Hermes itself finds for the profile: its own first, then the
-    // managed set, then the platform skill (the image's: its CLI's own)
+    // managed set and the platform skill (the image's: its CLI's own)
     let hermes_finds = || {
         let found = c.exec_out(&[
             "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
@@ -341,17 +341,20 @@ async fn the_hermes_image() {
     assert!(found["grill-me"].as_str().is_some_and(|d| d.contains("which wins")), "its own wins on a name: {found}");
     assert!(found["fragment"].as_str().is_some_and(|d| d.starts_with("You are an agent on a Fragment computer")), "the platform skill: {found}");
     let platform = c.exec_out(&["cat", "/opt/fragment/skills/platform/fragment/SKILL.md"]);
+    assert_eq!(c.exec_out(&["cat", &format!("{view}/platform/fragment/SKILL.md")]), platform, "the view shows the image's platform skill");
     let cli = c.exec_out(&["fragment", "skill"]);
     let cli_body = cli.split_once("\n---\n").map_or("", |(_, body)| body.trim());
     assert!(platform.contains("# Your computer") && !cli_body.is_empty() && platform.contains(cli_body), "the platform skill is the image's CLI's own, after the computer's page:\n{platform}");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /opt/fragment/skills/platform/fragment/SKILL.md"]), "the platform skill is read-only to the agents");
+    assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo x > {view}/platform/fragment/SKILL.md")]), "and so is its view");
 
     let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:paul fragment login 2>&1; echo exit=$?"]);
     assert!(login.contains("needs no login") && login.contains("exit=2"), "an agent logs in to nothing: {login}");
 
     // a change to the managed set is followed while it runs: one skill
     // changed, a file gone, and a managed `fragment`, which shadows the
-    // platform's
+    // platform's (it leaves the view: Hermes finds neither of two of one
+    // name in its external dirs)
     fake.with(|w| {
         let f = w.fragments.get_mut(&skills).unwrap();
         f.files.insert("skills/research/arxiv-finite/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: arxiv-finite\ndescription: Search arXiv, again.\n---\n"));
@@ -359,7 +362,8 @@ async fn the_hermes_image() {
         f.files.insert("skills/fragment/SKILL.md".into(), bytes::Bytes::from_static(b"---\nname: fragment\ndescription: The managed fragment, which wins.\n---\n"));
     });
     let t_follow = Instant::now();
-    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py") && installed("fragment/SKILL.md")) {
+    let shown = || c.exec(&["test", "-e", &format!("{view}/platform/fragment/SKILL.md")]);
+    while !(c.exec_out(&["cat", &format!("{managed}/research/arxiv-finite/SKILL.md")]).contains("again") && !installed("research/arxiv-finite/scripts/search.py") && installed("fragment/SKILL.md") && !shown()) {
         assert!(t_follow.elapsed() < Duration::from_secs(60), "the managed skills never followed the change; the container said:\n{}", c.logs());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -486,6 +490,22 @@ async fn the_hermes_image() {
     });
     assert!(c.exec(&["dpkg", "-s", "fragment-hello"]), "installed as a package, through apt");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /usr/local/bin/fragment-hi"]), "the system's directories stay root's: an install goes through sudo");
+    // and `sudo npm install -g` installs where its terminal runs programs
+    // from, not into Hermes' tool store (npm's own prefix since Hermes' PM)
+    let npm = fake.say(&chat, &person("paul"), json!({ "text": "run: echo npm-global=$(sudo npm prefix -g)" }));
+    let tn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", npm["seq"].as_u64().unwrap());
+    fake.until(120_000, "npm's answer", |w| answered(w, &tn).is_some()).await;
+    fake.with(|w| {
+        let reply = answered(w, &tn).unwrap();
+        assert!(reply["text"].as_str().unwrap_or("").contains("npm-global=/usr/local\""), "npm's global prefix, as root: {reply}");
+    });
+    // Hermes fetches none of its optional backends on its own (its lazy
+    // installs, which its image turns on, off in the managed overlay), in
+    // the gateway's home or an agent's
+    for home in ["/data/hermes", "/data/hermes/profiles/juniper-paul"] {
+        let allowed = c.exec_out(&["/command/s6-setuidgid", "hermes", "env", &format!("HERMES_HOME={home}"), "/opt/hermes/.venv/bin/python", "-c", "import os; os.chdir('/opt/hermes'); from pm import lazy_installs_allowed; print(lazy_installs_allowed())"]);
+        assert_eq!(allowed.trim().lines().last(), Some("False"), "no lazy installs for {home}: {allowed}");
+    }
     // Hermes' file tools (write_file, patch) may write where its terminal
     // works, its home and /tmp, and nowhere else (HERMES_WRITE_SAFE_ROOT),
     // as Hermes' own check decides
@@ -718,14 +738,18 @@ fn unexplained(changed: &[String]) -> Vec<&String> {
 }
 
 /// Each of `paths` Hermes replaces whole, a state or a stamp, read now:
-/// whole, it parses as JSON (a stamp's epoch is a number).
+/// whole, it parses as JSON; a stamp is its epoch, a number, and the
+/// cron ticker's heartbeat its writer's pid after it (`<epoch> <pid>`, since
+/// Hermes' main of 2026-10).
 fn whole(c: &Container, paths: &[String]) {
     let replaced = |p: &&String| p.ends_with(".json") || ["/gateway.heartbeat", "/ticker_heartbeat", "/ticker_last_success", "/ticker_last_error"].iter().any(|s| p.ends_with(s));
     for p in paths.iter().filter(replaced) {
         let (code, text) = c.exec_code(&["cat", p]);
-        if code == 0 {
-            assert!(serde_json::from_str::<serde_json::Value>(&text).is_ok(), "{p} is whole: {text:?}");
+        if code != 0 {
+            continue;
         }
+        let stamp = p.ends_with("/ticker_heartbeat") && text.split_once(' ').is_some_and(|(epoch, pid)| epoch.parse::<f64>().is_ok() && pid.trim().parse::<u32>().is_ok());
+        assert!(stamp || serde_json::from_str::<serde_json::Value>(&text).is_ok(), "{p} is whole: {text:?}");
     }
 }
 
@@ -1207,13 +1231,17 @@ fn held_event(c: &Container) -> Option<serde_json::Value> {
 }
 
 /// Goal (Paul, 2026-10-07: an agent's `~` is its work): a Chromium the
-/// agent runs from its terminal with its default profile, the full one as
-/// its desktop runs it, keeps that profile in its home, in its work, so a
-/// hold while it runs keeps none of its databases hot (`locked` empty), and
-/// none is under Hermes' home for a restore's check to find. Before, it was
-/// under Hermes' home (on Containers `/data/hermes/.config/…`; with the home
-/// pinned, the profile's `home/.config/…`), and its
-/// `declarative_performance_observer.db` was held locked.
+/// agent runs from its terminal, headless with no profile named, the full
+/// one as its desktop runs it, keeps its databases out of Hermes' home, so
+/// a hold while it runs keeps none of them hot (`locked` empty), and none
+/// is under Hermes' home for a restore's check to find. Before, its profile
+/// was under Hermes' home (on Containers `/data/hermes/.config/…`; with the
+/// home pinned, the profile's `home/.config/…`), and its
+/// `declarative_performance_observer.db` was held locked. Chrome 153 (Hermes
+/// v0.21.5's image) kept that temporary profile under `~`, in its work;
+/// Chrome 145 (Hermes' main) keeps it in `TMPDIR`, which Hermes points at
+/// its home's scratch, so the image's Chromium gives it the container's
+/// `/tmp` (hermes.rs, `CHROMIUM_TMP`).
 /// The agent starts it as Hermes' background process (`start:`).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
@@ -1229,18 +1257,18 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
     within(&fake, &chat, &c, 240_000, "the terminal's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)).await;
     let dbs = |under: &str| c.exec_out(&["sh", "-c", &format!("find {under} \\( -name '*.db' -o -name History -o -name Cookies \\) -path '*chrom*' 2>/dev/null")]);
     let t = Instant::now();
-    while dbs("/data/").trim().is_empty() {
+    while dbs("/data/ /tmp/").trim().is_empty() {
         assert!(t.elapsed() < Duration::from_secs(60), "the agent's Chromium made no databases; the terminal said {:?}", fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "the agent's Chromium runs into the hold");
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
     let held = held_event(&c).unwrap_or_else(|| panic!("no held event; the container said:\n{}", c.logs()));
-    eprintln!("browse: held {held}; left out {left_out:?}\nbrowse: its Chromium's databases:\n{}", dbs("/data/"));
+    eprintln!("browse: held {held}; left out {left_out:?}\nbrowse: its Chromium's databases:\n{}", dbs("/data/ /tmp/"));
     assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "and through it");
     assert_eq!(held["locked"], json!([]), "no database kept hot for being locked: {held}");
     assert_eq!(dbs("/data/hermes/").trim(), "", "none of its databases is under Hermes' home");
-    assert!(!dbs("/data/work/juniper-paul/home/").trim().is_empty(), "they are in its home, in its work");
+    assert!(!dbs("/tmp/").trim().is_empty() || !dbs("/data/work/juniper-paul/home/").trim().is_empty(), "its temporary profile is the container's, or in its home, in its work");
     unhold(&c);
 }
 

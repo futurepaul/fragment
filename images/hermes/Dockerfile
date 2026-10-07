@@ -1,15 +1,19 @@
 # syntax=docker/dockerfile:1.7
 # Our Hermes computer image (docs/computers.md; decisions 15, 18, 21; spike
 # S3b's boot list). Everything Hermes-specific lives here, never in the
-# platform: Hermes v0.21.5's desktop image, the bridge as its Relay
-# connector, hermes-boot around it, sandbox-shim, the screen.
+# platform: Hermes' desktop image, the bridge as its Relay connector,
+# hermes-boot around it, sandbox-shim, the screen.
 # The image holds no secret.
 #
 # Build from the repo root (it carries the fragment CLI, of the root
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
 
-ARG HERMES=nousresearch/hermes-agent:v2026.9.24-desktop
+# Upstream's main (no stable release of its new pipeline is published yet),
+# pinned by digest: `main-desktop` as of 2026-10-06, built from
+# NousResearch/hermes-agent@90194c64ff99. The first stable is
+# `vX.Y.Z-desktop`, pinned here the same way (a tag and its index digest).
+ARG HERMES=nousresearch/hermes-agent:main-desktop@sha256:7c6c7debc9e8fe623ffd5afce1c80116e8cff4e818ef42eb649d43562139d140
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -52,11 +56,15 @@ ADD --checksum=sha256:b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c4
 RUN mkdir /novnc && tar -xzf /novnc.tgz -C /novnc --strip-components=1
 
 FROM ${HERMES} AS hermes
+# Upstream's settings, as its image sets them: the flatten below restates
+# them, and checks it does.
+RUN mkdir -p /opt/fragment && env | sort > /opt/fragment/upstream.env
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 # cua-driver, the backend of Hermes' computer_use (screenshots of the agent's
 # desktop, XTest input): without it Hermes offers the agent no computer_use.
-# Pinned (the release current at Hermes v0.21.5's), named to Hermes by
-# HERMES_CUA_DRIVER_CMD below, so Hermes never runs its upstream installer.
+# Pinned (the release current at Hermes v0.21.5's; Hermes' image has none,
+# and its PM's pin is older), named to Hermes by HERMES_CUA_DRIVER_CMD
+# below, which Hermes takes over its PM's.
 ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /tmp/cua-driver.tgz
 RUN tar -C /usr/local/bin -xzf /tmp/cua-driver.tgz cua-driver && rm /tmp/cua-driver.tgz \
  && CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false /usr/local/bin/cua-driver --version | grep -qx 'cua-driver 0\.28\.3'
@@ -71,6 +79,20 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
       'exec /opt/gws/gws "$@"' > /usr/local/bin/gws \
  && chmod 0755 /usr/local/bin/gws \
  && /usr/local/bin/gws --version | grep -q '0\.22\.5'
+# agent-browser, the CLI Hermes' built-in browser tools drive (each
+# profile's `browser.backend: "off"`: boot/src/hermes.rs). Hermes' image
+# carries none (its default browser is Browser Use's browser_exec), and its
+# browser tools look for it only in its PM's store or on PATH, never
+# installing it to see whether to offer themselves: without it an agent has
+# no browser_* tool. Fetched by Hermes' own PM, at the version and hash its
+# lock pins, and put on PATH: PM writes beside a sealed store (the image's)
+# only into its home's (HERMES_HOME/tools, which /data would replace), so it
+# fetches into a scratch home, and its one binary (a native one) is
+# installed from there.
+RUN HERMES_HOME=/tmp/pm-agent-browser /opt/hermes/.venv/bin/python -c 'from pm import ensure, installed_package; ensure("agent-browser", explicit=True); print(installed_package("agent-browser").binary)' > /tmp/agent-browser.path \
+ && install -m 0755 "$(tail -n 1 /tmp/agent-browser.path)" /usr/local/bin/agent-browser \
+ && rm -rf /tmp/pm-agent-browser /tmp/agent-browser.path \
+ && /usr/local/bin/agent-browser --version | grep -q '^agent-browser [0-9]'
 
 # Root for the session (Paul, 2026-10-05: "hermes needs to be able to
 # install binaries (not persisted)"). Hermes stays its unprivileged user, as
@@ -80,10 +102,12 @@ RUN mkdir -p /opt/gws && tar -C /opt/gws -xzf /tmp/gws.tgz ./gws && rm /tmp/gws.
 # so root inside it opens nothing of anyone else's. The system's
 # directories stay root's, as on a CI runner. What it installs lasts until
 # the computer's next start from this image (docs/computers.md, "Root in
-# our Hermes image"). apt's lists are kept, fresh as of this build.
+# our Hermes image"). apt's lists are kept, fresh as of this build. sudo
+# keeps npm's global prefix (npm_config_prefix, below), so `sudo npm
+# install -g` puts a program in /usr/local/bin.
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends sudo \
- && printf 'hermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
+ && printf 'Defaults env_keep += "npm_config_prefix"\nhermes ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/hermes \
  && chmod 0440 /etc/sudoers.d/hermes \
  && visudo -c -q
 COPY --from=build /out/ /opt/fragment/bin/
@@ -133,8 +157,10 @@ RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchec
 
 # What the boot reads instead of finding it each time: the lean plugin list;
 # the image's Chromium, /opt/fragment/bin/chromium
-# (Playwright's, always with the flags a container needs, which Hermes adds
-# only where it sees Docker: boot/src/hermes.rs); the platform skill every profile
+# (the full Chromium Hermes' build pins and names in
+# /etc/hermes/agent-browser-executable-path, always with the flags a
+# container needs, which Hermes adds only where it sees Docker:
+# boot/src/hermes.rs); the platform skill every profile
 # has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
 # and the files the gateway loads, read ahead on the second CPU while /data
 # is restored (S3b, cut h).
@@ -146,7 +172,10 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && install -d -m 1777 /tmp/node-compile-cache
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
-# restated, without upstream's VOLUME. Three differ from upstream's:
+# restated, without upstream's VOLUME. Hermes' PM finds its tool store (its
+# Python, Node, npm, uv, Chromium) by HERMES_RUNTIME_DIR, and Hermes no
+# longer falls back to a system node, npm or uv: unset, both would look in
+# /data/hermes/tools. Three differ from upstream's:
 # - Hermes' home is /data/hermes, under the only directory a computer
 #   keeps, not /opt/data. Hermes and its setup read HERMES_HOME; what still
 #   names /opt/data never runs here (main-wrapper.sh, upstream's main
@@ -158,11 +187,14 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 #   to it), the last for the scratch an install is made from. /usr/local is not
 #   theirs to write: they run as Hermes' user, and root is the terminal's,
 #   through sudo.
-# - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
-#   optional backends (providers, platforms, speech; tools/lazy_deps.py),
-#   which a computer configures none of (its model is the platform's route,
-#   its chat the relay). Software the agent wants is its terminal's to
-#   install.
+# - npm's global prefix is /usr/local (npm_config_prefix), as it was before
+#   Hermes' PM: its npm's own is its Node's directory in the store, which no
+#   PATH names, so `sudo npm install -g` would put a program nowhere an
+#   agent runs it from, and write into Hermes' sealed store. Hermes' PM
+#   leaves npm_config_* out of its own npm runs.
+# Lazy installs, which upstream now turns on (into /data/hermes/installs),
+# are off: Hermes' managed overlay (security.allow_lazy_installs,
+# boot/src/hermes.rs).
 # Node's compile cache is kept under /tmp (NODE_COMPILE_CACHE, one directory
 # every user may write, each its own inside), never in /data: npm turns it on
 # at every start, under TMPDIR, which Hermes points into its home
@@ -174,14 +206,16 @@ COPY --from=hermes / /
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright \
-    npm_config_install_links=false \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools \
+    HERMES_RUNTIME_DIR=/opt/hermes/tools \
+    HERMES_PYTHON=/opt/hermes/.venv/bin/python \
+    CC=gcc \
+    CXX=g++ \
+    npm_config_prefix=/usr/local \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/hermes \
     HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
-    HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     NODE_COMPILE_CACHE=/tmp/node-compile-cache \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
@@ -195,6 +229,13 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     FRAGMENT_API=http://api.fragment.internal \
     FRAGMENT_MODEL=http://model.fragment.internal
 WORKDIR /opt/hermes
+# Every setting of upstream's image is restated, but the two above that
+# differ (its PATH's home, read as ours): the build fails on one the
+# flatten drops or sets otherwise, as a new base's would be.
+RUN env | sort > /tmp/env.now \
+ && lost="$(grep -Ev '^(HOME|HOSTNAME|PWD|SHLVL|_|HERMES_HOME|HERMES_WRITE_SAFE_ROOT)=' /opt/fragment/upstream.env | sed '/^PATH=/s#/opt/data#/data/hermes#' | grep -vxFf /tmp/env.now || true)" \
+ && rm /tmp/env.now \
+ && if [ -n "$lost" ]; then printf 'upstream sets what the flatten does not:\n%s\n' "$lost"; exit 1; fi
 # which build this is, served beside the screen (the platform's upgrade and
 # rollback lane reads it through the computer's port): a layer of its own,
 # so another build shares the one above
