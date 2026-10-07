@@ -25,7 +25,7 @@ fn free_port() -> SocketAddr {
 }
 
 fn relay(listen: SocketAddr, dir: &std::path::Path) -> Box<Relay> {
-    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media"), end_settle_ms: 300, empty_settle_ms: 2_000 } })
+    Box::new(Relay { config: RelayConfig { listen, gateway_id: "computer-test".into(), secret: SECRET.into(), media_dir: dir.join("relay-media") } })
 }
 
 fn replies(w: &World, chat: &str) -> Vec<Value> {
@@ -76,6 +76,30 @@ async fn a_reply_with_steps_and_drafts() {
         assert_eq!(e["source"]["chat_id"], wire::chat_id(&chat, "juniper.paul"));
         assert_eq!(e["source"]["user_name"], "paul");
         assert_eq!(e["message_id"], turn);
+    });
+    bridge.stop().await;
+}
+
+/// Goal: a turn ends at its `❌` though it said nothing (only a `✅`
+/// waits for something said: the startup gate's empty bracket's), with no
+/// clock; Hermes' notice after it is no step of the failed turn's but a
+/// message of its own.
+#[tokio::test]
+async fn a_failed_turn_ends_at_its_cross() {
+    let (fake, bridge, _hermes, _dir) = setup("relay-fail", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "fail please" }));
+    let turn = records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let end = |w: &World| w.bodies(&chat, "work", "turn.end").into_iter().find(|e| e["turn"] == turn);
+    fake.until(WAIT, "the turn's end, and the notice", |w| end(w).is_some() && !replies(w, &chat).is_empty()).await;
+    fake.with(|w| {
+        assert_eq!(end(w).unwrap()["outcome"], "error");
+        assert!(w.bodies(&chat, "work", "turn.step").is_empty(), "the notice is no step");
+        let notice = replies(w, &chat);
+        assert_eq!(notice.len(), 1);
+        assert_eq!(notice[0]["text"], support::hermes::FAILURE);
+        assert_ne!(notice[0]["turn"], turn, "said after the turn's end, the notice is a turn of its own");
     });
     bridge.stop().await;
 }

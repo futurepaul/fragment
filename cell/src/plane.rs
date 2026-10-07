@@ -4,10 +4,11 @@
 //! pin (metadata only), and moves a pin when a signed push webhook, an
 //! editor's `refresh`, or the poll backstop sees its branch move. Editors
 //! write to git directly with a storage token; deploy, preview, and
-//! rollback are ref moves the CLI makes. The poll backstop keeps its
-//! interval only while something outside the platform may be writing (a
-//! token minted, a webhook, in the last day) or other work rides it
-//! (`busy`); a fragment nothing touches is polled once a day.
+//! rollback are ref moves the CLI makes. The cell follows each move it
+//! makes or is told of at once; the poll backstop runs only while the pins
+//! may lag the repo (`pins_may_lag`: a storage token minted, or a move that
+//! failed to follow, in the last day), so a fragment no one pushes to asks
+//! code.storage nothing.
 
 use std::collections::BTreeMap;
 
@@ -32,13 +33,13 @@ const DELIVERIES_KEPT: i64 = 10_000;
 const DELIVERY_TTL_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Tree rows per insert statement.
 const TREE_BATCH: usize = 20;
-/// How far apart a quiet fragment's passes are (the poll backstop, and the
-/// housekeeping it carries): a day. A busy one's come every poll interval
-/// (`FragmentCell::busy`).
+/// How far apart a quiet fragment's passes (its housekeeping) are: a day.
+/// A busy one's come every poll interval (`FragmentCell::busy`).
 pub const QUIET_PASS_MS: i64 = 24 * 3600 * 1000;
-/// How long a storage token minted, or a webhook, keeps a fragment busy: a
-/// token lives 15 minutes, so this is generous for whoever pushes with it.
-const OUTSIDE_WRITES_MS: i64 = 24 * 3600 * 1000;
+/// How long the pins may lag after a storage token is minted, or a move
+/// fails to follow: a token lives 15 minutes, so this is generous for
+/// whoever pushes with it, and outlasts a code.storage outage of hours.
+const MAY_LAG_MS: i64 = 24 * 3600 * 1000;
 pub const REFS: [&str; 2] = ["main", "live"];
 
 pub struct PinMove {
@@ -128,7 +129,8 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 /// A blob's served type came after the blob table (blobs.rs): one from
 /// before is served untyped. A channel trigger's posters (`from`) came
 /// after the trigger table: one from before fires for every record, as it
-/// was installed to.
+/// was installed to. A run's code came after the run table (jobs.rs
+/// `advance`): a run in flight from before starts over at its next step.
 /// Runs in the constructor, before anything reads these tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
     for (table, column, decl) in [
@@ -137,6 +139,7 @@ pub(crate) fn migrate_code(sql: &SqlStorage) {
         ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "mime", "TEXT"),
         ("code_triggers", "from_kind", "TEXT"),
+        ("runs", "code", "TEXT"),
     ] {
         let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
         if !cols.iter().any(|c| c["name"] == column) {
@@ -297,6 +300,7 @@ impl FragmentCell {
             ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
             (_, live) => {
                 self.install_code(live).await?;
+                self.search_fence()?;
             }
         }
         match pin {
@@ -533,9 +537,9 @@ impl FragmentCell {
     /// A blessed fragment installed from an older release of its template
     /// installs live again, from the release it now serves: one deploy of
     /// the platform updates every chat, its manifest and its code, at its
-    /// next request (fragment.rs `route`) or pass. Asked again under the
-    /// plane's lock (a request beside it may have installed it meanwhile),
-    /// of the pin live is at then.
+    /// next request (fragment.rs `route`); one no one uses waits. Asked
+    /// again under the plane's lock (a request beside it may have
+    /// installed it meanwhile), of the pin live is at then.
     pub(crate) async fn blessed_current(&self) -> CellResult<()> {
         if !self.blessed_stale()? {
             return Ok(());
@@ -547,6 +551,7 @@ impl FragmentCell {
             }
             let live = self.meta(MetaKey::PinLive)?;
             self.install_code(live.as_deref()).await?;
+            self.search_fence()?;
         }
         // the release's cron triggers, if it declares any, are due from now
         self.schedule().await
@@ -632,50 +637,52 @@ impl FragmentCell {
         }
     }
 
-    /// The backstop for lost webhooks, from the alarm's pass.
+    /// The backstop for lost webhooks, from the alarm's pass while the pins
+    /// may lag the repo: every other move was followed when it was made or
+    /// announced, so a quiet pass asks code.storage nothing.
     pub(crate) async fn poll(&self) {
         if let Err(e) = self.interpret(&REFS).await {
             self.event("git.poll-failed", &e.message, json!({ "code": e.code }));
         }
-        if let Err(e) = self.blessed_current().await {
-            self.event("blessed.install-failed", &e.message, json!({ "code": e.code }));
-        }
     }
 
-    /// Whether the fragment's next pass (the poll backstop and the
-    /// housekeeping it carries) comes within the poll interval rather than
-    /// a day after the last: something outside the platform may have
-    /// written its repo in the last day (a storage token was minted for it,
-    /// or a webhook arrived), a run is in flight (each pass checks it
-    /// against its Workflow) or ended with a reservation to give back, or a
-    /// template or a declared agent is still to land (each pass tries
-    /// again). The rest of the alarm's work has due times of its own.
-    /// A fragment nothing touches (a chat, from its second day) is woken
-    /// once a day, and asks code.storage twice.
+    /// Whether the fragment's next pass (its housekeeping, and the poll
+    /// backstop) comes within the poll interval rather than a day after the
+    /// last: the pins may lag the repo (`pins_may_lag`), a run is in flight
+    /// (each pass checks it against its Workflow) or ended with a
+    /// reservation to give back, or a template or a declared agent is still
+    /// to land (each pass tries again). The rest of the alarm's work has
+    /// due times of its own. A fragment nothing touches (a chat, from its
+    /// second day) is woken once a day, and asks code.storage nothing.
     pub(crate) fn busy(&self) -> CellResult<bool> {
         #[derive(Deserialize)]
         struct Busy {
-            outside_at: Option<String>,
             pending: i64,
             running: i64,
             holds: i64,
         }
         let rows: Vec<Busy> = self.typed(
-            "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
-               EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
+            "SELECT EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
                EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS holds",
-            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
+            vec![MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
-        let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);
-        Ok(outside || b.pending != 0 || b.running != 0 || b.holds != 0)
+        Ok(self.pins_may_lag()? || b.pending != 0 || b.running != 0 || b.holds != 0)
     }
 
-    /// Something outside the platform may write the repo from now on (a
-    /// storage token was minted for it, or a webhook arrived): for the next
-    /// day the poll backstop comes within its interval (`busy`).
-    async fn outside_writer(&self) -> CellResult<()> {
+    /// Whether the pins may lag the repo: in the last day a storage token
+    /// was minted for it (its holder pushes when they like, and a push's
+    /// webhook can be lost), or a move the cell made or was told of failed
+    /// to follow.
+    pub(crate) fn pins_may_lag(&self) -> CellResult<bool> {
+        let at = self.meta(MetaKey::OutsideAt)?.and_then(|at| at.parse::<i64>().ok());
+        Ok(at.is_some_and(|at| js::now_ms() - at < MAY_LAG_MS))
+    }
+
+    /// The pins may lag the repo from now: for the next day the poll
+    /// backstop follows whatever moved, within its interval (`busy`).
+    pub(crate) async fn may_lag(&self) -> CellResult<()> {
         self.set_meta(MetaKey::OutsideAt, &js::now_ms().to_string())?;
         self.schedule().await
     }
@@ -699,7 +706,8 @@ impl FragmentCell {
     /// A code.storage push delivery: validate, then remember (redeliveries
     /// are acknowledged, not interpreted twice), then interpret. The pin
     /// moves to the branch's head as read now, so a late or out-of-order
-    /// delivery never moves it backwards.
+    /// delivery never moves it backwards. One that fails to follow is the
+    /// poll backstop's.
     pub(crate) async fn webhook(&self, event: &str, signature: &str, body: &[u8]) -> CellResult<Response> {
         self.name()?;
         let secret = self.must(MetaKey::WebhookSecret)?;
@@ -707,7 +715,6 @@ impl FragmentCell {
             self.event("webhook.rejected", &format!("{event}: {why}"), Value::Null);
             return Err(CellError::new(ErrorCode::Unauthenticated, why));
         }
-        self.outside_writer().await?;
         let payload: Value = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("webhook body: {e}")))?;
         let Some(push) = webhook::parse_push(event, &payload) else {
             return json_response(&json!({ "ok": true, "ignored": event }));
@@ -732,7 +739,11 @@ impl FragmentCell {
         if !REFS.contains(&push.branch.as_str()) {
             return json_response(&json!({ "ok": true, "interpreted": false, "redelivery": false }));
         }
-        self.interpret(&[push.branch.as_str()]).await?;
+        if let Err(e) = self.interpret(&[push.branch.as_str()]).await {
+            // remembered, so its redelivery is acknowledged, not followed
+            self.may_lag().await?;
+            return Err(e);
+        }
         json_response(&json!({ "ok": true, "interpreted": true, "redelivery": false }))
     }
 
@@ -749,7 +760,7 @@ impl FragmentCell {
             &format!("{} → repo {repo}, git:read+git:write, {}s", npub::display(who), limits::STORAGE_TOKEN_TTL_S),
             json!({ "actor": npub::display(who), "key": caller.key().map(npub::display), "repo": repo, "expiresAt": token.expires_at }),
         );
-        self.outside_writer().await?;
+        self.may_lag().await?;
         json_response(&token)
     }
 
@@ -860,24 +871,6 @@ impl FragmentCell {
         let mut resp = self.stream_file(&facts, "main", &row, None).await?;
         resp.headers_mut().set("cache-control", "no-store")?;
         Ok(resp)
-    }
-
-    pub(crate) async fn stat(&self, caller: &Caller, path: &str) -> CellResult<Response> {
-        let mut facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Viewer)?;
-        if !valid_repo_path(path) {
-            return Err(CellError::invalid("path must be a relative repo path"));
-        }
-        self.ensure_pins(&mut facts).await?;
-        let absent = json!({ "path": path, "size": 0, "blobSha": "", "lastCommitSha": "", "present": false });
-        let stat = match (&facts.pin_main, self.tree_row("main", path)?) {
-            (Some(pin), Some(row)) => match self.cs()?.head(&facts.repo, pin, path).await? {
-                Some(h) => json!({ "path": path, "size": h.size, "blobSha": h.blob_sha, "lastCommitSha": h.last_commit_sha, "present": true }),
-                None => json!({ "path": path, "size": row.size, "blobSha": "", "lastCommitSha": row.last_commit, "present": true }),
-            },
-            _ => absent,
-        };
-        json_response(&json!({ "stat": stat, "ref": facts.pin_main }))
     }
 
     /// The installed operations (from the live commit); none without code.

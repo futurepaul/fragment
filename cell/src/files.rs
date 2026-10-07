@@ -152,9 +152,10 @@ impl FragmentCell {
             };
             self.exec("INSERT OR IGNORE INTO file_commits (key, sha, at) VALUES (?, ?, ?)", vec![key.into(), tip.as_str().into(), now])?;
             drop(held);
-            // The pin follows now (the webhook and the poll would, later).
+            // The pin follows now; failing that, the webhook or the poll backstop.
             if let Err(e) = self.interpret(&["main"]).await {
                 self.event("files.refresh-failed", &e.message, json!({ "commit": tip }));
+                self.may_lag().await?;
             }
             return Ok(Wrote::Commit(tip));
         }
