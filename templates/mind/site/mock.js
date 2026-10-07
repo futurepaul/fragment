@@ -57,7 +57,9 @@ const NOTE_KINDS = [
   ["life", () => pick(["prefers short answers; no bullet lists unless asked", "Sam is vegetarian", "allergic to cashews", "coffee: Chemex 1:16 at 94°C", "mom's birthday Nov 12", "dislikes more than one question at a time", "reads paper books before bed", "wants commit messages terse, no emoji", "dinner with the Okafors on Friday", "dentist moved to the 14th"])],
   ["money", () => pick(["house fund $" + (18 + Math.floor(rnd() * 12)) + "k", "paid Q2 estimated tax", "HYSA at 4.1%", "cancelled the gym membership", "budget: groceries $640 this month"])],
 ];
-const NOTES = 6144;
+// `?mock&fresh`: a mind made a moment ago, with nothing in it yet
+const FRESH = new URLSearchParams(location.search).has("fresh");
+const NOTES = FRESH ? 0 : 6144;
 const NOTE_START = NOW - 380 * DAY;
 const NOTE_END = NOW - 110 * DAY;
 for (let k = 0; k < NOTES; k++) {
@@ -118,7 +120,8 @@ const fills = []; // echoes written once the log is whole
 // a thread starts `ago` minutes back, else on day `d` at hour `h` (and before now)
 const hourNow = new Date(NOW).getHours() + new Date(NOW).getMinutes() / 60;
 for (const def of THREADS) def.start = def.ago ? NOW - def.ago * MIN : Math.min(NOW - def.d * DAY + (def.h - hourNow) * 3600_000, NOW - (90 + def.h) * MIN);
-const sorted = [...THREADS].sort((a, b) => a.start - b.start);
+const sorted = FRESH ? [] : [...THREADS].sort((a, b) => a.start - b.start);
+if (FRESH) topics.length = 0;
 for (const def of sorted) {
   const id = `t_${hex(16)}`;
   let at = def.start;

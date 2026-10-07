@@ -19,10 +19,10 @@ const title = (text, sub) => h("div.top-title", null, h("div.top-text", null, h(
 
 // ---- Everything: the chats by time, as cards ----
 
-function everything(into) {
+function everything(into, row) {
   const list = h("div.timeline");
   const more = h("button.ghost.more", { type: "button", hidden: true }, "Further back");
-  into.replaceChildren(h("div.screen-intro", null, h("h1", { text: "Everything" }), h("p", { text: "Every chat, as it came to be remembered. Open one to read it here." })), list, more);
+  into.replaceChildren(h("div.screen-intro", null, h("h1", { text: "Everything" }), h("p", { text: "Every chat, as it came to be remembered. Open one to read it here." }), row), list, more);
   let oldest = null;
   let lastPeriod = null;
   async function page() {
@@ -62,6 +62,8 @@ export function searchScreen(q0 = "") {
   const bar = h("div.search-bar", null, icon("search"), input, clear);
   const status = h("div.search-status", { "aria-live": "polite" });
   const results = h("div.results");
+  // Everything's ways in by topic
+  const topicRow = h("div.chips.big.topic-row");
   const col = h("div.column.wide", null, bar, status, results);
   const el = h("section.screen.search", null, topBar(title("Search")), h("div.scroll", null, col));
   let seq = 0;
@@ -75,7 +77,7 @@ export function searchScreen(q0 = "") {
     const n = ++seq;
     if (!q) {
       status.textContent = "";
-      if (shown !== "") everything(results);
+      if (shown !== "") everything(results, topicRow);
       shown = "";
       return;
     }
@@ -133,7 +135,13 @@ export function searchScreen(q0 = "") {
   run();
   return {
     el,
-    render() {},
+    render() {
+      const topics = [...(S.topics ?? [])].sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
+      const sig = JSON.stringify(topics.map((t) => [t.id, t.name, t.count]));
+      if (topicRow.__sig === sig) return;
+      topicRow.__sig = sig;
+      topicRow.replaceChildren(...topics.map((t) => h("a.chip", { href: `#/topic/${encodeURIComponent(t.id)}` }, icon("hash"), t.name, h("span.chip-count", { text: String(t.count ?? 0) }))));
+    },
     focus: () => input.focus(),
     // the hash named another search (a link, the back button)
     update(r) {
@@ -313,6 +321,8 @@ function stretch(n) {
 
 export function memoryScreen() {
   const stats = h("div.mem-stats");
+  const strata = h("div.strata", { role: "list", "aria-label": "How your history is folded, oldest first" });
+  const legend = h("div.strata-legend", { "aria-hidden": "true", hidden: true }, h("span", { text: "long ago, folded" }), h("span", { text: "now, line by line" }));
   const list = h("div.mem-list");
   const newest = h("button.pill.float-newest", { type: "button" }, icon("down"), "Newest");
   const intro = h(
@@ -321,6 +331,8 @@ export function memoryScreen() {
     h("h1", { text: "Memory" }),
     h("p", { text: "This is the whole of your history as every chat begins with it. Older stretches fold into fewer lines; the newest are a line each. Open any line to unfold it, all the way down to the words." }),
     stats,
+    strata,
+    legend,
   );
   const scroll = h("div.scroll", null, h("div.column.wide.memory-col", null, intro, list));
   const el = h("section.screen.memory", null, topBar(title("Memory", "as Mind sees it")), scroll, newest);
@@ -347,20 +359,53 @@ export function memoryScreen() {
   }
 
   function draw() {
+    legend.hidden = parts.length < 2;
+    newest.hidden = parts.length < 30;
+    if (!parts.length) {
+      list.replaceChildren(h("p.empty", { text: "Nothing yet. Every message lands here as a line of its own, and lines fold together as they age." }));
+      strata.replaceChildren();
+      stats.replaceChildren();
+      return;
+    }
     const items = [];
+    const runs = [];
     let run = null;
     for (const p of parts) {
       if (!run || run.n !== p.n) {
-        run = { n: p.n, first: p.id };
+        run = { n: p.n, first: p.id, lines: 0, key: `sec:${p.n}:${p.id}` };
+        runs.push(run);
         const d = dateOf(p.id);
         const since = typeof d === "number" ? `from ${new Date(d).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}` : typeof d === "string" ? d : "";
         const label = stretch(p.n);
-        items.push({ key: `sec:${p.n}:${p.id}`, sig: label + since, make: () => h("div.mem-sec", null, h("span", { text: label }), since ? h("time", { text: since }) : null) });
+        const key = run.key;
+        items.push({ key, sig: label + since, make: () => h("div.mem-sec", { dataset: { sec: key } }, h("span", { text: label }), since ? h("time", { text: since }) : null) });
       }
+      run.lines++;
       const fresh = painted;
       items.push({ key: `${p.id}+${p.n}`, sig: `${p.built}|${p.text}`, make: () => memRow(p, { fresh }) });
     }
     reconcile(list, items, { quiet: true });
+    // the strata: each level's stretch, as wide as (the root of) what it covers
+    const deepest = Math.max(1, ...runs.map((r) => Math.log2(r.n)));
+    reconcile(
+      strata,
+      runs.map((r) => ({
+        key: r.key,
+        sig: `${r.lines}|${deepest}`,
+        make: () => {
+          const covered = r.lines * r.n;
+          const fine = 1 - Math.log2(r.n) / deepest;
+          const b = h(
+            "button.stratum",
+            { type: "button", role: "listitem", style: `--g:${Math.sqrt(covered).toFixed(2)};--f:${fine.toFixed(2)}`, title: `${plural(covered, "message")} in ${plural(r.lines, "line")} (${r.n <= 1 ? "one per line" : `${r.n} per line`})` },
+            h("span", { text: r.n <= 1 ? "1" : r.n >= 1024 ? `${r.n / 1024}k` : String(r.n) }),
+          );
+          b.addEventListener("click", () => list.querySelector(`[data-sec="${r.key}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+          return b;
+        },
+      })),
+      { quiet: true },
+    );
     const unbuilt = parts.filter((p) => p.built === false).length;
     const pct = Math.min(100, Math.round((bytes / VIEW_BYTES) * 100));
     stats.replaceChildren(

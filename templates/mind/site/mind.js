@@ -106,12 +106,14 @@ export function mount(root, fragment) {
       { quiet: true },
     );
     const st = S.status;
-    nav.replaceChildren(
+    const memory = st?.unbuilt ? "…" : st?.T ? compact(st.T) : "";
+    const topicsCount = S.topics ? String(S.topics.length) : "";
+    once(nav, [current?.name, memory, topicsCount], () => [
       navItem("new", "#/new", "compose", "New chat"),
       navItem("search", "#/search", "search", "Search", navigator.platform?.startsWith("Mac") ? "⌘K" : "Ctrl K"),
-      navItem("topics", "#/topics", "hash", "Topics", S.topics ? String(S.topics.length) : ""),
-      navItem("memory", "#/memory", "layers", "Memory", st?.unbuilt ? "…" : st?.T ? compact(st.T) : ""),
-    );
+      navItem("topics", "#/topics", "hash", "Topics", topicsCount),
+      navItem("memory", "#/memory", "layers", "Memory", memory),
+    ]);
     const ids = S.recent.filter((id) => S.threads.has(id)).slice(0, 12);
     reconcile(
       recent,
@@ -140,7 +142,7 @@ export function mount(root, fragment) {
     );
     recentSec.hidden = !ids.length;
     const name = S.person?.name || "You";
-    foot.replaceChildren(
+    once(foot, [name, S.person?.picture], () => [
       h(
         "button.me",
         { type: "button", onclick: () => settingsSheet(), "aria-label": "Settings" },
@@ -149,7 +151,7 @@ export function mount(root, fragment) {
         icon("settings"),
       ),
       h("a.icon-btn", { href: `${platformOrigin()}/?apps`, target: "_top", title: "Your apps", "aria-label": "Your apps" }, icon("grid")),
-    );
+    ]);
   }
 
   // ---- the right panel: what it did here ----
@@ -169,7 +171,8 @@ export function mount(root, fragment) {
     const state = busy(r.id) ? (turn?.state === "settling" ? "Gathering memory" : "Thinking") : tasks.some(running) ? "Waiting on the computer" : "Ready";
     const st = S.status;
     const topics = (t?.topics ?? []).map((x) => ({ x, t: (S.topics ?? []).find((y) => y.id === x.id) })).filter((o) => o.t);
-    panel.replaceChildren(
+    const sig = [r.id, p.id, p.name, p.emoji, p.hands, msgs.length, looks, state, busy(r.id), tasks.map((k) => [k.id, k.state, k.text]), topics.map((o) => [o.x.id, o.x.p, o.t.name]), st?.hands, st?.T, st?.unbuilt];
+    once(panel, sig, () => [
       h("div.panel-head", null, h("span", { text: "What it did here" }), h("span.grow"), iconButton("x", "Close", () => setPanel(false))),
       h("div.panel-persona", null, avatar(p, "xxl"), h("div.panel-name", { text: p.name }), h(`div.panel-state${busy(r.id) ? ".live" : ""}`, null, busy(r.id) ? h("span.pulse-dot") : null, state)),
       h(
@@ -211,7 +214,7 @@ export function mount(root, fragment) {
         h("h3", { text: "Memory" }),
         h("a.kv.link", { href: "#/memory" }, icon("layers"), h("span", { text: st ? `${(st.T ?? 0).toLocaleString()} messages${st.unbuilt ? `, summarizing ${st.unbuilt}` : ""}` : "…" }), icon("chevron")),
       ),
-    );
+    ]);
   }
 
   function setPanel(on) {
@@ -295,3 +298,12 @@ export function mount(root, fragment) {
 }
 
 const compact = (n) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n.toLocaleString());
+
+/// `node`'s children made again only when what they show (`sig`) changed,
+/// so a live update does not take focus or hover from under the person.
+function once(node, sig, build) {
+  const s = JSON.stringify(sig);
+  if (node.__sig === s) return;
+  node.__sig = s;
+  node.replaceChildren(...build().filter(Boolean));
+}

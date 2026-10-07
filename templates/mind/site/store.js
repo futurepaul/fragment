@@ -138,8 +138,10 @@ function onLog(record) {
         const box = S.msgs.get(m.thread);
         if (box) box.byI.set(m.i, m);
         if (m.kind === "user") {
+          // the log caps a long message: the same words, as far as they go
+          const head = (s) => s.trim().slice(0, 1000);
           const list = S.pending.get(m.thread);
-          const at = list?.findIndex((p) => p.text.trim() === m.text.trim());
+          const at = list?.findIndex((p) => head(p.text) === head(m.text));
           if (at >= 0) {
             S.landed.set(m.i, `p:${list[at].key}`);
             list.splice(at, 1);
@@ -161,7 +163,7 @@ function onLog(record) {
     }
     case "turn": {
       if (typeof b.thread !== "string") return;
-      S.turns.set(b.thread, { state: str(b.state), error: str(b.error), at: record.at ?? Date.now() });
+      S.turns.set(b.thread, { state: str(b.state), error: str(b.error), at: num(record.at) ?? Date.now(), seen: Date.now() });
       if (b.state === "settling") S.said.delete(b.thread);
       if (b.state !== "thinking" && b.state !== "settling") {
         S.drafts.delete(b.thread);
@@ -252,15 +254,20 @@ export function handDraftOf(task) {
   return null;
 }
 
+/// A turn's lock lapses this long after its last touch (docs/optchat.md).
+const TURN_LAPSE_MS = 15 * 60_000;
+
 /// Whether the mind is answering in `thread` now: its latest turn record
 /// says so, and the mind's status does not say otherwise.
 export function busy(thread) {
   const t = S.turns.get(thread);
   if (!t || (t.state !== "thinking" && t.state !== "settling")) return false;
   const st = S.status;
-  if (!st || st.turn?.thread === thread) return true;
-  // a turn the status (read after it) says is not running ended unsaid
-  return !(S.statusAt > t.at + 2000);
+  if (st?.turn && st.turn.running !== false && st.turn.thread === thread) return true;
+  // a status read after the record came that names no turn here: it ended
+  // unsaid (a crash); so did one older than the turn lock lasts
+  if (st && S.statusAt > t.seen + 1500) return false;
+  return Date.now() - t.at < TURN_LAPSE_MS;
 }
 
 export function draftOf(thread) {

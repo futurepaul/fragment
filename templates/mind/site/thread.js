@@ -8,7 +8,7 @@
 // they come, its words as they stream, then its report. The mind's reply
 // streams in as `log`'s draft `turn:<thread>` until its `talk` arrives.
 
-import { avatar, contextView, go, memRow, miniMessage, topicChip } from "./pieces.js";
+import { avatar, contextView, go, memRow, topicChip } from "./pieces.js";
 import {
   PENDING_MS,
   S,
@@ -147,9 +147,11 @@ export function composer(thread, { onSent } = {}) {
     stopBtn.disabled = S.stopping.has(thread);
     stopBtn.classList.toggle("stopping", S.stopping.has(thread));
     hint.textContent = p.hands && S.status && !S.status.hands ? "No computer yet" : "";
-    grow();
+    sendBtn.disabled = !ta.value.trim();
   }
   render();
+  // words kept from before size the box once it is on the page
+  requestAnimationFrame(grow);
   return { el: form, render, focus: () => ta.focus(), set: (text) => ((ta.value = text), unsent.set(key, text), grow(), ta.focus()) };
 }
 
@@ -286,8 +288,10 @@ function taskNode(id, fallback) {
   const shown = showAll ? steps : steps.slice(-CARD_STEPS);
   const draft = task ? handDraftOf(task) : null;
   const text = task?.text || fallback || "";
-  const reportOpen = opened.has(`r:${id}`);
+  const long = !!task?.report && (task.report.length > 360 || task.report.split("\n").length > 6);
+  const reportOpen = !long || opened.has(`r:${id}`);
   const elapsed = task?.started ? duration((task.ended ?? Date.now()) - task.started) : "";
+  const lastOk = steps.length > 0 && steps.at(-1).ok !== undefined;
   const toggle = (k) => () => {
     if (opened.has(k)) opened.delete(k);
     else opened.add(k);
@@ -304,9 +308,8 @@ function taskNode(id, fallback) {
           null,
           steps.length > shown.length || showAll ? h("button.linkish", { type: "button", onclick: toggle(`k:${id}`) }, showAll ? "Fewer steps" : `${plural(steps.length - shown.length, "earlier step")}`) : null,
           shown.map((s, k) => {
-            const last = showAll ? k === shown.length - 1 : k === shown.length - 1;
             const failed = s.ok === false;
-            const wait = phase === "running" && last && s.ok === undefined;
+            const wait = phase === "running" && k === shown.length - 1 && s.ok === undefined;
             return h(
               `div.task-step${failed ? ".failed" : ""}`,
               { title: typeof s.excerpt === "string" ? s.excerpt : "" },
@@ -315,6 +318,8 @@ function taskNode(id, fallback) {
               h("span.task-args", { text: String(s.args ?? s.title ?? s.text ?? "").replace(/^`|`$/g, "") }),
             );
           }),
+          // between steps, with no words streaming: still going
+          phase === "running" && lastOk && !draft ? h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Working…" })) : null,
         )
       : phase === "running"
         ? h("div.task-steps", null, h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Waking your computer…" })))
@@ -326,7 +331,7 @@ function taskNode(id, fallback) {
           null,
           h("div.task-report-label", null, icon("file"), "Report"),
           md(task.report),
-          h("button.linkish", { type: "button", onclick: toggle(`r:${id}`) }, reportOpen ? "Show less" : "Read the whole report"),
+          long ? h("button.linkish", { type: "button", onclick: toggle(`r:${id}`) }, reportOpen ? "Show less" : "Read the whole report") : null,
         )
       : null,
   );
@@ -501,18 +506,23 @@ export function threadScreen(id) {
   const top = topBar(title, h("span.grow"), panelBtn);
   const col = h("div.column.messages");
   const scroll = h("div.scroll", null, col);
-  const comp = composer(id);
+  let painted = false;
+  let sent = false; // what one says is followed to the bottom, wherever the scroll was
+  const comp = composer(id, { onSent: () => (sent = true) });
   const dock = h("div.dock", null, h("div.dock-inner", null, comp.el));
   const el = h("section.screen.thread", null, top, scroll, dock);
-  let painted = false;
   loadThread(id);
 
   function render() {
     const t = S.threads.get(id);
     const p = persona(picked.get(id) ?? t?.persona) ?? currentPersona();
-    const chips = (t?.topics ?? []).map((x) => topicChip(x.id, x.p)).filter(Boolean);
-    title.replaceChildren(avatar(p, "sm"), h("div.top-text", null, h("div.top-name", { text: t?.title || "New chat" }), chips.length ? h("div.chips.top-chips", null, chips) : h("div.top-sub", { text: p.name })));
-    document.title = t?.title ? `${t.title} · Mind` : "Mind";
+    const head = JSON.stringify([p.id, p.emoji, p.name, t?.title, t?.topics, (S.topics ?? []).length]);
+    if (title.__sig !== head) {
+      title.__sig = head;
+      const chips = (t?.topics ?? []).map((x) => topicChip(x.id, x.p)).filter(Boolean);
+      title.replaceChildren(avatar(p, "sm"), h("div.top-text", null, h("div.top-name", { text: t?.title || "New chat" }), chips.length ? h("div.chips.top-chips", null, chips) : h("div.top-sub", { text: p.name })));
+      document.title = t?.title ? `${t.title} · Mind` : "Mind";
+    }
 
     const nearBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 160;
     const before = scroll.scrollHeight;
@@ -528,8 +538,9 @@ export function threadScreen(id) {
     if (earlierOf === id && !box.loading) {
       earlierOf = null;
       scroll.scrollTop += scroll.scrollHeight - before;
-    } else if (!painted || nearBottom) scroll.scrollTop = scroll.scrollHeight;
+    } else if (!painted || nearBottom || sent) scroll.scrollTop = scroll.scrollHeight;
     painted = true;
+    sent = false;
   }
 
   return {
@@ -554,10 +565,13 @@ const OPENERS = {
   default: ["What did we decide last time?", "Help me think something through", "Catch me up on this week"],
   hands: ["Make me a little web page", "Tidy up a folder on my computer", "Check a website for me"],
   coach: ["Help me plan tomorrow", "I'm stuck on a decision", "Ask me about my week"],
+  // a mind with nothing in it yet: things worth remembering
+  first: ["Remember that I…", "Here's what I'm working on", "Help me plan my week"],
 };
 
 function prompts(p) {
   const name = (p?.name ?? "").toLowerCase();
+  if (S.status?.T === 0) return OPENERS.first;
   const base = p?.hands ? OPENERS.hands : name.includes("coach") ? OPENERS.coach : OPENERS.default;
   const topics = [...(S.topics ?? [])].sort((a, b) => (b.count ?? 0) - (a.count ?? 0));
   const out = [...base.slice(0, 2)];
@@ -600,11 +614,9 @@ export function newScreen() {
     line.textContent = `${greeting()}${name ? `, ${name}` : ""}.`;
     head.textContent = hello(p);
     const T = S.status?.T;
-    sub.textContent = T ? `A fresh page. I still remember all ${T.toLocaleString()} messages before it.` : "A fresh page. I still remember everything before it.";
+    sub.textContent = T ? `A fresh page. I still remember all ${T.toLocaleString()} messages before it.` : T === 0 ? "Say anything. Every chat after this one will remember it." : "A fresh page. I still remember everything before it.";
     ideas.replaceChildren(...prompts(p).map((t) => h("button.idea", { type: "button", onclick: () => comp.set(t) }, h("span", { text: t }))));
     document.title = "Mind";
   }
   return { el, render, focus: () => comp.focus() };
 }
-
-export { miniMessage };
