@@ -867,9 +867,29 @@ persisted)".
   terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
   only them, not the terminal: defense in depth, as Hermes says), for the
   scratch an install is made from; they run as its user, so `/usr/local`
-  is not theirs. Lazy installs stay off, as upstream ships them: they are
-  Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of.
+  is not theirs.
+- **Hermes installs nothing at run time** (Paul, 2026-10-07). Its lazy
+  installs fetch an optional backend's packages from PyPI the first time
+  a feature asks for one.
+  - **Before.** Upstream's image sets `HERMES_DISABLE_LAZY_INSTALLS=1`
+    beside a durable target, `HERMES_LAZY_INSTALL_TARGET`, and with a
+    target they go on, into it. Ours did the same until then: every
+    computer's first start installed edge-tts (Hermes' default speech)
+    into `/data/hermes/lazy-packages` from PyPI.
+  - **Now.** The image names no target, so the variable blocks them, and
+    the managed overlay's `security.allow_lazy_installs: false` blocks
+    them in Hermes' config too. Hermes reads config that does not parse
+    as allowing them, so the variable is the second lock.
+  - **What our agents use is in the image.** computer_use, vision,
+    Google Workspace and the high tier's Anthropic SDK are in Hermes'
+    venv; edge-tts is installed at build by Hermes' own installer, at
+    its pins. Speech-to-text is the platform's route (Models, above),
+    never local Whisper.
+  - **Earlier saves.** A computer's earlier `lazy-packages` stays where
+    it is, unread. Upstream's start-up makes the directory, empty, as
+    part of its home's skeleton.
+
+  The Docker lane's `nothing_is_installed_at_run_time` proves it.
 - **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer

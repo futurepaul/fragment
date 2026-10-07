@@ -121,6 +121,17 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> S
     // rewrote four caches in its home while the computer was held
     // (docs/durable-computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
+    // Hermes installs nothing at run time (Paul, 2026-10-07). Its lazy
+    // installs (tools/lazy_deps.py) fetch an optional backend's packages
+    // from PyPI the first time a feature asks for one: they put its default
+    // speech, edge-tts, into /data at every computer's first start, and a
+    // person's first voice note would have installed local Whisper. What
+    // our agents use is in the image (edge-tts, by Hermes' own installer:
+    // images/hermes/Dockerfile); its speech-to-text is the platform's
+    // route (`profile_config`, `stt`). The image's environment blocks them
+    // too (`HERMES_DISABLE_LAZY_INSTALLS`, no target), as Hermes reads
+    // config that does not parse as allowing them.
+    y.push_str("security:\n  allow_lazy_installs: false\n");
     // The first agent's desktop starts for the screen's first viewer (the
     // bridge's `screen-start`), and any agent's at its first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
@@ -650,6 +661,7 @@ mod tests {
             "bot_desktop:\n  auto_start: true\n",
             "\nmodel_catalog:\n  enabled: false\n",
             "\nstt:\n  echo_transcripts: false\n",
+            "\nsecurity:\n  allow_lazy_installs: false\n",
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }

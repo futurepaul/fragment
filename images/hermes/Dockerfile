@@ -124,6 +124,18 @@ RUN rm /etc/cont-init.d/02-reconcile-profiles \
 RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).read(); old = '                        await asyncio.sleep(remaining)\n                        continue\n'; assert s.count(old) == 1, 'upstream progress sender changed: ' + p; open(p, 'w').write(s.replace(old, '                        await asyncio.sleep(remaining)\n'))" /opt/hermes/gateway/run_turn_runner.py \
  && rm -f /opt/hermes/gateway/__pycache__/run_turn_runner.*.pyc
 
+# What our agents use is in the image, never installed at run time (lazy
+# installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
+# text_to_speech speaks with Edge, its default provider, whose SDK
+# (edge-tts) is an optional backend Hermes otherwise installed into /data
+# at every computer's first start: installed here by Hermes' own installer,
+# at its pins and under its constraints, into its venv. The build fails if
+# the feature is still missing.
+RUN cd /opt/hermes \
+ && HERMES_HOME=/tmp/lazy-build HERMES_DISABLE_LAZY_INSTALLS= HERMES_LAZY_INSTALL_TARGET= UV_NO_CACHE=1 PIP_NO_CACHE_DIR=1 \
+    /opt/hermes/.venv/bin/python -c "from tools.lazy_deps import ensure, feature_missing; ensure('tts.edge', prompt=False); missing = feature_missing('tts.edge'); assert not missing, missing" \
+ && rm -rf /tmp/lazy-build
+
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.
 # A few vendored files are not Python 3 (compileall exits 1 for them); the
@@ -158,11 +170,16 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 #   to it), the last for the scratch an install is made from. /usr/local is not
 #   theirs to write: they run as Hermes' user, and root is the terminal's,
 #   through sudo.
-# - Lazy installs stay off, as upstream ships them: they fetch Hermes' own
-#   optional backends (providers, platforms, speech; tools/lazy_deps.py),
-#   which a computer configures none of (its model is the platform's route,
-#   its chat the relay). Software the agent wants is its terminal's to
-#   install.
+# - Lazy installs are off. Hermes' own (tools/lazy_deps.py) fetch an
+#   optional backend's packages from PyPI the first time a feature asks for
+#   one. Upstream's image sets HERMES_DISABLE_LAZY_INSTALLS=1 beside a
+#   durable target in its home, and with a target they go on, into it:
+#   until 2026-10-07 ours did the same, so edge-tts was installed into
+#   /data at every computer's first start. Ours names no target, so the
+#   variable blocks them, as the managed overlay's
+#   `security.allow_lazy_installs: false` does in Hermes' config
+#   (boot/src/hermes.rs). What our agents use is in the image (edge-tts,
+#   above); software the agent wants is its terminal's to install.
 # Node's compile cache is kept under /tmp (NODE_COMPILE_CACHE, one directory
 # every user may write, each its own inside), never in /data: npm turns it on
 # at every start, under TMPDIR, which Hermes points into its home
@@ -181,7 +198,6 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_HOME=/data/hermes \
     HERMES_WRITE_SAFE_ROOT=/data/hermes:/data/work:/tmp \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     NODE_COMPILE_CACHE=/tmp/node-compile-cache \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \

@@ -1677,3 +1677,32 @@ async fn a_voice_memo_is_transcribed_through_the_route() {
     assert!(!replies[0]["text"].as_str().unwrap_or("").contains('🎙'), "{replies:?}");
     assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
 }
+
+// ---- nothing installed at run time (Paul, 2026-10-07) ----
+
+/// Goal: Hermes installs nothing at run time. Its lazy installs are off,
+/// as Hermes itself reads them, both in the gateway's own scope and in an
+/// agent's profile. Its `text_to_speech` is still offered, edge-tts being in
+/// the image. A feature forced to install (local Whisper) is refused. And
+/// nothing an install leaves is under `/data`. Before, upstream's durable
+/// target let them go on: every computer's first start installed edge-tts
+/// into `/data/hermes/lazy-packages`, with uv's cache in Hermes' home.
+/// Method: Hermes' own `tools.lazy_deps` and `check_tts_requirements`, run
+/// as its gateway runs them, in each scope; then `/data` searched.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn nothing_is_installed_at_run_time() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    const PROBE: &str = "import json\nfrom tools import lazy_deps as l\nfrom tools.tts_tool import check_tts_requirements\ntry:\n    l.ensure('stt.faster_whisper', prompt=False)\n    forced = 'installed'\nexcept Exception as e:\n    forced = str(e)\nprint(json.dumps({'allow': l._allow_lazy_installs(), 'target': str(l._lazy_install_target()), 'edge_missing': list(l.feature_missing('tts.edge')), 'speaks': check_tts_requirements(), 'forced': forced}))";
+    for home in ["/data/hermes", "/data/hermes/profiles/juniper-paul"] {
+        let seen = hermes_python(&c, &[&format!("HERMES_HOME={home}")], PROBE);
+        eprintln!("lazy: {home}: {seen}");
+        assert_eq!((seen["allow"].clone(), seen["target"].clone()), (json!(false), json!("None")), "lazy installs are off, and no target is named, in {home}: {seen}");
+        assert_eq!(seen["edge_missing"], json!([]), "edge-tts is in the image: {seen}");
+        assert_eq!(seen["speaks"], json!(true), "text_to_speech is offered in {home}: {seen}");
+        assert!(seen["forced"].as_str().is_some_and(|f| f.contains("lazy installs disabled")), "a forced install is refused in {home}: {seen}");
+    }
+    // upstream's start-up makes the directory, empty, among its home's skeleton
+    let left = c.exec_out(&["sh", "-c", "find /data -maxdepth 6 \\( -path '*/lazy-packages/*' -o -path '*/.cache/uv' -o -iname 'edge_tts*' -o -iname '*faster_whisper*' \\) | head -5"]);
+    assert_eq!(left.trim(), "", "no install left anything under /data");
+}
