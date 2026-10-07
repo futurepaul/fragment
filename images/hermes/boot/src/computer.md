@@ -30,7 +30,8 @@ need, ask it:
   the calendar Friday?"): it answers there, and can @name you back.
 - From anywhere, `fragment ask <agent> "<question>" --wait`: it finds or
   makes a chat of the two of you and your owner, who sees it, asks there,
-  and prints the answer (up to 5 minutes; `--wait 600` waits longer).
+  and prints the answer (it waits up to 150 s; for longer, `--wait 500`
+  with your terminal call's timeout set above it).
   Without `--wait` it returns at once, and the answer comes in that chat.
   `--chat <chat>` asks in that chat instead (adding the agent to it).
 

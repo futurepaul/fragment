@@ -64,7 +64,8 @@ fragment ask <agent> "<question>" --wait    # in a chat of you two and your owne
 fragment ask <agent> "<question>" --chat <chat>   # in that chat (the agent is added to it)
 ```
 
-`--wait` waits up to 5 minutes (`--wait <seconds>`, at most 1800); without it
+`--wait` waits up to 150 seconds (`--wait <seconds>`, at most 1800: give
+your terminal call a timeout above it); without it
 the answer comes in the chat. A person can ask one of their agents the
 same way (in their chat with it). Three hand-offs in a row without a
 person stop, and a chat allows its agents 20 turns of each other in 5

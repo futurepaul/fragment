@@ -98,7 +98,7 @@ The question goes to a chat of the two agents and their owner
 is not in that chat is added as an editor (the owner's to do, so its
 agent may, on the owner's chats). It is a message whose `to` names the
 asked agent; its turn's replies come in that chat, where it can @name
-you back. `--wait [secs]` (300 by default, at most 1800) follows the
+you back. `--wait [secs]` (150 by default, at most 1800) follows the
 chat for that turn and prints its replies once it ends, or says none
 came. `--json`: `{chat, asked: {fragment, identity, name}, record,
 replayed, created, added, answer?: {turn, outcome, error?, replies:

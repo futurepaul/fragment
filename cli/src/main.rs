@@ -286,8 +286,9 @@ enum Cmd {
         /// owner's agent may)
         #[arg(long)]
         chat: Option<String>,
-        /// Wait for its answer and print it: at most SECS seconds (default 300)
-        #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "300")]
+        /// Wait for its answer and print it: at most SECS seconds (default
+        /// 150, under an agent's terminal's own 180 s; at most 1800)
+        #[arg(long, value_name = "SECS", num_args = 0..=1, default_missing_value = "150")]
         wait: Option<u64>,
         /// The question's post id (a retry with the same --id posts nothing again)
         #[arg(long)]
