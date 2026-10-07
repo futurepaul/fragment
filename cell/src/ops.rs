@@ -511,7 +511,7 @@ impl FragmentCell {
                 // the batch sent now (a waiting one again: the ledger
                 // answers a resend as before)
                 if body["sample"] != false {
-                    self.sample_storage(true).await?;
+                    self.sample_storage(true)?;
                 }
                 if body["resend"] == true {
                     self.exec("UPDATE meter_batches SET sent_at = NULL", vec![])?;

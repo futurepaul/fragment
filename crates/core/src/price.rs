@@ -109,7 +109,7 @@ pub enum Usage {
 pub enum StorageClass {
     /// Blobs, site copies, screenshots, backups and replicas.
     R2,
-    /// A fragment's SQLite (its Durable Object's and its app facet's).
+    /// A fragment's SQLite (its Durable Object's).
     Sqlite,
     /// A fragment's git repository at code.storage.
     Git,

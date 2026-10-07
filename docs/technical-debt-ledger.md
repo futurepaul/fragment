@@ -438,8 +438,9 @@ fragment.club until cutover (decisions 34–35).
 ## A fragment's git repository is not metered, and storage is sampled daily
 
 - **Observed:** phase 3 (cell/src/meter.rs). A fragment's storage meter
-  samples its SQLite (its own and its app facet's) and its blobs once a
-  day from its alarm, as byte-hours since the last sample. Its
+  samples its own SQLite and its blobs once a day from its alarm, as
+  byte-hours since the last sample (its app's database: the entry "An
+  app's database answers to the app's own code alone"). Its
   code.storage repository is not sampled (code.storage publishes no size
   or price to us), and a computer's backups do not exist yet.
 - **Risk:** git storage is free to its owner; a fragment that grows and
@@ -471,18 +472,6 @@ fragment.club until cutover (decisions 34–35).
   the run is held and replays after a top-up), with an e2e check; the
   platform's own records stay (they cost nothing, and an agent must hear
   where it joined).
-
-## An app's database size is read from its own realm
-
-- **Observed:** phase 3. The storage meter asks the app facet's platform
-  code for its database size (`__size` in cell/platform.mjs), which runs
-  in the author's realm: an app can override it.
-- **Risk:** an app understates its own storage, by at most its cap
-  (`limits::APP_DB_MAX_BYTES`, which the meter clamps to).
-- **First proof:** a `__size` far under the facet's real size.
-- **Delete when:** the runtime lets the supervisor read a facet's storage
-  size itself.
-
 
 ## An agent runs one turn at a time, across all its chats
 
@@ -579,16 +568,29 @@ fragment.club until cutover (decisions 34–35).
   upstream, its inbox as a webhook's, the real model within the run's
   paid calls), and the local skips made there.
 
-## A query can write past its app's cap
+## An app's database answers to the app's own code alone
 
-- **Observed:** phase 2. A mutation that leaves the app's database over
-  16 MiB rolls back (507), but a query (or a route) that writes anyway is
-  not stopped: celld's hard stop 4 MiB above the cap went with the fork.
-- **Risk:** an app grows its database without bound outside mutations,
-  at its owner's storage cost.
-- **First proof:** an app's database over 16 MiB.
-- **Delete when:** writes outside a mutation and the constructor are
-  refused (or capped) by `platform.mjs`, with a test.
+- **Observed:** phase 2; 2026-10-06 (issue #156, problem 4). Every bound
+  on an app facet's SQLite runs in the app's own realm (cell/platform.mjs),
+  which its code can patch: a mutation that leaves the database over
+  16 MiB rolls back (507), but a query, a route (`fetch`), or code that
+  patches the platform's own writes past it (celld's hard stop 4 MiB
+  above went with the fork). Nothing outside the realm can stop it:
+  workerd allows a facet no `query_only`, `max_page_count` or authorizer
+  (its pragma allowlist), and a query or a route is async, so no
+  transaction spans one to roll back. Nor can the supervisor read the
+  facet's size: only the realm can say it. So the storage meter does not
+  count the app's database (until 2026-10-06 it asked `__size` daily,
+  which loaded the app's code, a billed dynamic worker, every day, to
+  meter at most 16 MiB of an honest app, under a cent a month).
+- **Risk:** the platform pays for app SQLite its owner is not billed for:
+  at most 16 MiB a fragment for an honest app ($0.0032 a month at list),
+  without bound for an app that writes outside its mutations.
+- **First proof:** a Fragment namespace whose stored bytes (Cloudflare's
+  usage) are well over the sum of its fragments' sampled `sqlite`.
+- **Delete when:** the runtime lets the supervisor read a facet's
+  database size or bound it (a facet storage limit), and the meter
+  samples it, with a test of a query that writes past the cap.
 
 ## A blob larger than the zone's request limit cannot be uploaded
 
