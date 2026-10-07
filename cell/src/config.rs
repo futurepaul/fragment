@@ -1,6 +1,6 @@
 //! The fleet's settings, from Worker variables (`cell/.dev.vars` in dev,
 //! rendered `vars` at deploy), built once per isolate (`CONFIG`). Nothing about a fleet is a constant in code
-//! (ROADMAP decision 13): the hostname suffix and the code.storage org
+//! (docs/cloudflare-v1.md, decision 4): the hostname suffix and the code.storage org
 //! arrive here. The fleet's secrets do not: the host secret, the
 //! code.storage key, and WorkOS's client id and API key are Secrets Store
 //! bindings, read only by keys.rs.

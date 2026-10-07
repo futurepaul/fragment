@@ -452,7 +452,7 @@ impl PrincipalCell {
 }
 
 /// A row as a list shows it; `None` for a fragment from before usernames
-/// (decision 16's hard cut: served nowhere, so never listed).
+/// (decision R16's hard cut: served nowhere, so never listed).
 fn listed(r: Listed) -> CellResult<Option<ListedFragment>> {
     if !fragment_proto::valid_fragment_name(&r.name) {
         return Ok(None);

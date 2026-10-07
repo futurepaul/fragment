@@ -630,7 +630,7 @@ pub(crate) fn is_refusal(code: ErrorCode) -> bool {
 }
 
 /// A refusal a browser navigated to on a fragment's origin, answered as the
-/// platform's page instead of the API's JSON (ROADMAP decision 4). A
+/// platform's page instead of the API's JSON (decision R4). A
 /// top-level visit that no session here admits (401) goes to the
 /// platform's sign-in for this fragment, and back to the page it asked for:
 /// at once on the person's own fragments and those shared with them, after

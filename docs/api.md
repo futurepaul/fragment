@@ -168,7 +168,7 @@ acts through it: a mutation or a job needs a membership of their own
 (403, saying so), and they get nothing the agent's own role opens beyond
 `viewer` (an editor's channels, tokens, or secrets).
 
-An agent acts for whoever asked, capped (ROADMAP decision 17). A request
+An agent acts for whoever asked, capped (docs/cloudflare-v1.md, R17). A request
 signed by an agent may name an identity in `for=<id:…>` in its URL's
 query (inside the signed URL, so the signature covers it): the request
 acts with the lower of the role that identity holds in the fragment (its
@@ -238,7 +238,7 @@ the new key and meant it for this signer.
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
 | `DELETE /api/users/{username}` | the fleet's operators | → `{username, identity, released}`: undoes a username taken by mistake, so its person chooses again; refused (409) while they own a fragment under it (its URLs name it) |
 
-## Names (decision 16)
+## Names (docs/cloudflare-v1.md, R16)
 
 A person chooses a **username** once (above; the platform's page asks
 after the first sign-in, and `fragment username <name>` does too). A
@@ -417,7 +417,7 @@ then they are a visitor there. The yes is remembered for that person
 and fragment (their newest 1000) until they sign out of it there
 (`POST __signout`), which makes the next sign-in ask again.
 
-### Opening a fragment by its URL (ROADMAP decision 4)
+### Opening a fragment by its URL (docs/cloudflare-v1.md, R4)
 
 A browser's top-level visit to a fragment's page (a GET or HEAD
 navigation whose `Accept` names `text/html`) that no session there
@@ -586,8 +586,8 @@ the code the fragment's own.
   400 naming the JSON pointer (`input /text: is required`).
 - `channels` declares the app's channels and their readers (default
   `viewer`); `events`, `ops`, and `inbox` are built in (readers: viewers).
-  A channel may also name who may post to it, `"post": <role>` (ROADMAP
-  decision 18): the platform appends a poster's record itself
+  A channel may also name who may post to it, `"post": <role>`
+  (docs/cloudflare-v1.md, R18): the platform appends a poster's record itself
   (`POST /api/f/{name}/channels/{channel}`, `fragment.post`), so a
   fragment whose live commit has channels and no `app.mjs` (a chat) runs
   no worker at all. A `post` role looser than the channel's `read` is
@@ -1198,8 +1198,8 @@ channel <name> [<channel>] [--after N] [--follow]`.
 
 ### Moved hosts (docs/fragment-boats.md, slice 2)
 
-fragment.club's fragments moved to `fragment.boats` (ROADMAP decision
-23); the platform stayed on `fragment.club`. The router takes a host in
+fragment.club's fragments moved to `fragment.boats` (docs/cloudflare-v1.md,
+decision 5); the platform stayed on `fragment.club`. The router takes a host in
 this order: the platform's own host (even under the suffix); a
 fragment's host; the suffix's own name (`fragment.boats`), which
 answers `308` to the same path and query on the platform, when the
@@ -1583,7 +1583,7 @@ there, or the fragment's own: the `agent` block, above):
     JSON (at most 140 characters), whether it worked, at most 300
     characters of its result, and the model's text before the call (at
     most 300) on the first call of a message. A result can hold what the
-    asker reaches in other fragments (decision 1: they could read it
+    asker reaches in other fragments (R17: they could read it
     anyway), so only this excerpt is posted;
   - `{kind: "turn.end", turn, outcome, error?}`: `idle` (answered),
     `stopped`, `yielded`, or `error` (at most 300 characters of it).

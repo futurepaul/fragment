@@ -227,7 +227,7 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
 }
 
 /// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (ROADMAP decision 17). At most one, an identity.
+/// for whoever asked it (decision R17). At most one, an identity.
 fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();

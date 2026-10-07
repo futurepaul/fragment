@@ -770,7 +770,7 @@ impl FragmentCell {
         Ok(Standing { member, owns_member_agent: member.is_none() && row.agent != 0, link, signed: true, cap: None, held: None })
     }
 
-    /// An agent acting for someone (ROADMAP decision 17), in one statement:
+    /// An agent acting for someone (decision R17), in one statement:
     /// the asker's standing (their membership, or an agent of theirs that is
     /// a member), capped by the agent's own membership and its owner's
     /// (`access::effective_role`). The fragment's own agent (its `agent`

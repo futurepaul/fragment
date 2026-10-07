@@ -20,8 +20,9 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    hard cut. Where it disagrees with anything below, it wins.
    `SPECIAL-CASE-INVENTORY.md` lists the platform surfaces that are not
    fragments, and why; keep it short.
-1. `docs/ROADMAP.md` — decisions, truth map, phases (and what is live),
-   escalations.
+1. The decisions are cloudflare-v1.md's: its own, and the ROADMAP's that
+   still hold, as R4 to R18. The truth map every change is checked
+   against is MODEL.md's ("Where each fact lives").
 2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
    `docs/api.md` — the wire contract the cell answers.
    `docs/finite-integration.md` — how fragment will move into

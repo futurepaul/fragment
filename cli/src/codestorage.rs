@@ -14,7 +14,7 @@ use serde_json::Value;
 use std::fmt;
 
 /// Working files live on `main`; `live` is the blessed serve point
-/// (ROADMAP wire contract: one repo per fragment, preview = ephemeral ref,
+/// (one repo per fragment, preview = ephemeral ref,
 /// promote = move live, rollback = re-point live).
 pub const MAIN: &str = "main";
 pub const LIVE: &str = "live";

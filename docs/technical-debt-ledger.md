@@ -530,7 +530,7 @@ fragment.club until cutover (decisions 34–35).
 - **Risk:** fragment is not self-hostable while one of its planes is a
   vendor's hosted service; an outage, a price change, or a deprecation
   at code.storage stops every fragment's files at once, and a
-  self-hoster (bring your own compute, ROADMAP phase 10) must hold a
+  self-hoster (a self-deployer: docs/cloudflare-v1.md, decision 4) must hold a
   code.storage org.
 - **First proof:** the first deployment that cannot or will not use
   code.storage (a self-hosted or air-gapped fleet), or a code.storage

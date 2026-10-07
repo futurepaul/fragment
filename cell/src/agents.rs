@@ -140,7 +140,7 @@ async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
 }
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
-/// reaches for whoever asked (ROADMAP decision 17): the asker's, where the
+/// reaches for whoever asked (decision R17): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
 /// there (`access::listed_role`). A call decides again, live.
 pub(crate) async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {

@@ -2,7 +2,7 @@
 
 Status: proposed 2026-09-23, revised the same day by the phase 1 spikes
 (`spikes/README.md` at the tag `celld-final`). This is the target shape the runtime is hard-cut to
-(ROADMAP decisions 2-4 and the five changes Paul approved). Every
+(the five changes Paul approved). Every
 mechanism names the celld primitive it uses; read with the celld docs
 (https://celld.dev/docs/, v0.5.1).
 
@@ -32,7 +32,7 @@ mechanism names the celld primitive it uses; read with the celld docs
    (a page everyone who may see it gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
-5. **Agents are add-ons a fragment declares** (ROADMAP decisions 19–20);
+5. **Agents are add-ons a fragment declares** (docs/cloudflare-v1.md, "The rule");
    a fragment that declares none carries nothing of them. Agents are
    hosted members with durable turns. Computers (decision 21) went at the
    cut (tag `celld-final`) and come back on Cloudflare
@@ -175,7 +175,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   them. Clients never append: records come from the platform and from
   mutations' effects, except on a channel the fragment declares
   postable, where the platform appends a member's record for them
-  (ROADMAP decision 18); one that says `"signedIn": true` takes posts
+  (docs/cloudflare-v1.md, R18); one that says `"signedIn": true` takes posts
   from signed-in posters only (an anonymous visitor holding the role is
   refused).
 - Subscribers: hibernatable WebSockets that resume from a cursor (a
@@ -190,7 +190,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 - A principal is an identity: a person, an agent, or a fragment, with
   one or more public keys in the registry (finite.computer's BANKS
-  model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
+  model, docs/cloudflare-v1.md, R15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
   maps to the person (phase 4 slice B); an agent signs with its cell's
   key; a fragment with its own key (unregistered: it is the principal of
@@ -223,7 +223,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 - Origins: each fragment is served from
   `<label>--<username>.fragment.boats` (its old host on fragment.club
   redirects there); the platform (login, share sheet, invites, the share
-  header) from `fragment.club`, another site (ROADMAP decision 23).
+  header) from `fragment.club`, another site (docs/cloudflare-v1.md, decision 5).
   celld does not vouch for `Host`, so the router checks the hostname
   against the configured suffix before it trusts it.
 
@@ -236,7 +236,7 @@ the spike and its handoff are on branch `spike/goose-agent`,
 
 - A fragment declares its agent in `fragment.json`: instructions, the
   operations it may call, the postable channel it answers, and its model
-  (ROADMAP decision 20). A turn starts from a signed-in visitor's message
+  (docs/api.md, A fragment's agent). A turn starts from a signed-in visitor's message
   there or from a job step, `job.agent`.
 - An agent is a Durable Object with a key, memberships in fragments, and
   its conversation in SQL. It runs as its own celld project (`agent/`,
@@ -266,7 +266,7 @@ the spike and its handoff are on branch `spike/goose-agent`,
   template went at the cut; chats come back as a blessed fragment
   template: docs/cloudflare-v1.md, "The rule".) A turn acts for whoever started it: every call names them
   (`for`), and acts with the lower of their role and the agent's cap
-  (ROADMAP decision 17). An anonymous visitor's message starts nothing.
+  (docs/cloudflare-v1.md, R17). An anonymous visitor's message starts nothing.
 - Model calls use the owner's own model credential (`docs/secrets.md`).
 
 ## Computers
@@ -275,6 +275,26 @@ Computers (an identity per machine, a Sprite each behind a `Computer`
 cell, `fragment computer serve`, builder workspaces) went at the cut
 (tag `celld-final`). The generic Computer comes back on Cloudflare
 (docs/cloudflare-v1.md, phase 4).
+
+## Where each fact lives
+
+Every change is checked against this table.
+
+| Thing | Source of truth | Copies must be |
+|---|---|---|
+| File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
+| Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by a webhook, a deploy, the cell's own commit, or the poll backstop |
+| Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
+| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
+| Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
+| Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
+| Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
+| Audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
+
+No file bytes persist in the cell's SQLite: a file lives in git or, at
+1 MiB and above, in R2 under its hash, named by a pointer in git.
 
 ## Limits (initial; each enforced and tested)
 

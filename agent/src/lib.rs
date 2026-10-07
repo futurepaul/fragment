@@ -1,9 +1,9 @@
-//! Agents on Cloudflare Workers (ROADMAP phase 5): a Durable Object per agent, with its
+//! Agents on Cloudflare Workers (docs/api.md, Agents): a Durable Object per agent, with its
 //! own key, its conversations in SQL, and goose's loop (`goose-agent`) as
 //! its turn. Its tools are fragments' operations and the platform's verbs,
 //! which it calls through the platform's signed API with its own key.
 //!
-//! An agent acts for whoever asked (ROADMAP decision 17): a turn records
+//! An agent acts for whoever asked (decision R17): a turn records
 //! who started it, and every call the turn makes names them (`for`, inside
 //! the signed URL), so the platform acts with the lower of their role and
 //! the agent's cap. The owner starts turns directly; anyone else, by a
@@ -805,7 +805,7 @@ impl Agent {
     }
 
     /// A stop posted in a chat: it stops the running turn only when that
-    /// turn is this chat's, `principal` started it (ROADMAP decision 17: the
+    /// turn is this chat's, `principal` started it (decision R17: the
     /// asker's turn is theirs), and it names that turn (or none).
     fn stop_from(&self, conv: &str, principal: &str, turn: Option<&str>) -> Answer<Value> {
         let sql = self.sql();

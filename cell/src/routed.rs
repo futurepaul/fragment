@@ -61,7 +61,7 @@ pub struct Signed {
     pub identity: Identity,
     /// 64 hex.
     pub key: Option<String>,
-    /// An agent acting for someone (ROADMAP decision 17): the identity its
+    /// An agent acting for someone (decision R17): the identity its
     /// signed URL named in `for`, which the router honors on an agent's
     /// request to a fragment only (`crate::acting_for`). The fragment acts
     /// with the lower of that identity's role and the agent's cap

@@ -324,7 +324,7 @@ fn html_request(api: &Api, url: String, dest: &str, mode: &str, site: &str, cook
     api.call(Call { method: "GET", url, cookie, extra, ..Call::default() })
 }
 
-/// Opening a fragment by its own URL (ROADMAP decision 4): a browser
+/// Opening a fragment by its own URL (decision R4): a browser
 /// signed in to the platform lands on the fragment signed in, silently on
 /// the person's own and on those shared with them, asked once on anyone
 /// else's; signed out, it signs in first and comes back to the path it

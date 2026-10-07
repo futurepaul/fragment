@@ -2,10 +2,10 @@
 
 Status: **decided 2026-10-02** (Paul, in a grilling session that merged
 the "Self-hosted sandbox service" and "cloudflare-ify" threads, then
-revised the same day by the rule below). This supersedes the celld/Fly
-hosting decisions in `docs/ROADMAP.md` (decisions 6, 8, 24, 25 and the
-sandcastle lane), `docs/one-home.md`, `docs/two-substrates.md` and
-`docs/runtime-seam.md` wherever they disagree. The explainer is the
+revised the same day by the rule below). It superseded
+`docs/ROADMAP.md`, whose decisions that still hold are below ("Carried
+from the ROADMAP", R4 to R18), `docs/one-home.md`,
+`docs/two-substrates.md` and `docs/runtime-seam.md`. The explainer is the
 "Fragment on Cloudflare" artifact; the design prototype is the
 "Fragment on Cloudflare: v1" canvas.
 
@@ -556,6 +556,51 @@ speaking Cloudflare's APIs) returns once this product works.
     - limits between one person's agents are specialization, never a
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
+
+### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
+
+`docs/ROADMAP.md` (2026-09-23, before this plan) is gone; it is in git
+history and at the tag `celld-final`. These of its decisions still hold
+and are cited by their old numbers, as R-labels. The others were
+superseded by the decisions above or went at the cut.
+
+- **R4. Sharing is the platform's.** The share sheet and accepting an
+  invite are platform pages, which no fragment's code can drive
+  (docs/api.md, Sharing). A fragment's page is code its author or an
+  agent rewrites, so it never grants anything. A direct URL signs you
+  in: at once on your own fragments and those shared with you. On anyone
+  else's, the platform asks once ("Continue to X as you?") before X
+  learns who you are, and signing out of X there makes it ask again
+  (docs/api.md, Asking first; Opening a fragment by its URL). The share
+  header over a fragment is not built.
+- **R15. Identity follows finite.computer's BANKS model (FIN-11).**
+  People, agents and fragments have stable identities, and grants name
+  identities. Each identity holds one or more public keys, each added
+  with proof of possession and revoked on its own. Every agent has one
+  human owner, who can read what the agent can read. Keys stay with
+  their callers: browsers hold sessions, the CLI and agents sign.
+  Lookups are live and fail visibly. What Core will own is a stand-in
+  in V3's shape (docs/finite-integration.md). `link` means anyone with
+  the unguessable link is a viewer; `public` means anyone.
+- **R16. Usernames, and fragments under them.** A person chooses a
+  username once. A fragment's name is `<label>.<username>`, served at
+  `<label>--<username>.<suffix>`. That is one DNS label, so the suffix's
+  one wildcard certificate covers every fragment (a certificate per host
+  ran into Let's Encrypt's limit of about 50 new names a week).
+  Sessions are `__Host-` cookies. Fragments from before usernames were
+  cut, not migrated (docs/api.md, Names).
+- **R17. An agent acts for whoever asked, capped.** Each call in a turn
+  acts with the lower of two roles: the asker's, and a cap. The cap is
+  the agent's own role, or its owner's on a fragment the owner belongs
+  to, and never above `editor` (docs/api.md, Principals and access;
+  decision 36 adds its limits). So a guest who drives someone's agent
+  reaches only what the guest could.
+- **R18. Channels a fragment declares postable.** A declared channel may
+  name a `post` role. The platform then appends a member's record
+  itself, with the role check, a rate limit, a size cap, and dedup by
+  principal and id. A chat therefore needs no app code. This is the one
+  exception to "clients never append" (docs/MODEL.md). `"signedIn":
+  true` refuses an anonymous poster.
 
 ## Lessons from cloudflare/agents
 

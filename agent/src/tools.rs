@@ -1,5 +1,5 @@
 //! An agent's tools (MODEL.md, Agents). A turn acts for whoever started it
-//! (ROADMAP decision 17): every call names them (`for`, fleet.rs), and the
+//! (decision R17): every call names them (`for`, fleet.rs), and the
 //! platform acts with the lower of their role and the agent's cap. So the
 //! agent reaches every fragment its asker can, which for a person may be
 //! hundreds: a tool per operation of each would be a tool explosion. The

@@ -5,7 +5,7 @@
 //! Workers AI fake, scripted, and its owner's ledger pays. Turns steer,
 //! stop, and survive a killed node without running an operation twice (the
 //! spike's checks, on the product). An agent acts for whoever asked,
-//! capped (ROADMAP decision 17): at the platform and through its turns.
+//! capped (decision R17): at the platform and through its turns.
 
 use std::time::{Duration, Instant};
 
