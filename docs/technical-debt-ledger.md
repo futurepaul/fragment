@@ -97,20 +97,6 @@ fragment.club until cutover (decisions 34–35).
   cookies), with the `pathmode` e2e section replaced by a check that the
   cell refuses to start serving without a suffix.
 
-## A deleted fragment can linger in a person's list
-
-- **Observed:** phase 2 slice B. Each person's list of fragments is an
-  index in their `Principal` cell, fed from the fragment's outbox with
-  retries. Deleting a fragment delivers the removals once and then wipes
-  the fragment, outbox included: a delivery that fails then is never
-  retried.
-- **Risk:** `fragment list` shows a fragment the person no longer has
-  (calls to it answer 404; nothing leaks).
-- **First proof:** a Principal cell unreachable during a delete.
-- **Delete when:** the list checks each entry against the fragment (or
-  the platform keeps delete tombstones and retries them), with an e2e
-  that fails a delivery during a delete.
-
 ## The effects sweep has no fault-injection test
 
 - **Observed:** phase 2 slice C; reworked in the reliability pass. A
