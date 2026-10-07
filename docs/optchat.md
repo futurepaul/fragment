@@ -90,12 +90,14 @@ Inspiration:
     "say":  { "read": "editor", "post": "editor", "signedIn": true },
     "log":  { "read": "editor" },
     "chat": { "read": "editor", "post": "editor" },
-    "work": { "read": "editor", "post": "editor" }
+    "work": { "read": "editor", "post": "editor" },
+    "sort": { "read": "editor" }
   },
   "triggers": [
     { "channel": "say",  "from": "person", "run": "heard" },
     { "channel": "chat", "from": "agent",  "run": "hands_said" },
-    { "channel": "work", "from": "agent",  "run": "hands_worked" }
+    { "channel": "work", "from": "agent",  "run": "hands_worked" },
+    { "channel": "sort", "run": "classify" }
   ]
 }
 ```
@@ -115,6 +117,8 @@ goose agent, an editor. The shell makes it `members` (private).
   contract unchanged. The mind's jobs publish a task to `chat` as a
   message. The goose agent, its lead, answers on `chat` and `work`
   exactly as an agent answers a person in a chat fragment.
+- **`sort`**: the app's alone. `topic_add` publishes `{topic}` there, and
+  its trigger starts `classify`: a mutation starts no job.
 
 ### The log, the tree, the view: OptChat's spec, in SQLite
 
@@ -135,7 +139,8 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
   the compactor tags `work:`.
 - **The spec's constants hold:** NODE 512, VIEW 128 000, TRIES 5,
   CAP 30 000, and the cut-at-limit retry. JOBS is up to 8 nodes in one
-  pump step round. RETRY is on the next pump.
+  pump step round. RETRY is on the next pump. A node a stubborn model
+  wrote past twice NODE is cut there.
 - **Prompts:** COMPACT, MASTER, VIEW_DOC and the subagent prompt are
   verbatim from the spec, with "OptChat" replaced by "Mind".
   - MASTER's "Use subagents only when the user asks" becomes: use
@@ -147,7 +152,15 @@ log_fts USING fts5(text, content='log', content_rowid='i')    -- search
 - **The view is folded incrementally** (spec §5.2) and never stored. It
   is rebuilt from the log at the app's first call (append + fit per
   message) and kept on the App instance, which the facet may evict at
-  any time.
+  any time. Each mutation that changes the log or the tree bumps
+  `kv.rev`, and an instance whose view is of another `rev` (a mutation
+  rolled back) folds it again.
+- **A job reads the instance to build a step's arguments** (the
+  compactor's context, Clef's state): they would fill a run's 4 MiB of
+  answers if they were a step's answer, and a past step's arguments do
+  not matter. Its control flow follows only its steps' answers. A
+  turn's view is the exception: a step's answer (`view {upto}`), so every
+  call of the turn sees the same one.
 - **The 16 MiB cap is debt.** A message over 30 000 characters is
   capped at logging, as the spec caps tool results, keeping head and
   tail.
@@ -162,22 +175,36 @@ The spec's §7, as a job:
    the running turn takes it next.
 2. `turn_begin`, a mutation: take the turn lock (it expires 15 minutes
    after its last touch), then take the queued messages of the oldest
-   thread waiting.
-3. **Settle:** while the view has an unbuilt part, run the pump
-   inline (below). It is normally a no-op, because the background pump
-   ran after the last turn.
-4. Render the view. Then loop, at most 40 model calls a turn:
+   thread waiting. It answers `tail`: where the turn's view stops, before
+   the newest run of messages still waiting. They go whole as block 2,
+   as the spec renders the view before it logs them.
+3. **Settle:** while the view has an unbuilt part before `tail`, build it
+   inline, level 0 one at a time. It is normally a no-op, because the
+   background pump ran after the last turn. A node a pump holds (a lease
+   from `pump_plan`) is waited for, not built twice. A node that fails 3
+   times, 10 s apart, ends the turn with an error, its messages logged
+   and unanswered. A settle past its budget (96 steps) puts the messages
+   back first in line and hands them to a fresh run.
+4. Render the view (`view {upto: tail}`). Then loop, at most 40 model
+   calls a turn:
    - Call `job.ai.text({model: "medium", messages, tools, draft:
      {channel: "log", turn: "turn:<thread>"}})`. The messages are
      `[system, user: [view, texts joined]]`, then the turn's steps.
    - Log each reply `talk`, each tool call `tool` (name and JSON input),
      and each result `echo` (capped). Publish each on `log`.
    - Run the tools: `zoom`, `date` and `search` are queries;
-     `computer` opens a hand-off.
+     `computer` opens a hand-off. At most 8 run per answer; past 24, an
+     answer's calls are dropped (a mutation publishes 64 records).
    - Stop when the model answers with no tool calls.
-5. `turn_end`, a mutation: release the lock. If messages are queued,
-   go to 2 in the same run. Otherwise start the job `pump`, then
-   `classify` for the thread.
+   - The last call offers no tools (`tool_choice: "none"`): the 40th, or
+     one past 512 KiB of conversation (a step's arguments travel in a
+     Workflow step of 1 MiB), or near the run's 256 steps or 3 MiB of
+     answers.
+5. `turn_end`, a mutation: release the lock, and classify the thread
+   when the mind has topics. If messages are queued, go to 2 in the same
+   run; otherwise start the job `pump`. A run takes at most 4 turns, and
+   starts one only below 64 steps; past that, `heard {resume}` takes the
+   rest in a fresh run.
 
 Tools (descriptions verbatim from the spec where it has them):
 
@@ -192,26 +219,32 @@ Tools (descriptions verbatim from the spec where it has them):
 
 ### The compactor (job `pump`)
 
-Spec §4, as a job. Each round asks `pump_plan` (a query) for up to 8
-nodes that are ready (spec §4.1 rules 1–3). It builds them in parallel
-with `job.ai.text({model: "cheap", …})` steps (the spec's two-block
-input, SCALE, the retry loop). Each result goes to `node_built`, a
-mutation where the first write wins, which refits the view. Rounds
-repeat until none is ready, or 30 rounds. A failed node is left for the
-next pump.
+Spec §4, as a job. Each round asks `pump_plan` (a query that writes
+its leases in `kv`) for up to 8 nodes that are ready (spec §4.1 rules
+1–3). It builds them with `job.ai.text({model: "cheap", …})` steps (the
+spec's two-block input, SCALE, the retry loop), one after another: a
+job's steps run one at a time (cell/platform.mjs), so JOBS is how many
+nodes a round takes, not how many calls run at once. A level-0 node is
+built alone in its round (a turn waits on level 0, and its next is ready
+only once it is built); merges wait for a round with none. Each result
+goes to `node_built`, a mutation where the first write wins, which
+refits the view. Rounds repeat until none is ready. A failed node is
+left for the next pump. Past 30 rounds or the run's budget with work
+left, a fresh `pump` takes the rest.
 
 ### Topics (job `classify`)
 
 Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 (platform, below).
 - **State:** the thread's title and its messages as `kind: text` lines,
-  at most 48 KiB, newest kept.
-- **Questions:** one `noul` per topic, at most 64 per call: `{type:
-  "noul", instructions: "Is this conversation about <name>? <description>"}`.
+  each at most 1 KiB, at most 48 KiB in all, newest kept.
+- **Questions:** one `noul` per topic, by the topic's id, at most 64 per
+  call: `{<topic id>: {type: "noul", instructions: "Is this conversation
+  about <name>? <description>"}}`.
 - A thread is in a topic at p ≥ 0.6. The answers go to `thread_topic`
   through `topics_set` and are published on `log`.
-- `topic_add` starts `classify` for the 100 newest threads. A turn's
-  end classifies its thread.
+- `topic_add` starts `classify` for the 100 newest threads (its record
+  on `sort`). A turn's end classifies its thread.
 - Clef only sorts. Topic names come from the person, or from
   `topic_suggest`, a job: one cheap `ai.text` over the view that answers
   up to 8 names, which the page offers and the person accepts.
@@ -220,8 +253,10 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 
 1. **The task.** The tool's step publishes
    `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>]}`
-   on `chat` as the fragment, under `task_open`. `task_open` records
-   the task and the record's `seq`.
+   on `chat` as the fragment (`job.publish`, which answers the record's
+   `seq`); then `task_open` records the task and that `seq`. The task id
+   is `w<run>-<step>`. goose's records for a task `task_open` has not
+   recorded yet are kept by `seq` as an orphan, which it adopts.
 2. **goose's turn.** The bridge admits it as a turn: the agent is the
    mind's lead, and the record is from neither the agent nor `anon:`.
    Its turn id is the hash of `<agent>|<mind>/chat/<seq>` (chat-records).
@@ -230,7 +265,8 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
    and its end on `work`.
 3. **The mind follows along.** `hands_worked` (each `work` record from
    an agent) records the turn against its task, keeps up to 50 steps for
-   the page, and publishes them on `log`. On `turn.end` it puts the
+   the page, and publishes them on `log`. On `turn.end` it waits 2 s
+   (the turn's last replies trigger runs of their own), then puts the
    report on the queue as a `user` message: `[<task id>] <the turn's
    replies joined>`, or `[<task id>] ended: <outcome>` with none. It
    then starts a turn like `heard` does, in the task's thread.
@@ -249,20 +285,20 @@ membership, which only its owner and the agent hold. Operations with a
 
 | op | kind | input → result |
 |---|---|---|
-| `view` | query (described) | `{}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>` |
+| `view` | query (described) | `{upto?}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>`, the parts that start before `upto` (all by default) up to the first not summarized yet (no call sees a placeholder); `settled` says none was left out |
 | `zoom` | query (described) | `{id, n}` → `{text}`: the spec's zoom |
-| `date` | query (described) | `{id}` → `{text}`: ISO local time of message `id` |
+| `date` | query (described) | `{id}` → `{text}`: ISO time of message `id`, in UTC (the mind knows no time zone) |
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |
 | `note` | mutation (described) | `{text}` → `{i}`: append a `note` (an MCP client's write) |
-| `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`; `summary` is the text of the smallest built node covering the thread's last message range, else its first user line |
+| `threads` | query | `{topic?, before?, limit?}` → `{threads: [{id, title, persona, started, last, summary, topics: [{id, p}], count}]}`, newest `last` first (`before` is a `last`); `summary` is the text of the smallest built node covering the thread's messages (`first_i` to `last_i`), else its first user line; `count` is its `user` and `talk` messages |
 | `thread` | query | `{id, before?, limit?}` → `{thread, messages: [{i, kind, text, at, persona, task}], more}`; `tool`/`echo` are returned so the page can fold them into a "steps" row |
 | `context` | query | `{i, before?, after?}` → `{messages}` around `i`, any thread (expand) |
-| `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T}`: the view as structured parts (the Memory screen) |
-| `node` | query | `{id, n}` → `{children: [{id, n, text}]}` or, for n = 1, `{message}` |
+| `memory` | query | `{}` → `{parts: [{id, n, text, built}], bytes, T, cut?}`: the view as structured parts (the Memory screen); past 768 KiB its last `cut` parts are left out |
+| `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
-| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, text, state, steps, report, started, ended}]}` |
-| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool}` |
+| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, text, state, steps, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
+| `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}]}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed |
 | `settings` | query | `{}` → `{about}` |
 | `topic_add` / `topic_remove` | mutation | `{name, description?}` / `{id}` |
 | `persona_set` / `persona_remove` / `persona_default` | mutation | `{id?, name, emoji, instructions, hands}` / `{id}` / `{id}` |
@@ -272,8 +308,11 @@ membership, which only its owner and the agent hold. Operations with a
 
 The internal mutations (editor, no description) are named here so the
 two halves agree: `hear`, `turn_begin`, `turn_touch`, `turn_end`,
-`logged` (log one step's messages), `pump_plan` (a query),
-`node_built`, `task_open`, `hands_step`, `hands_reply`, `topics_set`.
+`logged` (log one step's messages; it touches the lock and answers
+whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
+`task_open`, `hands_step`, `hands_reply`, `topics_set`. The jobs are
+`heard`, `pump`, `classify`, `topic_suggest`, `hands_said` and
+`hands_worked`.
 
 Seeded personas:
 - **Mind**, the default: plain, warm, brief.
