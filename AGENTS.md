@@ -86,7 +86,7 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, isolation, frames, ops, public,
+  delegation, files, deploy, templates, when, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
@@ -100,8 +100,8 @@ prebuilt bundle is in the debt ledger).
   and runs our Hermes image (3.8 GB), so it runs only by name
   (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
-  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
-  notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
+  `skip`, printed and counted: the hosted lane's. The share, isolation, browser,
+  notes and when sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section;
   frames, and computers' frame checks, start one of their own that
   blocks third-party cookies, as Safari does);
@@ -204,8 +204,9 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`, and `calories`: a channel trigger and a text step); the
-  shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`, `calories`: a channel trigger and a text step, and `when`:
+  `public` operations, live, presence); the shell's catalog offers
+  `todo`, `inbox`, `when` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store

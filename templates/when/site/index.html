@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>When</title>
+  <style>
+    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7c766a; --line: #e4dfd4; --soft: #efebe2; --accent: #2d5b8a; --on-accent: #fff; --tint: #dfe8f1; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1d1c16; --fg: #eeeae0; --muted: #9a9384; --line: #2f2d26; --soft: #26241e; --accent: #8fb6e0; --on-accent: #16150f; --tint: #24303c; } }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
+    main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.1rem 4rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem 3rem; }
+    @media (min-width: 52rem) { main { grid-template-columns: minmax(0, 1fr) 15rem; padding-top: 3.5rem; } header { grid-column: 1 / -1; } #empty, #board, #setup { grid-column: 1; } aside { grid-column: 2; grid-row: 2 / span 3; } }
+    .kicker { margin: 0 0 .4rem; color: var(--muted); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { font: 600 clamp(1.6rem, 5vw, 2.3rem)/1.15 Georgia, serif; margin: 0; max-width: 34ch; }
+    h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 0 .6rem; }
+    #status { margin: .6rem 0 0; color: var(--muted); font-size: .92rem; }
+    #settled { max-width: 40rem; margin-top: 1rem; padding: .9rem 1rem; border: 1px solid var(--accent); border-radius: .6rem; background: var(--tint); }
+    #settled strong { display: block; font: 600 1.15rem/1.3 Georgia, serif; }
+    .name { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+    .name span { color: var(--muted); font-size: .9rem; white-space: nowrap; }
+    input[type=text], input[type=date], input[type=time] { width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--card); color: inherit; font: inherit; }
+    input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    ol { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
+    .option { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: .85rem 1rem; }
+    .option.best { border-color: var(--accent); }
+    .top { display: flex; align-items: baseline; gap: .75rem; }
+    .label { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
+    .tag { font-size: .75rem; color: var(--accent); font-weight: 600; white-space: nowrap; }
+    .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .9rem; white-space: nowrap; }
+    .bar { display: flex; height: .4rem; margin: .55rem 0 .45rem; border-radius: 1rem; background: var(--soft); overflow: hidden; }
+    .bar i { display: block; transition: width .3s ease; }
+    .bar .y { background: var(--accent); }
+    .bar .m { background: var(--accent); opacity: .35; }
+    .who { color: var(--muted); font-size: .85rem; min-height: 1.3em; overflow-wrap: anywhere; }
+    .mine { display: flex; gap: .5rem; margin-top: .65rem; }
+    .mine button, .pick { border: 1px solid var(--line); background: transparent; border-radius: 2rem; padding: .4rem .95rem; font-size: .9rem; }
+    .mine button[aria-pressed=true], .pick[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .mine .maybe[aria-pressed=true] { background: var(--tint); color: var(--fg); }
+    .choice .option { padding: 0; }
+    .pick { display: block; width: 100%; text-align: left; border: 0; border-radius: .75rem; padding: .85rem 1rem; }
+    .pick[aria-pressed=true] { background: var(--tint); color: var(--fg); }
+    .pick[aria-pressed=true] .label::after { content: " · your pick"; color: var(--accent); font-weight: 600; font-size: .85rem; }
+    button:disabled { cursor: default; opacity: .55; }
+    #error { color: #b3261e; min-height: 1.4rem; font-size: .9rem; margin: .75rem 0 0; }
+    #empty { color: var(--muted); }
+    aside { display: grid; gap: 1.5rem; align-content: start; }
+    .people { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
+    .people li { display: flex; align-items: center; gap: .55rem; font-size: .93rem; }
+    .people .n { margin-left: auto; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+    .dot { width: 1.7rem; height: 1.7rem; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: .72rem; font-weight: 600; background: var(--soft); color: var(--muted); }
+    .here .dot { background: var(--tint); color: var(--accent); }
+    .quiet { color: var(--muted); font-size: .9rem; margin: 0; }
+    .tools { display: flex; flex-wrap: wrap; gap: .5rem; }
+    .tools button, #setup button { border: 1px solid var(--line); background: var(--card); border-radius: .5rem; padding: .45rem .8rem; font-size: .9rem; }
+    #setup { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1.1rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: .9rem; }
+    #setup label > span { display: block; font-size: .85rem; color: var(--muted); margin-bottom: .3rem; }
+    .modes { display: flex; gap: .5rem; }
+    .modes label { flex: 1; display: flex; gap: .5rem; align-items: center; border: 1px solid var(--line); border-radius: .5rem; padding: .55rem .7rem; cursor: pointer; }
+    .modes label:has(input:checked) { border-color: var(--accent); background: var(--tint); }
+    #drafts { list-style: none; margin: 0; padding: 0; display: grid; gap: .35rem; }
+    #drafts li { display: flex; align-items: center; gap: .5rem; padding: .4rem .2rem .4rem .7rem; border: 1px solid var(--line); border-radius: .5rem; }
+    #drafts li span { flex: 1; overflow-wrap: anywhere; }
+    #drafts li button { border: 0; background: none; color: var(--muted); padding: 0 .5rem; font-size: 1.1rem; }
+    .adder { display: flex; gap: .5rem; }
+    .adder input { min-width: 0; }
+    .adder input[type=date] { flex: 1 1 0; } .adder input[type=time] { flex: 0 0 7.5rem; }
+    #setup .save { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="kicker" id="kind">When</p>
+      <h1 id="question">Loading the poll…</h1>
+      <p id="status">connecting…</p>
+      <div id="settled" hidden></div>
+    </header>
+    <p id="empty" hidden>Nothing to vote on yet.</p>
+    <section id="board">
+      <label class="name"><span>Your name</span><input type="text" id="name" maxlength="40" autocomplete="nickname" placeholder="So everyone knows who voted"></label>
+      <ol id="options"></ol>
+      <p id="error" role="status"></p>
+    </section>
+    <form id="setup" hidden>
+      <label><span>The question</span><input type="text" id="ask" maxlength="200" required placeholder="When can everyone meet?"></label>
+      <div class="modes">
+        <label><input type="radio" name="mode" value="times" checked> Find a time</label>
+        <label><input type="radio" name="mode" value="choice"> Quick poll</label>
+      </div>
+      <ol id="drafts"></ol>
+      <div class="adder" id="addtime"><input type="date" id="day"><input type="time" id="hour"><button type="button" id="addt">Add</button></div>
+      <div class="adder" id="addtext" hidden><input type="text" id="choice" maxlength="80" placeholder="An option"><button type="button" id="addc">Add</button></div>
+      <div class="tools"><button class="save">Save and share</button><button type="button" id="cancel">Cancel</button></div>
+    </form>
+    <aside>
+      <div><h2>Here now</h2><ul class="people here" id="here"></ul></div>
+      <div><h2>Voted</h2><ul class="people" id="voters"></ul><p class="quiet" id="novoters">No one yet.</p></div>
+      <div class="tools" id="tools" hidden><button id="edit">Edit the poll</button><button id="toggle">Close voting</button></div>
+    </aside>
+  </main>
+  <script type="module">
+    import * as fragment from "./__fragment.js";
+
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, props = {}, ...kids) => { const e = Object.assign(document.createElement(tag), props); e.append(...kids); return e; };
+    const initials = (name) => (name.trim().split(/\s+/).slice(0, 2).map((w) => [...w][0]).join("") || "?").toUpperCase();
+    const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+    const show = (e) => { $("error").textContent = e ? e.message : ""; };
+
+    let poll = null;      // the last `poll` answer
+    let me = null;        // { principal, role }
+    let mine = null;      // this visitor's ballot as they are making it: Map(option -> answer)
+    let sending = null;   // a vote waiting to go
+    let taps = 0;         // a vote's answer forgets `mine` only if no tap came after it
+    let drafts = [];      // the options in the setup form
+
+    $("name").value = localStorage.getItem("when:name") ?? "";
+
+    function ballot() {
+      if (mine) return mine;
+      const you = poll?.ballots.find((b) => b.you);
+      return new Map(Object.entries(you?.picks ?? {}).map(([k, v]) => [Number(k), v]));
+    }
+
+    // the whole ballot, at most every 400 ms: a tap is answered at once on
+    // the page, and the public rate limit is never near
+    function send() {
+      clearTimeout(sending);
+      sending = setTimeout(async () => {
+        const name = $("name").value.trim();
+        if (!name) { $("name").focus(); show(new Error("Your name first, so everyone knows who voted.")); return; }
+        const picks = [...ballot()].map(([option, answer]) => ({ option, answer }));
+        const at = taps;
+        try { await fragment.call("vote", { name, picks }); show(); } catch (e) { show(e); }
+        if (taps === at) { mine = null; render(); }
+      }, 400);
+    }
+
+    function answer(option, value) {
+      const b = new Map(ballot());
+      if (poll.mode === "choice") { const had = b.get(option); b.clear(); if (had !== "yes") b.set(option, "yes"); }
+      else if (b.get(option) === value) b.delete(option);
+      else b.set(option, value);
+      mine = b;
+      taps++;
+      render();
+      send();
+    }
+
+    function render() {
+      if (!poll) return;
+      const editor = me && (me.role === "editor" || me.role === "owner");
+      const empty = poll.options.length === 0;
+      $("kind").textContent = poll.mode === "choice" ? "Quick poll" : "Find a time";
+      $("question").textContent = poll.question || (editor ? "Ask your question" : "Nothing to vote on yet");
+      document.title = poll.question ? `${poll.question} · When` : "When";
+      $("tools").hidden = !editor || empty;
+      $("toggle").textContent = poll.closed ? "Open voting again" : "Close voting";
+      $("empty").hidden = !empty || editor;
+      $("board").hidden = empty;
+      if (empty && editor && $("setup").hidden) openSetup();
+
+      const mineNow = ballot();
+      const tally = poll.options.map((o) => {
+        const yes = [], maybe = [];
+        for (const b of poll.ballots) {
+          const a = b.you && mine ? mineNow.get(o.id) : b.picks[o.id];
+          if (a === "yes") yes.push(b.you ? "you" : b.name);
+          if (a === "maybe") maybe.push(b.you ? "you" : b.name);
+        }
+        return { ...o, yes, maybe, score: yes.length + maybe.length / 2 };
+      });
+      const top = Math.max(0, ...tally.map((t) => t.score));
+      const voters = Math.max(1, poll.ballots.length + (mine && !poll.ballots.some((b) => b.you) ? 1 : 0));
+      $("options").className = poll.mode;
+      $("options").replaceChildren(...tally.map((t) => {
+        const best = top > 0 && t.score === top;
+        const tag = poll.chosen === t.id ? "Chosen" : best && !poll.closed ? (poll.mode === "choice" ? "Leading" : "Best so far") : "";
+        const head = el("div", { className: "top" }, el("span", { className: "label", textContent: t.label }), tag ? el("span", { className: "tag", textContent: tag }) : "",
+          el("span", { className: "count", textContent: poll.mode === "choice" ? plural(t.yes.length, "vote") : `${t.yes.length} yes${t.maybe.length ? ` · ${t.maybe.length} maybe` : ""}` }));
+        const bar = el("div", { className: "bar" }, el("i", { className: "y", style: `width:${(100 * t.yes.length) / voters}%` }), el("i", { className: "m", style: `width:${(100 * t.maybe.length) / voters}%` }));
+        const who = el("div", { className: "who", textContent: [t.yes.join(", "), t.maybe.length ? `maybe ${t.maybe.join(", ")}` : ""].filter(Boolean).join(" · ") });
+        const li = el("li", { className: `option${best || poll.chosen === t.id ? " best" : ""}` });
+        li.dataset.id = t.id;
+        if (poll.mode === "choice") {
+          const pick = el("button", { className: "pick", disabled: poll.closed, onclick: () => answer(t.id, "yes") }, head, bar, who);
+          pick.setAttribute("aria-pressed", mineNow.get(t.id) === "yes");
+          li.append(pick);
+        } else {
+          const yes = el("button", { className: "yes", textContent: "Works", disabled: poll.closed, onclick: () => answer(t.id, "yes") });
+          const maybe = el("button", { className: "maybe", textContent: "If need be", disabled: poll.closed, onclick: () => answer(t.id, "maybe") });
+          yes.setAttribute("aria-pressed", mineNow.get(t.id) === "yes");
+          maybe.setAttribute("aria-pressed", mineNow.get(t.id) === "maybe");
+          li.append(head, bar, who, el("div", { className: "mine" }, yes, maybe));
+        }
+        return li;
+      }));
+
+      const chosen = poll.options.find((o) => o.id === poll.chosen);
+      $("settled").hidden = !poll.closed;
+      $("settled").replaceChildren(chosen ? el("span", { textContent: "Settled" }) : el("span", { textContent: "Voting is closed" }), chosen ? el("strong", { textContent: chosen.label }) : "");
+      $("voters").replaceChildren(...poll.ballots.map((b) => el("li", {}, el("span", { className: "dot", textContent: initials(b.name) }), el("span", { textContent: b.you ? `${b.name} (you)` : b.name }),
+        el("span", { className: "n", textContent: String(Object.keys(b.picks).length) }))));
+      $("novoters").hidden = poll.ballots.length > 0;
+      const status = poll.closed ? "Voting is closed." : poll.mode === "choice" ? "Pick one." : "Mark every time that works for you.";
+      $("status").textContent = empty ? (editor ? "List the times (or the choices), save, and send the link: anyone with it can vote." : "")
+        : `${status} ${plural(poll.ballots.length, "person", "people")} voted.`;
+    }
+
+    // who this page is first: a visitor with no cookie yet is given one by
+    // the socket, and a call sent beside it would be given another
+    me = await fragment.me();
+    fragment.live("poll", {}, (p) => { poll = p; render(); }, show);
+
+    // ---- the editor's setup ----
+    function openSetup() {
+      drafts = poll.options.map((o) => o.label);
+      $("ask").value = poll.question;
+      $("cancel").hidden = poll.options.length === 0;
+      document.querySelector(`input[name=mode][value=${poll.mode}]`).checked = true;
+      showDrafts();
+      $("setup").hidden = false;
+    }
+    function showDrafts() {
+      const mode = document.querySelector("input[name=mode]:checked").value;
+      $("addtime").hidden = mode !== "times";
+      $("addtext").hidden = mode !== "choice";
+      $("drafts").replaceChildren(...drafts.map((d, i) => el("li", {}, el("span", { textContent: d }), el("button", { type: "button", title: "Remove", textContent: "×", onclick: () => { drafts.splice(i, 1); showDrafts(); } }))));
+    }
+    function addDraft(label) {
+      label = label.trim().slice(0, 80);
+      if (label && !drafts.includes(label) && drafts.length < 30) drafts.push(label);
+      showDrafts();
+    }
+    for (const r of document.querySelectorAll("input[name=mode]")) r.onchange = showDrafts;
+    $("addt").onclick = () => {
+      if (!$("day").value) return $("day").focus();
+      const at = new Date(`${$("day").value}T${$("hour").value || "00:00"}`);
+      const day = at.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+      addDraft($("hour").value ? `${day}, ${at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}` : day);
+    };
+    $("addc").onclick = () => { addDraft($("choice").value); $("choice").value = ""; $("choice").focus(); };
+    $("choice").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); $("addc").click(); } };
+    $("cancel").onclick = () => { $("setup").hidden = true; };
+    $("edit").onclick = openSetup;
+    $("setup").onsubmit = async (e) => {
+      e.preventDefault();
+      if (!drafts.length) return show(new Error("Add at least one option."));
+      try {
+        await fragment.call("setup", { question: $("ask").value.trim(), mode: document.querySelector("input[name=mode]:checked").value, options: drafts });
+        $("setup").hidden = true;
+        show();
+      } catch (err) { show(err); }
+    };
+    $("toggle").onclick = () => {
+      const best = [...document.querySelectorAll("#options .best")].map((li) => Number(li.dataset.id));
+      fragment.call("close", { closed: !poll.closed, chosen: best.length === 1 ? best[0] : null }).then(() => show(), show);
+    };
+
+    // ---- who is here, by the name they gave ----
+    $("name").onchange = () => {
+      const name = $("name").value.trim();
+      localStorage.setItem("when:name", name);
+      fragment.presence.set({ name });
+      if (poll?.ballots.some((b) => b.you) || mine) send();
+    };
+    fragment.presence.set({ name: $("name").value.trim() });
+    fragment.presence.on((list) => {
+      const people = new Map();
+      for (const p of list) if (!people.has(p.principal) || p.data?.name) people.set(p.principal, p.principal === me.principal ? "you" : p.data?.name || "someone");
+      $("here").replaceChildren(...[...people.values()].map((n) => el("li", {}, el("span", { className: "dot", textContent: initials(n === "you" ? $("name").value || "you" : n) }), el("span", { textContent: n }))));
+    });
+    fragment.closed(({ code }) => { $("status").textContent = code === 4004 ? "This poll was deleted." : "This page's access changed: reload it."; });
+  </script>
+</body>
+</html>

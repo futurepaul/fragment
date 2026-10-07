@@ -42,6 +42,7 @@ const CURRENT = "shell.chat.v1";
 const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
+  { template: "when", name: "When", about: "Find a time or run a poll: anyone with the link votes, live." },
   { template: "blank", name: "Blank", about: "One page to start from." },
   // blessed (decision 40): named, not copied, and made with a title, as a chat is
   { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
