@@ -140,12 +140,14 @@ prebuilt bundle is in the debt ledger).
   cache saves between (the build also builds the computer images ahead
   of the node, beside the Rust: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
-  … | --except …] [--dry-run | --sweep] [--max-paid-calls <n>]`: the hosted
+  … | --except …] [--dry-run | --sweep [<run>] | --sweep-all]
+  [--max-paid-calls <n>]`: the hosted
   lane, the same sections against the branch deployment
   `https://<b>.<zone>` on its real vendors (crates/e2e/src/hosted.rs). Its
   people sign in through the preview's levers as `<name>@e2e.test` (the
   config's `test_secret_file`, read from its file; docs/secrets.md), its
-  fragments are `e2e-…`, and a section that needs what a preview lacks is
+  fragments are `e2e-<run>-…` (the run's id, 6 hex digits, printed as it
+  starts), and a section that needs what a preview lacks is
   a skip that says why. Paid calls (models, AI steps) are lent from the
   run's budget (default 60), each person's capped by their ledger, and the
   run ends saying what it spent. `agent-smoke` runs only here, and only
@@ -154,11 +156,22 @@ prebuilt bundle is in the debt ledger).
   uses (a first reply, the CLI, an app, the desktop and its screen, an
   approval, a sleep and a wake), for about half an hour and up to 50 paid
   calls (crates/e2e/src/lanes/agent_smoke.rs). `--dry-run` prints the plan (base URL,
-  what runs, what is skipped and why) and calls nothing; `--sweep` deletes
-  the e2e people's `e2e-…` fragments there and puts their computers to
-  sleep. `cargo xtask e2e --rehearse` keeps the hosted lane's rules on the
-  local node (shaped as a branch, its fakes hidden from the lanes) and
-  ends with the sweep. Running it against a preview spends test cents:
+  what runs, what is skipped and why) and calls nothing. A preview is
+  shared (several sessions run on it at once), so a sweep is one run's
+  unless told otherwise: `--sweep` deletes the fragments of the last run
+  that finished in this checkout, `--sweep <run>` those of the run it
+  names, whatever their age and no other run's, and puts that run's
+  people's computers to sleep (not one whose person owns another run's
+  fragment too); a hosted run ends naming its id for this. `--sweep-all`,
+  for when nothing else runs there, deletes every e2e fragment at least an
+  hour old and spares younger ones (a run started meanwhile may be using
+  them), and their people's computers. Each says what it kept and why:
+  other runs' fragments counted by run, young ones named with their age
+  (crates/e2e/src/hosted/sweep.rs). `cargo xtask e2e --rehearse` keeps the
+  hosted lane's rules on the local node (shaped as a branch, its fakes
+  hidden from the lanes) and ends with its sweeps: its run's, which keeps
+  another run's fragment made beside it, then the whole one's, which
+  spares it for its age. Running it against a preview spends test cents:
   Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at

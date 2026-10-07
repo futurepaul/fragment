@@ -24,6 +24,10 @@ pub fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_secs() as i64
 }
 
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after 1970").as_millis() as i64
+}
+
 /// The wall clock as the node's logs stamp their lines (UTC, to the
 /// millisecond), so a call that failed can be found in them.
 pub fn clock() -> String {

@@ -8,7 +8,8 @@
 //!
 //!   --hosted --zone <zone> --branch <b> [--secret-file <file>]
 //!       [--offers computers,models] [--max-paid-calls <n>]
-//!       [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep]
+//!       [--only <section>[,...] | --except <section>[,...]]
+//!       [--dry-run | --sweep [<run>] | --sweep-all]
 //!
 //! - **People.** Each signs in through the preview's levers
 //!   (`POST /api/test/signin`, the deployment's test secret in its header):
@@ -16,7 +17,8 @@
 //!   reaches. No real account, and no credential typed anywhere.
 //! - **Sections.** Each says what it needs (needs.rs); one that needs what a
 //!   preview lacks is a skip that says why, counted. Its fragments are
-//!   named `e2e-…`.
+//!   labelled `e2e-<run>-…`: the run's id, 6 hex digits, printed as it
+//!   starts.
 //! - **Money.** A person makes no paid call (a model call, an AI step)
 //!   unless their section lends them some of the run's budget
 //!   (`--max-paid-calls`, default 60), and their ledger refuses the one past
@@ -25,8 +27,15 @@
 //! - **`--dry-run`** prints the plan: the base URL, the sections it would
 //!   run, and those it would skip and why. It calls nothing and reads no
 //!   secret.
-//! - **`--sweep`** deletes the e2e people's `e2e-…` fragments on the
-//!   preview, and puts their computers to sleep.
+//! - **`--sweep [<run>]`** deletes one run's fragments on the preview (by
+//!   default the last run that finished in this checkout), whatever their
+//!   age, and no other; and puts its people's computers to sleep. A preview
+//!   is shared: another session's run is never this sweep's.
+//!   **`--sweep-all`**, for when nothing else runs there, deletes every
+//!   e2e fragment at least an hour old and puts their people's computers
+//!   to sleep. Either says what it kept, and why (sweep.rs).
+
+pub mod sweep;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +46,7 @@ use fragment_devstack as devstack;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
-use crate::api::{self, Api, Call, Preview, Reply};
+use crate::api::{self, Api, Preview};
 use crate::needs::{Need, Offers, Rung};
 use crate::{browser, Fake, Planned, Shape, Suite};
 
@@ -45,12 +54,10 @@ use crate::{browser, Fake, Planned, Shape, Suite};
 /// and the most it may say: a hosted run spends test cents.
 pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
-/// The pages of e2e people one sweep walks at most (a page is 100).
-const SWEEP_PAGES_MAX: usize = 100;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--offers computers,models]
-                    [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep]";
+                    [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
 /// The suite's command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -83,11 +90,22 @@ pub struct Hosted {
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Run,
     DryRun,
-    Sweep,
+    Sweep(SweepOf),
+}
+
+/// What a sweep removes, as its command line names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SweepOf {
+    /// `--sweep`: the last run that finished in this checkout.
+    LastRun,
+    /// `--sweep <run>`: that run's.
+    Run(String),
+    /// `--sweep-all`: every e2e fragment at least `sweep::SPARED_FOR_MS` old.
+    All,
 }
 
 /// Reads the suite's arguments: the local run's `--only`/`--except`, or a
@@ -97,9 +115,9 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let list = |names: &str| names.split(',').filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>();
     let (mut only, mut except) = (None, vec![]);
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
-    let (mut dry_run, mut sweep, mut rehearse) = (false, false, false);
+    let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
     let mut shard = None;
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(arg) = it.next() {
         let mut value = || it.next().cloned().ok_or_else(usage);
@@ -114,7 +132,14 @@ pub fn parse(args: &[String]) -> Result<Args> {
             "--offers" => offers = Some(value()?),
             "--max-paid-calls" => max_paid_calls = Some(value()?.parse::<u64>().map_err(|_| anyhow::anyhow!("--max-paid-calls is a whole number"))?),
             "--dry-run" => dry_run = true,
-            "--sweep" => sweep = true,
+            // its run is the next argument, when that is not another flag
+            "--sweep" if sweep.is_none() => {
+                sweep = Some(match it.next_if(|next| !next.starts_with("--")) {
+                    Some(run) => SweepOf::Run(sweep_run(run)?),
+                    None => SweepOf::LastRun,
+                })
+            }
+            "--sweep-all" if sweep.is_none() => sweep = Some(SweepOf::All),
             "--rehearse" => rehearse = true,
             _ => return Err(usage()),
         }
@@ -128,9 +153,9 @@ pub fn parse(args: &[String]) -> Result<Args> {
         Ok(n)
     };
     if !hosted {
-        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep;
+        let hosted_only = zone.is_some() || branch.is_some() || secret_file.is_some() || offers.is_some() || dry_run || sweep.is_some();
         if hosted_only || (max_paid_calls.is_some() && !rehearse) {
-            bail!("--zone, --branch, --secret-file, --offers, --dry-run and --sweep are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
+            bail!("--zone, --branch, --secret-file, --offers, --dry-run, --sweep and --sweep-all are a hosted run's (--hosted), and --max-paid-calls a hosted run's or a rehearsal's\n{USAGE}");
         }
         if rehearse && shard.is_some() {
             // a rehearsal ends with its sweep, which belongs to no shard
@@ -156,12 +181,12 @@ pub fn parse(args: &[String]) -> Result<Args> {
         bail!("--zone is a domain (finite.place), not {zone:?}");
     }
     let action = match (dry_run, sweep) {
-        (true, true) => bail!("--dry-run and --sweep are two runs"),
-        (true, false) => Action::DryRun,
-        (false, true) => Action::Sweep,
-        (false, false) => Action::Run,
+        (true, Some(_)) => bail!("--dry-run and a sweep are two runs"),
+        (true, None) => Action::DryRun,
+        (false, Some(of)) => Action::Sweep(of),
+        (false, None) => Action::Run,
     };
-    if action == Action::Sweep && (only.is_some() || !except.is_empty()) {
+    if matches!(action, Action::Sweep(_)) && (only.is_some() || !except.is_empty()) {
         bail!("a sweep runs no sections: no --only or --except");
     }
     if action != Action::DryRun && secret_file.is_none() {
@@ -178,6 +203,16 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
     Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None })
+}
+
+/// `--sweep <run>`'s run: the id a run prints as it starts, the 6 hex
+/// digits after `e2e-` in its labels.
+fn sweep_run(text: &str) -> Result<String> {
+    if sweep::is_run(text) {
+        Ok(text.to_string())
+    } else {
+        bail!("--sweep <run> names a run by its id, {} hex digits (the c58b2a of e2e-c58b2a-todo), not {text:?}", sweep::RUN_HEX)
+    }
 }
 
 /// `--shard k/n`: shard `k` (from 1) of the table's split, whose size `n`
@@ -200,7 +235,7 @@ pub fn run(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> Re
             anyhow::ensure!(unknown.is_empty(), "no section is named {}", unknown.join(", "));
             Ok(())
         }
-        Action::Sweep => sweep(&hosted),
+        Action::Sweep(ref of) => sweep(&hosted, of),
         Action::Run => sections(only, except, hosted),
     }
 }
@@ -285,7 +320,7 @@ pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> Strin
     let width = planned.iter().map(|p| p.section.len()).max().unwrap_or(0);
     let mut out = format!("the hosted plan for {} (a dry run: nothing is called, no secret is read)\n", hosted.preview.branch);
     out += &format!("  platform     {}\n", hosted.preview.platform());
-    out += &format!("  fragments    https://<label>--<username>--{}.{}/ (labels e2e-…)\n", hosted.preview.branch, hosted.preview.zone);
+    out += &format!("  fragments    https://<label>--<username>--{}.{}/ (labels e2e-<run>-…, the run's id printed as it starts)\n", hosted.preview.branch, hosted.preview.zone);
     out += &match &hosted.secret_file {
         Some(file) => format!("  sign-in      e2e people (<name>@e2e.test) through the levers, the test secret read from {} when the run starts\n", file.display()),
         None => "  sign-in      none: no --secret-file, so no one can sign in and nothing needing the levers runs\n".to_string(),
@@ -344,14 +379,22 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
     let secret = read_secret(hosted.secret_file.as_deref().context("a hosted run names its secret file")?)?;
     let shared = api::Run::signing_in_by_levers(secret, hosted.max_paid_calls);
     let deploy = preflight(&Api::hosted(&hosted.preview, &shared))?;
-    println!("hosted: {} (deploy {deploy}); at most {} paid calls", hosted.preview.platform(), hosted.max_paid_calls);
     let cli = crate::cli_binary()?;
     let mut s = suite(only, except, &hosted, shared, cli, PathBuf::new());
-    s.scratch = devstack::repo_root().join("target/e2e").join(format!("hosted-{}", s.run));
+    let run = s.run.clone();
+    println!("hosted: {} (deploy {deploy}), run {run} (its fragments e2e-{run}-…); at most {} paid calls", hosted.preview.platform(), hosted.max_paid_calls);
+    s.scratch = devstack::repo_root().join("target/e2e").join(format!("hosted-{run}"));
     std::fs::create_dir_all(&s.scratch)?;
     s.chrome = browser::Shared::new(&s.scratch);
     crate::lanes::run(&mut s);
-    crate::finish(&mut s)
+    // noted as it finishes, so `--sweep` never takes a run still going here
+    let noted = sweep::note_last_run(&hosted.preview, &run);
+    let finished = crate::finish(&mut s);
+    match noted {
+        Ok(()) => println!("run {run}'s fragments stay for a look: `--sweep` deletes them (this run's alone; `--sweep {run}` names it)"),
+        Err(e) => println!("run {run}'s fragments stay; `--sweep {run}` deletes them (it could not be noted for `--sweep`: {e:#})"),
+    }
+    finished
 }
 
 /// What the run's people spent, from their ledgers: each one's model
@@ -390,121 +433,96 @@ pub fn spent(s: &mut Suite) {
     );
 }
 
-/// A call as the shell makes it, with a platform session (the sweep's
-/// people have no key).
-fn shell(api: &Api, session: &str, method: &str, path: &str) -> Result<Reply> {
-    api.call(Call {
-        method,
-        url: format!("{}{path}", api.base),
-        cookie: Some(format!("fragment_session={session}")),
-        extra: vec![("x-fragment-shell", "1".into()), ("sec-fetch-site", "same-origin".into()), ("origin", api.base.clone())],
-        ..Call::default()
-    })
-}
-
-/// Deletes every e2e person's `e2e-…` fragments on the preview, and puts
-/// their computers to sleep. Each person signs in again (a session, no
-/// paid calls) and acts as themself: the sweep has no power of its own.
-fn sweep(hosted: &Hosted) -> Result<()> {
+/// A sweep of the preview (sweep.rs): one run's fragments, or
+/// (`--sweep-all`) every e2e fragment old enough; it says what it kept.
+fn sweep(hosted: &Hosted, of: &SweepOf) -> Result<()> {
+    let scope = match of {
+        SweepOf::LastRun => sweep::Scope::Run(sweep::last_run(&hosted.preview)?),
+        SweepOf::Run(run) => sweep::Scope::Run(run.clone()),
+        SweepOf::All => sweep::Scope::All { spared_for_ms: sweep::SPARED_FOR_MS },
+    };
     let secret = read_secret(hosted.secret_file.as_deref().context("a sweep names the secret file")?)?;
     let shared = api::Run::signing_in_by_levers(secret, 0);
     let api = Api::hosted(&hosted.preview, &shared);
     preflight(&api)?;
-    let swept = sweep_on(&api)?;
-    println!(
-        "swept {}: {} e2e people, {} e2e- fragments deleted, {} others kept, {} computers put to sleep",
-        hosted.preview.platform(),
-        swept.people,
-        swept.deleted,
-        swept.kept,
-        swept.slept
-    );
+    let platform = hosted.preview.platform();
+    match &scope {
+        sweep::Scope::Run(run) => println!("sweeping run {run}'s fragments (e2e-{run}-…) on {platform}, and no other"),
+        sweep::Scope::All { spared_for_ms } => println!("sweeping every e2e fragment on {platform} but those younger than {} min", spared_for_ms / 60_000),
+    }
+    let swept = sweep::sweep_on(&api, &scope, api::now_ms())?;
+    println!("swept {platform}: {} e2e people, {} fragments deleted, {} computers put to sleep", swept.people, swept.deleted, swept.slept);
+    println!("{}", swept.report());
     Ok(())
 }
 
-/// A rehearsal's last section, `sweep`: on its node, the sweep deletes the
-/// run's e2e fragments (each e2e person's, by the label alone) and leaves
-/// none, and a second finds nothing to do. A hosted run sweeps by `--sweep`.
+/// A rehearsal's last section, `sweep`, on its node: the run's sweep
+/// deletes the run's fragments and keeps another run's, made just now;
+/// a second finds nothing of the run's left; the whole sweep spares the
+/// other run's for their age, and says so; then a sweep naming the other
+/// run, and a whole sweep sparing nothing, delete the rest. A hosted run
+/// sweeps by `--sweep`.
 pub fn rehearse_sweep(s: &mut Suite) {
     if !s.section("sweep", &[Need::Levers]) {
         return;
     }
+    if let Err(e) = rehearse_sweeps(s) {
+        s.fail("the sweeps", format!("{e:#}"));
+    }
+}
+
+fn rehearse_sweeps(s: &mut Suite) -> Result<()> {
+    use sweep::{Kept, Scope};
     let api = s.api();
-    let swept = sweep_on(&api).and_then(|first| Ok((first, sweep_on(&api)?)));
-    match swept {
-        Ok((first, again)) => {
-            s.ok(
-                "the sweep signs each e2e person in again and deletes their e2e- fragments",
-                first.people > 0 && first.deleted > 0 && first.kept == 0,
-                format!("{first:?}"),
-            );
-            s.ok("and puts their computers to sleep, and a second sweep finds nothing left", again.deleted == 0 && again.slept == 0 && again.people >= first.people, format!("{again:?}"));
-        }
-        Err(e) => s.fail("the sweep", format!("{e:#}")),
+    // another run's fragment, and one of an older layout, whose label names
+    // no run: a person of their own makes them now
+    let other = if s.run == "abcdef" { "fedcba" } else { "abcdef" };
+    let stranger = api.person_paying(0)?;
+    let theirs = api.qualified(&stranger, &sweep::label(other, "decoy"))?;
+    let older = api.qualified(&stranger, "e2e-decoy-older")?;
+    for label in [sweep::label(other, "decoy"), "e2e-decoy-older".to_string()] {
+        let r = api.create(&stranger, &label)?;
+        anyhow::ensure!(r.status == 200, "making {label}: {r}");
     }
-}
+    let there = |name: &str| api.status(&stranger, name).map(|r| r.status);
+    let decoys = |swept: &sweep::Swept| {
+        let mut spared = swept.spared.clone();
+        spared.sort();
+        spared
+    };
+    let kept_older = (older.clone(), Kept::OtherRun(None));
+    let mut other_runs = vec![kept_older.clone(), (theirs.clone(), Kept::OtherRun(Some(other.to_string())))];
+    other_runs.sort();
 
-/// What a sweep did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Swept {
-    pub people: usize,
-    pub deleted: usize,
-    pub kept: usize,
-    pub slept: usize,
-}
-
-/// The sweep, on the deployment `api` reaches (a preview, or a rehearsal's node).
-pub fn sweep_on(api: &Api) -> Result<Swept> {
-    assert!(api.signs_in_by_levers(), "a sweep signs the e2e people in through the levers");
-    let (mut people, mut deleted, mut kept, mut slept) = (0usize, 0usize, 0usize, 0usize);
-    // one that did not go is named at the end; the rest still go, and a
-    // sweep again finishes it. A delete answers within one round of its
-    // members' lists (the cell's ended.rs), well inside the client's 60 s:
-    // before, it told each of a 1000-member fragment's lists in turn and
-    // answered after 300 s, so the sweep saw a timeout for a delete that
-    // finished later
-    let mut left: Vec<String> = Vec::new();
-    let mut after: Option<String> = None;
-    for page in 0..=SWEEP_PAGES_MAX {
-        anyhow::ensure!(page < SWEEP_PAGES_MAX, "more than {SWEEP_PAGES_MAX} pages of e2e people: sweep again");
-        let r = api.unsigned("POST", "/api/test/people", Some(&json!({ "after": after })))?;
-        anyhow::ensure!(r.status == 200, "the e2e people: {r}");
-        for person in r.body["people"].as_array().into_iter().flatten() {
-            let email = person["email"].as_str().context("an e2e person has an email")?;
-            people += 1;
-            let (session, _) = api.e2e_sign_in(email, 0)?;
-            let listed = shell(api, &session, "GET", "/api/fragments")?;
-            anyhow::ensure!(listed.status == 200, "{email}'s fragments: {listed}");
-            for f in listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["role"] == "owner") {
-                let name = f["name"].as_str().unwrap_or("");
-                if !name.starts_with(levers::E2E_LABEL_PREFIX) {
-                    // not a hosted run's: an e2e person's fragment is the run's only by its label
-                    kept += 1;
-                    continue;
-                }
-                match shell(api, &session, "DELETE", &format!("/api/f/{name}")) {
-                    Ok(r) if r.status == 200 || r.status == 404 => deleted += 1,
-                    Ok(r) => left.push(format!("deleting {name}: {r}")),
-                    Err(e) => left.push(format!("deleting {name}: {e:#}")),
-                }
-            }
-            let computers = shell(api, &session, "GET", "/api/computers")?;
-            for c in computers.body["computers"].as_array().into_iter().flatten().filter(|c| c["phase"] != "asleep") {
-                let id = c["computer"].as_str().unwrap_or("");
-                match shell(api, &session, "POST", &format!("/api/computers/{id}/sleep")) {
-                    Ok(r) if r.status == 200 => slept += 1,
-                    Ok(r) => left.push(format!("putting {id} to sleep: {r}")),
-                    Err(e) => left.push(format!("putting {id} to sleep: {e:#}")),
-                }
-            }
-        }
-        after = r.body["next"].as_str().map(str::to_string);
-        if after.is_none() {
-            break;
-        }
-    }
-    anyhow::ensure!(left.is_empty(), "the sweep left {} (sweep again):\n  {}", left.len(), left.join("\n  "));
-    Ok(Swept { people, deleted, kept, slept })
+    let ours = Scope::Run(s.run.clone());
+    let first = sweep::sweep_on(&api, &ours, api::now_ms())?;
+    s.ok(
+        "the run's sweep signs each e2e person in again and deletes the run's fragments, and keeps another run's, by their labels",
+        first.people > 0 && first.deleted > 0 && decoys(&first) == other_runs,
+        format!("{first:?}"),
+    );
+    let again = sweep::sweep_on(&api, &ours, api::now_ms())?;
+    s.ok(
+        "a second finds none of the run's left, nor an awake computer of its people",
+        again.deleted == 0 && again.slept == 0 && again.people >= first.people && decoys(&again) == other_runs && there(&theirs)? == 200,
+        format!("{again:?}"),
+    );
+    let all = sweep::sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, api::now_ms())?;
+    let young = all.spared_for(|k| matches!(k, Kept::Young(age) if (0..sweep::SPARED_FOR_MS).contains(age)));
+    s.ok(
+        "the whole sweep spares another run's fragments made within the hour, and says so",
+        all.deleted == 0 && young.len() == 2 && all.spared.len() == 2 && all.report().contains("2 younger than 60 min") && there(&older)? == 200,
+        format!("{all:?}\n{}", all.report()),
+    );
+    let named = sweep::sweep_on(&api, &Scope::Run(other.to_string()), api::now_ms())?;
+    s.ok(
+        "a sweep naming the other run deletes its fragment alone",
+        named.deleted == 1 && decoys(&named) == [kept_older] && there(&theirs)? == 404 && there(&older)? == 200,
+        format!("{named:?}"),
+    );
+    let rest = sweep::sweep_on(&api, &Scope::All { spared_for_ms: 0 }, api::now_ms())?;
+    s.ok("and a whole sweep sparing nothing deletes the rest", rest.deleted == 1 && rest.spared.is_empty() && there(&older)? == 404, format!("{rest:?}"));
+    Ok(())
 }
 
 #[cfg(test)]

@@ -408,10 +408,11 @@ impl Suite {
     }
 
     /// A label for this run (a fragment's full name adds its owner's
-    /// username). Hosted, it starts `e2e-`, so a sweep finds it.
+    /// username). Hosted, it is `e2e-<run>-<base>`, so the run's sweep
+    /// finds it, and leaves every other run's (hosted/sweep.rs).
     pub fn name(&self, base: &str) -> String {
         match self.hosted_rules {
-            true => format!("{}{base}-{}", fragment_core::levers::E2E_LABEL_PREFIX, self.run),
+            true => hosted::sweep::label(&self.run, base),
             false => format!("{base}-{}", self.run),
         }
     }
@@ -775,9 +776,10 @@ fn cli_binary() -> Result<PathBuf> {
     Ok(cli)
 }
 
-/// A run's name: distinguishes its fragments from any earlier state.
+/// A run's name: distinguishes its fragments from any earlier state, and
+/// (hosted) names the run its sweep removes.
 fn run_name() -> String {
-    format!("{:x}", api::now_s() % 0xffffff)
+    hosted::sweep::run_id(api::now_s())
 }
 
 /// A local run's settings beside its sections (hosted.rs `Args`).
