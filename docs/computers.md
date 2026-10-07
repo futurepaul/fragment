@@ -810,8 +810,8 @@ persisted)".
 ## Billing
 
 - A computer's container starts at the size its awake time is priced at:
-  `FRAGMENT_COMPUTER_INSTANCE` names the price book's instance (default
-  `2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
+  every computer is the price book's instance `fragment_core::price::INSTANCE`
+  (`2vcpu-6gib`, decision 13), and its size goes to `ctx.container.start`
   as `instance` (`fragment_core::price::instance_size`: a Containers type
   by name, or `<n>vcpu-<m>gib`, a custom size with 2 GB of disk a GiB).
 - Awake time is metered at the instance's rate to the computer's owner (decision 24):

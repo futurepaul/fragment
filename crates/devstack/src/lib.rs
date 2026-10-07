@@ -322,9 +322,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
-    /// The platform's origin (sign-in, the platform session), when it is
-    /// not the hostname suffix itself.
-    pub platform_url: Option<String>,
+    /// The platform's origin (sign-in, the platform session;
+    /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
+    pub platform_url: String,
     /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
@@ -387,6 +387,7 @@ impl Fleet {
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
+            ("FRAGMENT_PLATFORM_URL", self.platform_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
         ];
@@ -409,7 +410,6 @@ impl Fleet {
         let retry = self.delivery_retry_s.map(|r| r.to_string());
         if let Some(r) = &retry {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
-            vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
         if let Some(s) = &self.host_suffix {
             vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
@@ -422,9 +422,6 @@ impl Fleet {
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
-        }
-        if let Some(p) = &self.platform_url {
-            vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));

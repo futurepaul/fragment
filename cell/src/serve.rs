@@ -209,7 +209,7 @@ impl FragmentCell {
             self.reader(&mut facts, caller, link, Role::Public).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
-            let platform = self.cfg.platform(&caller.url);
+            let platform = self.cfg.platform();
             // bounded: the registry answers at most 64 profiles
             for p in answer.profiles.values_mut() {
                 p.picture = p.picture.take().map(|path| format!("{platform}{path}"));

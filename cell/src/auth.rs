@@ -270,7 +270,7 @@ pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
 
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
     let workos = crate::keys::workos(env, cfg).await?;
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
     let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
     let state = began.state;
@@ -307,7 +307,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     let issuer = workos.issuer();
     let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await?;
     redirect(
-        &back_to(&format!("{}/", cfg.platform(url)), Some(&done.return_to))?,
+        &back_to(&format!("{}/", cfg.platform()), Some(&done.return_to))?,
         &[
             set_cookie(SESSION_COOKIE, &done.token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
             set_cookie(LOGIN_COOKIE, "", "/", 0, secure(url)),
@@ -318,7 +318,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
 /// Sign-in's routes on the platform origin (the router sends only these).
 pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     {
         match (method, segments) {
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
@@ -500,7 +500,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
 /// from its top-level ones, so a shell reloading its tabs ends none of
 /// those.
 async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let header = |k: &str| req.headers().get(k).map(Option::unwrap_or_default);
     let framed = fragment_core::frames::platform_frame(&header("sec-fetch-dest")?, &header("sec-fetch-mode")?, &header("sec-fetch-site")?);
     if !framed || url.origin().ascii_serialization() != platform {
@@ -651,7 +651,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let link_changed = !signing_in && query(url, "view").is_some();
     let signed_out = e.code == ErrorCode::Unauthenticated;
     if signed_out && !framed && !link_changed && !signing_in {
-        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[]);
+        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[]);
     }
     let (label, ask) = match fragment_proto::split_fragment_name(name) {
         Some((label, owner)) => (label, format!("its owner, <b>@{}</b>,", esc(owner))),
@@ -661,7 +661,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
     let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));
     let sign_in = a(&format!("{base}__signin?return={}", enc(&back)), &format!("Sign in to {label}"));
-    let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
+    let home = a(&format!("{}/", cfg.platform()), "Your fragments");
     let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
     let l = esc(label);
     let (title, body) = if link_changed {
@@ -730,7 +730,7 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if fetched.site && signed_in_here(req, env, name, url, path_mode).await? {
                 return redirect(&back_to(&base, Some(&back))?, &[]);
             }
-            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
+            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[])
         }
         ("__signout", Method::Get) => page(
             200,

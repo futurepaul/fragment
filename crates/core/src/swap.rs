@@ -90,14 +90,6 @@ pub fn agent_of<'a>(keys: &[TagKey], computer: &str, agents: &'a [String], provi
     agents.iter().find(|a| keys.iter().any(|k| k.verifies(computer, a, provider, tag))).map(String::as_str)
 }
 
-/// A placeholder's prefix for a provider of `kind`.
-pub fn prefix_of(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Connection => CONNECTION_PREFIX,
-        Kind::Operator | Kind::Own => KEY_PREFIX,
-    }
-}
-
 /// A placeholder, as a guest sends it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Placeholder {

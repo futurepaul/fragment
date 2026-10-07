@@ -95,8 +95,8 @@ impl FragmentCell {
         self.set_meta(MetaKey::Cards, &serde_json::to_string(cards).expect("the cards serialize"))
     }
 
-    /// Failed tries wait as deliveries do (`FRAGMENT_DELIVERY_RETRY_S`,
-    /// doubling to `_MAX_S`).
+    /// Failed tries wait as deliveries do (`delivery_retry_s`, doubling
+    /// to `delivery_retry_max_s`: config.rs).
     fn card_pace(&self) -> Pace {
         Pace { first_ms: i64::from(self.cfg.delivery_retry_s) * 1000, max_ms: i64::from(self.cfg.delivery_retry_max_s) * 1000 }
     }

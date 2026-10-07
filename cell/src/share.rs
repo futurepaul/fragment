@@ -489,7 +489,7 @@ fn carried(req: &Request, url: &Url) -> CellResult<Option<calls::Session>> {
 }
 
 async fn sheet(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let signed_out = || auth::to_login(&platform, &format!("/share/{name}"));
     let Some(session) = carried(req, url)? else { return signed_out() };
     let token = session.token.clone();
@@ -540,7 +540,7 @@ pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &s
 }
 
 async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (session, live, fields) = match poster(&mut req, env, url, &platform, &purpose("share", name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),
@@ -628,7 +628,7 @@ fn invite_token(url: &Url) -> Option<String> {
 }
 
 async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let Some(token) = invite_token(url) else { return notice(400, "Not an invite", "This link holds no invite. Ask for it again.") };
     let Some((session, live)) = auth::platform_session(req, env, url).await? else {
         return auth::to_login(&platform, &format!("/join/{name}?token={token}"));
@@ -683,7 +683,7 @@ async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str
 }
 
 async fn join_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (_, live, fields) = match poster(&mut req, env, url, &platform, &purpose("join", name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),

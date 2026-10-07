@@ -497,10 +497,10 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            platform_url: Some(match (self.shape, suffix) {
+            platform_url: match (self.shape, suffix) {
                 (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
                 _ => format!("http://127.0.0.1:{}", self.port),
-            }),
+            },
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             // the levers, as a preview has them: each request carries the secret

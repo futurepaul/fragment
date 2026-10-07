@@ -51,7 +51,7 @@ fn not_modified(req: &Request, tag: &str) -> Result<bool> {
 /// computer's host under the suffix (none without one: fragments are then
 /// served by path, on this origin).
 fn frame_src(cfg: &Config, url: &Url) -> String {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let scheme = url.scheme();
     let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
     match &cfg.host_suffix {
