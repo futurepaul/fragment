@@ -327,12 +327,12 @@ on. The cookies are cleared whatever the registry answers; when it
 cannot end the sessions, the failure is logged and a copy lasts until
 the session expires or its platform session ends (`/auth/logout`).
 
-### Which cookies count (docs/fragment-boats.md, decision 3)
+### Which cookies count
 
 Every fragment's origin is one site with the others (all of them are
-under `fragment.boats`, which the Public Suffix List does not list:
-docs/fragment-boats.md), so a SameSite=Lax cookie rides along on another
-fragment's images, scripts, fetches, and forms. The router counts a
+under `fragment.boats`, which the Public Suffix List does not list), so
+a SameSite=Lax cookie rides along on another fragment's images,
+scripts, fetches, and forms. The router counts a
 browser's cookies on a fragment's origin by the Fetch Metadata it sends
 (`Sec-Fetch-Site`, `-Mode`, `-Dest`, which no page's script sets); a
 request whose cookies do not count is served as to a stranger:
@@ -364,11 +364,28 @@ A fragment shows signed in only in the platform's page, and in another
 fragment's page not at all. A signed request (the CLI's, an agent's)
 carries no cookies and is unchanged.
 
+These rules do not wait for the Public Suffix List. Listing
+`fragment.boats` there would make browsers keep fragments apart
+themselves: no cookie of one sent to another, `Domain=fragment.boats`
+cookies refused, and storage and processes split per fragment. But the
+list declines projects that serve fewer than thousands of people,
+reviews take weeks to months, browsers pick a change up only in their
+own releases, and a listing is slow to undo. So it comes last, once
+fragment.boats serves that many. Its requirements (a `_psl` TXT record
+kept for as long as the entry is listed, more than two years of
+registration, a role address, and an abuse contact) are in
+docs/fragment-boats.md at the tag `celld-final`.
+
 ### Frame sessions
 
 A frame session is a fragment's session in a frame of the platform's
 own page (the shell's tabs: docs/cloudflare-v1.md, decision 6), bound to
-the platform's origin (docs/fragment-boats.md, design C):
+the platform's origin. A frame cannot sign in through the platform as a
+tab does: a browser sends no SameSite=Lax cookie into a cross-site
+frame, and Safari blocks every third-party cookie. A page's own code
+must never hold a sign-in token either. So platform code mints the
+session for a frame of the platform's page alone, and the frame keeps
+it in a partitioned cookie (CHIPS):
 
 - `GET <platform>/auth/frame?name=&return=` mints it, for a frame of the
   platform's own page only: its Fetch Metadata, which no page's script
@@ -1196,7 +1213,7 @@ Linux), `fragment
 post <name> <channel> --body '{...}' [--id ID]`, `fragment
 channel <name> [<channel>] [--after N] [--follow]`.
 
-### Moved hosts (docs/fragment-boats.md, slice 2)
+### Moved hosts
 
 fragment.club's fragments moved to `fragment.boats` (docs/cloudflare-v1.md,
 decision 5); the platform stayed on `fragment.club`. The router takes a host in
@@ -1213,7 +1230,9 @@ answer `Cache-Control: no-store`, so the move can be undone. Old links
 keep working through them (a share link's `?view=` rides along); a
 browser's cookies and storage on the old host stay there, so each person
 signs in once more on each fragment, and a page loaded before the move
-has its calls refused until it is reloaded onto the new host.
+has its calls refused until it is reloaded onto the new host. So
+fragment.club's wildcard records and certificate stay at least a year
+after the move.
 
 ## Agents (`agent/`, phase 5; co-hosted since phase 6)
 

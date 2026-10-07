@@ -467,7 +467,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
         return Ok(Minting::Redeem(redeem));
     }
     // silent on their own fragments and those shared with them, which know
-    // them already (answer 1, docs/fragment-boats.md)
+    // them already (docs/api.md, Asking first)
     let who = Signed::new(minted.identity, None);
     match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
         Ok(_) => {

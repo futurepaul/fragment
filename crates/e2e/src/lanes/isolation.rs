@@ -1,5 +1,5 @@
-//! Isolation between fragments, and the move (docs/fragment-boats.md,
-//! slices 1 and 2). Which of a browser's cookies count on a fragment's
+//! Isolation between fragments, and the move (docs/api.md, Which cookies
+//! count; Moved hosts). Which of a browser's cookies count on a fragment's
 //! origin follows the Fetch Metadata the browser sends, so another
 //! fragment's page (one site with it) reaches it only as a stranger would;
 //! a frame of a fragment signs in only through the platform's mint, for a
@@ -112,7 +112,7 @@ pub fn isolation(s: &mut Suite, _: &Api) -> Result<()> {
     result
 }
 
-/// The move (docs/fragment-boats.md, slice 2): a fragment's old host, under
+/// The move (docs/api.md, Moved hosts): a fragment's old host, under
 /// the platform's own domain as fragment.club's are, sends a browser on to
 /// its new one, the path and query kept, and refuses a write or a socket;
 /// the fragments' suffix's own name is the platform's; any other name under

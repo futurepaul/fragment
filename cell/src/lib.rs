@@ -312,7 +312,7 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 
 /// Which of a browser's cookies count on a fragment's origin, from the
 /// Fetch Metadata it sends (`Sec-Fetch-*`, which no page's script sets;
-/// docs/fragment-boats.md, decision 3). Every fragment is one site with
+/// docs/api.md, Which cookies count). Every fragment is one site with
 /// the others, so a SameSite=Lax cookie rides along on another fragment's
 /// images, scripts, fetches, and forms; these headers say whose page asked:
 ///
@@ -926,7 +926,7 @@ fn path_and_query(url: &Url) -> String {
     }
 }
 
-/// A move's redirect (docs/fragment-boats.md, slice 2). No cache keeps it,
+/// A move's redirect (docs/api.md, Moved hosts). No cache keeps it,
 /// so the move can still be undone: a browser caches a bare `308` for good.
 fn moved(to: &str) -> CellResult<Response> {
     let mut resp = Response::empty()?.with_status(308);
