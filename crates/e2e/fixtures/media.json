@@ -5,8 +5,11 @@
     "announce": { "kind": "job" },
     "summarize": { "kind": "job" },
     "summarize_high": { "kind": "job" },
+    "ask_text": { "kind": "job" },
+    "tool_turn": { "kind": "job" },
+    "sort": { "kind": "job" },
     "draw": { "kind": "job" },
     "film": { "kind": "job" }
   },
-  "channels": { "news": { "read": "viewer" } }
+  "channels": { "news": { "read": "viewer" }, "thinking": { "read": "viewer" } }
 }

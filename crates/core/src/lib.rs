@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod codestorage;
 pub mod computer;
 pub mod cron;
+pub mod decide;
 pub mod ddl;
 pub mod effects;
 pub mod egress;

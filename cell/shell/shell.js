@@ -490,7 +490,7 @@ function agentOfChat(name) {
 
 function openChat(name, push = true) {
   if (!byName(name)) return;
-  if (push) at("/");
+  if (push) at(APPS);
   state.page = null;
   $("settings-page").hidden = true;
   $("frames").hidden = false;
@@ -990,12 +990,19 @@ $("update-go").onclick = async () => {
   }
 };
 
-// ---- where the page is: `/` its chats, `/settings` its settings; each
+// ---- where the page is: `/` the person's mind (`openMind`) once they
+// have one, `/?apps` its chats and apps, `/settings` its settings; each
 // view says so in the address, so a reload or a link stays put ----
 const SETTINGS = "/settings";
+const APPS = "/?apps";
+const atApps = () => new URLSearchParams(location.search).has("apps");
 function at(path) {
-  if (location.pathname !== path) history.pushState(null, "", path);
+  if (location.pathname + location.search !== path) history.pushState(null, "", path);
 }
+// The person's own mind (docs/optchat.md), if they have one.
+const mindOf = () => state.fragments.find((f) => f.kind === "mind" && own(f)) ?? null;
+// The mind full-screen, on its own origin, signed in there by the platform.
+const openMind = (name) => location.replace(`/auth/fragment?name=${encodeURIComponent(name)}&return=${encodeURIComponent("/")}`);
 addEventListener("popstate", () => {
   const shown = !$("layout").hidden;
   if (shown && location.pathname === SETTINGS) openSettings(false).catch((e) => notice("Settings did not open", e.message));
@@ -1412,13 +1419,14 @@ function chooseUsername() {
   firstRun(el("h1", null, "Welcome."), form);
   input.focus();
 }
-// The first agent (Paul, 2026-10-03): no question asked. It is the
-// person's default agent, in charge, made with its computer and its chat
-// while this screen waits, so the chat opens with it ready and the first
-// message is answered at once, not after a computer's first start.
-const SETUP_WAIT_MS = 4 * 60_000;
+// The first run (Paul, 2026-10-03; docs/optchat.md): no question asked.
+// The person's default agent is made on their computer (the deployment's
+// default image), and their mind beside it, private, the agent an editor
+// there (its hands); then the mind opens. The mind answers by itself, so
+// nothing waits for the computer, which wakes meanwhile.
 const firstSoul = (name, username) => `You are ${name}, ${username}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
-// Each step reuses what an earlier try made: a retry picks up where it stopped.
+// Each step reuses what an earlier try made: a retry picks up where it
+// stopped. Answers the mind's name.
 async function defaultAgent(step) {
   await load();
   const username = state.me.username;
@@ -1443,26 +1451,15 @@ async function defaultAgent(step) {
     files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  const chatName = `${labelOf(agent.name)}-chat.${username}`;
-  if (!byName(chatName)) await api("POST", "/api/fragments", { name: `${labelOf(agent.name)}-chat`, template: "chat", title });
-  // adding it to its chat is what wakes the computer (the platform's `joined`)
-  await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
+  step("mind");
+  const mind = mindOf() ?? (await api("POST", "/api/fragments", { name: freeLabel("mind"), template: "mind", visibility: "members", title: "Mind" }));
+  // adding it to the mind is what wakes the computer (the platform's `joined`)
+  await api("PUT", `/api/f/${mind.name}/members/${seg(id)}`, { role: "editor" });
   api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
-  return { chat: chatName, id, computer: computer.computer };
-}
-// Ready: its computer awake, and the agent following its chat (its wake
-// subscription, which its guest makes as it follows: the chat's owner sees it).
-async function agentReady({ chat, id, computer }) {
-  const [c, subs] = await Promise.all([
-    api("GET", "/api/computers").then((v) => v.computers?.find((x) => x.computer === computer)),
-    api("GET", `/api/f/${chat}/subscriptions`),
-  ]);
-  // a wake refused (its owner's credit) is said, not waited out
-  if (c?.why && c.phase !== "awake") throw Object.assign(new Error(c.why), { refused: true });
-  return c?.phase === "awake" && (subs.subscriptions ?? []).some((x) => x.wake && x.principal === id && x.channel === "chat");
+  return mind.name;
 }
 function creatingAgent() {
-  const steps = [["agent", "Making your agent"], ["computer", "Starting its computer"]];
+  const steps = [["agent", "Making your agent"], ["mind", "Making your mind"]];
   const list = el("ol", "creating-steps");
   const items = new Map(steps.map(([key, text]) => { const li = el("li", null, text); list.append(li); return [key, li]; }));
   let current = null;
@@ -1471,39 +1468,17 @@ function creatingAgent() {
     current = key;
     items.get(key).className = "doing";
   };
-  const note = el("p", "muted", "It starts once, now, so it answers you at once after.");
   const error = el("p", "form-error");
   error.hidden = true;
   const retry = el("button", "primary", "Try again");
   retry.type = "button";
   retry.hidden = true;
   retry.onclick = () => creatingAgent();
-  const anyway = el("button", "quiet", "Open the chat now");
-  anyway.type = "button";
-  anyway.hidden = true;
-  firstRun(el("h1", null, "Creating your agent…"), note, list, error, retry, anyway);
+  firstRun(el("h1", null, "Setting you up…"), list, error, retry);
   (async () => {
-    const made = await defaultAgent(step);
-    step("computer");
-    anyway.onclick = () => start(made.chat);
-    const t0 = Date.now();
-    // one look every 1.5 s; past SETUP_WAIT_MS the person may go on without it
-    for (;;) {
-      let ready = false;
-      try {
-        ready = await agentReady(made);
-      } catch (e) {
-        if (e.refused) throw e;
-      }
-      if (ready) break;
-      if (Date.now() - t0 > SETUP_WAIT_MS && anyway.hidden) {
-        note.textContent = "It's taking longer than usual. It answers once its computer is up.";
-        anyway.hidden = false;
-      }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    items.get("computer").className = "done";
-    await start(made.chat);
+    const mind = await defaultAgent(step);
+    items.get(current).className = "done";
+    openMind(mind);
   })().catch((err) => {
     if (current) items.get(current).className = "failed";
     error.textContent = err.message;
@@ -1591,10 +1566,14 @@ async function start(open) {
   state.me = me;
   if (!me.username) return chooseUsername();
   await load();
-  watchList();
-  // the first agent is asked for at home; settings open as asked, chats or not
+  // at home, the person's mind, made first if they have none; settings
+  // and `/?apps` (the mind's page links to it) open as asked
   const settings = !open && location.pathname === SETTINGS;
-  if (!chats().length && !open && !settings) return creatingAgent();
+  if (!open && !settings && !atApps()) {
+    const mind = mindOf();
+    return mind ? openMind(mind.name) : creatingAgent();
+  }
+  watchList();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);
