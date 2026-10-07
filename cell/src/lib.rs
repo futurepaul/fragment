@@ -175,7 +175,7 @@ fn shell_session(cfg: &Config, req: &Request, url: &Url) -> CellResult<Option<St
         return Ok(None);
     }
     if !matches!(req.method(), Method::Get | Method::Head) {
-        let platform = cfg.platform(url);
+        let platform = cfg.platform();
         if req.headers().get("origin")?.is_none_or(|o| o.trim_end_matches('/') != platform) {
             return Ok(None);
         }
@@ -421,7 +421,7 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
         }
     };
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
-    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform(url))))?;
+    let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform())))?;
     create.name = qualify(&create.name, &username)?;
     may_create(env, &maker.id).await?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
@@ -456,7 +456,7 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
     let identity = match req.headers().get("authorization")? {
         Some(_) => signer(env, req, url, &[]).await?.identity.id,
         None => {
-            let platform = cfg.platform(url);
+            let platform = cfg.platform();
             let own_page = cfg.is_platform_host(url.host_str().unwrap_or_default())
                 && req.headers().get("origin")?.is_some_and(|o| o.trim_end_matches('/') == platform);
             let token = if own_page { auth::platform_session_token(req, url)? } else { None };
@@ -876,7 +876,7 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     // session is asked for here, for the page's origin (`bound`). Only the
     // platform's page has one (its mint names it): a session for any
     // other is no one's, so no answer names another page.
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (mut signed, mut framed) = (None, Framed::Stranger);
     if let (true, Some(Credential::Frame(token))) = (fetched.framed, &credential) {
         if let Some(live) = routed::site_session(env, token.clone(), name, true).await? {
@@ -957,7 +957,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
     }
     // the suffix's own name, with the platform elsewhere, is the platform's
     if host.is_some_and(|h| cfg.is_suffix(h)) {
-        return moved(&format!("{}{}", cfg.platform(&url), path_and_query(&url)));
+        return moved(&format!("{}{}", cfg.platform(), path_and_query(&url)));
     }
     // A fragment's old host: a browser's visit goes on to its new one. A
     // write or a socket is refused, so nothing acts where no one looks: a

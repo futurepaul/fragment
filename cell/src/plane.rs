@@ -172,7 +172,7 @@ struct TriggerRow {
 
 impl FragmentCell {
     pub(crate) fn cs(&self) -> CellResult<Cs<'_>> {
-        Ok(Cs::new(self.cfg.codestorage()?, &self.env))
+        Ok(Cs::new(self.cfg.codestorage(), &self.env))
     }
 
     pub(crate) fn pin(&self, which: &str) -> CellResult<Option<String>> {

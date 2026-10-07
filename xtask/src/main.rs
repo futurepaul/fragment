@@ -157,7 +157,7 @@ fn dev(args: &[String]) -> Result<()> {
         delivery_retry_s: None,
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
         signins_pending_max: None,
         test_secret: None,

@@ -659,7 +659,7 @@ impl ComputerCell {
             .filter(|(from, to)| to > from)
             .map(|(from, to)| MeterRow {
                 reference: format!("awake:{id}:{from}"),
-                usage: Usage::Awake { instance: self.cfg.computer_instance.clone(), ms: (to - from) as u64 },
+                usage: Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: (to - from) as u64 },
                 fragment: None,
                 agent: None,
                 computer: Some(id.clone()),
@@ -779,7 +779,7 @@ impl ComputerCell {
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
-        let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
+        let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
@@ -1828,7 +1828,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
 /// the platform's page alone (the shell's tab onto a port: decisions 11
 /// and 41), never by a fragment's, which is one site with this origin.
 pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
-    let platform = Config::from_env(env).platform(url);
+    let platform = Config::from_env(env).platform();
     let answered = match host_answer(req, env, url, id, signer).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
@@ -1992,7 +1992,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     if !fragment_proto::valid_fragment_name(&agent) {
         return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>.<username>)"));
     }
-    let platform = cfg.platform_url.clone().ok_or_else(|| CellError::host("a computer's egress needs FRAGMENT_PLATFORM_URL"))?;
+    let platform = cfg.platform();
     let arrived = Url::parse(&platform).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
     let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
     let target = match path.strip_prefix("/f/") {
