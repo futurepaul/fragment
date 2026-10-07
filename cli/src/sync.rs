@@ -1,5 +1,5 @@
 // Thin sync over the code.storage commit builder — commit without a local
-// clone (ROADMAP workstream B):
+// clone:
 //   push  = scan folder, diff against the branch-head listing, ONE
 //           commit-pack with expected-parent CAS; conflict -> refetch head,
 //           rebuild the diff, retry (bounded, explicit error after)
@@ -11,11 +11,11 @@
 use crate::api::Client;
 use crate::api::CodedError;
 use crate::codestorage::{Author, Change, CodeStorage, CsError, LIVE, MAIN, MAX_CAS_ATTEMPTS};
+use fragment_core::blob::sha256_hex;
 use fragment_core::codestorage::TreeEntry;
 use anyhow::{anyhow, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -31,12 +31,6 @@ pub enum Mode {
 #[derive(Clone)]
 pub struct SyncOptions {
     pub mode: Mode,
-    /// overlay a read-only source folder into dir before each pass: new
-    /// and changed files copy in (source never written, nothing deleted —
-    /// dir can hold app code and drops alongside the mirrored content).
-    /// Non-git sources (fbrain) depend on this; git sources would collapse
-    /// to a fetch, but that is not the Brain case.
-    pub mirror_from: Option<PathBuf>,
     pub apply_mass_delete: bool,
     /// in pull mode, delete local files that were deleted remotely
     /// (pull never deletes without it; mirror always propagates)
@@ -44,19 +38,16 @@ pub struct SyncOptions {
     /// in pull mode, pull `live` rather than main
     pub live: bool,
     pub writer_id: String, // 8 hex of our pubkey, for conflict-copy names
-    pub codestorage: Option<String>,
 }
 
 impl Default for SyncOptions {
     fn default() -> Self {
         SyncOptions {
             mode: Mode::Mirror,
-            mirror_from: None,
             apply_mass_delete: false,
             prune: false,
             live: false,
             writer_id: "anon".into(),
-            codestorage: None,
         }
     }
 }
@@ -212,10 +203,6 @@ impl Report {
     }
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
-}
-
 fn state_path(dir: &Path) -> PathBuf {
     dir.join(".fragment").join("state.json")
 }
@@ -307,13 +294,9 @@ impl Local {
     }
 }
 
-/// Reads the folder for a pass: the mirror source overlaid first (its new
-/// and changed files copy in), then the journal and a scan against it. No
+/// Reads the folder for a pass: the journal and a scan against it. No
 /// network.
-pub fn read_local(dir: &Path, name: &str, opts: &SyncOptions) -> Result<Local, SyncError> {
-    if let Some(src) = &opts.mirror_from {
-        mirror_overlay(src, dir).map_err(|e| SyncError::Io(format!("mirror-from {}: {e}", src.display())))?;
-    }
+pub fn read_local(dir: &Path, name: &str) -> Result<Local, SyncError> {
     let (state, journal) = read_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (files, stats) = scan_local(dir, Some(&state), false).map_err(|e| SyncError::Io(e.to_string()))?;
     Ok(Local { state, journal, files, stats })
@@ -326,10 +309,10 @@ pub(crate) struct LocalFile {
 }
 
 /// Whether a path in the folder (relative, `/`-separated) takes part in
-/// sync, in either direction. One rule for the scan, the watcher, the
-/// mirror source, and the repo's listing (a repo file that is out is never
-/// pulled, and never deleted for being absent here), checked on every
-/// segment, so a folder that is out takes everything under it:
+/// sync, in either direction. One rule for the scan, the watcher, and the
+/// repo's listing (a repo file that is out is never pulled, and never
+/// deleted for being absent here), checked on every segment, so a folder
+/// that is out takes everything under it:
 /// - dot files and folders: sync's own `.fragment/`, `.git/`, an editor's
 ///   workspace state (`.obsidian/`), `.DS_Store`, `.#` lock files;
 /// - the top-level `node_modules/`: the platform never loads or serves it
@@ -398,40 +381,6 @@ pub fn scan_local(dir: &Path, state: Option<&SyncState>, verify: bool) -> Result
         out.insert(rel, LocalFile { sha256: sha, size, mtime_ns });
     }
     Ok((out, stats))
-}
-
-/// copy new/changed files from src into dir (never writes src, never
-/// deletes in dir); preserves mtimes so the scan shortcut stays valid.
-/// The target's own identity is never overlaid: a source folder carrying
-/// its own fragment.json must not stomp the corrected one.
-fn mirror_overlay(src: &Path, dir: &Path) -> Result<()> {
-    let walker = walkdir::WalkDir::new(src).follow_links(false).into_iter().filter_entry(|e| e.depth() == 0 || syncable(&relative(src, e.path())));
-    for entry in walker {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = relative(src, entry.path());
-        if rel == "fragment.json" {
-            continue;
-        }
-        let target = dir.join(&rel);
-        let src_meta = fs::metadata(entry.path())?;
-        if let Ok(t) = fs::metadata(&target) {
-            if t.len() == src_meta.len() {
-                let sm = src_meta.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-                let tm = t.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as i128).unwrap_or(0);
-                if sm == tm {
-                    continue;
-                }
-            }
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(entry.path(), &target)?; // fs::copy preserves mtime
-    }
-    Ok(())
 }
 
 /// What one push pass wants to do, computed purely from (local, remote,
@@ -527,27 +476,21 @@ fn mass_delete_trips(push_deletes: usize, local_deletes: usize, known: usize, ap
     }
 }
 
-/// `fragment sync`: connects, runs one pass, and nudges the cell's pins
-/// when a commit landed.
+/// `fragment sync` (and a deploy's): connects, runs one pass, and nudges
+/// the cell's pins when a commit landed.
 pub fn sync_once(client: &Client, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
-    let storage = CodeStorage::connect(client, name, opts.codestorage.as_deref())?;
-    let report = pass(client, &storage, name, dir, opts)?;
+    let storage = CodeStorage::connect(client, name)?;
+    let report = pass_over(client, &storage, name, dir, opts, read_local(dir, name)?)?;
     if report.landed {
         refresh_pins(client, name);
     }
     Ok(report)
 }
 
-/// One pass over the folder with a connected `storage`: a command's own
-/// (deploy's is also its live move's), or a watcher's held one. It does
-/// not nudge the cell's pins: a caller whose pass `landed` calls
-/// `refresh_pins`, once for everything it moved.
-pub fn pass(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions) -> Result<Report, SyncError> {
-    pass_over(client, storage, name, dir, opts, read_local(dir, name, opts)?)
-}
-
-/// `pass`, over a folder already read (`read_local`): a watcher reads it
-/// first to learn whether it needs a pass at all.
+/// One pass over a folder already read (`read_local`: a watcher reads it
+/// first to learn whether it needs a pass at all), with a connected
+/// `storage`: a command's own, or a watcher's held one. It does not nudge
+/// the cell's pins: a caller whose pass `landed` calls `refresh_pins`.
 pub fn pass_over(client: &Client, storage: &CodeStorage, name: &str, dir: &Path, opts: &SyncOptions, local: Local) -> Result<Report, SyncError> {
     let Local { mut state, journal, files: local, stats } = local;
     // World binding (`SyncState::host`): refuse before any read or write.
@@ -923,10 +866,10 @@ fn pull_file(storage: &CodeStorage, blobs: &crate::blobs::Blobs<'_>, dir: &Path,
 
 /// Full-content audit: local truth vs the repo listing + fetched bytes
 /// (no shortcuts — every remote file is fetched and hashed).
-pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>) -> Result<Report, SyncError> {
+pub fn verify(client: &Client, name: &str, dir: &Path) -> Result<Report, SyncError> {
     let state = load_state(dir, name).map_err(|e| SyncError::Io(e.to_string()))?;
     let (local, stats) = scan_local(dir, Some(&state), true).map_err(|e| SyncError::Io(e.to_string()))?;
-    let storage = CodeStorage::connect(client, name, codestorage)?;
+    let storage = CodeStorage::connect(client, name)?;
     let mut drift = Report { scan: stats, mode: "verify".into(), ..Default::default() };
     let listing = list_main(&storage)?;
     for p in listing.files.keys() {
@@ -946,41 +889,6 @@ pub fn verify(client: &Client, name: &str, dir: &Path, codestorage: Option<&str>
         }
     }
     Ok(drift)
-}
-
-/// Commit exactly one file to main with CAS retries (manifest-set).
-pub fn commit_single_file(
-    client: &Client,
-    name: &str,
-    path: &str,
-    bytes: Vec<u8>,
-    message: &str,
-    writer_id: &str,
-    codestorage: Option<&str>,
-) -> Result<String, SyncError> {
-    let storage = CodeStorage::connect(client, name, codestorage)?;
-    let author = Author::writer(writer_id);
-    for attempt in 1..=MAX_CAS_ATTEMPTS {
-        let head = storage.branch_head(MAIN)?;
-        if let (true, Some(tip)) = (attempt > 1, &head) {
-            if storage.read_file(path, MAIN).is_ok_and(|b| b == bytes) {
-                // the last attempt's answer was lost, or someone wrote the
-                // same bytes: either way main holds them
-                return Ok(tip.clone());
-            }
-        }
-        match storage.commit(head.as_deref(), message, &author, &[Change::Upsert { path: path.to_string(), bytes: bytes.clone() }]) {
-            Ok(tip) => return Ok(tip),
-            Err(CsError::CasRejected { .. } | CsError::OutcomeUnknown(_)) if attempt < MAX_CAS_ATTEMPTS => continue,
-            Err(CsError::CasRejected { detail }) => {
-                return Err(SyncError::Cs(CsError::CasRejected {
-                    detail: format!("branch kept moving after {MAX_CAS_ATTEMPTS} attempts ({detail})"),
-                }));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    unreachable!("bounded loop returns from every arm")
 }
 
 #[cfg(test)]
@@ -1046,24 +954,18 @@ mod tests {
         }
     }
 
-    /// Goal: the scan and the mirror source take what `syncable` takes.
-    /// Method: a folder with one file of each kind.
+    /// Goal: the scan takes what `syncable` takes. Method: a folder with
+    /// one file of each kind.
     #[test]
-    fn the_scan_and_the_mirror_source_share_the_rule() {
+    fn the_scan_takes_what_syncs() {
         let src = tmpdir("rule-src");
-        let dir = tmpdir("rule-dir");
         for (rel, bytes) in [("a.md", "a"), (".obsidian/workspace.json", "{}"), ("node_modules/x/index.js", "x"), ("b.md~", "b"), ("sub/.DS_Store", "d"), ("sub/c.md", "c")] {
             fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
             fs::write(src.join(rel), bytes).unwrap();
         }
         let (scanned, _) = scan_local(&src, None, true).unwrap();
         assert_eq!(scanned.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
-        mirror_overlay(&src, &dir).unwrap();
-        let (overlaid, _) = scan_local(&dir, None, true).unwrap();
-        assert_eq!(overlaid.keys().collect::<Vec<_>>(), ["a.md", "sub/c.md"]);
-        assert!(!dir.join("node_modules").exists() && !dir.join(".obsidian").exists(), "the overlay copies only what syncs");
         fs::remove_dir_all(&src).ok();
-        fs::remove_dir_all(&dir).ok();
     }
 
     /// Goal: a repo file that does not sync is left alone both ways: never
@@ -1246,7 +1148,7 @@ mod tests {
         let mock = crate::mockcs::start();
         mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
         let c = client_for(&mock);
-        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let storage = CodeStorage::connect(&c, "t").unwrap();
         let before = list_main(&storage).unwrap();
         let changes = [
             Change::Upsert { path: "a.txt".into(), bytes: b"a, longer now".to_vec() },
@@ -1329,18 +1231,6 @@ mod tests {
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.commit_pack_count(), 1, "and nothing is left to send");
         fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn manifest_set_with_a_lost_answer_lands_once() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("fragment.json", br#"{"name":"t"}"#)]);
-        let c = client_for(&mock);
-        mock.drop_commit_answers("t", 1);
-        let tip = commit_single_file(&c, "t", "fragment.json", br#"{"name":"t","visibility":"public"}"#.to_vec(), "manifest-set", "deadbeef", None).unwrap();
-        assert_eq!(mock.commit_pack_count(), 1, "sent once");
-        assert_eq!(mock.branch("t", "main").as_deref(), Some(tip.as_str()));
-        assert_eq!(mock.file_at("t", "main", "fragment.json").unwrap(), br#"{"name":"t","visibility":"public"}"#);
     }
 
     #[test]
@@ -1528,7 +1418,7 @@ mod tests {
         let dir = tmpdir("conflict-paths");
         fs::write(dir.join("a"), b"ours a").unwrap();
         fs::write(dir.join("a.md"), b"ours a.md").unwrap();
-        let storage = CodeStorage::connect(&c, "t", None).unwrap();
+        let storage = CodeStorage::connect(&c, "t").unwrap();
         let blobs = crate::blobs::Blobs::new(&c, "t");
         let listing = list_main(&storage).unwrap();
         let (local, _) = scan_local(&dir, None, true).unwrap();
@@ -1574,36 +1464,15 @@ mod tests {
         let c = client_for(&mock);
         let dir = tmpdir("verify");
         sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        let clean = verify(&c, "t", &dir, None).unwrap();
+        let clean = verify(&c, "t", &dir).unwrap();
         assert!(clean.conflicts.is_empty(), "{:?}", clean.conflicts);
         assert_eq!(clean.exit_code(), 0, "a folder in sync exits 0");
         // same size, different content — the exact lie the audit exists for
         fs::write(dir.join("b.txt"), b"went-drft").unwrap();
-        let report = verify(&c, "t", &dir, None).unwrap();
+        let report = verify(&c, "t", &dir).unwrap();
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn mirror_from_overlays_before_push() {
-        let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
-        let c = client_for(&mock);
-        let src = tmpdir("mf-src");
-        fs::create_dir_all(src.join("notes")).unwrap();
-        fs::write(src.join("notes/x.md"), b"note body").unwrap();
-        fs::write(src.join("fragment.json"), b"{}").unwrap(); // never overlaid
-        let dir = tmpdir("mf");
-        fs::write(dir.join("app.mjs"), b"// app").unwrap();
-        let o = SyncOptions { mirror_from: Some(src.clone()), ..opts(Mode::Push) };
-        let report = sync_once(&c, "t", &dir, &o).unwrap();
-        assert_eq!(report.pushed.len(), 2); // app.mjs + notes/x.md
-        assert!(mock.file_at("t", "main", "notes/x.md").is_some());
-        assert!(mock.file_at("t", "main", "app.mjs").is_some());
-        assert!(mock.file_at("t", "main", "fragment.json").is_none(), "source fragment.json must not stomp the target's");
-        fs::remove_dir_all(&src).ok();
         fs::remove_dir_all(&dir).ok();
     }
 

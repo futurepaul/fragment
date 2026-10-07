@@ -1,29 +1,24 @@
 //! `cargo xtask <command>`: the repo's tooling, in Rust.
 //!
-//!   build            build cell/ and agent/ for wasm32 (worker-build 0.8.5; in
-//!                    parallel once worker-build has fetched its tools: build.rs)
+//!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
 //!                    <label>--<username>.fragment.localhost:8790), the
-//!                    code.storage fake on :8792, the Workers AI fake on :8796
-//!                    behind the model route, and the agents' Worker beside it
-//!                    (their turns spend their owner's ledger; new people are
-//!                    seats with the month's included credit)
+//!                    code.storage fake on :8792, and the Workers AI fake on :8796
+//!                    behind the model route (its calls spend their payer's
+//!                    ledger; new people are seats with the month's included
+//!                    credit)
 //!   try <template> [name]
 //!                    on the running dev stack: a fragment from a template
 //!                    (todo, inbox, notes), scaffolded under target/devstack/try
 //!                    so nothing lands in the repo; prints what to open and paste
 //!   e2e [args...]    build, then run crates/e2e (args pass through: --only <section>[,...],
 //!                    --except <section>[,...], or --shard <k>/<n> (the table's, as CI
-//!                    splits it); --summary <file> writes the run's summary; --rehearse
-//!                    keeps the hosted lane's rules on the local node). The build
-//!                    builds the computer images ahead of the node beside the Rust.
-//!                    CI splits it in two steps, so the cache saves between them:
-//!                    --build-only (builds, runs nothing), then --no-build (runs
-//!                    what the build left)
-//!   e2e-summary <dir>
-//!                    CI's `e2e` check: the shards' summaries in <dir> make the
-//!                    suite exactly once, and every check passed (summary.rs)
+//!                    splits it); --rehearse keeps the hosted lane's rules on the
+//!                    local node). The build builds the computer images ahead of
+//!                    the node beside the Rust. CI splits it in two steps, so the
+//!                    cache saves between them: --build-only (builds, runs
+//!                    nothing), then --no-build (runs what the build left)
 //!   e2e --hosted --config <file> --branch <name> [--only … | --except …]
 //!       [--dry-run | --sweep] [--max-paid-calls <n>]
 //!                    the suite against that branch deployment on its real vendors
@@ -49,8 +44,7 @@
 //!
 //! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
-//! use, never a `node` from PATH (crates/devstack/src/node.rs;
-//! FRAGMENT_NODE names another).
+//! use, never a `node` from PATH (crates/devstack/src/node.rs).
 //!
 //! fragment.club runs on celld from the `celld` branch (the tag celld-final)
 //! until the cutover (docs/cloudflare-v1.md, decision 35): `deploy` never
@@ -68,7 +62,6 @@ mod deploy;
 mod dns;
 mod js_syntax;
 mod secret;
-mod summary;
 
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
@@ -97,13 +90,13 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-/// cell/ and agent/ for wasm32 (build.rs).
+/// cell/ for wasm32 (build.rs).
 fn build() -> Result<()> {
-    build::workers()
+    build::cell()
 }
 
 fn dev(args: &[String]) -> Result<()> {
-    // the pinned Node and node_modules first: a refused FRAGMENT_NODE stops
+    // the pinned Node and node_modules first: one that cannot be had stops
     // the run before a build
     let tools = devstack::Tools::locate()?;
     build()?;
@@ -147,10 +140,9 @@ fn dev(args: &[String]) -> Result<()> {
         codestorage_org: DEV_ORG.into(),
         codestorage_key_pem: key,
         codestorage_url: fake.url.clone(),
-        host_suffix: Some("fragment.localhost".into()),
-        legacy_host_suffix: None,
+        host_suffix: "fragment.localhost".into(),
         host_label_suffix: None,
-        // No webhooks reach dev fragments (the CLI's refresh and this poll do).
+        // A dev fragment's pins move by its own moves, the CLI's refresh, and this poll.
         poll_interval_s: 10,
         egress_local: true,
         job_retry_delay_s: 2,
@@ -163,7 +155,7 @@ fn dev(args: &[String]) -> Result<()> {
         delivery_retry_s: None,
         workos: Some(workos),
         // the CLI's host: sign-in and approvals happen where it points
-        platform_url: Some(format!("http://127.0.0.1:{DEV_PORT}")),
+        platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
         signins_pending_max: None,
         test_secret: None,
@@ -175,14 +167,9 @@ fn dev(args: &[String]) -> Result<()> {
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
-    // the agents' Worker runs beside it, as a deployment runs it, bound to
-    // the same host secret
-    devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{DEV_PORT}"), agent_url: format!("http://127.0.0.1:{DEV_PORT}"), test_hooks: false }
-        .configure(&devstack::agent_dir(), &fleet.bound())?;
     let opts = devstack::NodeOptions {
         project: devstack::cell_dir(),
         port: DEV_PORT,
-        with: vec![devstack::agent_dir()],
         log_dir: devstack::repo_root().join("target/devstack"),
         // wrangler's own debug logs, when asked for
         node_logs: std::env::var_os("FRAGMENT_NODE_LOGS").is_some(),
@@ -193,7 +180,6 @@ fn dev(args: &[String]) -> Result<()> {
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  node log:     {}", node.log.display());
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
-    println!("  agents:       {}/api/agents (beside it; signed)", node.base);
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
 
@@ -300,19 +286,18 @@ fn build_suite() -> Result<()> {
 
 /// The suite, as `build_e2e` leaves it.
 const E2E_BIN: &str = "target/release/fragment-e2e";
-/// What the e2e runs: the workers (build.rs: in parallel once worker-build
-/// has its tools), the CLI (the e2e drives it too) and the suite beside
-/// them, and the computer images the node's boot builds, built ahead
-/// beside them all so its build finds every layer cached.
+/// What the e2e runs: the cell, the CLI (the e2e drives it too) and the
+/// suite beside it, and the computer images the node's boot builds, built
+/// ahead beside them all so its build finds every layer cached.
 fn build_e2e() -> Result<()> {
     let t0 = std::time::Instant::now();
     let built = std::thread::scope(|s| {
         let images = s.spawn(build::images);
         let native = s.spawn(build_native);
-        let workers = build::workers();
-        workers.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
+        let cell = build::cell();
+        cell.and(native.join().expect("the native build does not panic")).and(images.join().expect("the images' build does not panic"))
     });
-    println!("built the workers, the CLI, the suite and the images in {:.1?}", t0.elapsed());
+    println!("built the cell, the CLI, the suite and the images in {:.1?}", t0.elapsed());
     built
 }
 
@@ -357,7 +342,7 @@ fn javascript_parses(root: &Path) -> Result<()> {
     let started = std::time::Instant::now();
     let files = js_syntax::files(root)?;
     js_syntax::check(&node, &root.join(devstack::CACHE_DIR), root, &files)?;
-    println!("JavaScript: {} files parse (node --check on Node {}, {:.1?})", files.len(), node.release, started.elapsed());
+    println!("JavaScript: {} files parse (node --check on Node v{}, {:.1?})", files.len(), devstack::node::NODE_VERSION, started.elapsed());
     Ok(())
 }
 
@@ -375,10 +360,7 @@ fn check() -> Result<()> {
         .current_dir(&root))?;
     run(Command::new("cargo")
         .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .current_dir(Path::new(&devstack::cell_dir())))?;
-    run(Command::new("cargo")
-        .args(["clippy", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
-        .current_dir(Path::new(&devstack::agent_dir())))
+        .current_dir(Path::new(&devstack::cell_dir())))
 }
 
 /// Where the one-line install fetches the CLI from.
@@ -418,12 +400,11 @@ fn main() -> Result<()> {
         Some("dev") => dev(&args[1..]),
         Some("try") => try_template(&args[1..]),
         Some("e2e") => e2e(&args[1..]),
-        Some("e2e-summary") => summary::e2e_summary(&args[1..]),
         Some("check") => check(),
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
-        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--summary <file>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | e2e-summary <dir> | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
+        _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }
 

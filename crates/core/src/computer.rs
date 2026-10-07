@@ -960,6 +960,11 @@ impl Lifecycle {
 
 /// Records one save holds at most: one per directory it saves.
 pub const SAVE_RECORDS_MAX: usize = 4;
+/// Records let go of and not deleted yet, at most (`Saves::let_go`): a few
+/// saves' worth, since deletes that keep failing while saves work are not
+/// expected (both are R2's). Past it the oldest is no longer tried, its
+/// archive left in R2, as the DO logs.
+pub const FORGETTING_MAX: usize = 4 * SAVE_RECORDS_MAX;
 /// A guest's answer to the hold is at most this long, and names at most
 /// `LEFT_OUT_MAX` patterns of at most `LEFT_OUT_PATTERN_MAX_BYTES` each:
 /// room for an image that names each file it copied (ours: four lines a
@@ -993,6 +998,24 @@ pub fn left_out(answer: &str) -> Result<Vec<String>, String> {
         return Err(format!("{} patterns, past {LEFT_OUT_MAX}", patterns.len()));
     }
     Ok(patterns)
+}
+
+/// What the DO keeps of a guest's word on a hold it has not answered.
+pub const UNHELD_MAX_BYTES: usize = 1024;
+
+/// What a guest says of a hold it has not answered (`/run/computer/unheld`,
+/// docs/computers.md, "The hold"), as the Computer DO logs it once the
+/// hold's wait runs out: its text, trimmed, its control characters but
+/// newlines as spaces, at most `UNHELD_MAX_BYTES` (cut at a character);
+/// `None` for none. Only a log line: nothing is decided by it.
+pub fn unheld(text: &str) -> Option<String> {
+    let clean: String = text.trim().chars().map(|c| if c.is_control() && c != '\n' { ' ' } else { c }).collect();
+    let mut end = clean.len().min(UNHELD_MAX_BYTES);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = clean[..end].trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
 }
 
 /// A save of `/data`, as the Computer DO keeps it: the `DirectoryBackup`
@@ -1097,6 +1120,11 @@ pub struct Saves {
     running: Option<Running>,
     /// Starts that went back in time.
     rollbacks: u64,
+    /// Records no save holds now that the DO has not deleted yet, oldest
+    /// first: each stays until its delete worked (`forgot`), so one that
+    /// failed is tried again by the next.
+    #[serde(default)]
+    forgetting: Vec<Value>,
 }
 
 /// A start that came up, and the image's reference it runs.
@@ -1214,9 +1242,9 @@ impl Saves {
     /// The start `generation` saved `/data` as `records` at `at_ms`
     /// (`held`: its guest answered the hold): the newest save, and the
     /// current one. A snapshot of any other save caches nothing a wake
-    /// would use. Answers the saves it pushed out of the newest
-    /// `SAVES_KEPT`, whose records the DO deletes.
-    pub fn saved(&mut self, generation: u64, records: Vec<Value>, at_ms: i64, held: bool) -> Vec<Save> {
+    /// would use. The saves it pushed out of the newest `SAVES_KEPT` are
+    /// let go of (`let_go`): answers what that pushed out unforgotten.
+    pub fn saved(&mut self, generation: u64, records: Vec<Value>, at_ms: i64, held: bool) -> Vec<Value> {
         assert!(!records.is_empty() && records.len() <= SAVE_RECORDS_MAX, "a save is one record per directory, at most {SAVE_RECORDS_MAX}");
         let id = records[0]["id"].as_str().unwrap_or_default().to_string();
         assert!(!id.is_empty(), "a save has an id");
@@ -1231,7 +1259,31 @@ impl Saves {
         let dropped = if self.saves.len() > SAVES_KEPT { self.saves.split_off(SAVES_KEPT) } else { vec![] };
         assert!(self.saves.windows(2).all(|w| w[0].number > w[1].number), "newest first");
         assert!(self.snapshot.as_ref().is_none_or(|s| self.saves[0].id == s.save), "a snapshot kept is of the current save");
-        dropped
+        self.let_go(dropped.into_iter().flat_map(|s| s.records).collect())
+    }
+
+    /// `records` are no save's now (a save pushed out, or what a failed
+    /// save took before it failed): the DO deletes each (`forgetting`),
+    /// and each is kept here until that worked (`forgot`). Answers those
+    /// pushed past `FORGETTING_MAX`, oldest first, which no one will delete.
+    pub fn let_go(&mut self, records: Vec<Value>) -> Vec<Value> {
+        assert!(records.iter().all(|r| r["id"].as_str().is_some_and(|id| !id.is_empty())), "a record has an id: {records:?}");
+        assert!(!records.iter().any(|r| self.saves.iter().any(|s| s.records.contains(r))), "a record let go of is no kept save's");
+        self.forgetting.extend(records);
+        let over = self.forgetting.len().saturating_sub(FORGETTING_MAX);
+        let lost: Vec<Value> = self.forgetting.drain(..over).collect();
+        assert!(self.forgetting.len() <= FORGETTING_MAX, "at most FORGETTING_MAX records to delete");
+        lost
+    }
+
+    /// The records let go of and not deleted yet, oldest first.
+    pub fn forgetting(&self) -> &[Value] {
+        &self.forgetting
+    }
+
+    /// The record `id` was deleted.
+    pub fn forgot(&mut self, id: &str) {
+        self.forgetting.retain(|r| r["id"] != id);
     }
 
     /// A sleep of `generation` could not save: whether that is news (no
@@ -2198,8 +2250,10 @@ mod tests {
         assert!(s.saved(1, rec("a"), T, true).is_empty());
         assert!(s.saved(1, rec("b"), T + 1, false).is_empty());
         assert!(s.saved(2, rec("c"), T + 2, true).is_empty());
-        let dropped = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], T + 3, true);
-        assert_eq!(dropped.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec!["a"]);
+        assert!(s.forgetting().is_empty());
+        let lost = s.saved(2, vec![json!({ "id": "d", "dir": "/data" }), json!({ "id": "d-work", "dir": "/data/work" })], T + 3, true);
+        assert!(lost.is_empty());
+        assert_eq!(s.forgetting(), rec("a").as_slice(), "the oldest's records, to delete");
         assert_eq!(s.all().iter().map(|s| (s.number, s.id.as_str())).collect::<Vec<_>>(), vec![(4, "d"), (3, "c"), (2, "b")]);
         assert_eq!(s.current().map(|c| c.records.len()), Some(2));
         let views = s.views();
@@ -2209,6 +2263,55 @@ mod tests {
         // a record stored before it kept several saves is not read: a hard cut
         let old: Saves = serde_json::from_value(json!({ "backup": { "id": "x", "generation": 1, "atMs": T }, "snapshot": null, "starting": null, "ended": null, "restored": null, "running": null, "rollbacks": 0 })).unwrap();
         assert_eq!((old.current(), old.plan(Some(IMAGE))), (None, Plan::Nothing));
+    }
+
+    /// Goal (#156, problem 10): a record let go of is kept until its delete
+    /// worked, so one that failed is tried again by the next save's pass,
+    /// across a restart of the DO (the saves are stored as JSON); a failed
+    /// save's records are let go of the same way; past `FORGETTING_MAX` the
+    /// oldest are answered as lost, never silently dropped.
+    #[test]
+    fn a_record_let_go_of_is_kept_until_its_delete_worked() {
+        let ids = |s: &Saves| s.forgetting().iter().map(|r| r["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let mut s = Saves::default();
+        for (i, id) in ["a", "b", "c", "d"].into_iter().enumerate() {
+            s.saved(1, rec(id), T + i as i64, true);
+        }
+        assert_eq!(ids(&s), ["a"]);
+        // a's delete failed: the next save's pass finds it still, beside b
+        s.saved(1, rec("e"), T + 10, true);
+        assert_eq!(ids(&s), ["a", "b"]);
+        // a restart reads them back; one stored before this field reads none
+        let mut s: Saves = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(ids(&s), ["a", "b"]);
+        let mut stored = serde_json::to_value(&s).unwrap();
+        stored.as_object_mut().unwrap().remove("forgetting");
+        assert!(serde_json::from_value::<Saves>(stored).unwrap().forgetting().is_empty());
+        // b's delete worked, then a's; a delete answered twice changes nothing
+        s.forgot("b");
+        s.forgot("a");
+        s.forgot("a");
+        assert!(s.forgetting().is_empty());
+        assert_eq!(s.all().iter().map(|k| k.id.as_str()).collect::<Vec<_>>(), ["e", "d", "c"], "the saves kept are untouched");
+        // a failed save's records, taken before it failed
+        assert!(s.let_go(vec![json!({ "id": "f", "dir": "/data" })]).is_empty());
+        assert_eq!(ids(&s), ["f"]);
+        // bounded: the oldest past the bound are answered, in order
+        let many: Vec<Value> = (0..FORGETTING_MAX).map(|i| json!({ "id": format!("m{i}"), "dir": "/data" })).collect();
+        let lost = s.let_go(many);
+        assert_eq!(lost, vec![json!({ "id": "f", "dir": "/data" })]);
+        assert_eq!(s.forgetting().len(), FORGETTING_MAX);
+        assert_eq!(ids(&s)[0], "m0");
+    }
+
+    /// Invalid: a record a kept save holds is never let go of (its delete
+    /// would take what a wake restores).
+    #[test]
+    #[should_panic(expected = "no kept save's")]
+    fn a_kept_saves_record_is_never_let_go_of() {
+        let mut s = Saves::default();
+        s.saved(1, rec("a"), T, true);
+        s.let_go(rec("a"));
     }
 
     /// Valid and invalid answers to the hold: the patterns a guest names
@@ -2225,6 +2328,20 @@ mod tests {
         for bad in ["!keep.db", "a b", "$(rm -rf /)", "*.db;rm", "é", too_long.as_str(), too_many.as_str(), too_big.as_str()] {
             assert!(left_out(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A guest's word on a hold it has not answered, as logged: none for
+    /// nothing said, its text trimmed, its control characters spaces, and
+    /// never past its bound, cut at a character.
+    #[test]
+    fn a_guest_says_why_it_has_not_answered_within_a_bound() {
+        assert_eq!(unheld(""), None);
+        assert_eq!(unheld(" \n\t"), None);
+        assert_eq!(unheld("copy refused: copying /data/a.db: file is not a database\n"), Some("copy refused: copying /data/a.db: file is not a database".into()));
+        assert_eq!(unheld("a\u{1b}[31mb\nc"), Some("a [31mb\nc".into()));
+        let long = format!("{}é{}", "x".repeat(UNHELD_MAX_BYTES - 1), "y".repeat(100));
+        let cut = unheld(&long).unwrap();
+        assert!(cut.len() <= UNHELD_MAX_BYTES && cut.chars().all(|c| c == 'x'), "{} bytes", cut.len());
     }
 
     #[test]

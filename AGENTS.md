@@ -1,8 +1,8 @@
 # fragment-next
 
 Fragment is the product: stateful, multiplayer web apps published from
-the CLI. Agents are optional add-ons a fragment declares; computers come
-back on Cloudflare (docs/cloudflare-v1.md, phase 4).
+the CLI. Agents are fragments a computer of your own runs (today, Hermes
+profiles; docs/computers.md).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
@@ -11,7 +11,8 @@ cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
 `wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
 took Hermes, computers, the desktop, the personal agent's chat,
 sandcastle, and the fleet's deploy path off master; they live at the tag
-`celld-final`.
+`celld-final`. Computers came back in its phase 4, Hermes as their
+image's agent runtime.
 
 ## Read first
 
@@ -20,32 +21,29 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    hard cut. Where it disagrees with anything below, it wins.
    `SPECIAL-CASE-INVENTORY.md` lists the platform surfaces that are not
    fragments, and why; keep it short.
-1. `docs/ROADMAP.md` — decisions, truth map, phases (and what is live),
-   escalations.
-2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
+1. The decisions are cloudflare-v1.md's: its own, and the ROADMAP's that
+   still hold, as R4 to R18. The truth map every change is checked
+   against is MODEL.md's ("Where each fact lives").
+2. `docs/MODEL.md` — the core model, in Cloudflare's primitives.
    `docs/api.md` — the wire contract the cell answers.
+   `docs/computers.md` — the platform's contract with a computer's image;
+   `docs/bridge.md` — the bridge, the one process an image runs between
+   its agent runtime and the fragment API;
+   `docs/chat-records.md` — a chat's records, which the bridge writes
+   and the chat template reads;
+   `docs/durable-computers.md` — how a computer's state survives a
+   sleep, a crash or a rolled-back disk: the design of record;
+   `docs/ledger.md` — the usage ledger: what is metered, at what price,
+   and who pays;
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — usernames and flat hosts, templates, your agent
-   making apps (its desktop and computers went at the cut);
-   `docs/phase-4.md` — sign-in, identities, budgets (live);
-   `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
-   the isolation findings;
-   `docs/phase-5.md` — agents (choices for review);
-   `docs/durable-computers.md` — how a computer's state survives a
-   sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
-   (its connector went at the cut);
-   `docs/phase-3.md` — hosting on fragment.club;
-   `docs/phase-2.md` — the record of the core cut (slices A–G);
-   `docs/operate.md` — the operator runbook (the `celld` branch's).
-3. `docs/finite-next-lessons.md` — what to port from finite-next and the
-   gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
-4. `docs/published-fragments.md` — primitives that must stay expressible.
+   (its connector went at the cut).
+3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
-5. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
-6. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
+4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
+5. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
    engineering-style.md` (hard cuts, limits, assertions on in release,
    typed errors, valid/invalid/replay/restart tests, Rust for tooling).
 
@@ -70,16 +68,13 @@ prebuilt bundle is in the debt ledger).
   from another package.json, package-lock.json or Node. Every JavaScript
   process (npm, wrangler as `<node> node_modules/wrangler/bin/wrangler.js`,
   and whatever they start) runs on it, with it first on PATH; no `node`
-  from PATH is ever used. `FRAGMENT_NODE=/abs/path/to/node` runs another
-  node instead, refused unless it is a release of Node 22 or 24 with its
-  own npm beside it; `WRANGLER_BIN` names another wrangler entry script (a
-  `bin/wrangler.js`), run on the same Node. Their caches are the repo's:
+  from PATH is ever used, and no other Node. Their caches are the repo's:
   `XDG_CACHE_HOME=target/cache` (miniflare keeps the Chrome for Testing
   that preview cards' local Browser Rendering downloads, 126, about 145
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
   target/cache/wrangler`, and npm's in `target/cache/npm`; nothing goes
   to the system's cache. Moving the pin: README.md, "The pinned Node".
-- `cargo xtask build`: the cell and the agents for wasm32.
+- `cargo xtask build`: the cell for wasm32.
 - `cargo xtask check`: every first-party JavaScript file (`.js`, `.mjs`,
   `.cjs` git tracks or would add, less the vendored ones) through `node
   --check` on the pinned Node, each as a module or a classic script as
@@ -87,15 +82,15 @@ prebuilt bundle is in the debt ledger).
   lists), naming each file and line that does not parse; then host tests
   and clippy (host and wasm), warnings denied.
 - `cargo xtask e2e [--only <section>[,...] | --except <section>[,...]]`:
-  builds `cell/`, `agent/`, and the CLI, then runs `crates/e2e` against
+  builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  hermes, agent-smoke, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  brain, push, ai, ledger, shell, computers, chat, shell-ui,
+  hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
@@ -128,18 +123,22 @@ prebuilt bundle is in the debt ledger).
   The node's test levers (`/api/test/*`) take a secret made per run.
   A wait that runs out its limit prints `(a wait ran out its …s at
   <file>:<line>)`: one that does so on a passing run costs every run.
-- `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
-  shards CI runs, each on its own runner with its own build and node
-  (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
-  one, a host test checks; rebalance it from the summaries' `ms`).
-  `--summary` writes the run's summary (any local run takes it), and
-  `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them:
-  every section ran exactly once across the shards, the counts add up,
-  and every check passed, printed as one run. CI splits each shard's run
-  in two, `--build-only` then `--no-build`, so the cache saves between
-  (the build also builds the computer images ahead of the node, beside
-  the Rust; the cell and the agent build in parallel once worker-build
-  has its tools: `xtask/src/build.rs`).
+  A call that fails says when it was sent (UTC, as the node's logs stamp
+  their lines) and how long it waited: a dropped connection fails at
+  once, a hung call after its wait. A boot's log can lack its last
+  seconds when a failure stops the node at once (the Workers' output
+  reaches it late, in bursts): logs that just stop are not a node that
+  died. The run's client never reuses a connection idle 4 s: workerd
+  closes one idle 5 s, and a request written onto it as it closes is
+  lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
+- `cargo xtask e2e --shard <k>/4`: one of the four shards CI runs, each
+  on its own runner with its own build and node (`SHARDS` in
+  `crates/e2e/src/lanes/mod.rs`: every section in exactly one, a host
+  test checks; rebalance it from the time each shard's log prints for
+  each section). CI's `e2e` job is green when every shard is. CI splits
+  each shard's run in two, `--build-only` then `--no-build`, so the
+  cache saves between (the build also builds the computer images ahead
+  of the node, beside the Rust: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
   … | --except …] [--dry-run | --sweep [<run>] | --sweep-all]
   [--max-paid-calls <n>]`: the hosted
@@ -177,13 +176,11 @@ prebuilt bundle is in the debt ledger).
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
   `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
-  when `cell/src` or `crates/` change,
-  agents (`agent/`, goose's loop) beside it in the same process (the router
-  hands them `/api/agents` and `/api/a/*`), whose model calls go through
-  the model route to the Workers AI fake on :8796 (echoes, and draws
-  placeholder JPEGs for image steps; dev never calls a real model) and
-  spend their owner's ledger (dev people are seats, with the month's
-  included credit), the code.storage fake on :8792 (state in `target/devstack/`; its org
+  when `cell/src` or `crates/` change, the model route and AI steps on
+  the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
+  image steps; dev never calls a real model), which spend their payer's
+  ledger (dev people are seats, with the month's included credit), the
+  code.storage fake on :8792 (state in `target/devstack/`; its org
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
@@ -203,7 +200,7 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank` and `calories`, which has a goose agent of its own); the
+  `blank`, and `calories`: a channel trigger and a text step); the
   shell's catalog offers `todo`, `inbox` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
@@ -240,12 +237,10 @@ prebuilt bundle is in the debt ledger).
   included. The e2e's computer sections run the stub image under
   `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
-  shard k/4`), and `e2e`, which needs them all and checks their
-  summaries, on Linux; a manual run (workflow_dispatch) adds the suite
-  whole in one job (`e2e-whole`), to compare counts. Its caches restore
-  on every run and save only from master's pushes (each key's contents
-  are named in the workflow). `release.yml` builds the CLI for macOS and
-  Linux.
+  shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
+  restore on every run and save only from master's pushes (each key's
+  contents are named in the workflow). `release.yml` builds the CLI for
+  macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
   zone `finite.place` in Paul's account, and production only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`
@@ -258,11 +253,10 @@ prebuilt bundle is in the debt ledger).
 
 - The deployment's secrets live in its account's Cloudflare Secrets
   Store: set with `cargo xtask secret`, named in its config, bound to the
-  Workers by name, and read only by `cell/src/keys.rs` and
-  `agent/src/keys.rs` (docs/secrets.md). Only the DNS token and a
-  preview's test secret are files read by path. Never print them, pass
-  them on a command line (no `--value`), or commit them; deleting one is
-  Paul's.
+  Worker by name, and read only by `cell/src/keys.rs` (docs/secrets.md).
+  Only the DNS token and a preview's test secret are files read by path.
+  Never print them, pass them on a command line (no `--value`), or commit
+  them; deleting one is Paul's.
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.

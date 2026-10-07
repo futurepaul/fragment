@@ -7,11 +7,8 @@
 //! lane's rehearsal on the local node) they reach the e2e's own things
 //! alone. Valid, invalid and replay, here and on a preview.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use fragment_core::levers;
-use fragment_fakes::workers_ai::Reply as Said;
 use fragment_nip98::Keys;
 use fragment_proto::ErrorCode;
 use serde_json::{json, Value};
@@ -165,10 +162,10 @@ fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str, identity: &str) ->
     Ok(())
 }
 
-/// Locally, on the scripted model: an e2e person lent one paid call makes
-/// one model call, and the ledger refuses the next before it is made.
+/// Locally, on the Workers AI fake: an e2e person lent one paid call makes
+/// one model call (their agent's, through the model route), and the ledger
+/// refuses the next before it is made.
 fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
-    let agents = s.agents()?;
     let keys = Keys::generate();
     let email = Api::email_of(&keys);
     let r = api.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email, "paidCalls": 1 })))?;
@@ -176,32 +173,25 @@ fn paid_calls(s: &mut Suite, api: &Api) -> Result<()> {
     let session = r.body["session"].as_str().unwrap_or("").to_string();
     let identity = r.body["identity"].as_str().unwrap_or("").to_string();
     api.approve(&session, &keys)?;
-    let name = s.name("capped");
-    let made = agents.signed(&keys, "POST", "/api/agents", Some(&json!({ "name": name })))?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let made = api.signed(&keys, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &keys) })))?;
     anyhow::ensure!(made.status == 200, "an agent of theirs: {made}");
-    s.ai.clear_script();
-    s.ai.script(&[Said::Text("The first is paid for.".into()), Said::Text("unused".into())]);
-    let turn = |text: &str| -> Result<Value> {
-        agents.signed(&keys, "POST", &format!("/api/a/{name}/turns"), Some(&json!({ "text": text })))?;
-        let st = agents.signed(&keys, "GET", &format!("/api/a/{name}/state?wait_ms={}", fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX), None)?;
-        Ok(st.body)
-    };
+    let call = |text: &str| api.signed(&hand, "POST", "/api/models/v1/chat/completions", Some(&json!({ "model": "cheap", "messages": [{ "role": "user", "content": text }] })));
     let calls = |api: &Api| -> usize {
         let r = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "entries", "prefix": "aig:" })));
         r.map(|r| r.body["entries"].as_array().map_or(0, Vec::len)).unwrap_or(0)
     };
-    let one = turn("one")?;
-    s.ok("their first model call is made", one["outcome"] == "idle" && one["answer"] == "The first is paid for." && calls(api) == 1, &one);
+    let one = call("one")?;
+    s.ok("their first model call is made", one.status == 200 && one.body["choices"][0]["message"]["content"] == "echo: one" && calls(api) == 1, &one);
     let asked = s.ai.chats().len();
-    let two = turn("two")?;
-    std::thread::sleep(Duration::from_millis(200));
+    let two = call("two")?;
     s.ok(
-        "the next is refused by their ledger before it is made: the turn says so, and the model is not asked",
-        two["outcome"] == "error" && two["error"].as_str().is_some_and(|e| e.contains("paid calls")) && calls(api) == 1 && s.ai.chats().len() == asked,
-        json!({ "turn": two, "model requests": s.ai.chats().len() - asked }),
+        "the next is refused by their ledger before it is made (402), and the model is not asked",
+        two.status == 402 && two.message().contains("paid calls") && calls(api) == 1 && s.ai.chats().len() == asked,
+        &two,
     );
     let cap = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "paid-calls", "max": 1 })))?;
     s.ok("(the ledger counts the call it allowed)", cap.status == 200 && cap.body == json!({ "max": 1, "used": 1 }), &cap);
-    s.ai.clear_script();
     Ok(())
 }

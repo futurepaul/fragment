@@ -47,7 +47,6 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use crate::api::{self, Api, Preview};
-use devstack::summary::Shard;
 use crate::needs::{Need, Offers, Rung};
 use crate::{browser, Fake, Planned, Shape, Suite};
 
@@ -57,7 +56,6 @@ pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]]
-                    [--summary <file>]
        fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--offers computers,models]
                     [--max-paid-calls <n>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
@@ -71,12 +69,9 @@ pub struct Args {
     /// A rehearsal of the hosted lane on the local node, lending at most
     /// this many paid calls (`--rehearse`).
     pub rehearse: Option<u64>,
-    /// A local run of one shard's sections (`--shard k/n`, the table's
-    /// split: lanes/mod.rs `SHARDS`), as CI runs the suite.
-    pub shard: Option<Shard>,
-    /// Where a local run writes its summary as it ends (`--summary`),
-    /// which `cargo xtask e2e-summary` combines with its other shards'.
-    pub summary: Option<PathBuf>,
+    /// A local run of one shard's sections, `k` of `--shard k/n` (the
+    /// table's split: lanes/mod.rs `SHARDS`), as CI runs the suite.
+    pub shard: Option<u32>,
 }
 
 /// A hosted run's settings.
@@ -121,7 +116,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     let (mut only, mut except) = (None, vec![]);
     let (mut hosted, mut zone, mut branch, mut secret_file, mut offers, mut max_paid_calls) = (false, None, None, None, None, None);
     let (mut dry_run, mut sweep, mut rehearse) = (false, None, false);
-    let (mut shard, mut summary) = (None, None);
+    let mut shard = None;
     let mut it = args.iter().peekable();
     // bounded: each pass takes one argument at least
     while let Some(arg) = it.next() {
@@ -130,7 +125,6 @@ pub fn parse(args: &[String]) -> Result<Args> {
             "--only" if only.is_none() && except.is_empty() && shard.is_none() => only = Some(list(&value()?)),
             "--except" if only.is_none() && except.is_empty() && shard.is_none() => except = list(&value()?),
             "--shard" if only.is_none() && except.is_empty() && shard.is_none() => shard = Some(parse_shard(&value()?)?),
-            "--summary" if summary.is_none() => summary = Some(PathBuf::from(value()?)),
             "--hosted" => hosted = true,
             "--zone" => zone = Some(value()?),
             "--branch" => branch = Some(value()?),
@@ -171,13 +165,13 @@ pub fn parse(args: &[String]) -> Result<Args> {
             true => Some(max_paid_calls_or_default()?),
             false => None,
         };
-        return Ok(Args { only, except, hosted: None, rehearse, shard, summary });
+        return Ok(Args { only, except, hosted: None, rehearse, shard });
     }
     if rehearse {
         bail!("--rehearse is the hosted lane on the local node: not with --hosted");
     }
-    if shard.is_some() || summary.is_some() {
-        bail!("--shard and --summary are a local run's, as CI runs it: not with --hosted");
+    if shard.is_some() {
+        bail!("--shard is a local run's, as CI runs it: not with --hosted");
     }
     let (Some(zone), Some(branch)) = (zone, branch) else { bail!("a hosted run names its preview: --zone and --branch\n{USAGE}") };
     if !devstack::valid_branch(&branch) {
@@ -208,7 +202,7 @@ pub fn parse(args: &[String]) -> Result<Args> {
     }
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
-    Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None, summary: None })
+    Ok(Args { only, except, hosted: Some(Hosted { preview, secret_file, computers, models, max_paid_calls, action }), rehearse: None, shard: None })
 }
 
 /// `--sweep <run>`'s run: the id a run prints as it starts, the 6 hex
@@ -221,13 +215,15 @@ fn sweep_run(text: &str) -> Result<String> {
     }
 }
 
-/// `--shard k/n`: shard `k` of the table's split, whose size `n` must be
-/// (so CI's matrix and the table cannot drift apart unnoticed).
-fn parse_shard(text: &str) -> Result<Shard> {
-    let shard = Shard::parse(text).ok_or_else(|| anyhow::anyhow!("--shard is k/n, 1 <= k <= n, not {text:?}"))?;
+/// `--shard k/n`: shard `k` (from 1) of the table's split, whose size `n`
+/// must be (so CI's matrix and the table cannot drift apart unnoticed).
+fn parse_shard(text: &str) -> Result<u32> {
     let n = crate::lanes::SHARDS.len();
-    anyhow::ensure!(shard.n as usize == n, "--shard {shard}: the e2e's table (lanes/mod.rs SHARDS) splits the suite in {n}, not {}", shard.n);
-    Ok(shard)
+    let parsed = text.split_once('/').and_then(|(k, of)| Some((k.parse::<u32>().ok()?, of.parse::<usize>().ok()?)));
+    match parsed {
+        Some((k, of)) if of == n && (1..=n as u32).contains(&k) => Ok(k),
+        _ => bail!("--shard is k/{n}, 1 <= k <= {n} (the e2e's table, lanes/mod.rs SHARDS, splits the suite in {n}), not {text:?}"),
+    }
 }
 
 /// A hosted run: its plan, its sweep, or its sections.
@@ -261,9 +257,6 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         only,
         except,
         shard: None,
-        summary: None,
-        accounted: vec![],
-        outside: Default::default(),
         rung: Rung::Hosted(offers(hosted)),
         hosted_rules: true,
         preview: Some(hosted.preview.clone()),
@@ -296,7 +289,6 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         cli,
         scratch,
         project: PathBuf::new(),
-        agents_project: PathBuf::new(),
         shape: Shape::Plain,
         containers_removed: false,
     }

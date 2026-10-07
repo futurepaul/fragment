@@ -28,6 +28,11 @@ use serde::{Deserialize, Serialize};
 /// The platform's hold, and this image's answer to it.
 pub const HOLD: &str = "/run/computer/hold";
 pub const HELD: &str = "/run/computer/held";
+/// What this image says of a hold it has not answered yet: what it waits
+/// on, or why its copy failed (the platform logs it, docs/computers.md),
+/// at most this long.
+pub const UNHELD: &str = "/run/computer/unheld";
+pub const UNHELD_MAX_BYTES: usize = 1024;
 /// The bridge's own answer (its `BRIDGE_HELD`): no claim in flight.
 pub const BRIDGE_HELD: &str = "/var/lib/fragment-run/bridge-held";
 /// What a computer keeps, and where the copies wait, under names the save
@@ -45,8 +50,11 @@ pub const DATABASES_MAX: usize = 128;
 /// A line the answer names is at most this long (the platform's bound).
 const LINE_MAX_BYTES: usize = 256;
 /// A copy's tries while its database is locked (a checkpoint, a recovery),
-/// and the pause between.
-const COPY_TRIES_MAX: u32 = 40;
+/// and the pause between. One locked longer is held by its owner (SQLite's
+/// exclusive locking mode, in which a running Chromium keeps its own
+/// databases): no copy of one moment can be had while it runs, so it is
+/// kept hot, as one made after the copy is.
+const COPY_TRIES_MAX: u32 = 20;
 const COPY_RETRY_MS: u64 = 50;
 /// The 16 bytes every SQLite database begins with.
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -54,13 +62,10 @@ const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 /// Why a hold could not be answered, or a copy put back or checked.
 #[derive(Debug)]
 pub enum HeldError {
-    /// A directory could not be read, or a path is not what its name says.
+    /// A directory could not be read.
     Walk { path: PathBuf, why: String },
     /// More entries or databases than a hold reads.
     TooMany { what: &'static str, max: usize },
-    /// A directory, or a link, named as a database: the answer would leave
-    /// it out whole, and no copy would keep it.
-    NotAFile(PathBuf),
     Copy { path: PathBuf, why: String },
     Staging(String),
     /// The manifest does not read, or names what is no copy of ours.
@@ -74,7 +79,6 @@ impl std::fmt::Display for HeldError {
         match self {
             HeldError::Walk { path, why } => write!(f, "{}: {why}", path.display()),
             HeldError::TooMany { what, max } => write!(f, "more than {max} {what}"),
-            HeldError::NotAFile(p) => write!(f, "{} is named as a database and is no file", p.display()),
             HeldError::Copy { path, why } => write!(f, "copying {}: {why}", path.display()),
             HeldError::Staging(why) => write!(f, "the staging: {why}"),
             HeldError::Manifest(why) => write!(f, "the manifest: {why}"),
@@ -101,14 +105,36 @@ pub struct Manifest {
     pub copies: Vec<Copied>,
 }
 
+/// `text`, at most `max` bytes, cut at a character.
+pub fn cut(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 fn named_db(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "db")
 }
 
-/// Every SQLite database the answer leaves out: each entry named `*.db`
-/// under `root`, outside `skip` (the staging, and what the save keeps
-/// whole). A directory or a link so named is an error: the answer would
-/// leave it out, and nothing would keep it.
+/// Whether the file at `path` begins as every SQLite database does (its
+/// first 16 bytes). One that does not, whatever its name, is no database:
+/// an empty file, or another program's own format (Mesa's shader cache is
+/// `mesa_cache.db`).
+fn is_sqlite(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && &head == SQLITE_HEADER
+}
+
+/// Every SQLite database the answer leaves out: each regular file named
+/// `*.db` under `root`, outside `skip` (the staging, and what the save
+/// keeps whole), that begins with SQLite's header. Whatever else is so
+/// named (a directory, which is walked; a link, which is not followed; a
+/// file of another format, such as the agent's desktop's Mesa shader
+/// cache) is no database to copy: the answer names it not, so the save
+/// keeps it as it is.
 pub fn databases(root: &Path, skip: &[&Path]) -> Result<Vec<PathBuf>, HeldError> {
     let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -133,11 +159,10 @@ pub fn databases(root: &Path, skip: &[&Path]) -> Result<Vec<PathBuf>, HeldError>
             // a file that went as it was read is no database to keep
             let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
             let file_type = meta.file_type();
-            match (named_db(&path), file_type.is_file(), file_type.is_dir()) {
-                (true, true, _) => found.push(path),
-                (true, false, _) => return Err(HeldError::NotAFile(path)),
-                (false, _, true) => stack.push(path),
-                (false, _, false) => {}
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if file_type.is_file() && named_db(&path) && is_sqlite(&path) {
+                found.push(path);
             }
         }
     }
@@ -148,38 +173,52 @@ pub fn databases(root: &Path, skip: &[&Path]) -> Result<Vec<PathBuf>, HeldError>
     Ok(found)
 }
 
+/// Why one database was not copied.
+#[derive(Debug)]
+enum Uncopied {
+    /// Locked through every try: its owner's, kept hot.
+    Locked,
+    Failed(String),
+}
+
 /// Copies `src` whole into `dst` (a new file), by SQLite's online backup
 /// in one step: one read transaction, so the copy is of one moment
 /// whatever writes beside it. A locked source is tried again, bounded.
-fn copy_one(src: &Path, dst: &Path) -> Result<(), String> {
+fn copy_one(src: &Path, dst: &Path) -> Result<(), Uncopied> {
     use rusqlite::backup::{Backup, StepResult};
-    let from = rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(|e| e.to_string())?;
-    let mut to = rusqlite::Connection::open(dst).map_err(|e| e.to_string())?;
+    let failed = |e: rusqlite::Error| Uncopied::Failed(e.to_string());
+    let from = rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
+    // the tries below are the only wait (rusqlite's own is 5 s a step)
+    from.busy_timeout(std::time::Duration::ZERO).map_err(failed)?;
+    let mut to = rusqlite::Connection::open(dst).map_err(failed)?;
     {
-        let backup = Backup::new(&from, &mut to).map_err(|e| e.to_string())?;
+        let backup = Backup::new(&from, &mut to).map_err(failed)?;
         let mut tries = 0;
         // bounded by COPY_TRIES_MAX
         loop {
             tries += 1;
-            match backup.step(-1).map_err(|e| e.to_string())? {
+            match backup.step(-1).map_err(failed)? {
                 StepResult::Done => break,
                 StepResult::More => {}
                 StepResult::Busy | StepResult::Locked if tries < COPY_TRIES_MAX => std::thread::sleep(std::time::Duration::from_millis(COPY_RETRY_MS)),
-                other => return Err(format!("still {other:?} after {tries} tries")),
+                StepResult::Busy | StepResult::Locked => return Err(Uncopied::Locked),
+                other => return Err(Uncopied::Failed(format!("{other:?} after {tries} tries"))),
             }
             if tries >= COPY_TRIES_MAX {
-                return Err(format!("not done after {tries} steps"));
+                return Err(Uncopied::Failed(format!("not done after {tries} steps")));
             }
         }
     }
     // the copy stands alone: no journal of its own beside it
-    to.execute_batch("PRAGMA journal_mode = DELETE").map_err(|e| e.to_string())?;
+    to.execute_batch("PRAGMA journal_mode = DELETE").map_err(failed)?;
     drop(to);
-    std::fs::File::open(dst).and_then(|f| f.sync_all()).map_err(|e| e.to_string())
+    std::fs::File::open(dst).and_then(|f| f.sync_all()).map_err(|e| Uncopied::Failed(e.to_string()))
 }
 
 /// Copies each of `dbs` into `staging`, then writes the manifest, so a
-/// manifest is only ever of copies that are whole. The staging is made,
+/// manifest is only ever of copies that are whole. One its owner holds
+/// locked through every try is not copied (it is kept hot: the manifest,
+/// and so the answer, names it not); any other failure fails the whole. The staging is made,
 /// empty and the caller's, by `make_staging` (as root: `/data` is root's);
 /// the caller is the user who owns the databases (opening one creates its
 /// `-wal` and `-shm` as the opener's).
@@ -195,7 +234,17 @@ pub fn copy_all(dbs: &[PathBuf], staging: &Path) -> Result<Manifest, HeldError> 
         let file = format!("{i}.sqlite");
         let dst = staging.join(&file);
         let meta = std::fs::metadata(db).map_err(|e| HeldError::Copy { path: db.clone(), why: e.to_string() })?;
-        copy_one(db, &dst).map_err(|why| HeldError::Copy { path: db.clone(), why })?;
+        match copy_one(db, &dst) {
+            Ok(()) => {}
+            Err(Uncopied::Locked) => {
+                // nothing of it stays in the staging
+                for suffix in ["", "-journal"] {
+                    let _ = std::fs::remove_file(staging.join(format!("{file}{suffix}")));
+                }
+                continue;
+            }
+            Err(Uncopied::Failed(why)) => return Err(HeldError::Copy { path: db.clone(), why }),
+        }
         let bytes = std::fs::metadata(&dst).map_err(|e| HeldError::Copy { path: db.clone(), why: e.to_string() })?.len();
         assert!(bytes > 0, "a copy holds at least its header");
         copies.push(Copied { file, path: db.display().to_string(), bytes, uid: meta.uid(), gid: meta.gid(), mode: meta.mode() & 0o7777 });
@@ -319,7 +368,6 @@ pub fn quick_check(dbs: &[PathBuf]) -> Result<(), HeldError> {
 /// whatever its name (a browser's cookies are one): what the Docker rung
 /// checks after a restore.
 pub fn sqlite_files(root: &Path) -> Result<Vec<PathBuf>, HeldError> {
-    use std::io::Read;
     let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0usize;
@@ -335,11 +383,8 @@ pub fn sqlite_files(root: &Path) -> Result<Vec<PathBuf>, HeldError> {
             let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
             if meta.is_dir() {
                 stack.push(path);
-            } else if meta.is_file() && meta.len() >= 100 {
-                let mut head = [0u8; 16];
-                if std::fs::File::open(&path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && &head == SQLITE_HEADER {
-                    found.push(path);
-                }
+            } else if meta.is_file() && meta.len() >= 100 && is_sqlite(&path) {
+                found.push(path);
             }
         }
     }
@@ -397,10 +442,11 @@ mod tests {
         rusqlite::Connection::open(path).unwrap().query_row("SELECT count(*) FROM t", [], |r| r.get(0)).unwrap()
     }
 
-    /// Valid: every `*.db` under the root is found but those it skips; a
-    /// directory or a link so named is an error (it would be left out whole).
+    /// Valid: every SQLite database named `*.db` under the root is found
+    /// but those it skips; a directory so named is walked (a database in it
+    /// found), a link so named is not followed, and neither is an error.
     #[test]
-    fn the_walk_finds_every_database_and_refuses_what_it_cannot_copy() {
+    fn the_walk_finds_every_database_and_only_databases() {
         let root = dir("walk");
         std::fs::create_dir_all(root.join("hermes/profiles/a")).unwrap();
         std::fs::create_dir_all(root.join("work")).unwrap();
@@ -411,10 +457,10 @@ mod tests {
         let found = databases(&root, &[&root.join("work")]).unwrap();
         assert_eq!(found, vec![root.join("hermes/profiles/a/state.db"), root.join("hermes/state.db")]);
         std::fs::create_dir_all(root.join("hermes/odd.db")).unwrap();
-        assert!(matches!(databases(&root, &[]), Err(HeldError::NotAFile(_))));
-        std::fs::remove_dir(root.join("hermes/odd.db")).unwrap();
+        db(&root.join("hermes/odd.db/inner.db"), 1);
         std::os::unix::fs::symlink(root.join("hermes/state.db"), root.join("hermes/link.db")).unwrap();
-        assert!(matches!(databases(&root, &[]), Err(HeldError::NotAFile(_))));
+        let found = databases(&root, &[&root.join("work")]).unwrap();
+        assert_eq!(found, vec![root.join("hermes/odd.db/inner.db"), root.join("hermes/profiles/a/state.db"), root.join("hermes/state.db")]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -468,6 +514,82 @@ mod tests {
         std::fs::remove_file(staging.join(MANIFEST)).unwrap();
         assert_eq!(put_back(&root, &staging).unwrap(), Vec::<PathBuf>::new());
         assert!(!staging.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Mesa's shader cache: its own format (`MESA_DB`, a version and a
+    /// UUID, 20 bytes before any entry), in a file named `mesa_cache.db`,
+    /// which the agent's desktop keeps under its profile once it has drawn
+    /// (seen on the e2e preview, 2026-10-06: every hold after it unanswered).
+    fn mesa_cache(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = b"MESA_DB\0".to_vec();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0x5eed_u64.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// Valid: a file named `*.db` that is no SQLite database (Mesa's shader
+    /// cache, an empty file) is not one to copy, so the hold is answered:
+    /// the walk finds only the databases, each copies whole, and the check
+    /// a restore runs passes; the save keeps the others as they are. Before
+    /// (the hosted hold, 2026-10-06) the walk named Mesa's cache, its copy
+    /// failed, and so every hold was refused and every restore unusable.
+    #[test]
+    fn a_db_that_is_no_sqlite_database_is_kept_as_it_is_and_the_hold_answered() {
+        let root = dir("mesa");
+        let live = root.join("hermes/state.db");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        db(&live, 3);
+        let desktop = root.join("hermes/profiles/a/bot-desktop/xdg/.cache/mesa_shader_cache_db");
+        mesa_cache(&desktop.join("part0/mesa_cache.db"));
+        mesa_cache(&desktop.join("part1/mesa_cache.db"));
+        std::fs::write(root.join("hermes/empty.db"), b"").unwrap();
+        let found = databases(&root, &[]).unwrap();
+        assert_eq!(found, vec![live.clone()], "only the SQLite database");
+        let staging = root.join("held-copies");
+        make_staging(&staging, None).unwrap();
+        let manifest = copy_all(&found, &staging).unwrap();
+        assert_eq!(answer(&root, &manifest.copies), "/hermes/state.db\n/hermes/state.db-wal\n/hermes/state.db-shm\n/hermes/state.db-journal\n");
+        quick_check(&found).unwrap();
+        // what naming it did: its copy fails, so the hold went unanswered,
+        // and its check fails, so a restore of it was unusable
+        make_staging(&staging, None).unwrap();
+        let mesa = desktop.join("part0/mesa_cache.db");
+        let copied = copy_all(std::slice::from_ref(&mesa), &staging);
+        assert!(matches!(&copied, Err(HeldError::Copy { why, .. }) if why.contains("not a database")), "{copied:?}");
+        assert!(matches!(quick_check(std::slice::from_ref(&mesa)), Err(HeldError::Check { .. })));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Valid: a database its owner holds in SQLite's exclusive locking mode
+    /// (as a running Chromium keeps its own, the second thing seen on the e2e
+    /// preview, 2026-10-06: `declarative_performance_observer.db`, still
+    /// busy) is kept hot, and the rest is copied and answered: before, its
+    /// copy failed the whole, so the hold went unanswered while Chromium ran.
+    #[test]
+    fn a_database_its_owner_holds_locked_is_kept_hot_and_the_rest_copied() {
+        let root = dir("locked");
+        let live = root.join("hermes/state.db");
+        let chromium = root.join("hermes/.config/chromium/Default/declarative_performance_observer.db");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(chromium.parent().unwrap()).unwrap();
+        db(&live, 3);
+        let owner = rusqlite::Connection::open(&chromium).unwrap();
+        owner.execute_batch("PRAGMA locking_mode = EXCLUSIVE; PRAGMA journal_mode = TRUNCATE; CREATE TABLE t (n INTEGER); INSERT INTO t VALUES (1);").unwrap();
+        let found = databases(&root, &[]).unwrap();
+        assert_eq!(found, vec![chromium.clone(), live.clone()]);
+        let staging = root.join("held-copies");
+        make_staging(&staging, None).unwrap();
+        let manifest = copy_all(&found, &staging).unwrap();
+        assert_eq!(manifest.copies.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), vec![live.display().to_string()], "only what could be copied");
+        assert_eq!(answer(&root, &manifest.copies), "/hermes/state.db\n/hermes/state.db-wal\n/hermes/state.db-shm\n/hermes/state.db-journal\n");
+        let staged: Vec<String> = std::fs::read_dir(&staging).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+        assert_eq!(staged, vec![manifest.copies[0].file.clone(), MANIFEST.to_string()], "nothing of the locked one is staged");
+        // put back at a start, the copy goes over its live path and the hot one is as it was
+        drop(owner);
+        assert_eq!(put_back(&root, &staging).unwrap(), vec![live.clone()]);
+        quick_check(&[chromium, live]).unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 

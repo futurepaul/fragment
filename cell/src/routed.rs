@@ -1,6 +1,6 @@
 //! What the router hands a fragment's supervisor, and how it travels. The
-//! router decides a request's fragment, the URL it arrived on, how its
-//! site was addressed, and who is asking; `Routed` carries that in headers
+//! router decides a request's fragment, the URL it arrived on, and who is
+//! asking; `Routed` carries that in headers
 //! only the router sets (`fragment_proto::routed`; a client's are dropped),
 //! written once by `to_headers` and read once by `from_headers`, side by
 //! side here so the two cannot drift.
@@ -28,31 +28,6 @@ use worker::{Env, Headers, Method, Request, RequestInit, Url};
 use crate::error::{CellError, CellResult};
 use crate::registry::calls;
 
-/// How a fragment's site was addressed: its own origin, or `/f/<name>/`
-/// on the platform's (a dev fleet without hostnames).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Host,
-    Path,
-}
-
-impl Mode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Mode::Host => "host",
-            Mode::Path => "path",
-        }
-    }
-
-    fn parse(s: &str) -> Option<Mode> {
-        match s {
-            "host" => Some(Mode::Host),
-            "path" => Some(Mode::Path),
-            _ => None,
-        }
-    }
-}
-
 /// Who is asking: an identity the registry vouched for, and the key it
 /// signed with (none for a browser's session). It reads as its identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +36,7 @@ pub struct Signed {
     pub identity: Identity,
     /// 64 hex.
     pub key: Option<String>,
-    /// An agent acting for someone (ROADMAP decision 17): the identity its
+    /// An agent acting for someone (decision R17): the identity its
     /// signed URL named in `for`, which the router honors on an agent's
     /// request to a fragment only (`crate::acting_for`). The fragment acts
     /// with the lower of that identity's role and the agent's cap
@@ -142,8 +117,6 @@ pub struct Routed {
     /// The URL it arrived on: canonical URLs, cookies, and the query string
     /// all come from here.
     pub url: Url,
-    /// Set on site requests only.
-    pub mode: Option<Mode>,
     /// Who is asking, resolved (the control API). `None` with no
     /// `credential`: anonymous.
     pub signed: Option<Signed>,
@@ -160,9 +133,6 @@ impl Routed {
         assert!(self.signed.as_ref().is_none_or(|s| s.acting_for.is_none() || s.kind == IdentityKind::Agent), "only an agent acts for someone");
         headers.set(routed::NAME, &self.name)?;
         headers.set(routed::URL, self.url.as_str())?;
-        if let Some(mode) = self.mode {
-            headers.set(routed::MODE, mode.as_str())?;
-        }
         if let Some(signed) = &self.signed {
             let json = serde_json::to_string(signed).map_err(|e| CellError::host(format!("the signer: {e}")))?;
             headers.set(routed::SIGNED, &json)?;
@@ -179,10 +149,6 @@ impl Routed {
     pub fn from_headers(headers: &Headers) -> CellResult<Routed> {
         let name = headers.get(routed::NAME)?.filter(|n| valid_fragment_name(n)).ok_or_else(|| CellError::host("no fragment name from the router"))?;
         let url = headers.get(routed::URL)?.and_then(|u| Url::parse(&u).ok()).ok_or_else(|| CellError::host("no URL from the router"))?;
-        let mode = match headers.get(routed::MODE)? {
-            Some(m) => Some(Mode::parse(&m).ok_or_else(|| CellError::host(format!("the router named a mode {m:?}")))?),
-            None => None,
-        };
         let signed = match headers.get(routed::SIGNED)? {
             Some(json) => {
                 let signed: Signed = serde_json::from_str(&json).map_err(|e| CellError::host(format!("the router's signer: {e}")))?;
@@ -207,7 +173,7 @@ impl Routed {
             }
             None => None,
         };
-        Ok(Routed { name, url, mode, signed, credential })
+        Ok(Routed { name, url, signed, credential })
     }
 }
 
@@ -220,7 +186,7 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::jobs::JOB_HEADER, "1")))
     } else if path.starts_with("cap/files/") {
         Ok(Some((crate::files::CAP_HEADER, "files")))
-    } else if path == "deliver/report" || path == "card/report" {
+    } else if path == "deliver/report" {
         Ok(Some((crate::deliveries::REPORT_HEADER, "1")))
     } else if path.starts_with("computer/") {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))

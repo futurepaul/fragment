@@ -9,14 +9,11 @@
 //!                          the gateway, its answer to the hold; then, until
 //!                          SIGTERM, the agents followed as they change
 //!                          (agents.rs)
-//! hermes-boot stamped <name> <input> -- <cmd…>
-//!                          a setup step, skipped when this image already ran
-//!                          it on this exact input
 //! hermes-boot readahead    warm the page cache with the gateway's files
 //! hermes-boot screen-start (the bridge's, when a viewer finds the screen
 //!                          down) the first agent's desktop
-//! hermes-boot build-info   (at image build) the lean plugin list, Hermes'
-//!                          revision, the image's Chromium, the platform skill
+//! hermes-boot build-info   (at image build) the lean plugin list, the
+//!                          image's Chromium, the platform skill
 //! ```
 
 mod agents;
@@ -108,7 +105,6 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("pre-init") => pre_init(),
         Some("main") => tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime").block_on(boot_main()),
-        Some("stamped") => stamped(&args[2..]),
         Some("readahead") => readahead(),
         Some("screen-start") => screen_start(),
         Some("build-info") => build_info(),
@@ -116,7 +112,7 @@ fn main() {
         Some("check-restore") => check_restore(),
         Some("quick-check") => quick_check(&args[2..]),
         Some("sqlite-report") => sqlite_report(&args[2..]),
-        _ => fail("hermes-boot pre-init | main | stamped | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
+        _ => fail("hermes-boot pre-init | main | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
     }
 }
 
@@ -257,12 +253,15 @@ const COPY_RETRY_MS: u64 = 5_000;
 /// database under `/data` is copied by SQLite's online backup into the
 /// staging, as the hermes user, and `held` names the live files as what
 /// the save leaves out. A copy that fails answers nothing: the platform
-/// then saves the guest whole, not held. Once the hold goes (the save is
-/// done, or the sleep called off) the copies go too. Looked at every
-/// `HOLD_POLL_MS`, for the boot's life.
+/// then saves the guest whole, not held. Until it answers, `unheld` says
+/// what it waits on or why its copy failed, which the platform logs with
+/// a hold that goes unanswered (docs/computers.md, "The hold"). Once the
+/// hold goes (the save is done, or the sleep called off) the copies go
+/// too. Looked at every `HOLD_POLL_MS`, for the boot's life.
 async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
     let mut since: Option<Instant> = None;
     let mut failed_at: Option<Instant> = None;
+    let mut said = Unheld::default();
     // bounded by the boot's life: one look per HOLD_POLL_MS
     loop {
         tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)).await;
@@ -270,6 +269,7 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
             if since.take().is_some() {
                 quiet.paused.store(false, std::sync::atomic::Ordering::SeqCst);
                 failed_at = None;
+                said.say(None);
                 if let Err(e) = held::clear_staging(Path::new(held::STAGING)) {
                     ev!("held.staging_failed", { "error": e.to_string() });
                 }
@@ -282,37 +282,82 @@ async fn answer_holds(quiet: std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) {
         if Path::new(held::HELD).exists() || failed_at.is_some_and(|t| t.elapsed() < Duration::from_millis(COPY_RETRY_MS)) {
             continue;
         }
-        let rounds_done = quiet.busy.load(std::sync::atomic::Ordering::SeqCst) == 0 || first.elapsed() > Duration::from_millis(QUIET_WAIT_MS);
-        if !(Path::new(held::BRIDGE_HELD).exists() && rounds_done) {
+        if !Path::new(held::BRIDGE_HELD).exists() {
+            said.say(Some("waiting for the bridge's answer: a claim of a turn is in flight".into()));
             continue;
         }
+        let busy = quiet.busy.load(std::sync::atomic::Ordering::SeqCst);
+        if busy > 0 && first.elapsed() <= Duration::from_millis(QUIET_WAIT_MS) {
+            said.say(Some(format!("waiting for {busy} rounds under way (the repo sync, the skills install, the agents' read), at most {QUIET_WAIT_MS} ms")));
+            continue;
+        }
+        said.say(Some("copying the databases".into()));
         let t = Instant::now();
         match copy_databases(ids).await {
-            Ok((manifest, unnamed)) => match write_answer(&manifest) {
-                Ok(()) => ev!("held", {
-                    "copied": manifest.copies.len(),
-                    "bytes": manifest.copies.iter().map(|c| c.bytes).sum::<u64>(),
-                    "unnamed": unnamed,
-                    "ms": t.elapsed().as_millis() as u64,
-                    "sinceHoldMs": first.elapsed().as_millis() as u64
-                }),
-                Err(e) => {
-                    failed_at = Some(Instant::now());
-                    ev!("held.failed", { "error": e.to_string() });
+            Ok(Copies { manifest, unnamed, locked }) => {
+                said.say(None);
+                match write_answer(&manifest) {
+                    Ok(()) => ev!("held", {
+                        "copied": manifest.copies.len(),
+                        "bytes": manifest.copies.iter().map(|c| c.bytes).sum::<u64>(),
+                        "unnamed": unnamed,
+                        "locked": locked,
+                        "ms": t.elapsed().as_millis() as u64,
+                        "sinceHoldMs": first.elapsed().as_millis() as u64
+                    }),
+                    Err(e) => {
+                        failed_at = Some(Instant::now());
+                        said.say(Some(format!("its answer was not written: {e}")));
+                        ev!("held.failed", { "error": e.to_string() });
+                    }
                 }
-            },
+            }
             Err(why) => {
                 failed_at = Some(Instant::now());
+                said.say(Some(format!("the copy failed, so no answer (tried again in {COPY_RETRY_MS} ms): {why}")));
                 ev!("held.refused", { "why": why, "ms": t.elapsed().as_millis() as u64 });
             }
         }
     }
 }
 
+/// What `unheld` says now (held.rs `UNHELD`): written whole when it
+/// changes, at most `held::UNHELD_MAX_BYTES`, removed when there is
+/// nothing to say.
+#[derive(Default)]
+struct Unheld(Option<String>);
+
+impl Unheld {
+    fn say(&mut self, why: Option<String>) {
+        let why = why.map(|w| held::cut(&w, held::UNHELD_MAX_BYTES).to_string());
+        // said already, unless a new hold's mark cleared it meanwhile
+        if why == self.0 && (why.is_none() || Path::new(held::UNHELD).exists()) {
+            return;
+        }
+        let tmp = format!("{}.tmp", held::UNHELD);
+        let done = match &why {
+            Some(w) => std::fs::write(&tmp, w).and_then(|()| std::fs::rename(&tmp, held::UNHELD)),
+            None => std::fs::remove_file(held::UNHELD).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+        };
+        if let Err(e) = done {
+            ev!("held.unheld_failed", { "error": e.to_string() });
+        }
+        self.0 = why;
+    }
+}
+
+/// What one hold copied: the manifest, and the databases it kept hot, as
+/// the save keeps any other file (`unnamed`: named by no pattern the
+/// platform takes; `locked`: held locked by their owner through the copy).
+struct Copies {
+    manifest: held::Manifest,
+    unnamed: Vec<String>,
+    locked: Vec<String>,
+}
+
 /// Every database under `/data` the answer can name, copied into a
-/// staging made anew, as the hermes user: the copies' manifest, and the
-/// databases left hot (named by no pattern the platform takes).
-async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<String>), String> {
+/// staging made anew, as the hermes user.
+async fn copy_databases(ids: Option<(u32, u32)>) -> Result<Copies, String> {
     let (data, staging) = (Path::new(held::DATA), Path::new(held::STAGING));
     let found = held::databases(data, &[staging, Path::new(hermes::WORK)]).map_err(|e| e.to_string())?;
     let (dbs, unnamed): (Vec<PathBuf>, Vec<PathBuf>) = found.into_iter().partition(|db| held::nameable(data, db));
@@ -323,8 +368,10 @@ async fn copy_databases(ids: Option<(u32, u32)>) -> Result<(held::Manifest, Vec<
         return Err(String::from_utf8_lossy(&out.stdout).trim().chars().take(300).collect());
     }
     let manifest = held::read_manifest(data, staging).map_err(|e| e.to_string())?.ok_or("the copy wrote no manifest")?;
-    assert_eq!(manifest.copies.len(), dbs.len(), "a manifest names every copy");
-    Ok((manifest, unnamed.iter().map(|p| p.display().to_string()).collect()))
+    let copied: std::collections::BTreeSet<&str> = manifest.copies.iter().map(|c| c.path.as_str()).collect();
+    assert!(copied.len() == manifest.copies.len() && manifest.copies.iter().all(|c| dbs.iter().any(|d| d.as_os_str() == c.path.as_str())), "a manifest names each database it was asked for at most once");
+    let locked = dbs.iter().map(|d| d.display().to_string()).filter(|d| !copied.contains(d.as_str())).collect();
+    Ok(Copies { manifest, unnamed: unnamed.iter().map(|p| p.display().to_string()).collect(), locked })
 }
 
 /// `held`, whole: exactly what was copied, which the save leaves out.
@@ -410,42 +457,6 @@ fn write_private(path: &str, text: &str) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-// ---- stamped setup steps ----
-
-fn image_rev() -> String {
-    std::fs::read_to_string(format!("{OPT}/image-rev")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "unknown".into())
-}
-
-fn stamp_key(input: &Path) -> String {
-    let h = std::fs::read(input).map(|b| sync::hash(&b)[..16].to_string()).unwrap_or_else(|_| "none".into());
-    format!("{}:{h}", image_rev())
-}
-
-/// `stamped <name> <input> -- <cmd…>`: a setup step is a pure function of
-/// (the image, its input under the Hermes home); when both match what its
-/// last run recorded, it has nothing to do (S3b).
-fn stamped(args: &[String]) -> ! {
-    let (Some(name), Some(input), Some(sep)) = (args.first(), args.get(1), args.get(2)) else { fail("stamped <name> <input> -- <cmd…>") };
-    if sep != "--" || args.len() < 4 {
-        fail("stamped <name> <input> -- <cmd…>");
-    }
-    let stamp = home().join(".fragment-stamps").join(name);
-    let input = PathBuf::from(input);
-    if std::fs::read_to_string(&stamp).ok().as_deref() == Some(stamp_key(&input).as_str()) {
-        ev!("setup.skipped", { "step": name });
-        std::process::exit(0);
-    }
-    let t = Instant::now();
-    let status = Command::new(&args[3]).args(&args[4..]).status().unwrap_or_else(|e| fail(&format!("{}: {e}", args[3])));
-    if status.success() {
-        // Re-keyed after the step: it may have rewritten its input.
-        let _ = std::fs::create_dir_all(stamp.parent().expect("a parent"));
-        let _ = std::fs::write(&stamp, stamp_key(&input));
-    }
-    ev!("setup.ran", { "step": name, "ms": t.elapsed().as_millis() as u64, "ok": status.success() });
-    std::process::exit(status.code().unwrap_or(1));
-}
-
 fn readahead() -> ! {
     let Ok(list) = std::fs::read_to_string(format!("{OPT}/readahead.list")) else { std::process::exit(0) };
     let mut buf = vec![0u8; 1 << 16];
@@ -483,8 +494,6 @@ fn screen_start() -> ! {
 fn build_info() -> ! {
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
-    let rev = std::fs::read("/etc/hermes/image-provenance.json").ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v["revision"].as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into());
-    std::fs::write(format!("{OPT}/image-rev"), &rev).unwrap_or_else(|e| fail(&e.to_string()));
     // the image's Chromium (hermes::CHROMIUM): Playwright's two browsers,
     // with the flags a container needs, whatever the runtime
     let playwright = Path::new("/opt/hermes/.playwright");
@@ -499,7 +508,7 @@ fn build_info() -> ! {
     }
     let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
     skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
-    println!("{} plugins disabled; Hermes {rev}; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
+    println!("{} plugins disabled; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
 
@@ -657,15 +666,24 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-    let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
-    let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
-    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    // A tier the platform did not answer for is said, and the config the
+    // last boot wrote stays, its tier with it: never a tier the agent did
+    // not choose, but for a profile with no config yet.
+    let config = dir.join("config.yaml");
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
+        ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
+        (!config.exists()).then_some(hermes::Tier::Medium)
+    });
+    if let Some(tier) = tier {
+        write_whole(&config, &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    }
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
-    match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
-        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
+    match sync::round(api, a, &dir, &own).await {
+        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.map(hermes::Tier::name), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
 }
@@ -994,7 +1012,9 @@ async fn boot_main() {
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
-        // Written once: the stamped config migration keys on this file.
+        // Written once (over the template stage2 seeds): stage2's config
+        // migration, at every boot, stamps its version once, then finds
+        // nothing to do.
         let _ = std::fs::write(&default_cfg, hermes::default_config(&model));
         chown(&default_cfg, ids);
     }
@@ -1121,7 +1141,7 @@ async fn boot_main() {
                 last_sync = Instant::now();
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+                    match sync::round(&api, a, &dir, &own).await {
                         Ok(d) if d != sync::Done::default() => ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted }),
                         Ok(_) => {}
                         Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),

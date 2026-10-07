@@ -430,10 +430,10 @@ impl Api {
         Ok(v["commit"].as_str().unwrap_or("").to_string())
     }
 
-    /// `GET /f/{name}/__live?v=2`, as the agent.
+    /// `GET /f/{name}/__live`, as the agent.
     pub async fn live(&self, agent: &str, fragment: &str) -> Result<ClientWs, String> {
         let fragment = name(fragment).map_err(|e| e.to_string())?;
-        net::connect_ws(&self.base, &format!("/f/{fragment}/__live?v=2"), &[(AGENT_HEADER, agent.to_string())]).await
+        net::connect_ws(&self.base, &format!("/f/{fragment}/__live"), &[(AGENT_HEADER, agent.to_string())]).await
     }
 }
 

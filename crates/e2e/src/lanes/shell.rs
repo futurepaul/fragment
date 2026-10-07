@@ -159,6 +159,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session, &username)?;
+    search_follows_reading(s, api)?;
     list_watch(s, api, &session, &username, &id)
 }
 
@@ -268,7 +269,9 @@ fn query(q: &str) -> String {
 /// Search): a message's words find it, for the chat's people only, in
 /// fragments they are in now; a query is words, never FTS5 syntax; a
 /// person archives a fragment for themselves alone, twice the same as
-/// once, and only one of theirs. Goal: the person's list is a fenced
+/// once, and only one of theirs; a chat's row names its agents and shows
+/// its newest message from each person's own search, so the shell's
+/// sidebar is one read, told when a new message comes. Goal: the person's list is a fenced
 /// projection (lesson 12). Method: three people (the shell's person, a
 /// member who is removed and comes back, and an outsider with a chat of
 /// their own), each asking their own list through the API.
@@ -299,8 +302,30 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     );
     let r = search("TOMAT tues")?;
     s.ok("every word, ignoring case, each a prefix", hits_in(&r, &chat).len() == 1, &r);
+
+    // the chat's row in the person's list shows its newest message, from
+    // their search, and their open shell is told when a new one arrives
+    let row = |r: &Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == chat.as_str()).cloned()).unwrap_or(Value::Null);
+    let mine = || shell(api, session, "GET", "/api/fragments", None, &[]);
+    let r = mine()?;
+    s.ok("the chat's row shows its newest message (the agent's step after it is none)", row(&r)["preview"] == said, &r);
+    let url = format!("{}/api/fragments/watch", api.base);
+    let mut tab = watching(Socket::connect(api, &url, None, Some(&format!("fragment_session={session}")), Some(&api.base)).map(|(socket, _)| socket));
+    if let Ok(w) = tab.as_mut() {
+        w.patience(SEARCH_WAIT)?;
+    }
     let basil = post("m2", "chat", json!({ "text": "Basil wants water too" }))?;
     anyhow::ensure!(basil.status == 200, "posting again: {basil}");
+    let told_new = told(&mut tab);
+    let r = mine()?;
+    s.ok(
+        "a new message is told to the person's open shell, and their list's row then shows it",
+        told_new == json!({ "type": "changed" }) && row(&r)["preview"] == "Basil wants water too",
+        json!([told_new, row(&r)]),
+    );
+    if let Ok(w) = tab {
+        w.close();
+    }
     let both = s.eventually(SEARCH_WAIT, || search("water").is_ok_and(|r| hits_in(&r, &chat).len() == 2));
     let r = search("water")?;
     let snippets: Vec<Value> = hits_in(&r, &chat).iter().map(|h| h["snippet"].clone()).collect();
@@ -340,6 +365,27 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     let theirs = |keys: &fragment_nip98::Keys, q: &str| api.signed(keys, "GET", &format!("/api/search?q={}", query(q)), None);
     let found = s.eventually(SEARCH_WAIT, || theirs(&member, "tomatoes").is_ok_and(|r| !hits_in(&r, &chat).is_empty()));
     s.ok("a new member's search finds what the chat said before they joined (signed, with their key)", found, theirs(&member, "tomatoes")?);
+
+    // the chat's agents, the first added first, are named in every member's row
+    let rows = || -> Result<(Value, Value)> { Ok((row(&mine()?), row(&api.signed(&member, "GET", "/api/fragments", None)?))) };
+    let (_, lead) = super::delegation::agent_of(api, &member)?;
+    let (_, second) = super::delegation::agent_of(api, &member)?;
+    let added = [&lead, &second].map(|a| shell(api, session, "PUT", &format!("/api/f/{chat}/members/{a}"), Some(&json!({ "role": "viewer" })), &[]));
+    let (my_row, their_row) = rows()?;
+    s.ok(
+        "agents added are named in every member's row, the first added first; the member's row shows the newest message from their own search",
+        added.iter().all(|r| r.as_ref().is_ok_and(|r| r.status == 200))
+            && my_row["agents"] == json!([lead, second])
+            && their_row["agents"] == json!([lead, second])
+            && their_row["preview"] == "Basil wants water too",
+        json!([my_row, their_row]),
+    );
+    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{lead}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok("the lead removed, every row names the agent left", removed.status == 200 && my_row["agents"] == json!([second]) && their_row["agents"] == json!([second]), json!([my_row, their_row]));
+    let removed = shell(api, session, "DELETE", &format!("/api/f/{chat}/members/{second}"), None, &[])?;
+    let (my_row, their_row) = rows()?;
+    s.ok("and the last, none", removed.status == 200 && my_row["agents"].is_null() && their_row["agents"].is_null(), json!([my_row, their_row]));
     let own = s.named(api, &outsider, "plot")?;
     let r = api.create_with(&outsider, json!({ "name": own, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "the outsider's chat: {r}");
@@ -413,6 +459,48 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
     let r = api.signed(&outsider, "DELETE", &format!("/api/f/{own}"), None)?;
     let gone = s.eventually(SEARCH_WAIT, || theirs(&outsider, "tomatoes").is_ok_and(|r| r.status == 200 && hits_in(&r, &own).is_empty()));
     s.ok("a deleted fragment's messages leave its people's search", r.status == 200 && gone, theirs(&outsider, "tomatoes")?);
+    Ok(())
+}
+
+/// Search follows who may read (#156, problem 5): a deploy that makes a
+/// channel the editors' takes its messages from every list (only channels
+/// every member reads are searched), and a member who joins after never
+/// gets them. Method: an app with two postable channels, `talk` tightened
+/// by a second deploy and `notes` left as it was; each wait ends on what
+/// does arrive, never on an absence.
+fn search_follows_reading(s: &mut Suite, api: &Api) -> Result<()> {
+    const OPEN: &[u8] = br#"{ "channels": { "talk": { "read": "viewer", "post": "viewer" }, "notes": { "read": "viewer", "post": "viewer" } } }"#;
+    const CLOSED: &[u8] = br#"{ "channels": { "talk": { "read": "editor", "post": "editor" }, "notes": { "read": "viewer", "post": "viewer" } } }"#;
+    let (owner, viewer, late) = (api.person()?, api.person()?, api.person()?);
+    let name = s.named(api, &owner, "readers")?;
+    let c = s.create(api, &owner, &name)?;
+    s.commit(&c, &[("fragment.json", Some(OPEN))]);
+    s.deploy(&c);
+    let add = |keys: &fragment_nip98::Keys| api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{}", keys.pubkey_hex()), Some(&json!({ "role": "viewer" })));
+    anyhow::ensure!(add(&viewer)?.status == 200, "adding the viewer");
+    let post = |channel: &str, id: &str, text: &str| api.signed(&owner, "POST", &format!("/api/f/{name}/channels/{channel}"), Some(&json!({ "id": id, "body": { "text": text } })));
+    let search = |keys: &fragment_nip98::Keys| api.signed(keys, "GET", "/api/search?q=rhubarb", None);
+    let took = s.eventually(SEARCH_WAIT, || post("talk", "t1", "the rhubarb is ready").is_ok_and(|r| r.status == 200));
+    let found = s.eventually(SEARCH_WAIT, || search(&viewer).is_ok_and(|r| hits_in(&r, &name).len() == 1));
+    s.ok("a viewer finds a message on a channel every member reads", took && found, search(&viewer)?);
+
+    s.commit(&c, &[("fragment.json", Some(CLOSED))]);
+    s.deploy(&c);
+    let gone = s.eventually(SEARCH_WAIT, || search(&viewer).is_ok_and(|r| r.status == 200 && hits_in(&r, &name).is_empty()));
+    let read = api.signed(&viewer, "GET", &format!("/api/f/{name}/channels/talk"), None)?;
+    s.ok("a deploy that makes the channel the editors' takes its message from the viewer's search, as from their reading (403)", gone && read.status == 403, &read);
+    let gone = s.eventually(SEARCH_WAIT, || search(&owner).is_ok_and(|r| r.status == 200 && hits_in(&r, &name).is_empty()));
+    s.ok("and from the owner's: a channel only some members read is never searched", gone, search(&owner)?);
+
+    anyhow::ensure!(add(&late)?.status == 200, "adding the late viewer");
+    let posted = post("notes", "n1", "the rhubarb went to market")?;
+    let caught_up = s.eventually(SEARCH_WAIT, || search(&late).is_ok_and(|r| !hits_in(&r, &name).is_empty()));
+    let r = search(&late)?;
+    s.ok(
+        "a member who joins after finds the channels searched now, never the tightened one's old message",
+        posted.status == 200 && caught_up && hits_in(&r, &name).iter().all(|h| h["channel"] == "notes"),
+        &r,
+    );
     Ok(())
 }
 
@@ -580,7 +668,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
-    backfill_ui(s, api, &mut b, &page, &session)?;
+    add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     b.color_scheme(&page, "dark")?;
@@ -807,12 +895,12 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
     Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
 }
 
-/// The skills fragment backfilled (decision 17): a person whose agents were
-/// made before setup made one (2026-10-03) has an agent and no skills
-/// fragment. Valid: the shell makes one as it loads, from the blessed
-/// template, before settings reads it. Replay: loaded again, it makes no
-/// second. Method: the person's own is deleted, then the shell reloaded.
-fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+/// The managed skills added from settings (decision 17): a person with an
+/// agent and no skills fragment (theirs deleted here; people set up before
+/// 2026-10-03 have none). Valid: their settings offer the managed skills,
+/// and the button makes the fragment from the blessed template and lists
+/// it. Replay: loaded again, there is no second. Loading makes none unasked.
+fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
     let Some(old) = before.first().cloned() else {
@@ -820,9 +908,12 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
         return Ok(());
     };
     let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
-    let gone = own_skills(api, session)?.is_empty();
-    s.ok("with it deleted, the person has an agent and no skills fragment, as people set up before 2026-10-03 do", r.status == 200 && gone, &r);
     b.reload(page)?;
+    let add = "[...document.querySelectorAll('#settings-skills button')].find((b) => b.textContent === 'Add the managed skills')";
+    let offered = b.until(page, &format!("!!{add}"), wait);
+    let none = own_skills(api, session)?;
+    s.ok("with it deleted, their settings offer the managed skills, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
+    b.eval(page, &format!("({add}.click(), true)"))?;
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
@@ -832,14 +923,14 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let manifest = manifest_of()?;
     let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
     s.ok(
-        "the shell, loaded, makes them one from the blessed template, silently, and their settings list it",
+        "the button makes them one from the blessed template, and their settings list it",
         made && manifest.body["template"] == "skills" && listed,
         json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
     );
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
     let again = own_skills(api, session)?;
-    s.ok("loaded again, it makes no second", again == now, json!(again));
+    s.ok("loaded again, there is no second", again == now, json!(again));
     Ok(())
 }
 
@@ -882,7 +973,7 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let got: Vec<(String, String)> = serde_json::from_str(b.eval(page, shown)?.as_str().unwrap_or("[]")).unwrap_or_default();
     s.ok(
         &format!("settings' Skills lists the managed set by category ({} skills), exactly the skills fragment's files", want.len()),
-        listed && want.len() == 42 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
+        listed && want.len() == 41 && got == want && got.iter().any(|(c, n)| c == "software-development" && n == "apps-finite"),
         json!({ "shown": got.len(), "files": want.len(), "missing": want.iter().filter(|w| !got.contains(w)).collect::<Vec<_>>(), "extra": got.iter().filter(|g| !want.contains(g)).collect::<Vec<_>>() }),
     );
     // an agent's own skill, from its fragment, shows beside it
@@ -967,7 +1058,13 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("it takes two agents or more, in the order picked: the first leads", one == true && order == json!(["Lead", "2", false]), &order);
     let _ = b.screenshot(page, &shots.join("desktop-new-group.png"));
     b.eval(page, "document.getElementById('new-group-form').requestSubmit()")?;
-    let made = b.until(page, "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open", wait);
+    // made once its row is in the sidebar and its chat's heading has drawn its two agents
+    let made = b.until(
+        page,
+        "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open \
+         && document.querySelectorAll('#agent-mark .avatar-stack .agent-avatar').length === 2",
+        wait,
+    );
     let row = b.eval(
         page,
         "(() => { const g = document.querySelector('#chats .agent-row[data-group=\"2\"]'); if (!g) return null; const color = (a) => a.style.getPropertyValue('--agent-color'); \

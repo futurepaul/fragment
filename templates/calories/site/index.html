@@ -40,8 +40,7 @@
     const el = (tag, text) => Object.assign(document.createElement(tag), { textContent: text });
     const midnight = new Date().setHours(0, 0, 0, 0);
     let me = null;
-    // the agent's turns this person started (`work`'s turn.start), and its answers (`ask`)
-    const mine = new Set();
+    // each person's newest answer (`replies`: heard's and summarize's)
     const answers = new Map();
 
     fragment.live("today", { since: midnight }, ({ entries, total }) => {
@@ -56,16 +55,11 @@
     }, (err) => ($("answer").textContent = err.message));
 
     const shown = () => {
-      const turn = [...answers.keys()].filter((t) => mine.has(t)).pop();
-      if (turn) $("answer").textContent = answers.get(turn);
+      const text = answers.get(me?.principal);
+      if (text) $("answer").textContent = text;
     };
-    fragment.subscribe("work", (r) => {
-      if (r.body.kind === "turn.start" && r.body.asker === me?.principal) mine.add(r.body.turn);
-      if (r.body.kind === "turn.end" && mine.has(r.body.turn) && r.body.error) $("answer").textContent = r.body.error;
-      shown();
-    }, { last: 200 });
-    fragment.subscribe("ask", (r) => {
-      if (r.body.turn && typeof r.body.text === "string") answers.set(r.body.turn, r.body.text);
+    fragment.subscribe("replies", (r) => {
+      answers.set(r.body.for, r.body.text);
       shown();
     }, { last: 200 });
 
@@ -76,7 +70,7 @@
         $("note").replaceChildren(a, " to log what you eat.");
         return;
       }
-      $("note").textContent = "Say what you ate; the agent logs it for you.";
+      $("note").textContent = "Say what you ate; it is logged for you.";
       $("text").disabled = false;
       $("summarize").hidden = false;
       shown();

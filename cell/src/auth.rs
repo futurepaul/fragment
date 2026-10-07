@@ -231,25 +231,16 @@ pub(crate) async fn platform_session(req: &Request, env: &Env, url: &Url) -> Cel
     }
 }
 
-/// Where a fragment's session cookie lives: its whole host, or its path
-/// when fragments share the platform's origin (no suffix).
-fn site_cookie_path(name: &str, path_mode: bool) -> String {
-    if path_mode {
-        format!("/f/{name}/")
-    } else {
-        "/".to_string()
-    }
-}
-
 /// The token of a fragment origin's own session cookie, unresolved (the
-/// registry says whom it names, for that fragment only).
-pub fn site_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<String>> {
-    cookie_of(req, SITE_COOKIE, secure(url), &site_cookie_path(name, path_mode))
+/// registry says whom it names, for that fragment only). It lives on the
+/// whole host.
+pub fn site_token(req: &Request, url: &Url) -> CellResult<Option<String>> {
+    cookie_of(req, SITE_COOKIE, secure(url), "/")
 }
 
 /// The token of its frame cookie, unresolved.
-pub fn frame_token(req: &Request, name: &str, url: &Url, path_mode: bool) -> CellResult<Option<String>> {
-    cookie_of(req, FRAME_COOKIE, secure(url), &site_cookie_path(name, path_mode))
+pub fn frame_token(req: &Request, url: &Url) -> CellResult<Option<String>> {
+    cookie_of(req, FRAME_COOKIE, secure(url), "/")
 }
 
 /// A POST from a browser comes from the platform's own pages: where a
@@ -270,7 +261,7 @@ pub(crate) fn to_login(platform: &str, back: &str) -> CellResult<Response> {
 
 async fn begin(env: &Env, cfg: &Config, url: &Url, link: Option<String>) -> CellResult<Response> {
     let workos = crate::keys::workos(env, cfg).await?;
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let return_to = site::return_path(query(url, "return").as_deref());
     let began = ask_registry(env, &calls::Begin { return_to, link_to: link }).await?;
     let state = began.state;
@@ -307,7 +298,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
     let issuer = workos.issuer();
     let done = ask_registry(env, &calls::Exchange { state, code, client_id: workos.client_id, issuer }).await?;
     redirect(
-        &back_to(&format!("{}/", cfg.platform(url)), Some(&done.return_to))?,
+        &back_to(&format!("{}/", cfg.platform()), Some(&done.return_to))?,
         &[
             set_cookie(SESSION_COOKIE, &done.token, "/", crate::registry::SESSION_TTL_MS / 1000, secure(url)),
             set_cookie(LOGIN_COOKIE, "", "/", 0, secure(url)),
@@ -318,7 +309,7 @@ async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResu
 /// Sign-in's routes on the platform origin (the router sends only these).
 pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     {
         match (method, segments) {
             (Method::Get, ["auth", "login"]) => begin(env, cfg, url, None).await,
@@ -467,7 +458,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
         return Ok(Minting::Redeem(redeem));
     }
     // silent on their own fragments and those shared with them, which know
-    // them already (answer 1, docs/fragment-boats.md)
+    // them already (docs/api.md, Asking first)
     let who = Signed::new(minted.identity, None);
     match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
         Ok(_) => {
@@ -487,9 +478,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
 /// must be the platform's, so the frame redemption's embedder (the only
 /// page the fragment's answers to it may show in) is the platform's origin
 /// and nothing a request names. A page on any other origin, a fragment's
-/// (its author's code) included, cannot start one; nor can a fleet whose
-/// fragments share the platform's origin (no suffix), where a fragment's
-/// page is the platform's own.
+/// (its author's code) included, cannot start one.
 ///
 /// The token travels only in the redirect: a page cannot read the URL its
 /// cross-origin frame was sent to, nor `fetch` this route (its dest is not
@@ -500,14 +489,11 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
 /// from its top-level ones, so a shell reloading its tabs ends none of
 /// those.
 async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let header = |k: &str| req.headers().get(k).map(Option::unwrap_or_default);
     let framed = fragment_core::frames::platform_frame(&header("sec-fetch-dest")?, &header("sec-fetch-mode")?, &header("sec-fetch-site")?);
     if !framed || url.origin().ascii_serialization() != platform {
         return page(403, "Not a frame of the platform", "<p>This signs in a frame of the platform's own page, and nothing else. Open the fragment itself instead.</p>");
-    }
-    if cfg.host_suffix.is_none() {
-        return page(403, "Not on this fleet", "<p>Here every fragment shares the platform's origin, so a frame of the platform's page signs in to none of them.</p>");
     }
     let (name, back) = fragment_asked(url)?;
     let Some(token) = cookie_of(req, SESSION_COOKIE, secure(url), "/")? else { return frame_note(&platform, &name, &back, Unsigned::SignedOut) };
@@ -630,7 +616,7 @@ pub(crate) fn is_refusal(code: ErrorCode) -> bool {
 }
 
 /// A refusal a browser navigated to on a fragment's origin, answered as the
-/// platform's page instead of the API's JSON (ROADMAP decision 4). A
+/// platform's page instead of the API's JSON (decision R4). A
 /// top-level visit that no session here admits (401) goes to the
 /// platform's sign-in for this fragment, and back to the page it asked for:
 /// at once on the person's own fragments and those shared with them, after
@@ -651,7 +637,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let link_changed = !signing_in && query(url, "view").is_some();
     let signed_out = e.code == ErrorCode::Unauthenticated;
     if signed_out && !framed && !link_changed && !signing_in {
-        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[]);
+        return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[]);
     }
     let (label, ask) = match fragment_proto::split_fragment_name(name) {
         Some((label, owner)) => (label, format!("its owner, <b>@{}</b>,", esc(owner))),
@@ -661,7 +647,7 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
     let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));
     let sign_in = a(&format!("{base}__signin?return={}", enc(&back)), &format!("Sign in to {label}"));
-    let home = a(&format!("{}/", cfg.platform(url)), "Your fragments");
+    let home = a(&format!("{}/", cfg.platform()), "Your fragments");
     let why = format!("<p style=\"opacity:.7;font-size:.9em\">{}</p>", esc(&e.message));
     let l = esc(label);
     let (title, body) = if link_changed {
@@ -680,8 +666,8 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
 }
 
 /// Whether this origin's session cookie names someone on `name`.
-async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url, path_mode: bool) -> CellResult<bool> {
-    match site_token(req, name, url, path_mode)? {
+async fn signed_in_here(req: &Request, env: &Env, name: &str, url: &Url) -> CellResult<bool> {
+    match site_token(req, url)? {
         Some(token) => Ok(Credential::Session(token).resolve(env, name).await?.is_some()),
         None => Ok(false),
     }
@@ -704,9 +690,7 @@ pub fn is_fragment_route(rest: &str) -> bool {
 ///   script, or a fetch it is refused;
 /// - `__signout` is a button (`GET`), and a POST from this origin's own
 ///   page only.
-#[allow(clippy::too_many_arguments)]
-pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, path_mode: bool, fetched: Fetched) -> CellResult<Response> {
-    let cookie_path = site_cookie_path(name, path_mode);
+pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, fetched: Fetched) -> CellResult<Response> {
     let base = cfg.canonical(url, name);
     let back = site::return_path(query(url, "return").as_deref());
     let ttl_s = crate::registry::SESSION_TTL_MS / 1000;
@@ -715,22 +699,22 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             if let Some(redeem) = query(url, "token") {
                 let redeemed = ask_registry(env, &calls::Redeem { redeem, fragment: name.to_string(), framed: fetched.framed }).await?;
                 return match fetched.framed {
-                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(FRAME_COOKIE, &redeemed.token, &cookie_path, ttl_s, secure(url))]),
-                    false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, &cookie_path, ttl_s, secure(url))]),
+                    true => redirect(&format!("{base}__signin?check=frame&return={}", enc(&redeemed.return_to)), &[frame_cookie(FRAME_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
+                    false => redirect(&back_to(&base, Some(&redeemed.return_to))?, &[set_cookie(SITE_COOKIE, &redeemed.token, "/", ttl_s, secure(url))]),
                 };
             }
             if fetched.framed {
-                let kept = query(url, "check").as_deref() == Some("frame") && fetched.frame && frame_token(req, name, url, path_mode)?.is_some();
+                let kept = query(url, "check").as_deref() == Some("frame") && fetched.frame && frame_token(req, url)?.is_some();
                 return if kept { redirect(&back_to(&base, Some(&back))?, &[]) } else { blocked(cfg, url, name, &back) };
             }
             if !fetched.navigation {
                 return Err(CellError::new(ErrorCode::Forbidden, "sign in by opening this page: not from another page's image, script, or fetch"));
             }
             // signed in here already: straight back
-            if fetched.site && signed_in_here(req, env, name, url, path_mode).await? {
+            if fetched.site && signed_in_here(req, env, name, url).await? {
                 return redirect(&back_to(&base, Some(&back))?, &[]);
             }
-            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(url), enc(&back)), &[])
+            redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[])
         }
         ("__signout", Method::Get) => page(
             200,
@@ -744,13 +728,13 @@ pub async fn fragment(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &
             // answers: a registry that cannot end them is logged, and they
             // last until they expire or the platform session ends
             // (`/auth/logout` ends every one).
-            let (site, frame) = (cookie_of(req, SITE_COOKIE, secure(url), &cookie_path)?, frame_token(req, name, url, path_mode)?);
+            let (site, frame) = (site_token(req, url)?, frame_token(req, url)?);
             if site.is_some() || frame.is_some() {
                 if let Err(e) = ask_registry(env, &calls::EndSession { site, frame, fragment: name.to_string() }).await {
                     console_error!("__signout on {name}: the registry did not end the sessions ({:?}): {}", e.code, e.message);
                 }
             }
-            Ok(redirect(&base, &[set_cookie(SITE_COOKIE, "", &cookie_path, 0, secure(url)), frame_cookie(FRAME_COOKIE, "", &cookie_path, 0, secure(url))])?.with_status(303))
+            Ok(redirect(&base, &[set_cookie(SITE_COOKIE, "", "/", 0, secure(url)), frame_cookie(FRAME_COOKIE, "", "/", 0, secure(url))])?.with_status(303))
         }
         (_, m) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {rest}", m.as_ref()))),
     }

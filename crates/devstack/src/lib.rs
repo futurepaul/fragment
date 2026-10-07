@@ -1,8 +1,7 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
-//! (`cell/`) and the agents' Worker (`agent/`) together, each one's
-//! variables rendered into its `.dev.vars` and its secrets seeded into
-//! wrangler's local Secrets Store, bound by name as a deploy binds them
-//! (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
+//! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
+//! seeded into wrangler's local Secrets Store, bound by name as a deploy
+//! binds them (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
 //! crashes, and restarts it.
 
 use std::fs;
@@ -22,7 +21,6 @@ pub mod node;
 mod node_release;
 pub mod signals;
 pub mod store;
-pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
@@ -34,9 +32,6 @@ pub const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// installs it). Moving it re-checks what containers.rs leans on in it
 /// and its workerd (docs/technical-debt-ledger.md).
 pub const WRANGLER_VERSION: &str = "4.145.0";
-/// Names another wrangler entry script (a `bin/wrangler.js`), run on the
-/// pinned Node all the same.
-pub const WRANGLER_BIN_VAR: &str = "WRANGLER_BIN";
 /// The pinned Node, unpacked (node.rs), under the repo root.
 pub const TOOLS_DIR: &str = "target/tools";
 /// The caches every JavaScript process keeps, under the repo root:
@@ -62,11 +57,6 @@ pub fn repo_root() -> PathBuf {
 
 pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
-}
-
-/// The agents' Worker project (goose's loop; phase 5).
-pub fn agent_dir() -> PathBuf {
-    repo_root().join("agent")
 }
 
 /// `text` (JSONC: JSON with `//` comments) as JSON.
@@ -108,11 +98,11 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
-/// A copy of a built project at `dir`: its config (without its `build`
-/// step: a staged copy has no source to build), its `files`, and its
-/// `build/`, so a node run from it keeps its state and variables apart
-/// from the source tree, where `xtask dev` runs.
-fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
+/// A copy of the built cell project at `dir`: its config (without its
+/// `build` step: a staged copy has no source to build), its shim, and its
+/// `build/`, so a node run from it keeps its state and variables apart from
+/// the source tree, where `xtask dev` runs.
+pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
@@ -126,14 +116,13 @@ fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
         }
         Ok(())
     }
+    let from = cell_dir();
     fs::create_dir_all(dir)?;
-    let mut config = read_config(from)?;
+    let mut config = read_config(&from)?;
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
-    absolute_images(&mut config, from)?;
+    absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    for f in files {
-        fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
-    }
+    fs::copy(from.join("entry.mjs"), dir.join("entry.mjs")).context("stage entry.mjs")?;
     let _ = fs::remove_dir_all(dir.join("build"));
     copy_dir(&from.join("build"), &dir.join("build")).with_context(|| format!("stage {}/build (run `cargo xtask build`)", from.display()))?;
     Ok(dir.to_path_buf())
@@ -204,42 +193,28 @@ pub fn clear_state(project: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A copy of the built agent project at `dir`.
-pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
-    stage(&agent_dir(), dir, &[])
-}
-
-/// A copy of the built cell project at `dir` (its config, shim, and build).
-pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
-}
-
 /// What the node runs on: the pinned Node and the wrangler it runs.
 pub struct Tools {
     pub node: node::Node,
-    /// wrangler's entry script: `WRANGLER_BIN`'s, or the pinned one npm
-    /// installed (`node_modules/wrangler/bin/wrangler.js`).
+    /// wrangler's entry script, the pinned one npm installed
+    /// (`node_modules/wrangler/bin/wrangler.js`).
     pub wrangler: PathBuf,
     /// `CACHE_DIR`, absolute.
     pub cache: PathBuf,
 }
 
 impl Tools {
-    /// The pinned Node (or `FRAGMENT_NODE`'s), fetched on first use;
-    /// node_modules from its own `npm ci` when missing or stale; and the
-    /// wrangler package.json pins, or `WRANGLER_BIN`'s, checked by version.
-    /// Nothing from PATH.
+    /// The pinned Node, fetched on first use; node_modules from its own
+    /// `npm ci` when missing or stale; and the wrangler package.json pins,
+    /// checked by version. Nothing from PATH.
     pub fn locate() -> Result<Tools> {
         let root = repo_root();
         let cache = root.join(CACHE_DIR);
         let node = node::locate(&root.join(TOOLS_DIR))?;
         node::ensure_modules(&node, &root, &root.join(TOOLS_DIR), &cache)?;
-        let wrangler = match std::env::var_os(WRANGLER_BIN_VAR) {
-            Some(p) => PathBuf::from(p),
-            None => root.join("node_modules/wrangler/bin/wrangler.js"),
-        };
+        let wrangler = root.join("node_modules/wrangler/bin/wrangler.js");
         if !wrangler.is_file() {
-            bail!("no wrangler entry script at {} ({WRANGLER_BIN_VAR} names one, a wrangler package's bin/wrangler.js; unset, it is the one npm ci installs)", wrangler.display());
+            bail!("no wrangler at {} (npm ci installs it: remove node_modules, and the next run installs it again)", wrangler.display());
         }
         let tools = Tools { node, wrangler, cache };
         let out = tools
@@ -294,11 +269,8 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>` when set.
-    pub host_suffix: Option<String>,
-    /// Where fragments were served before the suffix moved: a fragment's
-    /// host there redirects to its host under the suffix.
-    pub legacy_host_suffix: Option<String>,
+    /// Fragments are served from `<label>--<username>.<suffix>`.
+    pub host_suffix: String,
     /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
     /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
     /// test levers to the e2e's own things (the hosted lane's rehearsal).
@@ -322,9 +294,9 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
-    /// The platform's origin (sign-in, the platform session), when it is
-    /// not the hostname suffix itself.
-    pub platform_url: Option<String>,
+    /// The platform's origin (sign-in, the platform session;
+    /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
+    pub platform_url: String,
     /// Who may grant credit and set plans (`FRAGMENT_OPERATORS`).
     pub operators: Option<String>,
     /// Pending sign-ins the Registry keeps (`None`: the cell's default,
@@ -358,8 +330,8 @@ pub struct WorkOsVars {
 }
 
 impl Fleet {
-    /// The store secrets its Workers are bound to, by name.
-    pub fn bound(&self) -> store::Bound {
+    /// The store secrets its Worker is bound to, by name.
+    fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
         store::Bound::conventional(self.workos.is_some(), &providers)
     }
@@ -387,6 +359,7 @@ impl Fleet {
         let mut vars = vec![
             ("CODESTORAGE_ORG", self.codestorage_org.as_str()),
             ("CODESTORAGE_API_URL", self.codestorage_url.as_str()),
+            ("FRAGMENT_PLATFORM_URL", self.platform_url.as_str()),
             ("FRAGMENT_POLL_INTERVAL_S", poll.as_str()),
             ("FRAGMENT_JOB_RETRY_DELAY_S", retry.as_str()),
         ];
@@ -409,22 +382,13 @@ impl Fleet {
         let retry = self.delivery_retry_s.map(|r| r.to_string());
         if let Some(r) = &retry {
             vars.push(("FRAGMENT_DELIVERY_RETRY_S", r.as_str()));
-            vars.push(("FRAGMENT_DELIVERY_RETRY_MAX_S", r.as_str()));
         }
-        if let Some(s) = &self.host_suffix {
-            vars.push(("FRAGMENT_HOST_SUFFIX", s.as_str()));
-        }
-        if let Some(s) = &self.legacy_host_suffix {
-            vars.push(("FRAGMENT_LEGACY_HOST_SUFFIX", s.as_str()));
-        }
+        vars.push(("FRAGMENT_HOST_SUFFIX", self.host_suffix.as_str()));
         if let Some(s) = &self.host_label_suffix {
             vars.push(("FRAGMENT_HOST_LABEL_SUFFIX", s.as_str()));
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
-        }
-        if let Some(p) = &self.platform_url {
-            vars.push(("FRAGMENT_PLATFORM_URL", p.as_str()));
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));
@@ -447,33 +411,6 @@ impl Fleet {
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
-        }
-        write_dev_vars(project, &vars)
-    }
-}
-
-/// What an agent fleet is configured with: the platform it acts on (its
-/// model calls are the platform's model route's). Its host secret is the
-/// platform's, bound to the same secret in the same local store
-/// (`Fleet::bound`), as a deploy binds both Workers to one.
-pub struct AgentFleet {
-    /// The fragment platform's base URL (`FRAGMENT_API`).
-    pub fragment_api: String,
-    /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
-    /// fragments to deliver to.
-    pub agent_url: String,
-    /// The owner's test controls (holds, the watchdog period): dev and e2e only.
-    pub test_hooks: bool,
-}
-
-impl AgentFleet {
-    /// Renders the fleet into the project's `.dev.vars`, and its bindings
-    /// (`bound.agent()`, the platform fleet's names) into its local config.
-    pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
-        write_local_config(project, &bound.agent())?;
-        let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
-        if self.test_hooks {
-            vars.push(("AGENT_TEST_HOOKS", "allow"));
         }
         write_dev_vars(project, &vars)
     }
@@ -509,13 +446,9 @@ pub struct NodeOptions {
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
     pub port: u16,
-    /// Projects run beside it for its service bindings (`wrangler dev -c`
-    /// again), each configured first: the agents' Worker
-    /// (`AgentFleet::configure`).
-    pub with: Vec<PathBuf>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`).
     pub log_dir: PathBuf,
-    /// wrangler's own debug logs in the log, beside the Workers' output.
+    /// wrangler's own debug logs in the log, beside the Worker's output.
     pub node_logs: bool,
     /// A process group of its own, so the e2e crashes wrangler and workerd
     /// as one. `xtask dev` keeps it in the terminal's, so Ctrl-C reaches it
@@ -593,16 +526,13 @@ pub struct Node {
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-        let configs: Vec<PathBuf> = std::iter::once(&opts.project).chain(&opts.with).map(|p| local_config(p)).collect();
-        if let Some(missing) = configs.iter().find(|c| !c.is_file()) {
-            bail!("{} is not there: configure the fleet first (Fleet::configure, AgentFleet::configure)", missing.display());
+        let config = local_config(&opts.project);
+        if !config.is_file() {
+            bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = tools.wrangler()?;
-        cmd.arg("dev");
-        for config in &configs {
-            cmd.arg("-c").arg(config);
-        }
+        cmd.arg("dev").arg("-c").arg(&config);
         cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
         cmd.args(["--inspector-port", &free_port()?.to_string()]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));
@@ -746,7 +676,7 @@ mod tests {
     fn wrangler_runs_on_the_pinned_node_with_repo_caches() {
         let root = repo_root();
         let bin = root.join(TOOLS_DIR).join("node-test/bin");
-        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js"), release: node::pinned_release() };
+        let node = node::Node { node: bin.join("node"), bin: bin.clone(), npm_cli: root.join("npm-cli.js") };
         let tools = Tools { node, wrangler: root.join("node_modules/wrangler/bin/wrangler.js"), cache: root.join(CACHE_DIR) };
         let cmd = tools.wrangler().expect("a wrangler command");
         assert_eq!(cmd.get_program(), bin.join("node").as_os_str());

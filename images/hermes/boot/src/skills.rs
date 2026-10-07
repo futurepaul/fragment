@@ -51,9 +51,9 @@ pub const FETCH_AT_ONCE: usize = 8;
 const PATH_MAX: usize = 300;
 const DEPTH_MAX: usize = 8;
 /// While the owner has no skills fragment, it is looked for this often
-/// rather than every `SKILLS_EVERY_MS` (main.rs): the shell makes one for a
-/// person who lacks it (shell.js, `backfillSkills`), and their agents have
-/// it within about this.
+/// rather than every `SKILLS_EVERY_MS` (main.rs): a person who lacks one
+/// adds it from the shell's settings, and their agents have it within
+/// about this.
 pub const ABSENT_EVERY_MS: u64 = 60_000;
 
 /// Where the platform skill is: in the image, read-only to the agents.

@@ -1,7 +1,7 @@
-//! The fragment end-to-end suite: the real cell and agents' Worker under
-//! `wrangler dev` (workerd, from staged copies under `target/e2e/<run>`, so
-//! a running `xtask dev` is never touched), the code.storage fake from
-//! `crates/fakes` (webhooks included), the real CLI, and signed HTTP the
+//! The fragment end-to-end suite: the real cell under `wrangler dev`
+//! (workerd, from a staged copy under `target/e2e/<run>`, so a running
+//! `xtask dev` is never touched), the code.storage fake from
+//! `crates/fakes`, the real CLI, and signed HTTP the
 //! way the CLI and a browser send it. The fakes stand only at vendor
 //! boundaries (code.storage, WorkOS, the model, a push service): this is
 //! the lower rung under the hosted lane.
@@ -42,7 +42,6 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use api::Api;
-use devstack::summary::{self, Shard};
 pub use needs::Need;
 
 pub const SUFFIX: &str = "fragment.localhost";
@@ -56,10 +55,9 @@ pub const BOATS: &str = "boats.localhost";
 enum Shape {
     /// The platform on 127.0.0.1, the fragments under `fragment.localhost`.
     Plain,
-    /// As fragment.club is since the move (docs/fragment-boats.md): the
+    /// As fragment.club is (docs/api.md, Hosts): the
     /// platform at `fragment.localhost`, cross-site from the fragments
-    /// (`<flat>.boats.localhost`, one site with each other), whose old
-    /// hosts under `fragment.localhost` redirect to their new ones.
+    /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,
 }
 const ORG: &str = "fragment-e2e";
@@ -167,15 +165,8 @@ pub struct Suite {
     /// The sections to run (`None`: all of them), and those not to.
     only: Option<Vec<String>>,
     except: Vec<String>,
-    /// The table's shard to run (`--shard k/n`; `None`: no split).
-    shard: Option<Shard>,
-    /// Where the run writes its summary as it ends (`--summary`).
-    summary: Option<PathBuf>,
-    /// Each section the run accounted for (ran, or skipped whole), with
-    /// its checks: what the summary reports (lanes/mod.rs `run` counts them).
-    accounted: Vec<summary::Section>,
-    /// Checks made outside any section.
-    outside: summary::Counts,
+    /// The table's shard to run, `k` of `--shard k/n` (from 1; `None`: no split).
+    shard: Option<u32>,
     /// Where the run is: under `wrangler dev` with the fakes, or a preview.
     rung: needs::Rung,
     /// The hosted lane's rules: on a preview, or its rehearsal on the local
@@ -237,8 +228,6 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
-    /// The agents' script (phase 5), co-hosted on the node.
-    agents_project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
     /// Whether the containers the run's nodes left are removed
@@ -296,10 +285,7 @@ impl Suite {
             };
             match &mut self.plan {
                 Some(plan) => plan.push(Planned { section: name.into(), needs: needs.to_vec(), skip: Some(why) }),
-                None => {
-                    self.account(name, false);
-                    self.skip(&format!("the {name} section"), &why);
-                }
+                None => self.skip(&format!("the {name} section"), &why),
             }
         }
         false
@@ -308,19 +294,7 @@ impl Suite {
     /// Whether `--only`, `--except` and `--shard` select the section `name`.
     fn selected(&self, name: &str) -> bool {
         let named = self.only.as_ref().is_none_or(|only| only.iter().any(|o| o == name)) && !self.except.iter().any(|e| e == name);
-        named && self.shard.is_none_or(|shard| lanes::shard_runs(shard.k, name))
-    }
-
-    /// A section accounted for: it runs, or (`ran` false) is skipped whole.
-    /// Its checks are counted as its lane ends (lanes/mod.rs `run`).
-    fn account(&mut self, name: &str, ran: bool) {
-        let zero = summary::Counts::default();
-        self.accounted.push(summary::Section { name: name.to_string(), ran, counts: zero, ms: 0 });
-    }
-
-    /// The checks counted so far.
-    fn counts(&self) -> summary::Counts {
-        summary::Counts { passed: self.passed as u64, failed: self.failed.len() as u64, skipped: self.skipped.len() as u64 }
+        named && self.shard.is_none_or(|k| lanes::shard_runs(k, name))
     }
 
     /// Whether the section `name`, needing `needs`, runs in this suite:
@@ -344,13 +318,11 @@ impl Suite {
             return false;
         }
         if let Some((need, why)) = unmet {
-            self.account(name, false);
             self.skip(&format!("the {name} section"), &format!("{why} ({})", need.name()));
             return false;
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
-        self.account(name, true);
         if let Some(why) = self.lost.clone() {
             self.fail(&format!("{name} did not run: no node"), why);
             return false;
@@ -414,7 +386,7 @@ impl Suite {
                 println!("      {e:#}");
             }
         }
-        self.start(false, true)?;
+        self.start(false)?;
         Ok(())
     }
 
@@ -424,8 +396,8 @@ impl Suite {
         match (&self.preview, self.hosted_rules) {
             (Some(preview), _) => Api::hosted(preview, &self.shared),
             // a rehearsal's node is shaped as a branch deployment
-            (None, true) => Api::new(self.port, Some(SUFFIX), &self.shared).branch(REHEARSAL_BRANCH),
-            (None, false) => Api::new(self.port, Some(SUFFIX), &self.shared),
+            (None, true) => Api::new(self.port, SUFFIX, &self.shared).branch(REHEARSAL_BRANCH),
+            (None, false) => Api::new(self.port, SUFFIX, &self.shared),
         }
     }
 
@@ -458,15 +430,15 @@ impl Suite {
 
     fn start_shaped(&mut self, shape: Shape) -> Result<Api> {
         self.shape = shape;
-        let started = self.start(false, true);
+        let started = self.start(false);
         self.shape = Shape::Plain;
         let mut api = started?;
         api.base = format!("http://{SUFFIX}:{}", self.port);
         Ok(api)
     }
 
-    /// Starts the node; `suffix` serves fragments from their own hosts.
-    pub fn start(&mut self, clean: bool, suffix: bool) -> Result<Api> {
+    /// Starts the node, fragments on their own hosts.
+    pub fn start(&mut self, clean: bool) -> Result<Api> {
         anyhow::ensure!(self.preview.is_none(), "a hosted run starts no node: a section that does declares Need::Node");
         assert!(self.node.is_none(), "one node at a time");
         let tools = self.tools.as_ref().context("a local run locates its tools")?;
@@ -479,8 +451,7 @@ impl Suite {
             codestorage_org: ORG.into(),
             codestorage_key_pem: self.org_key.clone(),
             codestorage_url: self.fake.node().url.clone(),
-            host_suffix: suffix.then(|| self.suffix().to_string()),
-            legacy_host_suffix: (suffix && self.shape == Shape::TwoSites).then(|| SUFFIX.to_string()),
+            host_suffix: self.suffix().to_string(),
             // a rehearsal's node is shaped as a branch deployment, whose
             // levers are scoped as a preview's are
             host_label_suffix: self.hosted_rules.then(|| format!("--{REHEARSAL_BRANCH}")),
@@ -498,10 +469,10 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
-            platform_url: Some(match (self.shape, suffix) {
-                (Shape::TwoSites, true) => format!("http://{SUFFIX}:{}", self.port),
-                _ => format!("http://127.0.0.1:{}", self.port),
-            }),
+            platform_url: match self.shape {
+                Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
+                Shape::Plain => format!("http://127.0.0.1:{}", self.port),
+            },
             operators: Some(fragment_core::npub::encode(self.operator.pubkey_hex())),
             signins_pending_max: Some(SIGNINS_PENDING_MAX),
             // the levers, as a preview has them: each request carries the secret
@@ -515,15 +486,9 @@ impl Suite {
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
         fleet.configure(tools, &self.project)?;
-        // the agents' Worker runs beside it, as a deployment runs it: the
-        // router hands it /api/agents and /api/a/*, its inboxes included;
-        // it is bound to the platform's host secret
-        devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{}", self.port), agent_url: format!("http://127.0.0.1:{}", self.port), test_hooks: true }
-            .configure(&self.agents_project, &fleet.bound())?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,
-            with: vec![self.agents_project.clone()],
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
@@ -533,7 +498,7 @@ impl Suite {
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
-        Ok(Api::new(self.port, suffix.then_some(self.suffix()), &self.shared))
+        Ok(Api::new(self.port, self.suffix(), &self.shared))
     }
 
     /// The fragments' suffix in the next node's shape.
@@ -542,19 +507,6 @@ impl Suite {
             Shape::TwoSites => BOATS,
             Shape::Plain => SUFFIX,
         }
-    }
-
-    /// The agents' API: the node's own (the agents' script is co-hosted),
-    /// started again after `crash`. Its state is the node's.
-    pub fn agents(&mut self) -> Result<Api> {
-        if let Some(preview) = &self.preview {
-            // the platform's own: the router hands the agents' Worker /api/a/*
-            return Ok(Api::hosted(preview, &self.shared));
-        }
-        if self.node.is_none() {
-            self.start(false, true)?;
-        }
-        Ok(Api::new(self.port, None, &self.shared))
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -578,38 +530,32 @@ impl Suite {
         devstack::containers::remove(&self.project).map(Some)
     }
 
-    /// Registers the fragment's push webhook with the fake (the dashboard
-    /// registration the real service has), so git moves reach the cell.
-    /// Hosted, nothing: the run's commits and deploys go through the API
-    /// (`commit`, `deploy`), which moves the pins itself.
-    pub fn hook(&self, api: &Api, created: &Value) {
-        if self.hosted() {
-            return;
-        }
+    /// Records who owns a fragment made some other way than `create` (the
+    /// CLI, the shell), so `commit` and `deploy` act as them.
+    pub fn owned(&self, created: &Value, keys: &Keys) {
         let name = created["name"].as_str().expect("created.name");
-        let repo = created["repo"].as_str().expect("created.repo");
-        let secret = created["webhookSecret"].as_str().expect("created.webhookSecret");
-        self.fake.register_webhook(repo, &format!("{}/api/f/{name}/webhook", api.base), secret);
+        self.owners.borrow_mut().insert(name.to_string(), keys.clone());
     }
 
-    /// Creates a fragment (signed by `keys`) with its webhook registered.
+    /// Creates a fragment signed by `keys`, its owner.
     pub fn create(&self, api: &Api, keys: &Keys, name: &str) -> Result<Value> {
         let r = api.create(keys, name)?;
         if r.status != 200 {
             bail!("create {name}: {r}");
         }
-        self.hook(api, &r.body);
-        let full = r.body["name"].as_str().context("a create answers the fragment's name")?;
-        self.owners.borrow_mut().insert(full.to_string(), keys.clone());
+        self.owned(&r.body, keys);
         Ok(r.body)
     }
 
-    /// A commit on main by another writer, announced by webhook. Hosted,
-    /// its owner's commit through the files route (`POST /api/f/{name}/files`:
+    /// A commit on main by another writer: a push through the fake, then
+    /// its owner's `refresh`, as the CLI pushes and refreshes. Hosted, its
+    /// owner's commit through the files route (`POST /api/f/{name}/files`:
     /// one commit, main moved at once), since a preview's git is real.
     pub fn commit(&self, created: &Value, changes: &[(&str, Option<&[u8]>)]) -> String {
         if !self.hosted() {
-            return self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            let sha = self.fake.external_commit(created["repo"].as_str().expect("created.repo"), "main", changes, "e2e commit");
+            self.refresh(created);
+            return sha;
         }
         let files: Vec<Value> = changes
             .iter()
@@ -623,26 +569,41 @@ impl Suite {
         r["commit"].as_str().unwrap_or_else(|| panic!("a commit answers its sha: {r}")).to_string()
     }
 
-    /// Moves live to main's tip (what `fragment deploy` does), announced.
-    /// Hosted, its owner's deploy (`POST /api/f/{name}/deploy`), which
-    /// installs the app at once.
+    /// Moves live to main's tip through the fake, then refreshes (a ref
+    /// move as `fragment rollback` makes one). Hosted, its owner's deploy
+    /// (`POST /api/f/{name}/deploy`), which installs the app at once.
     pub fn deploy(&self, created: &Value) -> String {
         if !self.hosted() {
             let repo = created["repo"].as_str().expect("created.repo");
             let tip = self.fake.branch(repo, "main").expect("main has a commit");
             self.fake.set_branch(repo, "live", &tip);
+            self.refresh(created);
             return tip;
         }
         let r = self.as_owner(created, "deploy", &json!({ "note": "e2e deploy" }));
         r["live"].as_str().unwrap_or_else(|| panic!("a deploy answers live: {r}")).to_string()
     }
 
-    /// A hosted run's `POST /api/f/{name}/{route}`, signed by the owner
-    /// `create` recorded: a git move as a local run makes it through the fake.
+    /// The owner's `refresh` after a move through the fake; one that fails
+    /// (a code.storage outage a test makes) is the test's to see, as the
+    /// CLI only warns.
+    fn refresh(&self, created: &Value) {
+        let _ = self.call_as_owner(created, "refresh", &json!({}));
+    }
+
+    /// `POST /api/f/{name}/{route}`, signed by the owner `create` or
+    /// `owned` recorded.
+    fn call_as_owner(&self, created: &Value, route: &str, body: &Value) -> Result<api::Reply> {
+        let name = created["name"].as_str().expect("created.name");
+        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name}'s owner is recorded by Suite::create or Suite::owned"));
+        self.api().signed(&owner, "POST", &format!("/api/f/{name}/{route}"), Some(body))
+    }
+
+    /// A hosted run's `POST /api/f/{name}/{route}` as its owner: a git move
+    /// as a local run makes it through the fake.
     fn as_owner(&self, created: &Value, route: &str, body: &Value) -> Value {
         let name = created["name"].as_str().expect("created.name");
-        let owner = self.owners.borrow().get(name).cloned().unwrap_or_else(|| panic!("{name} was made by Suite::create, which records its owner"));
-        let r = self.api().signed(&owner, "POST", &format!("/api/f/{name}/{route}"), Some(body)).unwrap_or_else(|e| panic!("{route} {name}: {e:#}"));
+        let r = self.call_as_owner(created, route, body).unwrap_or_else(|e| panic!("{route} {name}: {e:#}"));
         assert!(r.status == 200, "{route} {name}: {r}");
         r.body
     }
@@ -690,11 +651,6 @@ impl Suite {
     /// Runs the CLI with its own HOME against the node.
     pub fn cli(&self, api: &Api, home: &Path, args: &[&str]) -> Output {
         self.cli_command(api, home, args).output().expect("run the fragment CLI")
-    }
-
-    /// `cli`, run in `cwd` (where `fragment init` makes its folder).
-    pub fn cli_in(&self, api: &Api, home: &Path, cwd: &Path, args: &[&str]) -> Output {
-        self.cli_command(api, home, args).current_dir(cwd).output().expect("run the fragment CLI")
     }
 
     /// The CLI as a lane spawns it itself (a watcher, a piped input): its
@@ -806,7 +762,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args = hosted::parse(&args)?;
     match args.hosted {
-        None => local(args.only, args.except, LocalRun { rehearse: args.rehearse, shard: args.shard, summary: args.summary }),
+        None => local(args.only, args.except, LocalRun { rehearse: args.rehearse, shard: args.shard }),
         Some(hosted) => hosted::run(args.only, args.except, hosted),
     }
 }
@@ -830,8 +786,7 @@ fn run_name() -> String {
 struct LocalRun {
     /// A rehearsal of the hosted lane, lending at most this many paid calls.
     rehearse: Option<u64>,
-    shard: Option<Shard>,
-    summary: Option<PathBuf>,
+    shard: Option<u32>,
 }
 
 /// The local run: a fresh `wrangler dev` node and the fakes. A rehearsal
@@ -842,7 +797,7 @@ struct LocalRun {
 /// what it needs, as on a preview; it ends with the sweep. A shard runs the
 /// sections the table gives it, in the lanes' order.
 fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> Result<()> {
-    let LocalRun { rehearse, shard, summary } = settings;
+    let LocalRun { rehearse, shard } = settings;
     let root = devstack::repo_root();
     let cli = cli_binary()?;
     let tools = devstack::Tools::locate()?;
@@ -867,7 +822,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
-    let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let test_secret = devstack::random_hex(32);
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
@@ -884,9 +838,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         only,
         except,
         shard,
-        summary,
-        accounted: vec![],
-        outside: summary::Counts::default(),
         rung,
         hosted_rules: rehearse.is_some(),
         preview: None,
@@ -918,15 +869,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cli,
         scratch,
         project,
-        agents_project,
         shape: Shape::Plain,
         containers_removed: false,
     };
-    if let Some(shard) = s.shard {
-        println!("shard {shard}: {}", lanes::SHARDS[shard.k as usize - 1].join(", "));
+    if let Some(k) = s.shard {
+        println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
     }
     let t0 = Instant::now();
-    s.start(true, true)?;
+    s.start(true)?;
     // wrangler builds the computer images as it boots: built ahead (xtask's
     // build), every step is a cache hit, and the boot takes seconds
     let log = s.node.as_ref().map(|n| std::fs::read_to_string(&n.log).unwrap_or_default()).unwrap_or_default();
@@ -934,7 +884,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     println!("the node is ready in {:.1?} (its image builds: {cached} steps cached)", t0.elapsed());
     lanes::run(&mut s);
     if rehearse.is_some() {
-        lanes::counted(&mut s, |s, _| {
+        lanes::run_one(&mut s, |s, _| {
             hosted::rehearse_sweep(s);
             Ok(())
         });
@@ -946,8 +896,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
 /// fails it; the node stops; the counts, each FAIL, and (hosted) what the
 /// run spent are printed. Non-zero when any check failed, the scratch kept.
 fn finish(s: &mut Suite) -> Result<()> {
-    // the run's own checks, outside any section
-    let before = s.counts();
     for (flag, name) in s.only.clone().unwrap_or_default().into_iter().map(|n| ("--only", n)).chain(s.except.clone().into_iter().map(|n| ("--except", n))) {
         if !s.asked.contains(&name) {
             s.fail(&format!("{flag} {name}"), "no section has that name");
@@ -975,14 +923,6 @@ fn finish(s: &mut Suite) -> Result<()> {
     let t0 = Instant::now();
     s.chrome.close();
     println!("      (Chrome closed in {:.1?})", t0.elapsed());
-    s.outside = s.outside + s.counts().since(before);
-    if let Some(path) = s.summary.clone() {
-        // written before the counts are printed: a red run's summary too
-        // (the aggregate names its FAILs), and a run that cannot write one fails
-        if let Err(e) = write_summary(s, &path) {
-            s.fail("the run writes its summary", format!("{}: {e:#}", path.display()));
-        }
-    }
     let skipped = match s.hosted() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
@@ -1003,32 +943,5 @@ fn finish(s: &mut Suite) -> Result<()> {
     } else if let Err(e) = std::fs::remove_dir_all(&s.scratch) {
         println!("could not remove {}: {e}", s.scratch.display());
     }
-    Ok(())
-}
-
-/// The run's summary (devstack's `summary::Summary`) at `path`: the suite
-/// as the lanes asked for it, the sections it accounted for, and its counts.
-fn write_summary(s: &Suite, path: &Path) -> Result<()> {
-    let mut suite: Vec<String> = Vec::with_capacity(s.asked.len());
-    for name in &s.asked {
-        if !suite.contains(name) {
-            suite.push(name.clone());
-        }
-    }
-    let summary = summary::Summary {
-        shard: s.shard,
-        suite,
-        sections: s.accounted.clone(),
-        outside: s.outside,
-        totals: s.counts(),
-        failures: s.failed.clone(),
-    };
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(&summary)?)?;
-    // read back: what the aggregate will read is what was meant
-    let back: summary::Summary = serde_json::from_slice(&std::fs::read(path)?)?;
-    assert_eq!(back, summary, "a summary reads back as written");
     Ok(())
 }

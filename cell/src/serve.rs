@@ -1,5 +1,5 @@
 //! Serving a fragment: its site from the `live` pin, the machine-read
-//! plane (`__tree`, `__file`), a blob by its hash (`__blob`, and an
+//! plane (`__files`, `__file`), a blob by its hash (`__blob`, and an
 //! editor's page uploading one there), browser calls (`__op`), who is in
 //! it (`__people`, `__members`), and the change feed (`__watch`). Who may
 //! see what follows the fragment's visibility:
@@ -29,7 +29,6 @@ use worker::*;
 use crate::error::{CellError, CellResult};
 use crate::fragment::{as_themselves, decide, decode_segment, json_response, Caller, Facts, FragmentCell, MetaKey};
 use crate::js;
-use crate::routed::Mode;
 
 /// The browser library pages import as `./__fragment.js`.
 const CLIENT_JS: &str = include_str!("../client.mjs");
@@ -61,14 +60,13 @@ pub(crate) fn eq_ct(a: &str, b: &str) -> bool {
 }
 
 struct Origin {
-    cookie_path: String,
     secure: bool,
 }
 
 impl Origin {
     fn cookie(&self, name: &str, value: &str, max_age_s: i64) -> String {
         let secure = if self.secure { "; Secure" } else { "" };
-        format!("{name}={value}; Path={}; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{secure}", self.cookie_path)
+        format!("{name}={value}; Path=/; Max-Age={max_age_s}; HttpOnly; SameSite=Lax{secure}")
     }
 }
 
@@ -142,10 +140,7 @@ impl FragmentCell {
         let mut facts = self.facts()?;
         // the query string, as the request arrived (the router's URL)
         let url = caller.url.clone();
-        let origin = Origin {
-            cookie_path: if caller.mode == Some(Mode::Host) { "/".into() } else { format!("/f/{name}/") },
-            secure: caller.url.scheme() == "https",
-        };
+        let origin = Origin { secure: caller.url.scheme() == "https" };
         let cookies = req.headers().get("cookie")?.unwrap_or_default();
         let via_query = url.query_pairs().any(|(k, v)| k == "view" && eq_ct(&v, &facts.view_token));
         let via_cookie = site::cookie(&cookies, VIEW_COOKIE).is_some_and(|v| eq_ct(v, &facts.view_token));
@@ -209,7 +204,7 @@ impl FragmentCell {
             self.reader(&mut facts, caller, link, Role::Public).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
             let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
-            let platform = self.cfg.platform(&caller.url);
+            let platform = self.cfg.platform();
             // bounded: the registry answers at most 64 profiles
             for p in answer.profiles.values_mut() {
                 p.picture = p.picture.take().map(|path| format!("{platform}{path}"));
@@ -362,19 +357,6 @@ impl FragmentCell {
             "__preview.svg" => {
                 let svg = site::preview_svg(name);
                 return Ok(Response::ok(svg)?.with_headers(headers("image/svg+xml", if public { "public, max-age=3600" } else { "private, max-age=3600" })?));
-            }
-            "__tree" => {
-                let blobs = self.pointer_sizes("live")?;
-                let files: Vec<Value> = self
-                    .tree_rows("live")?
-                    .into_iter()
-                    .filter(|r| !site::is_machinery(&r.path))
-                    .map(|r| {
-                        let size = blobs.get(&r.path).copied().unwrap_or(r.size);
-                        json!({ "path": r.path, "size": size, "mode": r.mode, "lastCommitSha": r.last_commit })
-                    })
-                    .collect();
-                return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
             }
             "__files" => {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {
