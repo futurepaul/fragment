@@ -214,14 +214,16 @@ impl RegistryCell {
     }
 
     /// Their and their agents' sessions (a site's and a frame's with the
-    /// platform's), the redemptions of those, their keys, and the sign-ins
-    /// pending to link to them: from now nothing signed or signed in is
+    /// platform's), the redemptions of those, their keys, their connected
+    /// clients and the codes of those, and the sign-ins pending to link to them: from now nothing signed or signed in is
     /// them. Keys are deleted, not revoked: a wiped identity holds nothing,
     /// and the key's holder may bring it to the new person they become.
     fn end_access(&self, identity: &str) -> CellResult<()> {
         self.exec(&format!("DELETE FROM redemptions WHERE session IN (SELECT hash FROM sessions WHERE {THEIRS})"), theirs(identity))?;
         self.exec(&format!("DELETE FROM sessions WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM keys WHERE {THEIRS}"), theirs(identity))?;
+        self.exec(&format!("DELETE FROM oauth_codes WHERE {THEIRS}"), theirs(identity))?;
+        self.exec(&format!("DELETE FROM connections WHERE {THEIRS}"), theirs(identity))?;
         self.exec("DELETE FROM logins WHERE link_to = ?", vec![identity.into()])?;
         Ok(())
     }

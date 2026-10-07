@@ -86,7 +86,7 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, levers, secrets,
-  delegation, files, deploy, templates, share, isolation, frames, ops, public,
+  delegation, files, deploy, templates, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
