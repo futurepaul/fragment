@@ -384,8 +384,8 @@ that a pointer in git names.
 - Fragment identity: the npub secret is generated client-side at create,
   crosses the wire once, and is stored wrapped.
 - Webhooks: validate → persist (dedupe) → interpret; a poll backstop,
-  every 5 minutes while something outside the platform may be writing
-  (a storage token or a webhook in the last day), else daily.
+  every 5 minutes, only while the pins may lag the repo (a storage token
+  minted, or a move that failed to follow, in the last day).
 
 ## Phases
 
