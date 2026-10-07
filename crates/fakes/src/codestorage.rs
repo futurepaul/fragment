@@ -146,6 +146,8 @@ struct State {
     #[serde(skip)]
     refreshes: u32,
     #[serde(skip)]
+    race: BTreeMap<String, Vec<OwnedChange>>,
+    #[serde(skip)]
     deliveries: Vec<(String, Result<u16, String>)>,
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
@@ -654,6 +656,9 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
         st.commit_packs += 1;
+        if let Some(changes) = st.race.remove(url) {
+            st.commit(url, Write { branch: "main", message: "racing writer", author: "racer", changes: &changes, from: None }, out);
+        }
         if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
@@ -1176,6 +1181,15 @@ impl CodeStorage {
     /// Webhook deliveries so far: (url, status or error).
     pub fn deliveries(&self) -> Vec<(String, Result<u16, String>)> {
         self.with(|st| st.deliveries.clone())
+    }
+
+    /// The next commit pack for `repo` first lands these changes on main as
+    /// another writer (a writer between the client's head read and its commit).
+    pub fn arm_race(&self, repo: &str, changes: &[Change<'_>]) {
+        self.with(|st| {
+            let url = st.url_of(repo).expect("arm_race on a known repo");
+            st.race.insert(url, changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect());
+        });
     }
 
     /// Every call waits this long before it is served, as a call to the
