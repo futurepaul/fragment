@@ -888,6 +888,26 @@ tier an agent or a job's step may name.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
+
+Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
+memo is one the agent transcribes itself, through this route):
+- **The model.** `whisper` is Workers AI's Whisper
+  (`@cf/openai/whisper-large-v3-turbo`), called as a tier's model is.
+- **What it is sent.** The audio as base64. A `language` or `prompt` it
+  was given passes on; with no language, Whisper detects it. OpenAI's
+  other fields are let go.
+- **Refusals before anything is reserved.** A form that is not one, a
+  model other than `whisper`, and a format other than `json` or `text`
+  are refused 400. Audio past 10 MiB is refused 413.
+- **Metering** (`fragment_core::transcribe`). Workers AI's 46.63 neurons
+  a minute of audio. The call reserves its audio's bytes read as 16
+  kbps, and settles at the length Whisper reports. Above the
+  reservation it is charged in full; with no length reported, at the
+  reservation.
+- **Who pays.** The payer is the agent's owner, under no fragment's cap.
+- **What is kept.** Only the usage, on the ledger. Whisper's refusal is
+  released and passed through, as a chat call's is.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`

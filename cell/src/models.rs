@@ -30,12 +30,22 @@
 //! image (Hermes' screenshots), metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
+//!
+//! Transcription (decision 9: a voice memo is one the agent transcribes
+//! itself): `POST /api/models/v1/audio/transcriptions`, OpenAI's multipart
+//! shape, `model` the route's `whisper` (`transcription_route`), runs
+//! Workers AI's Whisper on the same transport, reserved at its audio's
+//! bytes and settled at the length Whisper heard, in neurons
+//! (`fragment_core::transcribe`). It names no fragment: its agent's owner
+//! pays, under no fragment's cap, as a call through the model intercept
+//! does.
 
 use std::pin::Pin;
 
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Named, Stream};
 use fragment_core::price::Usage;
+use fragment_core::{multipart, transcribe};
 use fragment_proto::{valid_fragment_name, ErrorCode, IdentityKind};
 use futures_util::future::LocalBoxFuture;
 use futures_util::StreamExt;
@@ -114,7 +124,8 @@ struct Held {
     payer: String,
     reference: String,
     model: &'static str,
-    named: Named,
+    /// What the call named: a tier, `vision` or `whisper`.
+    name: &'static str,
 }
 
 impl Held {
@@ -126,7 +137,7 @@ impl Held {
         let settle = Settle { reference: self.reference.clone(), usage };
         match ledger::retried(&self.env, &self.payer, &settle).await {
             // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named.as_str(), "model": self.model, "charge": settled.charge, "basis": settled.basis })),
+            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.name, "model": self.model, "charge": settled.charge, "basis": settled.basis })),
             Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
     }
@@ -172,7 +183,7 @@ pub async fn complete(env: &Env, call: ModelCall<'_>, after: &dyn Background) ->
         capped,
     };
     ledger::hold(env, call.payer, &reserve).await?;
-    let held =Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, named: call.named };
+    let held = Held { env: env.clone(), payer: call.payer.to_string(), reference: reserve.reference, model: bounded.model, name: call.named.as_str() };
     let meta = Metadata { user_id: opaque(call.payer), agent_id: call.agent.map(opaque) };
     let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta).await {
         Ok(r) => r,
@@ -421,4 +432,72 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
         stream,
     };
     complete(env, call, after).await
+}
+
+/// `POST /api/models/v1/audio/transcriptions`: an agent's transcription
+/// (the module's doc), signed by the agent; OpenAI's multipart shape, its
+/// `model` `whisper`. Its owner pays. The audio is refused past
+/// `transcribe::AUDIO_MAX_BYTES` (413) before anything is reserved or sent.
+pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, transcribe::BODY_MAX_BYTES).await?;
+    let agent = crate::signer_for(env, &req, url, &body).await?;
+    if agent.kind != IdentityKind::Agent {
+        return Err(CellError::new(ErrorCode::Forbidden, "the model route is an agent's: its owner pays for its calls"));
+    }
+    let owner = agent.owner.clone().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let content_type = req.headers().get("content-type")?.unwrap_or_default();
+    let malformed = |m: multipart::Malformed| CellError::invalid(m.message());
+    let boundary = multipart::boundary(&content_type).map_err(malformed)?;
+    let parts = multipart::parts(&body, &boundary).map_err(malformed)?;
+    let bounded = match transcribe::bound(&parts) {
+        Ok(b) => b,
+        Err(transcribe::Refusal::TooLarge(n)) => return Err(CellError::too_large("the audio", n, transcribe::AUDIO_MAX_BYTES)),
+        Err(why) => return Err(CellError::invalid(why.message())),
+    };
+    drop(parts);
+    drop(body);
+    let reserve = Reserve {
+        reference: format!("aig:{}", js::random_hex::<16>()),
+        spend: Spend::AgentTurn,
+        worst: bounded.worst(),
+        fragment: None,
+        agent: Some(agent.id.clone()),
+        capped: false,
+    };
+    ledger::hold(env, &owner, &reserve).await?;
+    let held = Held { env: env.clone(), payer: owner.clone(), reference: reserve.reference, model: transcribe::TRANSCRIBE_MODEL, name: transcribe::WHISPER };
+    let meta = Metadata { user_id: opaque(&owner), agent_id: Some(opaque(&agent.id)) };
+    let mut upstream = match transport(env, Config::from_env(env), transcribe::TRANSCRIBE_MODEL, &bounded.input, &meta).await {
+        Ok(r) => r,
+        Err(e) => {
+            held.release("the model was not reached").await;
+            return Err(e);
+        }
+    };
+    let status = upstream.status_code();
+    let log_id = upstream.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        // a refusal used nothing: the vendor's answer, as it came
+        let text = bounded_text(&mut upstream).await;
+        held.release(&format!("the model answered {status}")).await;
+        let mut resp = Response::ok(text)?.with_status(status);
+        resp.headers_mut().set("content-type", "application/json")?;
+        return Ok(resp);
+    }
+    let answer = match read_whole(&mut upstream).await {
+        Ok(b) => b,
+        Err(e) => {
+            // what it used is unknown: its worst case
+            held.settle(None, log_id).await;
+            return Err(e);
+        }
+    };
+    let whisper: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
+    held.settle(transcribe::usage_of(&whisper), log_id).await;
+    let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
+        return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));
+    };
+    let mut resp = Response::from_bytes(out)?;
+    resp.headers_mut().set("content-type", kind)?;
+    Ok(resp)
 }

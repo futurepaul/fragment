@@ -19,6 +19,14 @@
 //! the prompt (`image_bytes`), with no usage: Workers AI prices an image by
 //! its tiles and steps, which the cell counts itself.
 //!
+//! The transcription model (`TRANSCRIBE_MODEL`, Whisper) answers as its
+//! catalog's output schema says, `{text, word_count, transcription_info:
+//! {language, duration, …}, segments, vtt}`, from the audio's own bytes: a
+//! WAV `spoken_wav` makes carries its words in a chunk of its own (`said`),
+//! which is the text, and its length is its samples'; any other audio is
+//! heard as `NO_WORDS`, its length its bytes at 16 kbps. Workers AI prices
+//! it by that length, which the cell meters itself.
+//!
 //! A chat call may carry images (`image_url` parts, OpenAI's shape) to a
 //! model that reads them (`TAKES_IMAGES`, as Workers AI's catalog marks
 //! them: the route's vision model); one carrying an image to another, or a
@@ -46,6 +54,10 @@ use crate::http::{Handler, Request, Response, Server};
 
 /// The image model's catalog id (fragment_core::media::IMAGE_MODEL).
 pub use fragment_core::media::IMAGE_MODEL;
+/// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
+pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
+/// What Whisper hears in audio that carries no words of `spoken_wav`'s.
+pub const NO_WORDS: &str = "(no words)";
 
 /// The chat models the platform calls that read images: those Workers AI's
 /// catalog marks "Vision: Yes" (GLM-5.3 Flash, the cheap tier's and the
@@ -97,6 +109,9 @@ pub struct AiCall {
     pub metadata: Value,
     /// GLM's prefix-cache key (`x-session-affinity`).
     pub affinity: Option<String>,
+    /// An `authorization` header, were one ever sent (a guest's key must
+    /// never reach the vendor).
+    pub authorization: Option<String>,
 }
 
 /// What an answer reports it used, when a test says (`set_usage`).
@@ -424,6 +439,80 @@ pub fn image_bytes(prompt: &str) -> Vec<u8> {
     out
 }
 
+/// 16 kHz, 16-bit mono PCM: 32,000 bytes a second.
+const WAV_BYTES_PER_SECOND: u32 = 32_000;
+
+/// A WAV of `seconds` of silence that says `words` (in a chunk of its own,
+/// `said`, which the fake reads as what was spoken): a voice memo for a
+/// test.
+pub fn spoken_wav(words: &str, seconds: u32) -> Vec<u8> {
+    let mut said = words.as_bytes().to_vec();
+    if said.len() % 2 == 1 {
+        said.push(0);
+    }
+    let data = (seconds * WAV_BYTES_PER_SECOND) as usize;
+    let mut w = Vec::with_capacity(44 + said.len() + data);
+    w.extend(b"RIFF");
+    w.extend(((4 + 24 + 8 + said.len() + 8 + data) as u32).to_le_bytes());
+    w.extend(b"WAVEfmt ");
+    w.extend(16u32.to_le_bytes());
+    w.extend(1u16.to_le_bytes()); // PCM
+    w.extend(1u16.to_le_bytes()); // mono
+    w.extend(16_000u32.to_le_bytes());
+    w.extend(WAV_BYTES_PER_SECOND.to_le_bytes());
+    w.extend(2u16.to_le_bytes());
+    w.extend(16u16.to_le_bytes());
+    w.extend(b"said");
+    w.extend((words.len() as u32).to_le_bytes());
+    w.extend(&said);
+    w.extend(b"data");
+    w.extend((data as u32).to_le_bytes());
+    w.resize(w.len() + data, 0);
+    w
+}
+
+/// What a WAV says (its `said` chunk) and how long it is (its data at its
+/// byte rate); any other audio says nothing, and lasts its bytes at 16 kbps.
+pub fn heard(audio: &[u8]) -> (String, f64) {
+    let otherwise = (NO_WORDS.to_string(), audio.len() as f64 / 2_000.0);
+    if audio.len() < 12 || &audio[..4] != b"RIFF" || &audio[8..12] != b"WAVE" {
+        return otherwise;
+    }
+    let (mut words, mut rate, mut data) = (None, None, None);
+    let mut at = 12;
+    // bounded by the audio: each pass moves past one chunk
+    while at + 8 <= audio.len() {
+        let id = &audio[at..at + 4];
+        let len = u32::from_le_bytes(audio[at + 4..at + 8].try_into().expect("four bytes")) as usize;
+        let body = &audio[at + 8..(at + 8 + len).min(audio.len())];
+        match id {
+            b"fmt " if body.len() >= 12 => rate = Some(u32::from_le_bytes(body[8..12].try_into().expect("four bytes"))),
+            b"said" => words = Some(String::from_utf8_lossy(body).into_owned()),
+            b"data" => data = Some(body.len()),
+            _ => {}
+        }
+        at += 8 + len + len % 2;
+    }
+    match (rate, data) {
+        (Some(r), Some(d)) if r > 0 => (words.unwrap_or_else(|| NO_WORDS.to_string()), d as f64 / f64::from(r)),
+        _ => otherwise,
+    }
+}
+
+/// Whisper's answer to `input`, as its catalog's output schema says.
+fn transcription_answer(input: &Value, log_id: &str) -> Response {
+    let Some(audio) = input["audio"].as_str() else { return problem(400, "Type mismatch of '/audio', 'undefined' not in 'string'") };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(audio) else { return problem(400, "audio is base64") };
+    let (text, duration) = heard(&bytes);
+    let answer = json!({
+        "text": text, "word_count": text.split_whitespace().count(),
+        "transcription_info": { "language": input["language"].as_str().unwrap_or("en"), "language_probability": 0.99, "duration": duration, "duration_after_vad": duration },
+        "segments": [{ "start": 0.0, "end": duration, "text": text }],
+        "vtt": format!("WEBVTT\n\n00:00.000 --> 00:{duration:06.3}\n{text}\n"),
+    });
+    Response::json(200, &answer).with_header("cf-aig-log-id", log_id)
+}
+
 /// The image model's answer to `input`, as the binding answers it raw.
 fn image_answer(input: &Value, log_id: &str) -> Response {
     let Some(prompt) = input["prompt"].as_str() else { return problem(400, "Type mismatch of '/prompt', 'undefined' not in 'string'") };
@@ -439,7 +528,8 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let metadata = req.header("x-fragment-ai-metadata").and_then(|m| serde_json::from_str(m).ok()).unwrap_or(Value::Null);
     let affinity = req.header("x-session-affinity").map(str::to_string);
-    s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity });
+    let authorization = req.header("authorization").map(str::to_string);
+    s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity, authorization });
     if let Some(Some(status)) = s.failures.pop_front() {
         return problem(status, "a failure the test asked for");
     }
@@ -447,6 +537,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let log_id = format!("01FAKE{:020}", s.answers);
     if model == IMAGE_MODEL {
         return image_answer(&body, &log_id);
+    }
+    if model == TRANSCRIBE_MODEL {
+        return transcription_answer(&body, &log_id);
     }
     if let Some(why) = image_refusal(&model, &body) {
         return problem(400, &why);
@@ -759,6 +852,20 @@ mod tests {
 
     /// Goal: a runtime's transcript decides its answer, whatever else it
     /// asked meanwhile. Method: each rule, from its transcript alone.
+    #[test]
+    fn a_memo_is_heard_as_it_says() {
+        let wav = spoken_wav("hello from a voice memo", 3);
+        assert_eq!(heard(&wav), ("hello from a voice memo".to_string(), 3.0));
+        let odd = spoken_wav("hi!", 1);
+        assert_eq!(heard(&odd), ("hi!".to_string(), 1.0), "an odd chunk is padded and read past");
+        assert_eq!(heard(b"OggS not a wav"), (NO_WORDS.to_string(), 14.0 / 2_000.0));
+        let input = json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&wav), "task": "transcribe" });
+        let r = transcription_answer(&input, "log");
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!((v["text"].clone(), v["transcription_info"]["duration"].clone(), v["word_count"].clone()), (json!("hello from a voice memo"), json!(3.0), json!(5)));
+        assert_eq!(fragment_core::transcribe::usage_of(&v), Some(fragment_core::price::Usage::Neurons { milli: 2_332 }), "the cell meters what the answer says");
+    }
+
     #[test]
     fn a_transcript_decides_its_answer() {
         let say = |text: &str| json!({ "messages": [{ "role": "user", "content": text }] });

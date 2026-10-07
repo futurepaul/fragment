@@ -2065,28 +2065,36 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
 }
 
 /// The guest's model call (docs/computers.md, Models): `POST
-/// /v1/chat/completions`, OpenAI's shape, with `model` a tier and
-/// `x-fragment-agent`. It is the platform's model route as that agent
-/// (`models::route`, signed as egress_api signs), which bounds it, meters
-/// it to the agent's owner, and refuses at zero credit. Its auth headers
-/// are the guest's and go nowhere; any other path is 404, unmetered.
+/// /v1/chat/completions`, OpenAI's shape, with `model` a tier, or `POST
+/// /v1/audio/transcriptions`, OpenAI's multipart shape, with `model`
+/// `whisper`; each names its agent (`models::agent_named`: the
+/// `x-fragment-agent` header, or the key `agent:<name>` from a client that
+/// sends no header of its own). It is the platform's model route as that
+/// agent (`models::route`, `models::transcription_route`, signed as
+/// egress_api signs, only for an agent that runs on this computer), which
+/// bounds it, meters it to the agent's owner, and refuses at zero credit.
+/// The guest's auth headers, its key among them, go nowhere: only the
+/// agent's name, the content type and `accept` are sent on. Any other path
+/// is 404, unmetered.
 async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
-    if req.method() != Method::Post || req.path() != "/v1/chat/completions" {
-        return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions"));
-    }
-    if req.headers().get(AGENT_HEADER)?.is_none() {
-        return Err(CellError::new(ErrorCode::Unauthenticated, "name the agent this call is for (x-fragment-agent): its owner pays for it"));
-    }
+    let (route, max) = match (req.method(), req.path().as_str()) {
+        (Method::Post, "/v1/chat/completions") => ("/api/models/v1/chat/completions", crate::models::MODEL_BODY_MAX_BYTES),
+        (Method::Post, "/v1/audio/transcriptions") => ("/api/models/v1/audio/transcriptions", fragment_core::transcribe::BODY_MAX_BYTES),
+        _ => return Err(CellError::new(ErrorCode::NotFound, "the model intercept answers POST /v1/chat/completions and /v1/audio/transcriptions")),
+    };
+    let named = fragment_core::models::agent_named(req.headers().get(AGENT_HEADER)?.as_deref(), req.headers().get("authorization")?.as_deref());
+    let agent = named.map_err(|why| CellError::new(ErrorCode::Unauthenticated, why.message()))?;
     let headers = Headers::new();
-    for k in [AGENT_HEADER, "content-type", "accept"] {
+    headers.set(AGENT_HEADER, &agent)?;
+    for k in ["content-type", "accept"] {
         if let Some(v) = req.headers().get(k)? {
             headers.set(k, &v)?;
         }
     }
-    let body = crate::read_body(&mut req, crate::models::MODEL_BODY_MAX_BYTES).await?;
+    let body = crate::read_body(&mut req, max).await?;
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
-    let api = Request::new_with_init("http://api.fragment.internal/api/models/v1/chat/completions", &init)?;
+    let api = Request::new_with_init(&format!("http://api.fragment.internal{route}"), &init)?;
     egress_api(api, env, ctx, computer).await
 }
 

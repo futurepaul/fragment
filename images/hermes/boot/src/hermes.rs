@@ -57,6 +57,9 @@ impl Tier {
 /// The model route's name for the deployment's vision model
 /// (`fragment_core::models::VISION`): Hermes' auxiliary vision names it.
 pub const VISION_MODEL: &str = "vision";
+/// The model route's name for transcription
+/// (`fragment_core::transcribe::WHISPER`): Hermes' speech-to-text names it.
+pub const TRANSCRIBE_MODEL: &str = "whisper";
 
 fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
@@ -105,6 +108,11 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> S
     y.push_str(&format!("approvals:\n  mode: \"smart\"\n  timeout: {approval_timeout_s}\n  destructive_slash_confirm: false\n"));
     // Hermes' own cron is off: an agent's routines are its fragment's cron (decision 38).
     y.push_str("agent:\n  disabled_toolsets: [\"cronjob\"]\n");
+    // A voice memo's transcript is no message of its own: the agent hears it
+    // and answers once (one reply a turn, #160). The gateway reads this from
+    // its own home's config, with this overlay merged over it; each profile
+    // transcribes through the route (`profile_config`, `stt`).
+    y.push_str("stt:\n  echo_transcripts: false\n");
     // Hermes' remote model catalogs are off: every profile's model is the
     // platform's route, and they serve only its `/model` picker (which a
     // person never reaches: the bridge keeps a leading `/` from reading as a
@@ -174,6 +182,20 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
         "auxiliary:\n  vision:\n    provider: \"custom\"\n    base_url: {}\n    model: {}\n    api_key: \"fragment-model\"\n",
         q(&format!("{base}/v1")),
         q(VISION_MODEL)
+    ));
+    // Its ears (decision 9: a voice memo is one the agent transcribes
+    // itself): Hermes' speech-to-text, which a voice note a person attaches
+    // gets before its turn, on the route's `whisper` (Workers AI's Whisper),
+    // OpenAI's transcription shape through the intercept, metered to the
+    // agent's owner. Hermes' STT client takes a base URL and a key and sends
+    // no header of ours, so its key names the agent (`agent:<name>`, which
+    // the intercept reads and sends no further). No language: Whisper
+    // detects it (Hermes' own default, `en`, mangles every other).
+    y.push_str(&format!(
+        "stt:\n  provider: \"openai\"\n  language: \"\"\n  openai:\n    base_url: {}\n    api_key: {}\n    model: {}\n",
+        q(&format!("{base}/v1")),
+        q(&format!("agent:{}", agent.fragment)),
+        q(TRANSCRIBE_MODEL)
     ));
     // Its browser: Hermes' built-in browser tools (browser_navigate, …),
     // driving the image's own Chromium, headed, on the agent's desktop, so
@@ -627,6 +649,7 @@ mod tests {
             "    - \"platforms/discord\"",
             "bot_desktop:\n  auto_start: true\n",
             "\nmodel_catalog:\n  enabled: false\n",
+            "\nstt:\n  echo_transcripts: false\n",
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
         }
@@ -655,6 +678,11 @@ mod tests {
             assert!(config.contains(vision), "the {tier} tier's screenshots go to the route's vision model: {config}");
         }
         assert!(!m.contains("auxiliary:"), "each profile's own, beside the headers that name its agent: {m}");
+        let ears = "stt:\n  provider: \"openai\"\n  language: \"\"\n  openai:\n    base_url: \"http://model.fragment.internal/v1\"\n    api_key: \"agent:juniper.paul\"\n    model: \"whisper\"\n";
+        for (tier, config) in [("medium", &p), ("high", &h)] {
+            assert!(config.contains(ears), "the {tier} tier's voice memos go to the route's whisper, its key naming the agent, no language forced: {config}");
+        }
+        assert!(!m.contains("api_key") && !m.contains("openai"), "the overlay names no agent, so a call outside a profile names none either: {m}");
         assert!(p.contains("skills:\n  external_dirs: [\"/data/hermes/managed-skills\", \"/opt/fragment/skills\"]\n"), "the managed skills, then the platform skill, after its own: {p}");
         assert!(p.contains("browser:\n  headed: true\n  backend: \"off\"\n"), "Hermes' built-in browser, headed, in the profile's own config: {p}");
         assert!(!m.contains("browser:"), "Hermes never reads `browser` from the managed overlay: {m}");

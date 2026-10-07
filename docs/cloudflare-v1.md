@@ -112,6 +112,23 @@ speaking Cloudflare's APIs) returns once this product works.
    to text; Paul, 2026-10-03), push notifications (fragment push), and
    rename and archive. Search across chats, apps and messages is the
    shell's, over your fragments' channels and files.
+   *Status (Paul, 2026-10-07).* The agent still transcribes a memo
+   itself, but through the platform's model route, so voice memos never
+   depend on a run-time install:
+   - **The route.** `POST /api/models/v1/audio/transcriptions` runs
+     Workers AI's Whisper (`@cf/openai/whisper-large-v3-turbo`) in
+     OpenAI's multipart shape, with `model` `whisper`.
+   - **Metering.** It is metered to the agent's owner at 46.63 neurons
+     per audio minute, and takes at most 10 MiB of audio.
+   - **Naming the agent.** It is generic: a guest may name its agent by
+     its key (`agent:<name>`), the one rule for every model call
+     (docs/computers.md, Models).
+   - **Our Hermes image.** It points Hermes' speech-to-text at the route,
+     with no language forced and no transcript echoed as a message of
+     its own.
+   - **Before.** Hermes would have installed faster-whisper into `/data`
+     at a person's first voice note.
+   docs/api.md; docs/ledger.md.
 10. **First run:** choose a username, then "What should your first
     agent do?". Through public APIs the shell makes your computer (the
     operator's default image), an agent fragment, and a chat fragment
