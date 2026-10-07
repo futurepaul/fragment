@@ -676,10 +676,16 @@ pub fn teardown(rest: &[String]) -> Result<()> {
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
     let tools = devstack::Tools::locate()?;
+    // Cloudflare deletes neither first: not a Worker that still consumes a
+    // queue (10064), nor a queue a Worker still binds. So its consumers go,
+    // then the Worker, then its queues.
+    for q in [&n.deliveries, &n.dead, &n.ledger] {
+        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "consumer", "remove", q, &n.cell]), "a queue's consumer")?;
+    }
     ensure(wrangler(&tools, &d.account_id)?.args(["delete", "--name", &n.cell, "--force"]), "the Worker")?;
     ensure(wrangler(&tools, &d.account_id)?.args(["workflows", "delete", &n.jobs]), "the Workflow")?;
     for q in [&n.deliveries, &n.dead, &n.ledger] {
-        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q, "--force"]), "a queue")?;
+        ensure(wrangler(&tools, &d.account_id)?.args(["queues", "delete", q]), "a queue")?;
     }
     println!("removed {}; its bucket {} stays (empty it, then `wrangler r2 bucket delete {}`)", n.cell, n.bucket, n.bucket);
     Ok(())
