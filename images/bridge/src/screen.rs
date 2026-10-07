@@ -230,8 +230,9 @@ struct Screen {
     /// Sockets open on it (control and RFB), and RFB streams among them.
     sockets: AtomicUsize,
     streams: AtomicUsize,
-    /// What its viewers were told last, and when its activity was touched.
-    told: Mutex<Option<Holder>>,
+    /// What its viewers were told last (from its first sight: a socket's
+    /// first word is who holds it then), and when its activity was touched.
+    told: Mutex<Holder>,
     touched: Mutex<Option<Instant>>,
 }
 
@@ -253,16 +254,20 @@ impl Screen {
             None => Control::Own(Mutex::new(Lease::default())),
         };
         let (words, _) = broadcast::channel(16);
-        Screen { agent: agent.to_string(), display, control, words, starts: Mutex::new(Starts::default()), sockets: AtomicUsize::new(0), streams: AtomicUsize::new(0), told: Mutex::new(None), touched: Mutex::new(None) }
+        let told = Mutex::new(control.holder());
+        Screen { agent: agent.to_string(), display, control, words, starts: Mutex::new(Starts::default()), sockets: AtomicUsize::new(0), streams: AtomicUsize::new(0), told, touched: Mutex::new(None) }
     }
 
-    /// Tells its viewers `holder`, when it is news.
-    fn tell(&self, holder: Holder) {
+    /// Tells its viewers `holder` when it is news, or `always`: whether it
+    /// told them.
+    fn tell(&self, holder: Holder, always: bool) -> bool {
         let mut told = self.told.lock().expect("told");
-        if told.as_ref() != Some(&holder) {
-            *told = Some(holder.clone());
+        let news = *told != holder;
+        if news || always {
+            *told = holder.clone();
             let _ = self.words.send(Word::Holder(holder));
         }
+        news || always
     }
 
     /// Changes who holds it, and tells its viewers; a lease that could not
@@ -273,12 +278,11 @@ impl Screen {
                 if changed {
                     crate::ev!("screen.control", { "agent": self.agent, "why": why, "holder": holder.said() });
                 }
-                self.tell(holder);
+                self.tell(holder, false);
             }
             Err(e) => {
                 crate::ev!("screen.lease_failed", { "agent": self.agent, "why": e.to_string() });
-                *self.told.lock().expect("told") = None;
-                self.tell(self.control.holder());
+                self.tell(self.control.holder(), true);
             }
         }
     }
@@ -419,7 +423,7 @@ async fn tick(shared: Arc<Shared>, mut stop: watch::Receiver<bool>) {
                 let _ = s.words.send(Word::Gone);
                 continue;
             }
-            s.tell(s.control.holder());
+            s.tell(s.control.holder(), false);
             if s.streams.load(Ordering::SeqCst) > 0 && s.touch_due(now) {
                 s.touch();
             }
@@ -507,7 +511,12 @@ async fn viewer_control(ws: net::ServerWs, viewer: String, screen: Arc<Screen>, 
     let _open = Open::new(&screen, false);
     let (mut sink, mut stream) = ws.split();
     let mut words = screen.words.subscribe();
-    let _ = sink.send(said(&named, &screen.control.holder())).await;
+    // its first word: who holds it now, told to every viewer when that is
+    // news to them (a change the next look would have told), else to it alone
+    let now = screen.control.holder();
+    if !screen.tell(now.clone(), false) {
+        let _ = sink.send(said(&named, &now)).await;
+    }
     // bounded by the socket
     loop {
         tokio::select! {

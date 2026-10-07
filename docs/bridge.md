@@ -17,10 +17,20 @@ ended.
   (`BRIDGE_AGENTS_FILE`): a computer's agents may change while it runs.
 - `runtime/`: `relay` (Hermes' Relay connector) and `script` (a
   deterministic agent, the stub image's).
-- `screen.rs`: a screen page and an RFB proxy with Take over / Give back:
-  its input gate follows every message noVNC 1.7.0 sends (the extended
-  clipboard's negative length, the extended pointer event), and its
-  control socket answers on an image with no display (the stub's) too.
+- `screen.rs`: each agent's screen (`?agent=<agent fragment>` on its
+  sockets): a page, and an RFB proxy onto that agent's own display with
+  Take over / Give back. Its input gate follows every message noVNC 1.7.0
+  sends (the extended clipboard's negative length, the extended pointer
+  event), and its control socket answers on an image with no display (the
+  stub's) too. An agent the bridge does not run, or one the image names
+  no screen for, is 404; no agent's name, 400.
+- `screens.rs`: which display is each agent's, when the image says
+  (`BRIDGE_SCREENS_FILE`), with its runtime's lease and activity file.
+- `lease.rs`: who drives a screen, the agent or one person, as Hermes'
+  Bot Desktop lease file has it (`lease.json` under its `lease.lock`
+  flock, its epoch one on at every change): Take over is that lease, so
+  the agent's tools refuse while a person holds it (`human_has_control`).
+  A screen with no lease file keeps one of its own, by the same rules.
 
 ## A runtime
 
@@ -80,7 +90,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 ## Settings
 
-`fragment-bridge run` (and `screen`, the screen alone):
+`fragment-bridge run`:
 
 | Variable | Default | |
 |---|---|---|
@@ -100,10 +110,10 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
-| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
+| `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screens. Their sockets wait (at most 30 s) for the agents, told past the restore gate, so no lease under `/data` is touched before the restore |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
-| `BRIDGE_SCREEN_RFB` | | `unix:<path>` or `tcp:<host:port>`: the display; none, the page alone |
-| `BRIDGE_SCREEN_START` | | the command that starts the display, run by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
+| `BRIDGE_SCREENS_FILE` | | each agent's screen (`screens.rs`): `{"screens": [{agent, rfb, lease?, activity?}]}`, `rfb` as `unix:<path>` or `tcp:<host:port>`, written whole and renamed into place, read again when it changes. Unset, no agent has a display (the stub); set, an agent it does not name has no screen. While someone watches a screen its `activity` file's time is set every 10 s (`ACTIVITY_EVERY_MS`), so the image's idle stop leaves a watched desktop up. Our Hermes image's is `/var/lib/fragment-run/screens.json` (docs/computers.md) |
+| `BRIDGE_SCREEN_START` | | the command that starts an agent's display, run with the agent's fragment as its last argument by a viewer that finds it down: at once when it answered since the last start (it stopped or restarted under its viewers, whose streams end with it), else at most once a minute while it stays down |
 
 ## State, and what it never does twice
 

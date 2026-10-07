@@ -188,6 +188,9 @@ async fn take_over_is_the_agents_lease() {
     assert_eq!(next(&mut wc).await["holder"], Value::Null);
     let mut d = Viewer::open(&base, "d", "juniper.paul", WAIT).await.unwrap();
     let mut w = Viewer::open(&base, "w", "juniper.paul", WAIT).await.unwrap();
+    // a few of the screen's looks pass: none tells its viewers what they
+    // heard as their first word (the Docker rung once heard `null` again here)
+    tokio::time::sleep(Duration::from_millis(4 * fragment_bridge::screen::TICK_MS)).await;
 
     dc.say("take").await.unwrap();
     assert_eq!(next(&mut dc).await["holder"], "d");

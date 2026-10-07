@@ -725,20 +725,47 @@ impl Socket {
         }
     }
 
-    /// The next `n` bytes of binary frames (an RFB stream's); `Err` on a
-    /// timeout or a close.
-    pub fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
+    /// Sends `bytes` as one binary frame (an RFB client's).
+    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        self.0.send(tungstenite::Message::Binary(bytes.to_vec().into()))?;
+        Ok(())
+    }
+
+    /// An RFB server's handshake, as a viewer: RFB 3.8, no authentication,
+    /// shared. The name of the desktop it serves, from its ServerInit (our
+    /// Hermes image's are Hermes' `hermes:<profile>`, one per agent).
+    pub fn rfb_desktop(&mut self) -> Result<String> {
+        // one server message may come in several frames, or several in one
+        let mut buf = Vec::new();
+        let version = self.take(&mut buf, 12)?;
+        anyhow::ensure!(version.starts_with(b"RFB 003."), "no RFB greeting: {:?}", String::from_utf8_lossy(&version));
+        self.send_bytes(b"RFB 003.008\n")?;
+        let n = self.take(&mut buf, 1)?[0] as usize;
+        anyhow::ensure!(n > 0, "the RFB server refused the viewer");
+        let types = self.take(&mut buf, n)?;
+        anyhow::ensure!(types.contains(&1), "no security type None among {types:?}");
+        self.send_bytes(&[1])?;
+        let result = self.take(&mut buf, 4)?;
+        anyhow::ensure!(result == [0, 0, 0, 0], "security result {result:?}");
+        self.send_bytes(&[1])?;
+        let init = self.take(&mut buf, 24)?;
+        let len = u32::from_be_bytes([init[20], init[21], init[22], init[23]]) as usize;
+        anyhow::ensure!(len <= 1024, "a desktop's name of {len} bytes");
+        Ok(String::from_utf8_lossy(&self.take(&mut buf, len)?).into_owned())
+    }
+
+    /// The next `n` bytes of the stream, `buf` holding what came beyond the
+    /// last take.
+    fn take(&mut self, buf: &mut Vec<u8>, n: usize) -> Result<Vec<u8>> {
         // bounded by the socket's read timeout
-        while out.len() < n {
+        while buf.len() < n {
             match self.0.read()? {
-                tungstenite::Message::Binary(b) => out.extend_from_slice(&b),
+                tungstenite::Message::Binary(b) => buf.extend_from_slice(&b),
                 tungstenite::Message::Close(f) => anyhow::bail!("closed {}", f.map(|f| u16::from(f.code)).unwrap_or(0)),
                 _ => {}
             }
         }
-        out.truncate(n);
-        Ok(out)
+        Ok(buf.drain(..n).collect())
     }
 
     /// The very next frame, which must be of `kind`: a check that nothing
