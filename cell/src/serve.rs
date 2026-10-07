@@ -1,5 +1,5 @@
 //! Serving a fragment: its site from the `live` pin, the machine-read
-//! plane (`__tree`, `__file`), a blob by its hash (`__blob`, and an
+//! plane (`__files`, `__file`), a blob by its hash (`__blob`, and an
 //! editor's page uploading one there), browser calls (`__op`), who is in
 //! it (`__people`, `__members`), and the change feed (`__watch`). Who may
 //! see what follows the fragment's visibility:
@@ -362,19 +362,6 @@ impl FragmentCell {
             "__preview.svg" => {
                 let svg = site::preview_svg(name);
                 return Ok(Response::ok(svg)?.with_headers(headers("image/svg+xml", if public { "public, max-age=3600" } else { "private, max-age=3600" })?));
-            }
-            "__tree" => {
-                let blobs = self.pointer_sizes("live")?;
-                let files: Vec<Value> = self
-                    .tree_rows("live")?
-                    .into_iter()
-                    .filter(|r| !site::is_machinery(&r.path))
-                    .map(|r| {
-                        let size = blobs.get(&r.path).copied().unwrap_or(r.size);
-                        json!({ "path": r.path, "size": size, "mode": r.mode, "lastCommitSha": r.last_commit })
-                    })
-                    .collect();
-                return json_response(&json!({ "type": "tree", "ref": "live", "sha": live, "count": files.len(), "files": files }));
             }
             "__files" => {
                 if !req.headers().get("accept")?.is_some_and(|a| a.contains("application/json")) {

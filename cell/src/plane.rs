@@ -871,24 +871,6 @@ impl FragmentCell {
         Ok(resp)
     }
 
-    pub(crate) async fn stat(&self, caller: &Caller, path: &str) -> CellResult<Response> {
-        let mut facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Viewer)?;
-        if !valid_repo_path(path) {
-            return Err(CellError::invalid("path must be a relative repo path"));
-        }
-        self.ensure_pins(&mut facts).await?;
-        let absent = json!({ "path": path, "size": 0, "blobSha": "", "lastCommitSha": "", "present": false });
-        let stat = match (&facts.pin_main, self.tree_row("main", path)?) {
-            (Some(pin), Some(row)) => match self.cs()?.head(&facts.repo, pin, path).await? {
-                Some(h) => json!({ "path": path, "size": h.size, "blobSha": h.blob_sha, "lastCommitSha": h.last_commit_sha, "present": true }),
-                None => json!({ "path": path, "size": row.size, "blobSha": "", "lastCommitSha": row.last_commit, "present": true }),
-            },
-            _ => absent,
-        };
-        json_response(&json!({ "stat": stat, "ref": facts.pin_main }))
-    }
-
     /// The installed operations (from the live commit); none without code.
     pub(crate) fn operations(&self) -> CellResult<BTreeMap<String, OpDecl>> {
         self.typed::<OpRow>("SELECT op, kind, role, input, ephemeral FROM code_ops ORDER BY op", vec![])?.into_iter().map(op_decl).collect()
