@@ -43,8 +43,8 @@ const SERVER_KEEP_ALIVE: Duration = Duration::from_secs(5);
 /// How long the run's client keeps an idle connection to use again: under
 /// the server's. A request written onto a connection as the server closes
 /// it gets no answer ("connection closed before message completed", or a
-/// reset), and the client does not send a POST again: the hermes lane's
-/// skills polls, 5 s apart, lost one now and then (2026-10-05). Under the
+/// reset), and the client does not send a POST again: a lane's polls, 5 s
+/// apart, lost one now and then (2026-10-05). Under the
 /// server's, the pool never hands out a connection the server may be
 /// closing.
 const POOL_IDLE: Duration = Duration::from_secs(4);
@@ -740,22 +740,6 @@ impl Socket {
                 _ => {}
             }
         }
-    }
-
-    /// The next `n` bytes of binary frames (an RFB stream's); `Err` on a
-    /// timeout or a close.
-    pub fn bytes(&mut self, n: usize) -> Result<Vec<u8>> {
-        let mut out = Vec::new();
-        // bounded by the socket's read timeout
-        while out.len() < n {
-            match self.0.read()? {
-                tungstenite::Message::Binary(b) => out.extend_from_slice(&b),
-                tungstenite::Message::Close(f) => anyhow::bail!("closed {}", f.map(|f| u16::from(f.code)).unwrap_or(0)),
-                _ => {}
-            }
-        }
-        out.truncate(n);
-        Ok(out)
     }
 
     /// The very next frame, which must be of `kind`: a check that nothing

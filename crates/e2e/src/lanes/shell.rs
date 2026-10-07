@@ -1309,8 +1309,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// `fragment ask` as a person (an agent's runs in its computer: the hosted
-/// lane's, and our Hermes image's): their direct chat with the agent, its
+/// `fragment ask` as a person (an agent's runs in its computer): their direct chat with the agent, its
 /// answer waited for and printed; the same `--id` again posts nothing and
 /// finds the same answer; `--chat` adds the agent to a chat it is not in
 /// first. Invalid: an agent that is none of theirs, an empty question.
