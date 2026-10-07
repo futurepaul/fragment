@@ -119,9 +119,10 @@ Bodies are JSON. `api.rs` has one method for each.
 
 `<state>/state.json`, written whole (a temporary file, synced, renamed)
 after every step that changed it and before that step's effects: the
-cursors (`agent|fragment|channel` → seq) and the turns not yet over
-(queued, running, waiting, or ended and owing their last records). It is
-a cache. The authority on which turns have started is the chat's `work`
+cursors (`agent|fragment|channel` → seq), the turns not yet over
+(queued, running, waiting, or ended and owing their last records), and
+each chat's budget of agent turns ("Agents asking each other", below). It
+is a cache. The authority on which turns have started is the chat's `work`
 channel, which never goes back in time, so `/data` restored from any
 earlier save, or lost, costs reads and runs nothing twice
 (docs/explorations/pi-durable.md, P1).
@@ -193,6 +194,50 @@ turns ran.
 
 Every bound is a const in `limits.rs`, with its reason. SIGTERM: gone
 within 3 s.
+
+## Agents asking each other
+
+A person's agents hand work to each other in a chat they share, by
+`@name` in a reply (the bridge stamps its `to`), or by a message one posts
+itself naming the other in `to` (`fragment ask`, cli/src/ask.rs). The
+bridge that answers decides whether it is a turn, and how deep
+(docs/chat-records.md, "An agent's reply"):
+
+- **The hop is counted here, not read.** A record by an agent of this
+  computer is one hop past the turn that agent is in: its turn running in
+  that chat, or the one there the record's `turn` names when that ended
+  within `ENDED_HOPS_MS` (remembered, never written: a reply read just
+  after its turn was let go); and its deepest turn running anywhere else,
+  the deeper of the two; in none at all, `HOPS_MAX` (answered, handing on
+  nothing). A CLI post names no turn, so a turn just ended does not count
+  for it (`an_ended_turn_counts_only_for_the_reply_that_names_it`). A record's `hop` only raises it. So a post made
+  around the bridge (the CLI, the API, a script the agent left running)
+  resets nothing: `a_hand_off_loop_stops_at_the_cap` runs the same
+  A, B, A, B loop with each hand-off posted by its turn as the CLI does (no
+  `hop`, no `turn`) and stops at the same place, and `a_scripted_hand_off_loop_stops_at_the_cap`
+  (tests/bridge.rs) runs it with the scripted runtime, then an agent's
+  CLI-shaped post, answered once. What is remembered of ended turns is
+  never written to `/data`: a reply the next life reads first is the last
+  hop (`a_reply_read_by_the_next_life_resets_nothing`). Another
+  computer's agent (another person's, in a shared chat) is held to the hop
+  it claims, at least 1, and by the budget.
+- **A chat's budget.** Turns its agents start of each other are kept per
+  chat in the state (`agent_turns`: the causing records' `at`s, the
+  platform's clock, so every life counts alike), at most
+  `AGENT_TURNS_PER_CHAT_MAX` in `AGENT_TURNS_WINDOW_MS`; past it a
+  hand-off's turn is refused with both its records, its end saying why
+  (`a_chats_agents_have_a_budget`: valid, past it, a person never
+  counted, replay, restart, another chat's own, the window sliding). A
+  state from before the budget loads with none.
+- **`tasks` is the agent's own.** A routine or `joined` starts anything
+  only from the agent fragment's own key (not an identity: its cron, the
+  platform) or its owner; another agent acting for the owner, who may post
+  there, is passed over (`tasks_hear_only_the_owner_and_the_fragment`).
+
+Why here: the platform holds no chat record (docs/cloudflare-v1.md, the
+rule), and the bridge is the one place that knows which turn an agent is
+in. A person's agents all run on one computer (decision 13), so every
+hand-off between them meets this count.
 
 ## A card keeps its computer awake
 

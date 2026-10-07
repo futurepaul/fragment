@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod agent_ask;
 mod agent_smoke;
 mod app;
 mod appfiles;
@@ -102,6 +103,7 @@ const LANES: &[Lane] = &[
     wipe::wipe,
     hermes::hermes,
     agent_smoke::agent_smoke,
+    agent_ask::agent_ask,
     sync::folder_sync,
     restart::restart,
 ];
@@ -110,8 +112,8 @@ const LANES: &[Lane] = &[
 /// its own, with its own build and node, the sections it lists in the
 /// lanes' order. Every section is in exactly one shard (a test below), so
 /// the shards together run what one whole run does. `hermes` runs only by
-/// name, and `agent-smoke` only on a preview, so their shard reports each
-/// as the whole run does: one skip.
+/// name, and `agent-smoke` and `agent-ask` only on a preview, so their
+/// shard reports each as the whole run does: one skip.
 ///
 /// Balanced by measured time (each section's, as its shard's log prints
 /// it, on CI's runners; run 37534339123): `computers` alone is about 4
@@ -122,7 +124,7 @@ const LANES: &[Lane] = &[
 /// fragment's deploy (after `effects`) up to it, so its first cron minute
 /// passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "hermes", "agent-smoke"],
+    &["shell", "computers", "hermes", "agent-smoke", "agent-ask"],
     &["chat", "shell-ui", "wipe", "sync", "restart"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
