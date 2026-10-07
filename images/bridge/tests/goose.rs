@@ -51,10 +51,11 @@ fn ends(w: &World, chat: &str) -> Vec<Value> {
 }
 
 /// Goal: a mind's turn is a fresh session in the work directory, with the
-/// mind's MCP (`fragment mcp <mind>`, as the agent), whose first prompt is
-/// the framing, VIEW_DOC, the view, then the task; a chat's is the text
-/// alone, with no MCP. One goose serves both, a session each; the answer is
-/// the turn's one reply, as the agent.
+/// mind's MCP (`fragment mcp <mind>`, as the agent) and the framing and
+/// VIEW_DOC under its system prompt, whose prompt is the view, then the
+/// task; a chat's is the text alone, with neither. One goose serves both, a
+/// session each, each closed after its turn; the answer is the turn's one
+/// reply, as the agent.
 #[tokio::test]
 async fn a_mind_hands_goose_its_view_and_a_chat_its_text() {
     let fake = Fake::start("127.0.0.1:0", &["hands"]).await;
@@ -76,13 +77,14 @@ async fn a_mind_hands_goose_its_view_and_a_chat_its_text() {
     fake.until(WAIT, "the chat's reply", |w| !replies(w, &chat).is_empty() && !ends(w, &chat).is_empty()).await;
     fake.with(|w| assert_eq!(replies(w, &chat), vec!["scripted: hello goose"]));
     assert!(said["seq"].as_u64().is_some());
+    support::until(WAIT, "both sessions closed", || goose.log.lock().unwrap().closed.len() == 2).await;
 
     {
         let log = goose.log.lock().unwrap();
         assert_eq!(log.spawned, vec!["hands.paul"], "one goose for the agent");
-        assert_eq!(log.prompts.len(), 2);
-        assert_eq!(log.prompts[0], format!("{FRAMING}\n\n{VIEW_DOC}\n\n{VIEW}\n\nFind my notes\n\n(task k1, thread t_0123456789abcdef)"));
-        assert_eq!(log.prompts[1], "hello goose", "a chat's turn is its text alone");
+        assert_eq!(log.prompts, vec![vec![VIEW.to_string(), "Find my notes\n\n(task k1, thread t_0123456789abcdef)".to_string()], vec!["hello goose".to_string()]], "a mind's view, then the task; a chat's text alone");
+        assert_eq!(log.system, vec![json!({ "sessionId": "s1", "mode": "append", "key": "fragment", "text": format!("{FRAMING}\n\n{VIEW_DOC}") })], "the mind's session alone is framed");
+        assert_eq!(log.closed, vec!["s1", "s2"]);
         let work = dir.join("work").display().to_string();
         assert_eq!(log.sessions[0]["cwd"], work.as_str());
         assert_eq!(log.sessions[0]["mcpServers"], json!([{ "name": "mind", "command": "/usr/local/bin/fragment", "args": ["mcp", mind], "env": [{ "name": "FRAGMENT_AS_AGENT", "value": "hands.paul" }, { "name": "FRAGMENT_FOR", "value": "id:paul" }, { "name": "FRAGMENT_API", "value": fake.url() }] }]));
@@ -124,8 +126,9 @@ async fn a_tool_call_is_a_step_with_its_words() {
     bridge.stop().await;
 }
 
-/// Goal: Stop cancels goose's session, and the turn ends `stopped` with no
-/// reply; the chat's next message is answered.
+/// Goal: Stop cancels goose's session, and the turn ends `stopped`, its one
+/// reply saying so and nothing of its drafts; the chat's next message is
+/// answered.
 #[tokio::test]
 async fn a_stop_cancels_the_session() {
     let fake = Fake::start("127.0.0.1:0", &["hands"]).await;
@@ -138,16 +141,18 @@ async fn a_stop_cancels_the_session() {
     fake.until(WAIT, "the stopped end", |w| !ends(w, &chat).is_empty()).await;
     fake.with(|w| {
         assert_eq!(ends(w, &chat)[0]["outcome"], "stopped");
-        assert!(replies(w, &chat).is_empty(), "a stopped turn says nothing more");
+        assert_eq!(replies(w, &chat), vec!["(ended: stopped: its asker stopped it)"], "a stopped turn's one reply");
     });
     assert_eq!(goose.log.lock().unwrap().cancels, vec!["s1"]);
     fake.say(&chat, &person("paul"), json!({ "text": "still there?" }));
-    fake.until(WAIT, "the next answer", |w| replies(w, &chat) == vec!["scripted: still there?"]).await;
+    fake.until(WAIT, "the next answer", |w| replies(w, &chat).len() == 2).await;
+    fake.with(|w| assert_eq!(replies(w, &chat)[1], "scripted: still there?"));
     bridge.stop().await;
 }
 
-/// Goal: a goose that dies ends the turn it ran as an error, and the
-/// agent's next turn starts another goose, which answers it.
+/// Goal: a goose that dies ends the turn it ran as an error, its one reply
+/// saying why, and the agent's next turn starts another goose, which
+/// answers it.
 #[tokio::test]
 async fn a_goose_that_dies_is_started_again() {
     let fake = Fake::start("127.0.0.1:0", &["hands"]).await;
@@ -160,9 +165,11 @@ async fn a_goose_that_dies_is_started_again() {
         let end = &ends(w, &chat)[0];
         assert_eq!(end["outcome"], "error");
         assert_eq!(end["error"], "goose: it stopped");
+        assert_eq!(replies(w, &chat), vec!["(ended: error: goose: it stopped)"]);
     });
     fake.say(&chat, &person("paul"), json!({ "text": "again" }));
-    fake.until(WAIT, "the answer of a new goose", |w| replies(w, &chat) == vec!["scripted: again"]).await;
+    fake.until(WAIT, "the answer of a new goose", |w| replies(w, &chat).len() == 2).await;
+    fake.with(|w| assert_eq!(replies(w, &chat)[1], "scripted: again"));
     assert_eq!(goose.log.lock().unwrap().spawned, vec!["hands.paul", "hands.paul"]);
     bridge.stop().await;
 }
@@ -226,8 +233,13 @@ async fn the_real_goose_on_this_host() {
     for c in &calls {
         assert_eq!((c.path.as_str(), c.model.as_str(), c.agent.as_deref()), ("/v1/chat/completions", "medium", Some("hands.paul")), "every call is the agent's, at the intercept's path");
     }
-    let first = support::model::text_of(&calls[0].body["messages"].as_array().unwrap().iter().find(|m| m["role"] == "user").unwrap()["content"]);
-    assert!(first.contains(FRAMING) && first.contains(VIEW), "the first prompt: {first}");
+    let (system, user) = (support::model::texts(&calls[0].body, "system"), support::model::texts(&calls[0].body, "user"));
+    assert!(system.contains(&format!("{FRAMING}\n\n{VIEW_DOC}")), "the framing in the system prompt: {system}");
+    assert!(user.contains(VIEW) && !user.contains(FRAMING), "the view in the prompt: {user}");
+    let tools = support::model::tools(&calls[0].body);
+    eprintln!("tools: {tools:?}");
+    let mine = |t: &String| t.starts_with("developer__") || t.starts_with("mind__") || ["shell", "write", "edit", "tree", "read_image"].contains(&t.as_str());
+    assert!(tools.iter().all(mine), "developer's tools and the mind's alone: {tools:?}");
 
     if cfg.cli.is_some() {
         fake.say(&mind, &person("paul"), json!({ "text": "zoom: 0 1", "to": ["id:hands"] }));

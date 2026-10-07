@@ -11,20 +11,24 @@
 //!   are in their variables. A goose started with other credentials is
 //!   started again at the agent's next turn when none of its turns runs.
 //! - **A fresh session per turn** (`session/new`, cwd `/data/work`), never
-//!   loaded again: nothing of a session carries to the next. Its first
-//!   prompt is, for a fragment that answers a `view` (a mind), the
-//!   subagent framing, VIEW_DOC, and the view (OptChat's spec, §9 and §7.2,
-//!   "OptChat" read "Mind"), then the turn's note and its text; for any
-//!   other fragment, the note and the text. A mind's session also gets
-//!   `fragment mcp <mind>` (read-only: view, zoom, date, search) when the
-//!   image names its CLI.
+//!   loaded again, and closed when the turn ends (its MCP servers with it):
+//!   nothing of a session carries to the next. For a fragment that answers
+//!   a `view` (a mind), the session's system prompt gets the subagent
+//!   framing and VIEW_DOC (OptChat's spec, §9 and §7.2, "OptChat" read
+//!   "Mind"; the same bytes every turn, so its prefix caches), and its
+//!   prompt is the view, then the task: the turn's note, its text and its
+//!   files. Any other fragment's prompt is the task alone. A mind's session
+//!   also gets `fragment mcp <mind>` (read-only: view, zoom, date, search)
+//!   when the image names its CLI.
 //! - **What goose says** (`session/update`): message chunks are the draft;
 //!   the words before a tool call are its step's (the draft stops); each
-//!   tool call, once completed or failed, is a step; the words after the
-//!   last tool call are the turn's one reply, or, with none, the last words
-//!   a step took. The prompt's answer is the end: `end_turn`, `max_tokens`
-//!   and `max_turn_requests` idle, `cancelled` stopped (after a Stop), and
-//!   anything else an error.
+//!   tool call, once completed or failed, is a step. The prompt's answer is
+//!   the end: `end_turn`, `max_tokens` and `max_turn_requests` idle,
+//!   `cancelled` stopped (after a Stop), and anything else an error.
+//! - **Exactly one reply a turn, at its end** (a mind takes it as the
+//!   hand-off's report, one run of its trigger): the words after the last
+//!   tool call; with none, or for a turn stopped or failed, however early,
+//!   `(ended: <outcome>: <why>)`.
 //! - **Stop** is `session/cancel`; the turn ends when goose answers its
 //!   prompt. A Stop before the session is made ends the turn at once.
 //! - **goose asks nothing in words** and shows no card: in `auto` mode it
@@ -103,29 +107,9 @@ whenever a summary only mentions something you need, such as what your
 last reply said, a decision, a past attempt or where a file is, before
 you act, guess or ask. date(id) gives the date and time of message id.";
 
-/// goose's own config (`<GOOSE_PATH_ROOT>/config/config.yaml`): every
-/// platform extension of v1.53.0 off but `developer` (`--with-builtin`):
-/// no subagents (`summon`, `orchestrator`), no scheduler, no memory of its
-/// own (`chatrecall`, `tom`, `skills`), and nothing that calls the model in
-/// the background. goose adds what a later version brings, at its default.
-pub const CONFIG_YAML: &str = "extensions:
-  analyze: {enabled: false}
-  apps: {enabled: false}
-  chatrecall: {enabled: false}
-  code_execution: {enabled: false}
-  Extension Manager: {enabled: false}
-  orchestrator: {enabled: false}
-  scheduler: {enabled: false}
-  skills: {enabled: false}
-  summarize: {enabled: false}
-  summon: {enabled: false}
-  todo: {enabled: false}
-  tom: {enabled: false}
-";
-
 #[derive(Debug, Clone)]
 pub struct GooseConfig {
-    /// goose (`GOOSE_BIN`).
+    /// goose (`BRIDGE_GOOSE_BIN`).
     pub command: PathBuf,
     /// Its arguments: `acp --with-builtin developer`.
     pub args: Vec<String>,
@@ -207,10 +191,18 @@ pub fn environment(cfg: &GooseConfig, a: &Agent) -> Vec<(String, String)> {
         // empty key in the environment sends no authorization at all
         ("OPENAI_API_KEY", String::new()),
         ("OPENAI_CUSTOM_HEADERS", format!("{}={}", crate::api::AGENT_HEADER, a.fragment)),
-        // a known limit: no probe of `/v1/models` (404 at the intercept)
+        // a known limit, not asked of `/v1/models` (404 at the intercept)
         ("GOOSE_CONTEXT_LIMIT", "128000".to_string()),
         // a turn is a fresh session: nothing of goose's own compacts it
+        // (the threshold, any goose; at an overflow too, our fork), and its
+        // system prompt never changes within it (our fork: its prefix caches)
         ("GOOSE_AUTO_COMPACT_THRESHOLD", "0".to_string()),
+        ("GOOSE_NO_COMPACTION", "1".to_string()),
+        ("GOOSE_STABLE_SYSTEM_PROMPT", "1".to_string()),
+        // no extension of goose's config: `developer` (its builtin) and a
+        // session's own (`mcpServers`) alone; no subagents, scheduler, or
+        // memory of goose's own
+        ("EXTENSIONS", "{}".to_string()),
         ("GOOSE_MODE", "auto".to_string()),
         ("GOOSE_DISABLE_KEYRING", "1".to_string()),
         ("GOOSE_DISABLE_SESSION_NAMING", "true".to_string()),
@@ -251,11 +243,7 @@ impl Spawn for Process {
             return Err(format!("{:?} is no agent fragment's name", a.fragment));
         }
         let cfg = &self.config;
-        let config_dir = cfg.root.join(&a.fragment).join("config");
-        let made = std::fs::create_dir_all(&config_dir)
-            .and_then(|()| std::fs::write(config_dir.join("config.yaml"), CONFIG_YAML))
-            .and_then(|()| std::fs::create_dir_all(&cfg.work))
-            .and_then(|()| std::fs::create_dir_all(&cfg.home));
+        let made = std::fs::create_dir_all(cfg.root.join(&a.fragment)).and_then(|()| std::fs::create_dir_all(&cfg.work)).and_then(|()| std::fs::create_dir_all(&cfg.home));
         made.map_err(|e| format!("its directories: {e}"))?;
         let mut child = tokio::process::Command::new(&cfg.command)
             .args(&cfg.args)
@@ -658,23 +646,29 @@ async fn view_of(api: &Api, ts: &TurnStart) -> Option<String> {
     None
 }
 
-/// A turn's first prompt: for a mind (a fragment with a view), the
-/// framing, VIEW_DOC and the view; then what the turn is told first (a cut
-/// turn's note), the text, and where its files are.
-pub fn first_prompt(view: Option<&str>, ts: &TurnStart) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(view) = view {
-        parts.extend([FRAMING.to_string(), VIEW_DOC.to_string(), view.to_string()]);
-    }
+/// A mind's sessions' system prompt, appended under goose's own: the
+/// framing and VIEW_DOC, the same bytes every turn.
+pub fn system_prompt() -> String {
+    format!("{FRAMING}\n\n{VIEW_DOC}")
+}
+
+/// A turn's prompt, as its text blocks: for a mind (a fragment with a
+/// view), the view, then the task; for any other, the task alone. The task
+/// is what the turn is told first (a cut turn's note), its text, and where
+/// its files are.
+pub fn prompt(view: Option<&str>, ts: &TurnStart) -> Vec<String> {
+    let mut task: Vec<String> = Vec::new();
     if let Some(note) = &ts.note {
-        parts.push(note.clone());
+        task.push(note.clone());
     }
-    parts.push(ts.text.clone());
+    task.push(ts.text.clone());
     if !ts.files.is_empty() {
         let files: Vec<String> = ts.files.iter().map(|f| format!("- {} ({}, {} bytes)", f.path.display(), f.media_type, f.size)).collect();
-        parts.push(format!("Its files, on this computer:\n{}", files.join("\n")));
+        task.push(format!("Its files, on this computer:\n{}", files.join("\n")));
     }
-    parts.join("\n\n")
+    let mut blocks: Vec<String> = view.map(str::to_string).into_iter().collect();
+    blocks.push(task.join("\n\n"));
+    blocks
 }
 
 /// The session a turn runs in: `fragment mcp <mind>` among its tools for
@@ -694,16 +688,34 @@ fn new_session(cfg: &GooseConfig, ts: &TurnStart, mind: bool) -> Value {
     json!({ "cwd": cfg.work, "mcpServers": servers, "_meta": { "sessionTitle": format!("turn {}", ts.turn) } })
 }
 
-/// The turn's session, made: its goose, its id, its updates, and its first prompt.
-async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, String), String> {
+/// The turn's session, made: its goose, its id, its updates, and its prompt.
+async fn prepare(ctx: &Ctx, ts: &TurnStart) -> Result<(Arc<Conn>, String, mpsc::UnboundedReceiver<Value>, Vec<String>), String> {
     let view = view_of(&ctx.api, ts).await;
     let conn = ctx.goose_for(&ts.agent).await.map_err(|e| format!("goose: {e}"))?;
     let made = conn.call("session/new", new_session(&ctx.config, ts, view.is_some()), Some(Duration::from_millis(ANSWER_MS_MAX))).await;
     let made = made.map_err(|e| format!("goose made no session: {e}"))?;
     let session = made["sessionId"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| format!("goose made no session: {made}"))?.to_string();
+    if view.is_some() {
+        let framed = json!({ "sessionId": session, "mode": "append", "key": "fragment", "text": system_prompt() });
+        if let Err(e) = conn.call("_goose/unstable/session/system-prompt/set", framed, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
+            close(&conn, &session);
+            return Err(format!("goose took no system prompt: {e}"));
+        }
+    }
     let updates = conn.follow(&session);
     crate::ev!("goose.session", { "turn": ts.turn, "agent": ts.agent.fragment, "session": session, "view": view.as_ref().map(String::len) });
-    Ok((conn, session, updates, first_prompt(view.as_deref(), ts)))
+    Ok((conn, session, updates, prompt(view.as_deref(), ts)))
+}
+
+/// Closes a turn's session (and its MCP servers), never waiting on it.
+fn close(conn: &Arc<Conn>, session: &str) {
+    conn.forget(session);
+    let (conn, params) = (conn.clone(), json!({ "sessionId": session }));
+    tokio::spawn(async move {
+        if let Err(e) = conn.call("session/close", params, Some(Duration::from_millis(ANSWER_MS_MAX))).await {
+            crate::ev!("goose.unclosed", { "agent": conn.agent, "error": e.to_string() });
+        }
+    });
 }
 
 async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, events: mpsc::Sender<Event>) {
@@ -720,21 +732,22 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
         p = prepare(&ctx, &ts) => p,
         h = heard.recv() => {
             if !matches!(h, Some(Heard::Forget)) {
-                emit(vec![Event::End { turn: id, outcome: Outcome::Stopped }]).await;
+                emit(ended(&id, Outcome::Stopped)).await;
             }
             return;
         }
     };
-    let (conn, session, mut updates, text) = match prepared {
+    let (conn, session, mut updates, blocks) = match prepared {
         Ok(p) => p,
         Err(e) => {
             crate::ev!("goose.turn_failed", { "turn": id, "error": e });
-            emit(vec![Event::End { turn: id, outcome: Outcome::Error(e) }]).await;
+            emit(ended(&id, Outcome::Error(e))).await;
             return;
         }
     };
     let mut map = Mapper::new(&id);
-    let prompt = conn.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }), None);
+    let blocks: Vec<Value> = blocks.into_iter().map(|text| json!({ "type": "text", "text": text })).collect();
+    let prompt = conn.call("session/prompt", json!({ "sessionId": session, "prompt": blocks }), None);
     tokio::pin!(prompt);
     let (mut stopping, mut following, mut hearing) = (false, true, true);
     // bounded by the prompt: it answers, or its goose dies (and it answers Gone)
@@ -754,7 +767,7 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
                 Some(Heard::Stop) => {}
                 Some(Heard::Forget) => {
                     conn.notify("session/cancel", json!({ "sessionId": session }));
-                    conn.forget(&session);
+                    close(&conn, &session);
                     return;
                 }
                 None => hearing = false,
@@ -765,7 +778,7 @@ async fn turn(ctx: Arc<Ctx>, ts: TurnStart, mut heard: mpsc::Receiver<Heard>, ev
     while let Ok(u) = updates.try_recv() {
         emit(map.update(&u)).await;
     }
-    conn.forget(&session);
+    close(&conn, &session);
     emit(map.end(answer.as_ref(), stopping)).await;
 }
 
@@ -788,9 +801,18 @@ pub struct Mapper {
     message: Option<String>,
     /// A draft of them is shown.
     drafted: bool,
-    /// The words the last step took.
-    narration: Option<String>,
     calls: HashMap<String, Call>,
+}
+
+/// A turn's end, said: its one reply, `(ended: <outcome>: <why>)`, then the
+/// end (a turn with final words says those instead: `Mapper::end`).
+pub fn ended(turn: &str, outcome: Outcome) -> Vec<Event> {
+    let said = match &outcome {
+        Outcome::Idle => "(ended: idle: goose said nothing after its last step)".to_string(),
+        Outcome::Stopped => "(ended: stopped: its asker stopped it)".to_string(),
+        Outcome::Error(why) => format!("(ended: error: {why})"),
+    };
+    vec![Event::Reply { turn: turn.to_string(), part: 1, text: said }, Event::End { turn: turn.to_string(), outcome }]
 }
 
 /// A text cut to at most `max` bytes, on a character boundary.
@@ -845,7 +867,7 @@ fn excerpt_of(u: &Value) -> String {
 
 impl Mapper {
     pub fn new(turn: &str) -> Mapper {
-        Mapper { turn: turn.to_string(), said: String::new(), message: None, drafted: false, narration: None, calls: HashMap::new() }
+        Mapper { turn: turn.to_string(), said: String::new(), message: None, drafted: false, calls: HashMap::new() }
     }
 
     /// One `session/update`'s `update`.
@@ -879,9 +901,6 @@ impl Mapper {
                     // its words are the step's now
                     out.push(Event::Draft { turn, text: String::new() });
                 }
-                if !words.is_empty() {
-                    self.narration = Some(words.clone());
-                }
                 let Some(id) = u["toolCallId"].as_str() else { return out };
                 if self.calls.len() >= CALLS_OPEN_MAX {
                     crate::ev!("goose.calls_bounded", { "turn": self.turn, "max": CALLS_OPEN_MAX });
@@ -904,7 +923,8 @@ impl Mapper {
     }
 
     /// The prompt's answer (`stopReason`), or why none came; `stopped`: the
-    /// asker pressed Stop.
+    /// asker pressed Stop. The turn's one reply is its final words when it
+    /// ended idle with some, else what ended it.
     pub fn end(&mut self, answer: Result<&Value, &AcpError>, stopped: bool) -> Vec<Event> {
         let turn = self.turn.clone();
         let outcome = match answer {
@@ -918,18 +938,10 @@ impl Mapper {
             Err(e) => Outcome::Error(format!("goose: {e}")),
         };
         let words = self.said.trim();
-        let reply = match (&outcome, words.is_empty()) {
-            (Outcome::Stopped, _) => String::new(),
-            (_, false) => words.to_string(),
-            (Outcome::Idle, true) => self.narration.take().unwrap_or_default(),
-            (_, true) => String::new(),
-        };
-        let mut out = Vec::new();
-        if !reply.is_empty() {
-            out.push(Event::Reply { turn: turn.clone(), part: 1, text: reply });
+        if outcome != Outcome::Idle || words.is_empty() {
+            return ended(&turn, outcome);
         }
-        out.push(Event::End { turn, outcome });
-        out
+        vec![Event::Reply { turn: turn.clone(), part: 1, text: words.to_string() }, Event::End { turn, outcome }]
     }
 }
 
@@ -981,9 +993,10 @@ mod tests {
     }
 
     /// Goal: two messages with no call between are two paragraphs of one
-    /// reply; a turn whose last words were a step's says them as its reply.
+    /// reply; a turn whose words were all a step's still says one reply, of
+    /// how it ended, never those words.
     #[test]
-    fn messages_join_and_a_silent_end_says_the_last_words() {
+    fn messages_join_and_a_silent_end_says_how_it_ended() {
         let mut m = Mapper::new("t");
         m.update(&chunk("One.", "m1"));
         assert_eq!(m.update(&chunk("Two.", "m2")), vec![draft("One.\n\nTwo.")]);
@@ -991,14 +1004,15 @@ mod tests {
         m.update(&chunk("Writing it now.", "m1"));
         m.update(&call("c1", "write", json!({ "path": "/data/work/a.txt", "content": "x" })));
         let steps = m.update(&done("c1", "completed", "wrote"));
-        assert!(matches!(&steps[..], [Event::Step { step, .. }] if step.args == "/data/work/a.txt" && step.tool == "write"));
+        assert!(matches!(&steps[..], [Event::Step { step, .. }] if step.args == "/data/work/a.txt" && step.tool == "write" && step.text == "Writing it now."));
         let end = m.end(Ok(&json!({ "stopReason": "end_turn" })), false);
-        assert_eq!(end[0], Event::Reply { turn: "t".into(), part: 1, text: "Writing it now.".into() });
+        assert_eq!(end, vec![Event::Reply { turn: "t".into(), part: 1, text: "(ended: idle: goose said nothing after its last step)".into() }, Event::End { turn: "t".into(), outcome: Outcome::Idle }]);
     }
 
-    /// Goal: each way a prompt ends. A Stop is `stopped` and says nothing
-    /// more; a cancel nobody asked for, a refusal, an unknown reason and a
-    /// goose that died are errors (what it said kept); a cut answer is idle.
+    /// Goal: each way a prompt ends, each with exactly one reply. A Stop is
+    /// `stopped`; a cancel nobody asked for, a refusal, an unknown reason and
+    /// a goose that died are errors; each says so as its reply, whatever it
+    /// said before. A cut answer is idle, its words the reply.
     #[test]
     fn every_end() {
         let ended = |answer: Result<Value, AcpError>, stopped: bool, said: &str| {
@@ -1010,15 +1024,17 @@ mod tests {
         };
         let end = |o: Outcome| Event::End { turn: "t".into(), outcome: o };
         let reply = |t: &str| Event::Reply { turn: "t".into(), part: 1, text: t.into() };
-        assert_eq!(ended(Ok(json!({ "stopReason": "cancelled" })), true, "half"), vec![end(Outcome::Stopped)]);
-        assert_eq!(ended(Ok(json!({ "stopReason": "cancelled" })), false, ""), vec![end(Outcome::Error("goose cancelled the turn".into()))]);
-        assert_eq!(ended(Ok(json!({ "stopReason": "refusal" })), false, "no"), vec![reply("no"), end(Outcome::Error("the model refused".into()))]);
+        assert_eq!(ended(Ok(json!({ "stopReason": "cancelled" })), true, "half"), vec![reply("(ended: stopped: its asker stopped it)"), end(Outcome::Stopped)]);
+        assert_eq!(ended(Ok(json!({ "stopReason": "cancelled" })), false, ""), vec![reply("(ended: error: goose cancelled the turn)"), end(Outcome::Error("goose cancelled the turn".into()))]);
+        assert_eq!(ended(Ok(json!({ "stopReason": "refusal" })), false, "no"), vec![reply("(ended: error: the model refused)"), end(Outcome::Error("the model refused".into()))]);
         assert_eq!(ended(Ok(json!({ "stopReason": "max_tokens" })), false, "cut"), vec![reply("cut"), end(Outcome::Idle)]);
-        assert_eq!(ended(Ok(json!({ "stopReason": "max_turn_requests" })), false, ""), vec![end(Outcome::Idle)]);
-        assert!(matches!(&ended(Ok(json!({ "stopReason": "weird" })), false, "")[..], [Event::End { outcome: Outcome::Error(e), .. }] if e.contains("weird")));
-        assert_eq!(ended(Err(AcpError::Gone), false, "so far"), vec![reply("so far"), end(Outcome::Error("goose: it stopped".into()))]);
+        assert_eq!(ended(Ok(json!({ "stopReason": "max_turn_requests" })), false, ""), vec![reply("(ended: idle: goose said nothing after its last step)"), end(Outcome::Idle)]);
+        assert!(matches!(&ended(Ok(json!({ "stopReason": "weird" })), false, "")[..], [Event::Reply { .. }, Event::End { outcome: Outcome::Error(e), .. }] if e.contains("weird")));
+        assert_eq!(ended(Err(AcpError::Gone), false, "so far"), vec![reply("(ended: error: goose: it stopped)"), end(Outcome::Error("goose: it stopped".into()))]);
         let refused = AcpError::Refused { code: -32603, message: "Error in agent response stream: 402".into() };
-        assert_eq!(ended(Err(refused), false, ""), vec![end(Outcome::Error("goose: Error in agent response stream: 402 (-32603)".into()))]);
+        assert_eq!(ended(Err(refused), false, ""), vec![reply("(ended: error: goose: Error in agent response stream: 402 (-32603))"), end(Outcome::Error("goose: Error in agent response stream: 402 (-32603)".into()))]);
+        // a turn ended before goose ran it (a Stop while it was prepared, a goose that did not start)
+        assert_eq!(super::ended("t", Outcome::Error("goose: it did not start: no such file".into())), vec![reply("(ended: error: goose: it did not start: no such file)"), end(Outcome::Error("goose: it did not start: no such file".into()))]);
     }
 
     fn ts(text: &str) -> TurnStart {
@@ -1026,21 +1042,20 @@ mod tests {
         TurnStart { turn: "t1".into(), agent, fragment: "mind.paul".into(), chat_name: "mind".into(), seq: 3, asker: "fragment:mind.paul".into(), asker_name: "mind".into(), text: text.into(), attachments: vec![], files: vec![], routine: false, claim_seq: None, note: None }
     }
 
-    /// Goal: a mind's turn starts with the framing, VIEW_DOC, the view, then
-    /// the task; any other fragment's with its text alone; a cut turn's note
-    /// and its files are said around it.
+    /// Goal: a mind's turn is its view, then its task, under a system prompt
+    /// of the framing and VIEW_DOC; any other fragment's is its text alone;
+    /// a cut turn's note and its files are said around the text.
     #[test]
-    fn the_first_prompt() {
-        let p = first_prompt(Some("<chat>\n0+1|user: hi\n</chat>"), &ts("Find my notes\n\n(task k1, thread t_1)"));
-        assert!(p.starts_with("You are a subagent of Mind, an AI agent"), "{p}");
-        let (framing, doc, view, task) = (p.find("Mind gave you a task").unwrap(), p.find("The view: the whole chat between Mind").unwrap(), p.find("<chat>").unwrap(), p.find("Find my notes").unwrap());
-        assert!(framing < doc && doc < view && view < task, "{p}");
-        assert!(!p.contains("OptChat"));
-        assert_eq!(first_prompt(None, &ts("hello")), "hello");
+    fn the_prompt() {
+        let sys = system_prompt();
+        assert!(sys.starts_with("You are a subagent of Mind, an AI agent") && sys.contains("The view: the whole chat between Mind") && !sys.contains("OptChat"), "{sys}");
+        assert_eq!(system_prompt(), sys, "the same bytes every turn");
+        assert_eq!(prompt(Some("<chat>\n0+1|user: hi\n</chat>"), &ts("Find my notes")), vec!["<chat>\n0+1|user: hi\n</chat>", "Find my notes"]);
+        assert_eq!(prompt(None, &ts("hello")), vec!["hello"]);
         let mut cut = ts("hello");
         cut.note = Some("Your turn before this one was cut short.".into());
         cut.files = vec![crate::runtime::LocalFile { path: "/tmp/bridge-media/x/cat.png".into(), media_type: "image/png".into(), name: "cat.png".into(), size: 3 }];
-        assert_eq!(first_prompt(None, &cut), "Your turn before this one was cut short.\n\nhello\n\nIts files, on this computer:\n- /tmp/bridge-media/x/cat.png (image/png, 3 bytes)");
+        assert_eq!(prompt(None, &cut), vec!["Your turn before this one was cut short.\n\nhello\n\nIts files, on this computer:\n- /tmp/bridge-media/x/cat.png (image/png, 3 bytes)"]);
     }
 
     fn config() -> GooseConfig {
@@ -1076,6 +1091,9 @@ mod tests {
             ("GOOSE_MODEL", "medium"),
             ("GOOSE_MODE", "auto"),
             ("GOOSE_AUTO_COMPACT_THRESHOLD", "0"),
+            ("GOOSE_NO_COMPACTION", "1"),
+            ("GOOSE_STABLE_SYSTEM_PROMPT", "1"),
+            ("EXTENSIONS", "{}"),
             ("GOOSE_DISABLE_SESSION_NAMING", "true"),
             ("GOOSE_PATH_ROOT", "/tmp/goose/hands.paul"),
             ("FRAGMENT_AS_AGENT", "hands.paul"),

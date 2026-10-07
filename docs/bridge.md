@@ -1,8 +1,8 @@
 # The bridge
 
-`images/bridge` (Rust, its own workspace with `images/hermes/boot`): the
-one process a computer image runs between its agent runtime and the
-fragment API (docs/computers.md). It owns nothing (lesson 1): the chat
+`images/bridge` (Rust, `images/`'s own workspace): the one process a
+computer image runs between its agent runtime and the fragment API
+(docs/computers.md). It owns nothing (lesson 1): the chat
 channel owns what was said, the runtime owns the in-flight turn, the
 Computer DO owns the computer. The bridge translates, and keeps only a
 cursor per followed channel and the turns it admitted that have not
@@ -13,14 +13,14 @@ ended.
   what it writes.
 - `driver.rs`: the restore gate, the state file, followers, posting
   lanes, the keepalive.
-- `ready.rs`: which of the computer's agents to run, when the image says
-  (`BRIDGE_AGENTS_FILE`): a computer's agents may change while it runs.
-- `runtime/`: `relay` (Hermes' Relay connector) and `script` (a
-  deterministic agent, the stub image's).
+- `runtime/`: `goose` (goose over ACP, our goose image's: below, "goose,
+  as the bridge speaks it") and `script` (a deterministic agent, the stub
+  image's).
 - `screen.rs`: a screen page and an RFB proxy with Take over / Give back:
   its input gate follows every message noVNC 1.7.0 sends (the extended
   clipboard's negative length, the extended pointer event), and its
-  control socket answers on an image with no display (the stub's) too.
+  control socket answers on an image with no display (the stub's and the
+  goose image's) too.
 
 ## A runtime
 
@@ -37,8 +37,8 @@ A runtime gets commands and sends events, each naming its turn
 
 | Event | |
 |---|---|
-| `Connected(bool)` | the runtime can take turns now, or cannot: the bridge claims a turn only while it can (Relay: Hermes on its socket, greeted; `script`: from its start) |
-| `Draft {text}` | the reply so far, shown live |
+| `Connected(bool)` | the runtime can take turns now, or cannot: the bridge claims a turn only while it can (`goose` and `script`: from their start) |
+| `Draft {text}` | the reply so far, shown live; empty, the draft stops (its words went to a step) |
 | `Reply {part, text}` | reply `part` (from 1) whole; posted at the next part, step, prompt, or end |
 | `Attachment {part, file}` · `Retract {part}` | a file on a reply; a reply taken back |
 | `Step {tool, args, ok, excerpt, text}` | a tool call |
@@ -57,7 +57,7 @@ Bodies are JSON. `api.rs` has one method for each.
 
 | Method and path | Body | Reads |
 |---|---|---|
-| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute, and within a second of a change to the ready file (below) |
+| `GET /api/computer` (no agent) | | `{computer, owner, image, agents: [{fragment, identity, name, owner}]}`; at start, then every minute |
 | `GET /api/computer/keepalive` (no agent), WebSocket | | held while a turn waits to run, runs, or waits on its card (below, "A card keeps its computer awake") |
 | `GET /api/fragments` | | `{fragments: [{name, role}]}` |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
@@ -71,12 +71,11 @@ Bodies are JSON. `api.rs` has one method for each.
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
 | `GET /api/f/{f}/blobs/{sha256}` | | a message's files (at most 25 MiB), checked against their hash |
+| `POST /api/f/{f}/ops/view` | `{id: "<turn>-view", input: {}}` | `{result: {text, …}}`: the `goose` runtime's, at each turn's start, the fragment's view (a mind's: docs/optchat.md); 400, 403 or 404 (`unknown_operation`: a chat), none; tried 3 times on a transport error, 429 or 5xx, then none |
 
-`hermes-boot` also calls, as each agent, on its own fragment:
-`GET /api/f/{agent}/files`, `GET /api/f/{agent}/file?path=` (its
-`SOUL.md`, `memories/`, `skills/`, `agent.json`), and
-`POST /api/f/{agent}/files {files, message, key}` (at most 16 files and
-180 KiB a commit; `key` is the batch's hash).
+goose itself calls `FRAGMENT_MODEL` as the agent (below), and a mind's
+`fragment mcp` calls `GET /api/f/{mind}/status` and `POST
+/api/f/{mind}/ops/{view,zoom,date,search}` as the agent (cli/src/mcp.rs).
 
 ## Settings
 
@@ -90,15 +89,19 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_HOLD` | `/run/computer/hold` | while this file exists the bridge claims no turn (the platform's hold before every save; looked at before each claim's every try) |
 | `BRIDGE_HELD` | `/run/computer/held` | the bridge's answer to the hold: it writes this file while the hold exists and no claim's try is in flight, and removes it otherwise (looked at every 100 ms). An image with more to quiet than the bridge names another file and answers the platform itself |
 | `BRIDGE_HELD_LEAVE_OUT` | none | what the save may leave out, written into the answer one per line (whitespace between here): gitignore patterns relative to `/data`, of letters, digits and `._-/*?[]`, at most 16 (docs/computers.md, "The hold"). The stub names `*.scratch` |
-| `BRIDGE_RUNTIME` | `relay` | `relay` or `script` |
+| `BRIDGE_RUNTIME` | `goose` | `goose` or `script` |
 | `BRIDGE_STATE_DIR` | `/data/bridge` | its state; made as it starts (past the restore gate), so a first start has a `/data` to save |
-| `BRIDGE_AGENTS_FILE` | | the agents the image has made ready (`src/ready.rs`): `{"agents": [fragment]}`, written whole and renamed into place. Set, the bridge runs only those of `GET /api/computer`'s, in the platform's order, and reads the computer again within a second of the file's change; missing, no agent is ready; one that does not read keeps the set before it. Unset, every agent the platform lists (the stub). Our Hermes image's is `/var/lib/fragment-run/agents.json`, written once each new agent's profile is whole (docs/computers.md) |
 | `BRIDGE_MEDIA_DIR` | `/tmp/bridge-media` | attachments, scratch |
 | `BRIDGE_PROMPT_TTL_MS` | 3 600 000 | a card's life unless the runtime says |
 | `BRIDGE_TURN_IDLE_MS` | 900 000 | a running turn this quiet ends as an error |
-| `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
-| `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
-| `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
+| `FRAGMENT_MODEL` | required for `goose` | goose's model host (its OpenAI provider's `OPENAI_HOST`) |
+| `BRIDGE_GOOSE_BIN` | `/usr/local/bin/goose` | goose, run as `goose acp --with-builtin developer` |
+| `BRIDGE_GOOSE_WORK` | `/data/work` | each session's cwd |
+| `BRIDGE_GOOSE_HOME` | `/data/work/home` | goose's and its tools' `HOME` |
+| `BRIDGE_GOOSE_ROOT` | `/tmp/goose` | each agent's goose's own state, `<root>/<agent>` (`GOOSE_PATH_ROOT`): scratch, never `/data` |
+| `BRIDGE_GOOSE_TIER` | `medium` | the model tier goose's calls name |
+| `BRIDGE_GOOSE_CLI` | | the fragment CLI: set, a mind's sessions get `fragment mcp <mind>` (the goose image's `/usr/local/bin/fragment`) |
+| `BRIDGE_TRUST_CA` | | the interception CA, appended to `/etc/ssl/certs/ca-certificates.crt` once it appears (at most 15 s: docs/computers.md, "Connections and operator keys"); the goose image's `/etc/cloudflare/certs/cloudflare-containers-ca.crt` |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
@@ -149,8 +152,8 @@ earlier save, or lost, costs reads and runs nothing twice
   running turn, so a later life tells it nothing: the message, read
   there, is a turn of its own, claimed and run once. So is one a rollback
   sends a cursor back before, though an earlier life told it (a Tell
-  writes nothing on `work`). A Stop answers the question too (Relay says
-  "Stop."), so the asker's next message queues behind the stopping turn.
+  writes nothing on `work`). A Stop answers the question too, so the
+  asker's next message queues behind the stopping turn.
 - What the runtime says unasked is a turn of the life's counter and the
   life, so a counter a rollback sent back collides with nothing.
 
@@ -234,35 +237,27 @@ hand-off between them meets this count.
 A turn waiting on its card holds the keepalive until the card is
 answered or expires, at most the card's life (`BRIDGE_PROMPT_TTL_MS`, an
 hour; docs/durable-computers.md, P6 for now). So a card expires with its
-runtime there: Hermes' approval times out with it (the image sets
-`approvals.timeout` to the card's life), the command does not run, Hermes
-says so and ends the turn, and the chat's next message is answered.
+runtime there, its turn ends as the runtime ends it, and the chat's next
+message is answered.
 
 It used to be let go (decision 42 as first written), so an idle computer
 slept 20 minutes into an unanswered card, and the next life ended its turn
-as lost. Hermes, though, had kept the cut turn's message as its session's
-last, unanswered, and folds the next message into it (two user messages
-in a row are one): the model was given `[paul] do the risky thing\n\n[paul]
-good morning`, and asked the cut command's approval again. Every message
-after a missed card was met by the card again, and the computer slept
-under each one (Paul on p5, 2026-10-05: "I missed the 1hr window and now
-it's not responding to chats"; `an_expired_approval_ends_its_turn` in
-tests/docker.rs, and its scripted twin in tests/relay.rs). A restart for
-any other reason while a card is open (an owner's sleep, a crash, a
-deploy) still cuts the turn, which ends as lost; the next message is now
-a turn of its own, told what was cut (below), never folded into the cut
-request. The card's promise outliving a restart is P6 of
-docs/explorations/pi-durable.md, and the debt ledger.
+as lost; the runtime of then had kept the cut turn's message as its
+session's last, folded the next message into it, and asked the cut
+command's approval again, under every message after (Paul on p5,
+2026-10-05). A restart for any other reason while a card is open (an
+owner's sleep, a crash, a deploy) still cuts the turn, which ends as lost;
+the next message is a turn of its own, told what was cut (below). The
+card's promise outliving a restart is P6 of
+docs/explorations/pi-durable.md, and the debt ledger. goose shows no
+cards (below): of our runtimes only the scripted agent (the stub's) does.
 
 ## The turn after a cut one is told
 
 A turn a restart cut ends as lost (one life per turn: "State", above),
 and is never run again. What it did before the cut may have effects (an
-email sent, a file half written), and its runtime may still hold its
-request: Hermes keeps a turn's message as its session's last until the
-turn answers, and joins the next message to it (two user messages in a
-row are one), so its model was handed `[paul] do the risky thing\n\n[paul]
-good morning` and did the risky thing again (F10 of
+email sent, a file half written), and a runtime that keeps sessions may
+still hold its request and join the next message to it (F10 of
 docs/explorations/pi-durable.md; P5 of docs/durable-computers.md). Two
 parts close it:
 
@@ -282,95 +277,106 @@ parts close it:
   any life and after any rollback of `/data`, and said once: at the turn
   after, the turn before is this one. A journal that does not answer
   within 5 s, or an agent's turn before further back than 1000 records,
-  gives no note: a turn is never held back longer for one. Relay hands it as the inbound's
-  read-only `context` (below); the scripted agent echoes it after its
-  reply (`(told: …)`).
-- **The cut turn closed in Hermes' session (our image).** Before the
-  gateway starts, `hermes-boot` appends Hermes' own failed-turn boundary
-  (the assistant row Hermes writes itself when a turn ends without an
-  answer, `display_kind` `failed_turn`) to each relay session whose last
-  message is unanswered (a user row, a tool call, or a tool result),
-  through Hermes' session code (`hermes::CLOSE_CUT_TURNS`;
-  docs/computers.md). The next message is then a user message of its own.
+  gives no note: a turn is never held back longer for one. `goose` puts it
+  before the turn's text in its task; the scripted agent echoes it after
+  its reply (`(told: …)`).
+- **No session is loaded again.** goose runs each turn in a fresh
+  session, so nothing of a cut turn's request is ever handed to the next.
 
-Proven with the real Hermes in `a_turn_cut_by_a_restart_is_closed_and_told`
-(tests/docker.rs): an owner's sleep under a card, then "good morning": no
-second call of the cut command, no card again, an answer, and the model's
-request ends with the note and the message after the boundary. Whether a
-real model, so told, checks before it redoes is a hosted run's to see.
+## goose, as the bridge speaks it
 
-## Hermes' Relay, as the bridge speaks it
+`src/runtime/goose.rs`: goose (github.com/aaif-goose/goose), in our image
+our fork's build (futurepaul/goose `fragment/optmem` at `4cfb2d7d`:
+upstream v1.53.0 and docs/optchat.md's surgery; images/goose/Dockerfile),
+spoken to over ACP, the Agent Client Protocol (agentclientprotocol.com):
+JSON-RPC 2.0, one message a line each way, on the stdio of `goose acp
+--with-builtin developer`. Upstream's v1.53.0 speaks it alike, less the
+fork's two settings.
 
-Hermes v0.21.5 (tag `v2026.9.24`, the newest release on 2026-10-03;
-`gateway/relay/`), contract version 1. The bridge serves
-`ws://127.0.0.1:8650/relay` and `/relay/media` and checks Hermes'
-token; the descriptor names platform `relay` with draft streaming and
-the ops `send, edit, delete, typing, react, draft, prompt, send_media,
-get_chat_info`.
+- **One goose per agent.** An agent's goose starts at its first turn, and
+  again at the turn after it died (every turn it ran ends as an error:
+  `goose: it stopped`). Its environment is the agent's, because a goose's
+  provider headers and its tools' environment are per process:
+  - its model is goose's OpenAI provider at `FRAGMENT_MODEL`
+    (`OPENAI_HOST`, `v1/chat/completions`), the tier `medium`, no key
+    (`OPENAI_API_KEY` empty: goose then reads `OPENAI_CUSTOM_HEADERS` from
+    the environment too), every call naming the agent
+    (`OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`: docs/computers.md,
+    "Models"). It also asks `GET /v1/models` once a session, which the
+    intercept answers 404, unmetered; `GOOSE_CONTEXT_LIMIT=128000` spares
+    it the context probe;
+  - its shell's `fragment` acts as the agent, for its owner
+    (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`, `FRAGMENT_API`: cli/GUIDE.md, "As
+    an agent"), and each credential's placeholder is in its variables
+    (docs/computers.md, "Connections and operator keys"). A goose started
+    with other credentials is started again at the agent's next turn when
+    none of its turns runs;
+  - nothing of goose's own runs beside the turn: no compaction
+    (`GOOSE_AUTO_COMPACT_THRESHOLD=0`, and the fork's `GOOSE_NO_COMPACTION=1`
+    for an overflow too), a system prompt that never changes within a
+    session (the fork's `GOOSE_STABLE_SYSTEM_PROMPT=1`), no extension of
+    its config (`EXTENSIONS={}`: `developer` and a session's own alone; no
+    subagents, scheduler, skills or memory of goose's), no session naming
+    (`GOOSE_DISABLE_SESSION_NAMING=true`), `GOOSE_MODE=auto` (it asks no
+    permission), no keyring, no telemetry;
+  - its state is `<BRIDGE_GOOSE_ROOT>/<agent>` (`GOOSE_PATH_ROOT`), never
+    `/data`: no session is ever loaded again. Its `HOME` is
+    `BRIDGE_GOOSE_HOME`, in the work (docs/computers.md, the seam).
+- **A turn is a fresh session**: `initialize` once per goose (protocol 1,
+  no file system or terminal of the client's), then per turn
+  `session/new` (`cwd` `/data/work`, a title of ours), and
+  `session/close` when it ends (its MCP servers stop with it). Never
+  `session/load`.
+- **A mind's turn** (its fragment answers `ops/view`, above): the session
+  gets `fragment mcp <mind>` as the agent (`mcpServers`, named `mind`:
+  `mind__view`, `mind__zoom`, `mind__date`, `mind__search`, read-only) and,
+  through `_goose/unstable/session/system-prompt/set` (`append`, key
+  `fragment`), OptChat's subagent framing and VIEW_DOC, "OptChat" read
+  "Mind" (its spec, §9 and §7.2: the same bytes every turn, so the prefix
+  caches). Its prompt is two text blocks, the view, then the task. Any
+  other turn's prompt is the task alone. The task is the turn's note
+  (above), its text, and its files' paths on this computer.
+- **What goose says** (`session/update`): `agent_message_chunk` text is
+  the draft (another message with no tool call between is another
+  paragraph); at a `tool_call` the words so far are that step's (`text`)
+  and the draft stops; the call is a step once its `tool_call_update`
+  says `completed` or `failed` (`tool` its name less its extension,
+  `args` its command or path, else its input; `excerpt` its result's
+  text, else its structured output); thoughts, usage and goose's own
+  notices say nothing. The prompt's answer ends the turn: `end_turn`,
+  `max_tokens` and `max_turn_requests` are `idle`, `cancelled` after a
+  Stop `stopped`, anything else an error. A model's refusal of a call (402
+  `budget_used_up`) reaches the chat as goose's words, then `end_turn`.
+- **Exactly one reply a turn, at its end.** A mind takes a hand-off's one
+  `chat` reply as its report (one run of its trigger each: the platform's
+  breaker allows a fragment 120 triggered runs an hour), and follows the
+  steps on `work`. So the words between tool calls are only ever drafts
+  and steps' `text`, never a reply; the reply is the words after the last
+  tool call of a turn that ended `idle`, and otherwise (no such words, a
+  Stop, an error, or a turn that ended before goose ran it: a Stop while
+  its session was made, a goose that did not start)
+  `(ended: <outcome>: <why>)`, as `(ended: error: goose: it stopped)`.
+- **Stop** is `session/cancel`; a Stop before the session is made ends the
+  turn at once. The bridge's own end (`Forget`) cancels and closes it,
+  and says nothing (the engine ended the turn itself).
+- **goose asks nothing a person answers.** It shows no card, and asks no
+  question in words: in `auto` mode it asks no permission, and one it asks
+  anyway (`session/request_permission`, a security inspector's) is refused
+  at once (`reject_once`). Anything else it asks of the client is not
+  offered (-32601). So no `Answer` or `Tell` comes for its turns. (A
+  person's message mid-turn could reach it between tool calls by
+  `_goose/unstable/session/steer`; the engine hands one only to a turn
+  that asked, so it is not used.)
+- Bounds: a line from goose is at most 16 MiB (past it, that goose is
+  stopped), its answers to `initialize`, `session/new` and the system
+  prompt are waited for 60 s, a turn's open tool calls are at most 256, and
+  what it says is kept to 256 KiB.
 
-- Each turn is an `inbound` group message routed to the agent's profile
-  (`source.profile`), its chat id `<chat fragment>/<agent fragment>` so
-  two agents in one chat are two chats to Hermes, its message id the
-  turn id. Claimed only while Hermes is on its socket and has said
-  `hello` (the bridge starts just before Hermes' gateway, so the message
-  that woke the computer waits for it, unclaimed); once handed, kept until
-  Hermes acks it and handed again on each dial, within that life. A
-  turn's note (above, "The turn after a cut one is told") is the
-  inbound's `context`, one item with no source, never its text: Hermes
-  renders it before the message, reference only and never as the person's
-  words:
-  `[Recent channel messages]\n<note>\n\n[New message]\n[paul] good morning`.
-- A reply streams as `draft` frames (the chat's draft), and arrives as a
-  `send` answering the turn's message; tool progress is a `send`
-  answering nothing whose lines grow by `edit`, each new line a step.
-  Hermes edits it at most every 1.5 s, and upstream held a line that came
-  sooner until a newer one, so a turn's last quick tool call showed no
-  step; our image patches its sender to send the line once the interval
-  is out (images/hermes/Dockerfile; the debt ledger).
-- One reply a turn, its answer (Paul, 2026-10-05). Hermes ends a draft
-  segment at every tool boundary with a `send` answering the message, so
-  the model's text beside a tool call ("Let me check that.") arrives as
-  a reply, whatever its `display.interim_assistant_messages` (off in our
-  image: docs/hermes-relay.md, "Hermes' settings"). The step that follows
-  takes it back (`Retract`) as its words, the step's `text`; when the
-  step reaches the bridge first, the `send` ending drafts that began
-  before it is its words, never a reply. A turn that ends idle having
-  said nothing since says the last words a step took as its reply:
-  Hermes' answer written beside a housekeeping call (`memory`), which it
-  sends once.
-- An approval is a `prompt` op (`once`, `session`, `always`, `deny`);
-  the owner's answer goes back at once as an inbound `prompt_response`.
-  Expiry needs no word: Hermes' `approvals.timeout` is the card's life
-  (`hermes-boot` gives the bridge the same; `HERMES_BOOT_APPROVAL_TIMEOUT_S`
-  is a test's shorter one). At its timeout Hermes tries to edit the card
-  (the bridge refuses: it is no message of the turn), sends `⌛ Approval
-  timed out …` (a step), hands the model `BLOCKED: Command timed out
-  without user response`, and the turn goes on to its reply.
-- A file Hermes sends is uploaded to `/relay/media`, then `send_media`;
-  a message's attachments are served at `/relay/media/<id>`, behind the
-  token.
-- A question to answer in words: an open `clarify` (`❓ …`, the base
-  adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
-  clarify's card, each read by its glyph (Hermes' translations keep
-  them). It is a `send`: the bridge shows it as a reply part and
-  the turn asks (`Asked`). Hermes blocks until the person's next message,
-  which its gateway's clarify intercept takes even mid-turn, so the
-  asker's next message goes back at once as an inbound in the same chat
-  (`Tell`), not queued as a turn behind this one (which would wait out
-  Hermes' clarify timeout, an hour).
-- Stop is `interrupt_inbound` for the profile's session key. A clarify
-  waiting on words never sees it, so a Stop while the turn asks is
-  followed by the words "Stop.", which let the wait go.
-- The end: `👀` on, `👀` off, then `✅` or `❌`. A turn ends at its `❌`,
-  at its `✅` once it said something, and, stopped, at its `👀` off.
-  Hermes brackets a message it took while its gateway was starting
-  twice, the first empty (docs/hermes-relay.md), and ends no person's
-  turn without saying something, so an empty bracket's `✅` ends
-  nothing. No clock: a turn whose bracket never ends is the idle
-  bound's (`BRIDGE_TURN_IDLE_MS`: "the agent stopped answering").
-
-Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
-for Slack chats (`gateway/run_turn.py`), so steps come from progress
-text; `follow_up` is Discord's interaction tokens; neither is
-advertised. It also has `thread_create` and `thread_rename` (threads are
-off here).
+Tests: the mapping, pure (`src/runtime/goose.rs`); the bridge with a
+scripted ACP goose on an in-process pipe (`tests/goose.rs`,
+`tests/support/acp.rs`: a mind's view, framing and MCP, a step's words,
+Stop, a goose that dies, a refused permission); the real goose on this
+host with the scripted model and the real `fragment mcp`
+(`FRAGMENT_GOOSE_BIN=… FRAGMENT_CLI_BIN=… cargo test -p fragment-bridge
+--test goose -- --ignored`); and the goose image in Docker
+(`the_goose_image`, tests/docker.rs).

@@ -1,6 +1,8 @@
 //! A scripted goose: an ACP agent on an in-process pipe, which the `goose`
-//! runtime is handed in place of `goose acp` (`Spawn`). What it says is a
-//! function of the prompt's last line (lesson 13):
+//! runtime is handed in place of `goose acp` (`Spawn`). It takes a
+//! session's system prompt (`_goose/unstable/session/system-prompt/set`)
+//! and its close, and refuses any other method it does not know. What it
+//! says is a function of the prompt's last line (lesson 13):
 //!
 //! - default: `scripted: <the line>`, in two chunks, then `end_turn`;
 //! - `tool`: "Let me look.", a `shell` call (`ls`) that completes with
@@ -32,8 +34,12 @@ pub struct Log {
     pub spawned: Vec<String>,
     /// Each `session/new`'s params.
     pub sessions: Vec<Value>,
-    /// Each `session/prompt`'s text.
-    pub prompts: Vec<String>,
+    /// Each `session/prompt`'s text blocks.
+    pub prompts: Vec<Vec<String>>,
+    /// Each system prompt set (`_goose/unstable/session/system-prompt/set`'s params).
+    pub system: Vec<Value>,
+    /// The sessions closed (`session/close`).
+    pub closed: Vec<String>,
     /// The sessions cancelled (`session/cancel`).
     pub cancels: Vec<String>,
     /// The answers to its permission asks.
@@ -99,9 +105,9 @@ async fn goose(io: tokio::io::DuplexStream, log: Arc<Mutex<Log>>, mut killed: on
                     }
                     Some("session/prompt") => {
                         let session = m["params"]["sessionId"].as_str().unwrap_or("").to_string();
-                        let text = m["params"]["prompt"][0]["text"].as_str().unwrap_or("").to_string();
-                        log.lock().unwrap().prompts.push(text.clone());
-                        let said = text.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or("").to_string();
+                        let blocks: Vec<String> = m["params"]["prompt"].as_array().map(|b| b.iter().map(|b| b["text"].as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                        let said = blocks.last().and_then(|t| t.lines().map(str::trim).rfind(|l| !l.is_empty())).unwrap_or("").to_string();
+                        log.lock().unwrap().prompts.push(blocks);
                         match said.as_str() {
                             "die" => return,
                             "slow" => {
@@ -132,6 +138,14 @@ async fn goose(io: tokio::io::DuplexStream, log: Arc<Mutex<Log>>, mut killed: on
                             }
                         }
                     }
+                    Some("_goose/unstable/session/system-prompt/set") => {
+                        log.lock().unwrap().system.push(m["params"].clone());
+                        out.push(json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
+                    }
+                    Some("session/close") => {
+                        log.lock().unwrap().closed.push(m["params"]["sessionId"].as_str().unwrap_or("").to_string());
+                        out.push(json!({ "jsonrpc": "2.0", "id": id, "result": {} }));
+                    }
                     Some("session/cancel") => {
                         let session = m["params"]["sessionId"].as_str().unwrap_or("").to_string();
                         log.lock().unwrap().cancels.push(session.clone());
@@ -147,6 +161,7 @@ async fn goose(io: tokio::io::DuplexStream, log: Arc<Mutex<Log>>, mut killed: on
                             out.push(json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } }));
                         }
                     }
+                    Some(method) if !id.is_null() => out.push(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("{method} is not a method of this goose") } })),
                     _ => {}
                 }
             }

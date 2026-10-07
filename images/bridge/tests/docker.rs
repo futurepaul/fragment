@@ -30,6 +30,17 @@ fn images_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("images/").to_path_buf()
 }
 
+/// The repo's root: the goose image's build context (it carries the
+/// fragment CLI, of the root workspace).
+fn repo_dir() -> PathBuf {
+    images_dir().parent().expect("the repo").to_path_buf()
+}
+
+/// The goose image's tag (`FRAGMENT_DOCKER_GOOSE_TAG`, so two checkouts on
+/// one Docker never build over each other's).
+fn goose_tag() -> String {
+    std::env::var("FRAGMENT_DOCKER_GOOSE_TAG").unwrap_or_else(|_| "fragment-goose:test".into())
+}
 
 /// Builds `dockerfile` (relative to `context`) as `tag`.
 fn build(context: &std::path::Path, dockerfile: &str, tag: &str) -> Duration {
@@ -147,4 +158,72 @@ async fn the_stub_image() {
     assert!(gated.exec(&["touch", "/run/computer/restored"]), "the marker, as the DO touches it");
     fake.until(30_000, "the gated stub to follow", |w| w.live_sockets() >= 2).await;
     eprintln!("stub: marker to following: {} ms", opened.elapsed().as_millis());
+}
+
+/// Goal: the goose image holds at its restore gate, then answers a mind's
+/// task through its bridge and the real goose with the scripted model: its
+/// shell runs in the work directory, a step; it opens the mind's view with
+/// `fragment mcp`, as the agent; every model call names the agent and the
+/// tier; its screen port serves its page; SIGTERM ends it in under 5 s.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn the_goose_image() {
+    let tag = goose_tag();
+    let built = build(&repo_dir(), "images/goose/Dockerfile", &tag);
+    eprintln!("goose: built in {:.1} s, {} MB", built.as_secs_f64(), size(&tag) / 1_000_000);
+    let fake = Fake::start("0.0.0.0:0", &["hands"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let view = "<chat>\n0+1|user: I keep my notes in ~/notes\n</chat>";
+    let mind = fake.mind("mind", &["hands"], view, "0+1|user: I keep my notes in ~/notes");
+
+    let t = Instant::now();
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("RESTORE_PENDING", "1")]);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(fake.with(|w| w.calls.is_empty()), "the gate holds: {:?}\n{}", fake.with(|w| w.calls.clone()), c.logs());
+    let gate = Instant::now();
+    assert!(c.exec(&["touch", "/run/computer/restored"]));
+    fake.until(60_000, "goose's bridge to follow the mind", |w| w.live_sockets() >= 2).await;
+    eprintln!("goose: marker to following: {} ms ({} ms since docker run)", gate.elapsed().as_millis(), t.elapsed().as_millis());
+
+    let ends = |w: &support::fake::World| w.bodies(&mind, "work", "turn.end");
+    let replies = |w: &support::fake::World| w.bodies(&mind, "chat", "reply").iter().map(|r| r["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+    let asked = Instant::now();
+    fake.say(&mind, &person("paul"), json!({ "text": "Check the shell.\n\nrun: echo tool-ran > ran.txt && cat ran.txt", "to": ["id:hands"] }));
+    let answered = tokio::time::timeout(Duration::from_secs(120), fake.until(600_000, "goose's answer", |w| !ends(w).is_empty()));
+    if answered.await.is_err() {
+        panic!("no answer; the container said:\n{}", c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+    }
+    eprintln!("goose: task to its end: {} ms", asked.elapsed().as_millis());
+    fake.with(|w| {
+        assert_eq!(ends(w)[0]["outcome"], "idle", "{:?}\n{}", ends(w), c.logs());
+        assert_eq!(replies(w), vec!["scripted: the tool said: tool-ran"]);
+        let steps = w.bodies(&mind, "work", "turn.step");
+        assert!(steps.len() == 1 && steps[0]["tool"] == "shell" && steps[0]["ok"] == true, "{steps:?}");
+        let by = w.records(&mind, "chat").into_iter().find(|r| r["body"]["turn"].is_string()).unwrap()["principal"].clone();
+        assert_eq!(by, "id:hands");
+    });
+    assert_eq!(c.exec_out(&["cat", "/data/work/ran.txt"]).trim(), "tool-ran", "its shell works in /data/work");
+
+    fake.say(&mind, &person("paul"), json!({ "text": "zoom: 0 1", "to": ["id:hands"] }));
+    fake.until(120_000, "the zoom's answer", |w| ends(w).len() == 2).await;
+    fake.with(|w| {
+        assert_eq!(replies(w)[1], "scripted: the tool said: 0+1|user: I keep my notes in ~/notes", "{}", c.logs());
+        let zooms: Vec<_> = w.requests.iter().filter(|r| r.0 == format!("POST /api/f/{mind}/ops/zoom")).collect();
+        assert!(zooms.len() == 1 && zooms[0].2.as_deref() == Some("hands.paul") && !zooms[0].3, "fragment mcp, as the agent, unsigned: {zooms:?}");
+    });
+    {
+        let calls = model.calls.lock().unwrap();
+        let completions: Vec<_> = calls.iter().filter(|c| c.path == "/v1/chat/completions").collect();
+        assert!(completions.len() >= 4, "{:?}", calls.iter().map(|c| c.path.clone()).collect::<Vec<_>>());
+        assert!(completions.iter().all(|c| c.agent.as_deref() == Some("hands.paul") && c.model == "medium"), "every call is the agent's, at its tier");
+        let (system, user) = (support::model::texts(&completions[0].body, "system"), support::model::texts(&completions[0].body, "user"));
+        assert!(system.contains("You are a subagent of Mind") && user.contains(view), "the framing in the system prompt, the view in the prompt:\n{system}\n---\n{user}");
+        let tools = support::model::tools(&completions[0].body);
+        assert!(tools.iter().any(|t| t.ends_with("zoom")) && tools.iter().any(|t| t.ends_with("shell")), "{tools:?}");
+    }
+    assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("no screen yet"));
+    let (took, code) = c.sigterm();
+    eprintln!("goose: SIGTERM to exit: {} ms (code {code})", took.as_millis());
+    assert!(took < Duration::from_secs(5), "{took:?}\n{}", c.logs());
+    assert_eq!(code, 0);
 }

@@ -66,6 +66,16 @@ pub fn text_of(content: &Value) -> String {
     }
 }
 
+/// The text of a request's messages of `role`, joined.
+pub fn texts(body: &Value, role: &str) -> String {
+    body["messages"].as_array().map(|m| m.iter().filter(|m| m["role"] == role).map(|m| text_of(&m["content"])).collect::<Vec<_>>().join("\n")).unwrap_or_default()
+}
+
+/// The names of the tools a request offers.
+pub fn tools(body: &Value) -> Vec<String> {
+    body["tools"].as_array().map(|t| t.iter().filter_map(|t| t["function"]["name"].as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 /// A text with goose's `<turn-context>…</turn-context>` blocks left out.
 fn without_context(text: &str) -> String {
     let mut out = String::new();
