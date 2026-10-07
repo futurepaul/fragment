@@ -7,7 +7,9 @@
 //!   `sleep 2`; `use the terminal slowly`: after `sleep 8`; `use the
 //!   terminal twice`: `echo first-ran`, then that one), and one saying
 //!   `risky` with one Hermes flags (`rm -rf …`); once a tool result is in
-//!   the transcript, the answer names it;
+//!   the transcript, the answer names it; `run: <command>` runs that, and
+//!   `start: <command>` starts it as a background process (Hermes refuses
+//!   a foreground `&`), each answer quoting what the tool said;
 //! - `browse: <url>` is a `browser_navigate` call, `look at your screen`
 //!   a `computer_use` capture, and `write: <path>` a `write_file` of one
 //!   line there (each through Hermes' `tool_call` bridge when it defers the
@@ -107,6 +109,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `run: <command>` on a line of what the user said: that command, and an
     // answer that quotes what it printed
     let run = last_user.lines().find_map(|l| l.split_once("run: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
+    // `start: <command>`: that command as Hermes' background process
+    let start = last_user.lines().find_map(|l| l.split_once("start: ").map(|(_, c)| c.trim().to_string())).filter(|c| !c.is_empty());
     // `browse: <url>`: the browser tool goes there; `look at your screen`:
     // computer_use captures it. Each answer quotes what its tool said.
     let browse = last_user.lines().find_map(|l| l.split_once("browse: ").map(|(_, u)| u.trim().to_string())).filter(|u| !u.is_empty());
@@ -114,7 +118,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // `write: <path>`: Hermes' write_file puts `WRITTEN` there
     let write = last_user.lines().find_map(|l| l.split_once("write: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     if let Some(result) = tool_result {
-        if run.is_some() || browse.is_some() || look || write.is_some() {
+        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -123,6 +127,10 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes' smart-approval guardian asks for one word: a person decides.
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
+    }
+    if let (Some(command), true) = (start.as_deref(), has_terminal) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "terminal", "arguments": json!({ "command": command, "background": true }).to_string() } });
+        return (String::new(), Some(call));
     }
     let command = if let Some(c) = run.as_deref() {
         Some(c)
@@ -239,6 +247,11 @@ fn answers_are_the_transcripts() {
     assert!(call["function"]["name"] == "tool_call" && call["function"]["arguments"].as_str().unwrap().contains("\"computer_use\""), "{call}");
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] look at your screen" }], "tools": tools }));
     assert_eq!((t.as_str(), call), ("scripted: no computer_use among my tools", None));
+    // `start:` is a background process, and the answer quotes what it said
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] start: chromium about:blank" }], "tools": tools }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "command": "chromium about:blank", "background": true }).to_string());
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] start: chromium" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"session_id\": \"proc_1\"}" }], "tools": tools }));
+    assert_eq!(t, "scripted: the tool said: {\"session_id\": \"proc_1\"}");
     // write_file, directly or behind tool_search, and the answer quotes it
     let files = json!([{ "type": "function", "function": { "name": "write_file" } }]);
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] write: ~/notes.txt" }], "tools": files }));

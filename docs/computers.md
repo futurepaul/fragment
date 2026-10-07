@@ -166,8 +166,8 @@ that names a PID from before a sleep can name a live process after it.
   a directory from an image layer (EXDEV); on a first start the image
   makes it itself.
 - **The seam** (step 2 of docs/durable-computers.md): `/data/work` is
-  what the guest's tools write (a terminal's working directory, projects,
-  a browser's profile, scratch files), and the rest of `/data` is the
+  what the guest's tools write (a terminal's working directory and home,
+  projects, a browser's profile, scratch files), and the rest of `/data` is the
   guest's own state (for ours, Hermes' home: its databases, sessions,
   profiles, config; and the bridge's state). Each save is two
   `DirectoryBackup` records, `/data` (its work left out, and what a held
@@ -599,9 +599,17 @@ settings and state):
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
   (`terminal.cwd`; left unset, Hermes' multiplexed gateway ran every
-  agent's commands in the gateway's own home, `/data/hermes`), and its
-  desktop browser's profile (`<profile>/bot-desktop/browser-profile`, where
-  Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
+  agent's commands in the gateway's own home, `/data/hermes`). Its home,
+  its terminal's `HOME` and its file tools' `~` (Hermes' profile `home`:
+  "Hermes' container guesses", below), is a link to
+  `/data/work/<profile>/home`, so what its tools write under `~` (a
+  browser's default profile and its databases, a CLI's login) is its
+  work, never Hermes' home (Paul, 2026-10-07). A hard cut: a profile's
+  `home` that already had something in it is set aside in place as
+  `home.before-work` (numbered when taken), unmoved, and the link made;
+  nothing is carried over or deleted (event `profile.home_set_aside`).
+  Its desktop browser's profile (`<profile>/bot-desktop/browser-profile`,
+  where Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
 
   Its saves (`images/hermes/boot/src/held.rs`; "The hold", above): its
   bridge answers to `/var/lib/fragment-run/bridge-held`, and `hermes-boot`
@@ -627,8 +635,8 @@ settings and state):
   unanswered, and a restore's check would have found every such save
   unusable). A database its owner holds locked through the copy's tries
   (1 s: SQLite's exclusive locking mode, in which a running Chromium keeps
-  its own, such as `.config/chromium/Default/declarative_performance_observer.db`
-  under Hermes' home) cannot be copied as of one moment while it runs, so
+  its own, such as `Default/declarative_performance_observer.db`) cannot
+  be copied as of one moment while it runs, so
   it is kept hot too, and the rest copied and answered (until 2026-10-06
   it failed the whole copy, so no hold was answered while a browser ran).
   Any other copy that fails answers nothing: the platform then saves
@@ -835,7 +843,7 @@ after it (`RUNTIME_ENV`, `images/hermes/boot/src/hermes.rs`).
 
 | Guess | What it decides | Pinned |
 |---|---|---|
-| `get_subprocess_home` (`TERMINAL_HOME_MODE`, `auto` by default) | `HOME` for an agent's terminal and `execute_code`, its file tools' `~`, a skill's paths, the write guard's homes: in a container its profile's `home` (`/data/hermes/profiles/<profile>/home`); on a host the gateway's own, `/data/hermes`, one for every agent | `TERMINAL_HOME_MODE=profile`. Only the environment counts: a multiplexed gateway reads no profile's `terminal.home_mode` |
+| `get_subprocess_home` (`TERMINAL_HOME_MODE`, `auto` by default) | `HOME` for an agent's terminal and `execute_code`, its file tools' `~`, a skill's paths, the write guard's homes: in a container its profile's `home` (`/data/hermes/profiles/<profile>/home`, a link to its home in its work, above); on a host the gateway's own, `/data/hermes`, one for every agent | `TERMINAL_HOME_MODE=profile`. Only the environment counts: a multiplexed gateway reads no profile's `terminal.home_mode` |
 | `apply_secure_dir_policy`, `_secure_file` | on a host, Hermes' home made owner-only (0700, 0600) at each start; in a container left as made | `HERMES_SKIP_CHMOD=1` |
 | `browser_tool_install._running_in_docker` | Chromium's `--no-sandbox --disable-dev-shm-usage`; Chromium's auto-install | the image's Chromium (above): always those flags, and never missing |
 

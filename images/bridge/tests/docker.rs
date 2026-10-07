@@ -1020,10 +1020,13 @@ async fn the_hermes_desktop() {
 struct Homes {
     /// Whether Hermes takes the runtime for a container.
     container: bool,
-    /// The agent's terminal's `HOME`.
+    /// The agent's terminal's `HOME`, and where it leads.
     terminal: String,
-    /// Where Hermes' write_file put `~/fragment-home.txt`, as it said.
+    terminal_real: String,
+    /// Where Hermes' write_file put `~/fragment-home.txt`, as it said, and
+    /// where that leads.
     written: String,
+    written_real: String,
     /// The modes of Hermes' home and its directories (`<mode> <path>`).
     modes: String,
 }
@@ -1061,16 +1064,19 @@ async fn homes(runtime: Runtime) -> Homes {
     if !written.is_empty() {
         assert_eq!(c.exec_out(&["cat", &written]), support::model::WRITTEN, "write_file wrote where it said");
     }
-    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/hermes/profiles/juniper-paul/cache/scratch", "/data/hermes/profiles/juniper-paul/home"];
+    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/hermes/profiles/juniper-paul/cache/scratch", "/data/work/juniper-paul/home"];
     let modes = c.exec_out(&["sh", "-c", &format!("stat -c '%a %n' {} 2>/dev/null", dirs.join(" "))]);
-    Homes { container: guess.trim() == "True", terminal: said(&terminal, "home"), written, modes }
+    let real = |p: &str| if p.is_empty() { String::new() } else { c.exec_out(&["realpath", p]).trim().to_string() };
+    let terminal = said(&terminal, "home");
+    Homes { container: guess.trim() == "True", terminal_real: real(&terminal), terminal, written_real: real(&written), written, modes }
 }
 
 /// Goal: an agent's home is the same on Docker and on Containers, though
 /// Hermes takes only Docker for a container: its terminal's `HOME` and its
 /// file tools' `~` are its profile's own `home` (each agent its own, as
-/// Hermes gives a container), and Hermes leaves its home's modes as the
-/// image makes them. Pinned by the image (`RUNTIME_ENV`), not guessed.
+/// Hermes gives a container), a link to its home in its work, and Hermes
+/// leaves its home's modes as the image makes them. Pinned by the image
+/// (`RUNTIME_ENV`), not guessed.
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn an_agents_home_is_the_same_on_either_runtime() {
@@ -1078,12 +1084,55 @@ async fn an_agents_home_is_the_same_on_either_runtime() {
     let (docker, hosted) = tokio::join!(homes(Runtime::Docker), homes(Runtime::Hosted));
     eprintln!("home: Docker {docker:#?}\nhome: Containers' way {hosted:#?}");
     assert!(docker.container && !hosted.container, "Hermes takes Docker for a container and the hosted rung for none (else this proves nothing): {docker:?} {hosted:?}");
-    let home = "/data/hermes/profiles/juniper-paul/home";
+    let (profile_home, home) = ("/data/hermes/profiles/juniper-paul/home", "/data/work/juniper-paul/home");
     for (on, h) in [("Docker", &docker), ("Containers' way", &hosted)] {
-        assert_eq!(h.terminal, home, "on {on}, the agent's terminal's HOME is its profile's: {h:#?}");
-        assert_eq!(h.written, format!("{home}/fragment-home.txt"), "on {on}, its file tools' `~` is the same home: {h:#?}");
+        assert_eq!(h.terminal, profile_home, "on {on}, the agent's terminal's HOME is its profile's: {h:#?}");
+        assert_eq!(h.terminal_real, home, "on {on}, which is its home in its work: {h:#?}");
+        assert!(h.written.ends_with("/fragment-home.txt"), "on {on}, write_file said where it wrote: {h:#?}");
+        assert_eq!(h.written_real, format!("{home}/fragment-home.txt"), "on {on}, its file tools' `~` is the same home: {h:#?}");
     }
     assert_eq!(docker.modes, hosted.modes, "Hermes leaves its home's modes alike on both");
+}
+
+/// The image's last `held` event: what its last hold copied, and kept hot.
+fn held_event(c: &Container) -> Option<serde_json::Value> {
+    c.logs().lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok()).find(|v| v["event"] == "held")
+}
+
+/// Goal (Paul, 2026-10-07: an agent's `~` is its work): a Chromium the
+/// agent runs from its terminal with its default profile, the full one as
+/// its desktop runs it, keeps that profile in its home, in its work, so a
+/// hold while it runs keeps none of its databases hot (`locked` empty), and
+/// none is under Hermes' home for a restore's check to find. Before, on
+/// Containers, it was `/data/hermes/.config/…`, held locked (the debt
+/// ledger's "A running browser's databases under Hermes' home").
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
+    build(&repo_dir(), "images/hermes/Dockerfile", &hermes_tag());
+    let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let chat = fake.chat("browse", &["juniper"]);
+    let c = Container::run_on(Runtime::Hosted, &hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
+    within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "start: DISPLAY=:99 /opt/fragment/bin/chromium --headless=new about:blank" }));
+    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    within(&fake, &chat, &c, 240_000, "the terminal's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)).await;
+    let dbs = |under: &str| c.exec_out(&["sh", "-c", &format!("find {under} \\( -name '*.db' -o -name History -o -name Cookies \\) -path '*chrom*' 2>/dev/null")]);
+    let t = Instant::now();
+    while dbs("/data/").trim().is_empty() {
+        assert!(t.elapsed() < Duration::from_secs(60), "the agent's Chromium made no databases; the terminal said {:?}", fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "the agent's Chromium runs into the hold");
+    let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
+    let held = held_event(&c).unwrap_or_else(|| panic!("no held event; the container said:\n{}", c.logs()));
+    eprintln!("browse: held {held}; left out {left_out:?}\nbrowse: its Chromium's databases:\n{}", dbs("/data/"));
+    assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "and through it");
+    assert_eq!(held["locked"], json!([]), "no database kept hot for being locked: {held}");
+    assert_eq!(dbs("/data/hermes/").trim(), "", "none of its databases is under Hermes' home");
+    assert!(!dbs("/data/work/juniper-paul/home/").trim().is_empty(), "they are in its home, in its work");
+    unhold(&c);
 }
 
 // ---- an approval nobody answers (Paul on p5, 2026-10-05: "I missed the
