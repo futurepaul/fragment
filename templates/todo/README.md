@@ -9,7 +9,9 @@ the author-facing API.
   can change the list, so its visibility decides who that is (the share
   link by default). For a list only members may change, set the
   mutations' role to `editor` and the visibility to `members`; browsers
-  act as members once people sign in (phase 4).
+  act as members once people sign in (phase 4). Each has a
+  `description`, which makes it a tool of `fragment mcp`: another agent
+  reads the list, and with `--write` changes it.
 - `app.mjs` is the `App` class: one method per operation over its own
   SQLite. Each mutation publishes a line to `activity`.
 - `site/index.html` uses the browser library (`./__fragment.js`): `live`

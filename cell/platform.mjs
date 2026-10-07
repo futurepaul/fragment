@@ -341,9 +341,12 @@ class Job {
   }
 
   // Text through the platform's model route (a tier: cheap unless named),
-  // and images on Workers AI (FLUX.1 [schnell]); the owner's ledger pays
-  // for each (docs/ledger.md):
-  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort? }) → { text, model, tier, usage }
+  // decisions (Clef) and images (FLUX.1 [schnell]) on Workers AI; the
+  // owner's ledger pays for each (docs/ledger.md):
+  //   ai.text({ model?, prompt | messages, max_tokens?, reasoning_effort?, tools?, tool_choice?, draft?: { channel, turn } })
+  //     → { text, message: { role, content, tool_calls? }, finish_reason, model, tier, usage }
+  //     (with a draft it streams, its text so far that channel's draft)
+  //   ai.decide({ model: "clef" | "clef-flash", state, questions, images? }) → { answers, model, usage }
   //   ai.image({ prompt, path, steps? })  → { path, size, sha256, mediaType }: a JPEG on main
   //   ai.video(…) is refused, saying why: videos are off until they run on Cloudflare
   get ai() {
@@ -351,6 +354,7 @@ class Job {
     const clean = (o) => JSON.parse(JSON.stringify(o ?? {}));
     return {
       text: (opts) => step("ai.text", clean(opts)),
+      decide: (opts) => step("ai.decide", clean(opts)),
       image: (opts = {}) => (checkPath(opts.path), step("ai.image", clean(opts))),
       video: (opts = {}) => step("ai.video", clean(opts)),
     };

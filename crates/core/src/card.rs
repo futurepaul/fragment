@@ -92,7 +92,7 @@ impl Skip {
 /// Whether a fragment of `kind` and `visibility` is shot, and as whom.
 pub fn visitor(kind: FragmentKind, visibility: Visibility) -> Result<Visitor, Skip> {
     match (kind, visibility) {
-        (FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills, _) => Err(Skip::NotAnApp),
+        (FragmentKind::Chat | FragmentKind::Agent | FragmentKind::Skills | FragmentKind::Mind, _) => Err(Skip::NotAnApp),
         (_, Visibility::Members) => Err(Skip::MembersOnly),
         (FragmentKind::App | FragmentKind::Brain, Visibility::Public) => Ok(Visitor::Anyone),
         (FragmentKind::App | FragmentKind::Brain, Visibility::Link) => Ok(Visitor::LinkHolder),
@@ -599,7 +599,7 @@ mod tests {
     fn who_is_shot_and_as_whom() {
         use FragmentKind::*;
         use Visibility::*;
-        for kind in [Chat, Agent] {
+        for kind in [Chat, Agent, Skills, Mind] {
             for v in [Public, Link, Members] {
                 assert_eq!(visitor(kind, v), Err(Skip::NotAnApp));
             }

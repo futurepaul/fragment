@@ -83,8 +83,8 @@ pub const PREWAKE_MS: i64 = 60_000;
 /// Starts that fail in a row before the computer stops trying.
 pub const STARTS_FAILED_MAX: u32 = 3;
 /// A start that has not reported ready by then has failed: a new image's
-/// first pull at a location takes 24–40 s (spike S3b), a Hermes boot on a
-/// fresh disk up to 82 s.
+/// first pull at a location takes 24–40 s (spike S3b), the slowest runtime
+/// boot measured on a fresh disk 82 s.
 pub const START_DEADLINE_MS: i64 = 3 * 60_000;
 /// A sleep's stop (snapshot, signal, five seconds of exit, destroy)
 /// finishes within this, or it is asked again.
@@ -977,8 +977,8 @@ const _: () = assert!(LEFT_OUT_MAX * 2 <= HELD_ANSWER_MAX_BYTES, "the answer's b
 /// What a guest's answer to the hold (`/run/computer/held`, docs/computers.md)
 /// names as left out of its save: one gitignore pattern a line, relative to
 /// `/data`, of letters, digits and `._-/*?[]` (empty lines skipped). These
-/// are files the guest copied under the hold to names the save keeps (our
-/// Hermes image: its SQLite databases, by SQLite's online backup), so a
+/// are files the guest copied under the hold to names the save keeps (its
+/// SQLite databases, say, by SQLite's online backup), so a
 /// hot copy of them, which could tear, is never what a wake restores. An
 /// answer past its bounds, or with any other line, is refused: the guest is
 /// then saved whole, losing nothing.

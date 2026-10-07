@@ -15,7 +15,7 @@ No API key is needed.
 Script path:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py --help
+python3 ${SKILL_DIR}/scripts/polymarket.py --help
 ```
 
 ## Workflow
@@ -29,7 +29,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py --help
 Search:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py search \
+python3 ${SKILL_DIR}/scripts/polymarket.py search \
   --query "OpenAI funding" \
   --limit 5
 ```
@@ -37,31 +37,31 @@ python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py search \
 Trending events:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py trending \
+python3 ${SKILL_DIR}/scripts/polymarket.py trending \
   --limit 10
 ```
 
 Specific event:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py event \
+python3 ${SKILL_DIR}/scripts/polymarket.py event \
   --slug "some-event-slug"
 ```
 
 Specific market:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py market \
+python3 ${SKILL_DIR}/scripts/polymarket.py market \
   --slug "some-market-slug"
 ```
 
 Token price and orderbook:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py price \
+python3 ${SKILL_DIR}/scripts/polymarket.py price \
   --token-id "TOKEN_ID"
 
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py book \
+python3 ${SKILL_DIR}/scripts/polymarket.py book \
   --token-id "TOKEN_ID" \
   --limit 10
 ```
@@ -69,12 +69,12 @@ python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py book \
 Price history and trades:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py history \
+python3 ${SKILL_DIR}/scripts/polymarket.py history \
   --condition-id "0xCONDITION_ID" \
   --interval 1m \
   --fidelity 30
 
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py trades \
+python3 ${SKILL_DIR}/scripts/polymarket.py trades \
   --condition-id "0xCONDITION_ID" \
   --limit 10
 ```
@@ -82,7 +82,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py trades \
 Machine-readable output:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/polymarket.py search \
+python3 ${SKILL_DIR}/scripts/polymarket.py search \
   --query "OpenAI funding" \
   --json
 ```

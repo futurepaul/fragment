@@ -216,8 +216,8 @@ ends it.
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`),
 `expired` (no answer by `expiresAt`, or the computer restarted while it
-waited, as an owner's sleep or a crash does: Hermes cannot resume a turn
-across a restart, and the agent's next turn is told the card was cut
+waited, as an owner's sleep or a crash does: a runtime cannot resume a
+turn across a restart, and the agent's next turn is told the card was cut
 with it), or `stopped`.
 
 ```json

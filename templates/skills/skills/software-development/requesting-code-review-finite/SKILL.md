@@ -5,9 +5,8 @@ version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
 metadata:
-  hermes:
-    tags: [code-review, quality, validation, workflow, review]
-    related_skills: [subagent-driven-development-finite, writing-plans-finite, test-driven-development-finite]
+  tags: [code-review, quality, validation, workflow, review]
+  related_skills: [subagent-driven-development-finite, writing-plans-finite, test-driven-development-finite]
 ---
 
 # Requesting Code Review

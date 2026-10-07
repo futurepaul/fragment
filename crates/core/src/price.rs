@@ -251,14 +251,22 @@ pub struct PriceBook {
 /// model catalog page for Opus 5.5, Anthropic's list price passed through
 /// Unified Billing (spike S4; the gateway's own `cost` matched these on
 /// every call). GLM has no cache writes: its write price is its input
-/// price, so a write it reported would never be free.
-pub const DEFAULT_MODELS: [(&str, TokenPrices); 3] = [
+/// price, so a write it reported would never be free. Clef (a job's
+/// `ai.decide`: crate::decide) bills input tokens only (its catalog pages,
+/// read 2026-10-07) and caches nothing: every input class is its input
+/// price, its output free. A deployment whose ledgers already hold book 1
+/// takes Clef's rows by naming a newer `price_book_version`.
+pub const DEFAULT_MODELS: [(&str, TokenPrices); 5] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),
     // $1.40 in, $0.26 cached, $4.40 out
     ("@cf/zai-org/glm-5.3", TokenPrices { input: 1_400_000, cached_input: 260_000, cache_write: 1_400_000, output: 4_400_000 }),
     // $4 in, $0.20 cache read, $5 cache write, $20 out (the high tier, off for now)
     ("anthropic/claude-opus-5.5", TokenPrices { input: 4_000_000, cached_input: 200_000, cache_write: 5_000_000, output: 20_000_000 }),
+    // $0.24 per million input tokens
+    ("@cf/cloudflare/clef", TokenPrices { input: 240_000, cached_input: 240_000, cache_write: 240_000, output: 0 }),
+    // $0.09 per million input tokens
+    ("@cf/cloudflare/clef-flash", TokenPrices { input: 90_000, cached_input: 90_000, cache_write: 90_000, output: 0 }),
 ];
 /// Workers AI: $0.011 per thousand neurons (spike S4: neurons × $0.000011
 /// matched tokens × the catalog price on every call). Images are priced
@@ -340,7 +348,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes.
 pub const DEFAULT_KEYS: [(&str, i64, u64); 4] = [
     // Perplexity's Search API (`POST /search`, the perplexity-research
-    // skill's search and Hermes' own web search): $5.00 per 1,000
+    // skill's search): $5.00 per 1,000
     // requests. Source: docs.perplexity.ai/getting-started/pricing. A Sonar
     // Pro brief (`/v1/sonar`) also bills tokens ($3 in, $15 out per
     // million) and a request fee of $6 to $14 per 1,000: it is metered at
@@ -640,6 +648,18 @@ mod tests {
             let by_neurons = book.price(&Usage::Neurons { milli: (neurons * 1000.0).ceil() as u64 }).unwrap();
             assert!((by_tokens.charge - by_neurons.charge).abs() <= 1, "{model} {input}/{cached}/{output}: {by_tokens:?} {by_neurons:?}");
         }
+    }
+
+    /// Goal: Clef bills its input tokens only, at its catalog prices, with
+    /// the credits' fee and the margin. Method: a million tokens in and a
+    /// million out on each size.
+    #[test]
+    fn clef_bills_input_tokens_only() {
+        let book = PriceBook::defaults();
+        let million = |model: &str| book.price(&tokens(model, 1_000_000, 0, 0, 1_000_000)).unwrap();
+        assert_eq!(million("@cf/cloudflare/clef"), Priced { list: 240_000, cost: 252_000, charge: 378_000 });
+        assert_eq!(million("@cf/cloudflare/clef-flash"), Priced { list: 90_000, cost: 94_500, charge: 141_750 });
+        assert_eq!(book.price(&tokens("@cf/cloudflare/clef-flash", 0, 1_000_000, 0, 0)).unwrap().list, 90_000, "nothing cached is cheaper");
     }
 
     /// Goal: a row rounds once, from its exact sum, never part by part.

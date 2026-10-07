@@ -19,7 +19,9 @@
 //! `FRAGMENT_AI_URL` instead, and the same input is POSTed to
 //! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
-//! A job's image step calls its model on the same transport (`run`).
+//! A job's image and decision steps call their models on the same
+//! transport (`run`), and its text step with a draft reads its answer as
+//! it streams (`call_streamed`).
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
@@ -27,7 +29,7 @@
 //! is the call itself. The payer is the agent's owner (decision 36).
 //! A call names a tier, or `vision`: the deployment's vision model
 //! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
-//! image (Hermes' screenshots), metered the same way.
+//! image (its computer's screenshots), metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 
@@ -48,8 +50,8 @@ use crate::error::{CellError, CellResult};
 use crate::ledger::{self, FragmentOpen};
 use crate::{js, read_body, routed};
 
-/// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
-/// and its prompt fit.
+/// A call's request (`fragment_core::models`): the largest image and its
+/// prompt fit.
 pub use fragment_core::models::MODEL_BODY_MAX_BYTES;
 /// An unstreamed answer, or a refusal, read whole: at most `MAX_TOKENS`
 /// of text and its JSON.
@@ -247,9 +249,24 @@ pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Optio
     run(env, bounded.model, &bounded.input, payer, agent).await
 }
 
+/// `call`, streamed (a job's text step with a draft): its status, the
+/// gateway's log id, and its answer's bytes as they come; a refusal's
+/// body is read whole.
+pub(crate) async fn call_streamed(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, std::result::Result<ByteStream, Vec<u8>>, Option<String>)> {
+    assert!(bounded.stream, "a streamed call asks for a stream");
+    let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let mut resp = transport(env, Config::from_env(env), bounded.model, &bounded.input, &meta).await?;
+    let status = resp.status_code();
+    let log_id = resp.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        return Ok((status, Err(read_whole(&mut resp).await?), log_id));
+    }
+    Ok((status, Ok(resp.stream()?), log_id))
+}
+
 /// One call of a catalog model with its input, on the same transport,
-/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
-/// caller bounds the input and meters it).
+/// unmetered and read whole (`call`; a job's image and decision steps:
+/// ai.rs, whose caller bounds the input and meters it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     let mut resp = transport(env, Config::from_env(env), model, input, &meta).await?;

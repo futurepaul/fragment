@@ -74,7 +74,7 @@ struct Deployment {
     /// `default`, which makes one that logs). Without it, models are off.
     ai_gateway: Option<String>,
     /// The model the route's `vision` runs (`FRAGMENT_VISION_MODEL`): a
-    /// runtime's calls about an image, Hermes' screenshots among them.
+    /// runtime's calls about an image, screenshots among them.
     /// GLM-5.3 Flash unless named; one the price book does not price is
     /// refused (`fragment_core::models::vision_model`).
     vision_model: Option<String>,
@@ -108,7 +108,7 @@ struct Computers {
     /// The image a new computer is pinned to (one of `images`).
     default_image: String,
     /// By name: each image's Dockerfile and build context, relative to the
-    /// repo (`images/hermes/Dockerfile`, `.`: the Hermes image carries the CLI,
+    /// repo (`images/goose/Dockerfile`, `.`: the goose image carries the CLI,
     /// so it builds from the repo root), and its build variables.
     images: BTreeMap<String, Image>,
     /// How long a computer whose sleep's save keeps failing stays awake
@@ -869,7 +869,7 @@ mod tests {
             let path = devstack::repo_root().join(file);
             let d = load(&path).unwrap();
             assert!(names(&d, Some("dev")).is_ok(), "{file}");
-            assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
+            assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("goose"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
             assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
@@ -1012,7 +1012,7 @@ mod tests {
         let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key": "k" });
         assert!(checked(with(vec![google])).is_err(), "a connection has no key");
         let mut d = deployment(None, None);
-        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
+        d.computers = Some(Computers { default_image: "goose".into(), images: BTreeMap::new(), unsaved_max_ms: None });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
     }

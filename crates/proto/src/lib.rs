@@ -32,6 +32,9 @@ pub mod limits {
     pub const MANIFEST_MAX_BYTES: usize = 256 * 1024;
     /// Declared operations per fragment.
     pub const OPERATIONS_MAX: usize = 256;
+    /// An operation's `description`, in characters (it makes the
+    /// operation an MCP tool: `fragment mcp`).
+    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -450,6 +453,9 @@ pub enum FragmentKind {
     /// A person's managed skills (decision 17: the blessed `skills`
     /// template), which their agents' computers install.
     Skills,
+    /// A person's one memory and main agent (docs/optchat.md: the blessed
+    /// `mind` template).
+    Mind,
 }
 
 impl FragmentKind {
@@ -460,6 +466,7 @@ impl FragmentKind {
             FragmentKind::Agent => "agent",
             FragmentKind::Brain => "brain",
             FragmentKind::Skills => "skills",
+            FragmentKind::Mind => "mind",
         }
     }
 
@@ -470,6 +477,7 @@ impl FragmentKind {
             "agent" => Some(FragmentKind::Agent),
             "brain" => Some(FragmentKind::Brain),
             "skills" => Some(FragmentKind::Skills),
+            "mind" => Some(FragmentKind::Mind),
             _ => None,
         }
     }
@@ -998,6 +1006,10 @@ pub struct OpDecl {
     /// no replay (the same id runs again) and no effects (docs/MODEL.md).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// What it does, for an agent (1 to `limits::OP_DESCRIPTION_MAX_CHARS`
+    /// characters): an operation with one is a tool `fragment mcp` serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A channel as `fragment.json` declares it (app channels), or a built-in.
