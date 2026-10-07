@@ -12,7 +12,7 @@
 //!
 //! Tokens and states are 32 random bytes; the cell keeps their SHA-256.
 //!
-//! A frame's session (docs/fragment-boats.md) is a site session bound to
+//! A frame's session (docs/api.md, Frame sessions) is a site session bound to
 //! the origin of the page that framed it (`embedder`): minted from the
 //! platform session for a frame of the platform's own page (the shell's
 //! tabs: `/auth/frame`, whose embedder is the platform's origin), redeemed

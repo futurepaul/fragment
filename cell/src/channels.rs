@@ -4,8 +4,8 @@
 //! fragment.json declares. Clients read: a page at a time over the API, or
 //! live from a cursor over the fragment's `__live` socket.
 //!
-//! A channel fragment.json declares with a `post` role takes posts (ROADMAP
-//! decision 18): the platform appends a member's record for them, with no
+//! A channel fragment.json declares with a `post` role takes posts (decision
+//! R18): the platform appends a member's record for them, with no
 //! app code (a chat needs no worker). A post is checked as a call is (the
 //! role, the public call budget, the id), bounded as a record is, keyed by
 //! its poster and id as a mutation is, and reaches sockets, subscriptions,

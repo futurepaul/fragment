@@ -458,7 +458,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
         return Ok(Minting::Redeem(redeem));
     }
     // silent on their own fragments and those shared with them, which know
-    // them already (answer 1, docs/fragment-boats.md)
+    // them already (docs/api.md, Asking first)
     let who = Signed::new(minted.identity, None);
     match share::ask(env, url, name, &who, Method::Get, "/api/status", None).await {
         Ok(_) => {
@@ -616,7 +616,7 @@ pub(crate) fn is_refusal(code: ErrorCode) -> bool {
 }
 
 /// A refusal a browser navigated to on a fragment's origin, answered as the
-/// platform's page instead of the API's JSON (ROADMAP decision 4). A
+/// platform's page instead of the API's JSON (decision R4). A
 /// top-level visit that no session here admits (401) goes to the
 /// platform's sign-in for this fragment, and back to the page it asked for:
 /// at once on the person's own fragments and those shared with them, after

@@ -1,6 +1,6 @@
-//! Isolation between fragments (docs/fragment-boats.md,
-//! slice 1). Which of a browser's cookies count on a fragment's
-//! origin follows the Fetch Metadata the browser sends, so another
+//! Isolation between fragments (docs/api.md, Which cookies count). Which
+//! of a browser's cookies count on a fragment's origin follows the Fetch
+//! Metadata the browser sends, so another
 //! fragment's page (one site with it) reaches it only as a stranger would;
 //! a frame of a fragment signs in only through the platform's mint, for a
 //! frame of the platform's own page (the frames section), so another
@@ -300,7 +300,7 @@ fn html_request(api: &Api, url: String, dest: &str, mode: &str, site: &str, cook
     api.call(Call { method: "GET", url, cookie, extra, ..Call::default() })
 }
 
-/// Opening a fragment by its own URL (ROADMAP decision 4): a browser
+/// Opening a fragment by its own URL (decision R4): a browser
 /// signed in to the platform lands on the fragment signed in, silently on
 /// the person's own and on those shared with them, asked once on anyone
 /// else's; signed out, it signs in first and comes back to the path it

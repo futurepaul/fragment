@@ -1,5 +1,5 @@
 // Thin sync over the code.storage commit builder — commit without a local
-// clone (ROADMAP workstream B):
+// clone:
 //   push  = scan folder, diff against the branch-head listing, ONE
 //           commit-pack with expected-parent CAS; conflict -> refetch head,
 //           rebuild the diff, retry (bounded, explicit error after)

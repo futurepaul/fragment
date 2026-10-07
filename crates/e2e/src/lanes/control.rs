@@ -148,7 +148,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("create", &[crate::Need::Fakes, crate::Need::Deployment]) {
         return Ok(());
     }
-    // a person takes a username before they make anything (decision 16)
+    // a person takes a username before they make anything (decision R16)
     let nameless = api.person_without_username()?;
     let r = api.create(&nameless, &s.name("nameless"))?;
     s.ok("a person without a username cannot create", r.status == 400 && r.message().contains("username"), &r);

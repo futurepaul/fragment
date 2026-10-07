@@ -1,7 +1,7 @@
-//! Frames (docs/api.md, Frame sessions; docs/fragment-boats.md, design
-//! C): the platform's own page (the shell) shows fragments, each on an
-//! origin of its own, and a computer's ports in frames, signed in as the
-//! person looking at it. These are the pure decisions under that: which
+//! Frames (docs/api.md, Frame sessions): the platform's own page (the
+//! shell) shows fragments, each on an origin of its own, and a
+//! computer's ports in frames, signed in as the person looking at it.
+//! These are the pure decisions under that: which
 //! navigation may mint a frame's sign-in, which pages may show a frame's
 //! answer, and what may be named there as an origin.
 

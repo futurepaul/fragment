@@ -225,7 +225,7 @@ pub(crate) async fn ask_registry<C: Call>(env: &Env, call: &C) -> CellResult<C::
 }
 
 /// The identity a request's signed URL names in `for`: an agent acting
-/// for whoever asked it (ROADMAP decision 17). At most one, an identity.
+/// for whoever asked it (decision R17). At most one, an identity.
 fn acting_for(url: &Url) -> CellResult<Option<String>> {
     let mut named = url.query_pairs().filter(|(k, _)| k == "for").map(|(_, v)| v.into_owned());
     let first = named.next();
@@ -309,7 +309,7 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 
 /// Which of a browser's cookies count on a fragment's origin, from the
 /// Fetch Metadata it sends (`Sec-Fetch-*`, which no page's script sets;
-/// docs/fragment-boats.md, decision 3). Every fragment is one site with
+/// docs/api.md, Which cookies count). Every fragment is one site with
 /// the others, so a SameSite=Lax cookie rides along on another fragment's
 /// images, scripts, fetches, and forms; these headers say whose page asked:
 ///
@@ -573,7 +573,7 @@ async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
 }
 
 /// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
-/// reaches for whoever asked (ROADMAP decision 17): the asker's, where the
+/// reaches for whoever asked (docs/cloudflare-v1.md, R17): the asker's, where the
 /// agent or its owner is in too, each with the role the agent acts with
 /// there (`access::listed_role`). A call decides again, live.
 async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {

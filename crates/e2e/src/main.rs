@@ -55,7 +55,7 @@ pub const BOATS: &str = "boats.localhost";
 enum Shape {
     /// The platform on 127.0.0.1, the fragments under `fragment.localhost`.
     Plain,
-    /// As fragment.club is since the move (docs/fragment-boats.md): the
+    /// As fragment.club is (docs/api.md, Hosts): the
     /// platform at `fragment.localhost`, cross-site from the fragments
     /// (`<flat>.boats.localhost`, one site with each other).
     TwoSites,

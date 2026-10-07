@@ -1,4 +1,4 @@
-//! Posts (ROADMAP decision 18): a channel fragment.json declares with a
+//! Posts (decision R18): a channel fragment.json declares with a
 //! `post` role takes records the platform appends for the poster, with no
 //! app code at all. Checked in the `channels` section (the rules: the role,
 //! the replay, the size, a channel without one, the deploy check, the

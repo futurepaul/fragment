@@ -256,7 +256,7 @@ pub fn valid_username(username: &str) -> bool {
         && !RESERVED_USERNAMES.contains(&username)
 }
 
-/// A fragment's name: `<label>.<username>` (decision 16), served at
+/// A fragment's name: `<label>.<username>` (decision R16), served at
 /// `<label>--<username>.<suffix>` ([`flat_name`]).
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
@@ -855,7 +855,7 @@ pub struct IdentityView {
     /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// A person's username (decision 16): their fragments are
+    /// A person's username (decision R16): their fragments are
     /// `<label>.<username>`. An agent's fragments go under its owner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,

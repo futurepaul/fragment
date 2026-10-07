@@ -1,9 +1,9 @@
 # MODEL — the fragment core model
 
-The shape the cell is built to: decided 2026-09-23 (ROADMAP decisions
-2–4 and the five changes Paul approved), on Cloudflare since phase 2 of
-docs/cloudflare-v1.md. Every mechanism names the Cloudflare primitive it
-uses; docs/api.md is the wire contract in full.
+The shape the cell is built to: decided 2026-09-23 (the five changes
+Paul approved), on Cloudflare since phase 2 of docs/cloudflare-v1.md.
+Every mechanism names the Cloudflare primitive it uses; docs/api.md is
+the wire contract in full.
 
 ## The five changes
 
@@ -44,7 +44,7 @@ uses; docs/api.md is the wire contract in full.
 | Files | code.storage git (wire contract unchanged) | every file; one of 1 MiB or more as a pointer to its blob |
 | Blobs | an **R2** bucket (`BLOBS`) | the bytes of large files, content-addressed by SHA-256; only blobs a pointer at a branch tip references are kept |
 | Jobs | **Workflows** (one instance per run) | multi-step or long operations |
-| Deliveries | **Queues** (at-least-once, dead-letter queue, `message.id` as idempotency key) | outbound webhooks and web push |
+| Deliveries | **Queues** (at-least-once, dead-letter queue, `message.id` as idempotency key) | records to channel subscribers, and web push |
 | Schedules | the supervisor's alarm (the platform takes the app's away) | per-fragment cron and retry backoff, multiplexed onto one alarm |
 
 The supervisor is on the path of every call into the app: it checks the
@@ -166,13 +166,13 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   them. Clients never append: records come from the platform and from
   mutations' effects, except on a channel the fragment declares
   postable, where the platform appends a member's record for them
-  (ROADMAP decision 18); one that says `"signedIn": true` takes posts
+  (docs/cloudflare-v1.md, R18); one that says `"signedIn": true` takes posts
   from signed-in posters only (an anonymous visitor holding the role is
   refused).
 - Subscribers: hibernatable WebSockets that resume from a cursor (a
   WebSocket closes when the cell moves, so clients reconnect with their
   last `seq`); channel-triggered operations; agents; and outbound
-  deliveries (webhooks, web push) through a Queue.
+  deliveries (a subscription's URL, web push) through a Queue.
 - Presence is per socket and never stored.
 - fragment's per-room persisted document becomes a query operation plus
   a change signal; `ctx.state` becomes the app's SQL.
@@ -181,7 +181,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
 
 - A principal is an identity: a person, an agent, or a fragment, with
   one or more public keys in the registry (finite.computer's BANKS
-  model, ROADMAP decision 15). The CLI proves a key with NIP-98 and the
+  model, docs/cloudflare-v1.md, R15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
   maps to the person; an agent signs with its cell's key; a fragment
   with its own key (unregistered: it is the principal of its own
@@ -211,11 +211,10 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   as a viewer. Operation ids belong to their caller: the ledger keys a
   mutation by principal and id.
 - Origins: each fragment is served from
-  `<label>--<username>.fragment.boats` (its old host on fragment.club
-  redirects there); the platform (login, share sheet, invites, the share
-  header) from `fragment.club`, another site (ROADMAP decision 23). The
-  router checks the hostname against the configured suffix before it
-  trusts it.
+  `<label>--<username>.fragment.boats`; the platform (login, the share
+  sheet, invites) from `fragment.club`, another site
+  (docs/cloudflare-v1.md, decision 5). The router checks the hostname against the configured
+  suffix before it trusts it.
 
 ## Agents
 
@@ -225,8 +224,8 @@ whose bridge turns the records of the channels it follows into turns
 (docs/cloudflare-v1.md, decisions 14 and 15; docs/computers.md;
 docs/chat-records.md). It acts on fragments through the platform's API
 as their member, for whoever asked: every call names them (`for`), and
-acts with the lower of their role and the agent's cap (ROADMAP decision
-17). The in-fragment goose agent (a loop in a Durable Object of its own,
+acts with the lower of their role and the agent's cap
+(docs/cloudflare-v1.md, R17). The in-fragment goose agent (a loop in a Durable Object of its own,
 a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
 #156): one runtime, with one set of turn semantics.
 
@@ -237,6 +236,26 @@ Object, which starts and stops it, saves and restores its `/data`, and
 runs its egress. Its image runs the turns of the person's agent
 fragments, as those agents; the platform names no agent runtime. The
 contract is docs/computers.md.
+
+## Where each fact lives
+
+Every change is checked against this table.
+
+| Thing | Source of truth | Copies must be |
+|---|---|---|
+| File bytes, their history, `main` and `live` | code.storage git | a local folder is a disposable working copy |
+| Tree index (path, size, SHA per pinned commit) | derived from git | in the cell's SQLite; names its pinned SHA; moved by the platform's own moves (its commits, a deploy), a writer's refresh after its push, or the poll backstop |
+| Manifest and declared operations | `fragment.json` in git | the cell's copy at the pin; an invalid one at a new pin keeps the last good and says why (`status.code.error`) |
+| Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
+| Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
+| Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
+| Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
+| Audit trail | the `events` channel | pin moves recorded as events |
+
+No file bytes persist in the cell's SQLite: a file lives in git or, at
+1 MiB and above, in R2 under its hash, named by a pointer in git.
 
 ## Limits (initial; each enforced and tested)
 
