@@ -1,7 +1,6 @@
 //! State survives a graceful restart and a crash of the node (a sleeping
 //! job, sealed secrets and keys, sessions, and a channel's sequence
-//! included); then the node runs without hostnames and serves fragments
-//! from `/f/<name>/`.
+//! included).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -102,7 +101,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     anyhow::ensure!(said && r.status == 200 && searched, "search setup: {r}");
 
     s.stop()?;
-    let api = s.start(false, true)?;
+    let api = s.start(false)?;
     let r = api.op(&owner, &name, "add_todo", "r1", json!({ "text": "survives" }))?;
     s.ok("after a restart the replay returns the stored result", r.body["replayed"] == true && r.body["result"] == first.body["result"], &r);
     s.ok("after a restart the app's rows survive", count(&api, &owner, &name) == 1, "count");
@@ -196,7 +195,7 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     let left = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": ended, "op": "ended" })))?;
     let lists_left = left.body["ended"][0]["lists"].as_i64().unwrap_or(0);
     s.crash()?;
-    let api = s.start(false, true)?;
+    let api = s.start(false)?;
     let r = api.op(&owner, &name, "add_todo", "r2", json!({ "text": "before the crash" }))?;
     s.ok("after a crash an acknowledged mutation replays", r.body["replayed"] == true, &r);
     s.ok("after a crash no acknowledged write is lost", count(&api, &owner, &name) == 2, "count");
@@ -212,39 +211,5 @@ pub fn restart(s: &mut Suite, _: &Api) -> Result<()> {
     s.ok(&format!("after a crash a delete's cleanup it cut short finishes ({lists_left} lists were left to tell)"), lists_left > 0 && cleaned, last);
     let r = api.signed(&member, "GET", "/api/fragments", None)?;
     s.ok("and the deleted fragment has left its member's list", r.status == 200 && !r.text.contains(&format!("\"{ended}\"")), &r);
-    Ok(())
-}
-
-/// A fleet without a hostname suffix serves fragments under `/f/<name>/`.
-pub fn pathmode(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("pathmode", &[crate::Need::Node]) {
-        return Ok(());
-    }
-    s.stop()?;
-    let api = s.start(false, false)?;
-    let owner = api.person()?;
-    let name = s.named(&api, &owner, "paths")?;
-    let c = s.create(&api, &owner, &name)?;
-    s.ok("without a suffix the canonical URL is a path", c["canonical"] == format!("{}/f/{name}/", api.base), &c);
-    api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
-    s.commit(&c, &[("site/index.html", Some(b"<p>by path</p>")), ("app.mjs", Some(include_bytes!("../../fixtures/guestbook.mjs"))), ("fragment.json", Some(include_bytes!("../../fixtures/guestbook.json")))]);
-    s.deploy(&c);
-    let r = api.page(&name, "", None)?;
-    s.ok("a page is served by path", r.status == 200 && r.text.contains("by path"), &r);
-    let session = api.sign_in(&Api::email_of(&owner))?;
-    let frame = vec![("sec-fetch-dest", "iframe".to_string()), ("sec-fetch-mode", "navigate".to_string()), ("sec-fetch-site", "same-origin".to_string())];
-    let url = format!("{}/auth/frame?name={name}&return=/", api.base);
-    let r = api.call(Call { method: "GET", url, cookie: Some(format!("fragment_session={session}")), extra: frame, ..Call::default() })?;
-    s.ok(
-        "the frame mint refuses (403): every fragment shares the platform's origin here, so a fragment's page is the platform's own",
-        r.status == 403 && !r.header("location").contains("__signin"),
-        &r,
-    );
-    let r = api.browser_op(&name, "sign", "p1", json!({ "text": "hi" }), None)?;
-    s.ok("a browser call works by path", r.status == 200, &r);
-    s.ok("its cookie is scoped to the fragment's path", r.header("set-cookie").contains(&format!("Path=/f/{name}/;")), r.header("set-cookie"));
-    let r = api.call(Call { method: "GET", url: format!("{}/f/{name}", api.base), ..Call::default() })?;
-    s.ok("the bare path redirects to the trailing slash", r.status == 308 && r.header("location") == format!("{}/f/{name}/", api.base), &r);
-    s.stop()?;
     Ok(())
 }

@@ -44,14 +44,16 @@ pub async fn workos_user(env: &Env, cfg: &Config, who: &str) -> CellResult<Optio
     Ok(crate::ask_registry(env, &SubjectOf { identity: who.into(), issuer }).await?.subject)
 }
 
-/// Each connection's state for `who` (as Pipes says, with no token).
-pub async fn connection_states(env: &Env, cfg: &Config, who: &str) -> CellResult<BTreeMap<String, ProviderState>> {
+/// Each connection's state for a person (as Pipes says, with no token),
+/// whose WorkOS user `user` finds (`workos_user`, or the one their computer
+/// keeps), asked only when the catalog has a connection.
+pub async fn connection_states(env: &Env, cfg: &Config, user: impl std::future::Future<Output = CellResult<Option<String>>>) -> CellResult<BTreeMap<String, ProviderState>> {
     let connections: Vec<&str> = cfg.providers.providers().iter().filter(|p| p.kind == Kind::Connection).map(|p| p.name.as_str()).collect();
     let mut states = BTreeMap::new();
     if connections.is_empty() {
         return Ok(states);
     }
-    let user = workos_user(env, cfg, who).await?;
+    let user = user.await?;
     let api = &cfg.workos()?.api;
     // at most `catalog::PROVIDERS_MAX` providers, one question each
     for provider in connections {
@@ -74,7 +76,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
     let computer = fragment_core::computer::default_computer_of(who);
     match (method.clone(), rest) {
         (Method::Get, []) => {
-            let states = connection_states(env, cfg, who).await?;
+            let states = connection_states(env, cfg, workos_user(env, cfg, who)).await?;
             // the person's computer keeps them, for its guest's next read; one
             // not made yet has nothing to tell, and so no own key either
             let own: Vec<String> = match crate::computer::ask(env, &computer, "computer/own-keys", &json!({ "connections": states })).await {
