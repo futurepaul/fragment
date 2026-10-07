@@ -673,7 +673,8 @@ decision 18's paragraph). With a save at each turn's end it would
 recover at most the turn in flight, which P1 ends as lost anyway; and
 its restore can only make a `/data` from two points in time (F8). The
 storage intercept (`storage.fragment.internal`, cell/storage.mjs) stays:
-it is the image's, for whatever an image wants to keep.
+it is the image's, for whatever an image wants to keep. *(It went too,
+#156: no image used it.)*
 
 If it stays instead, it needs what decision 18 already promised: a
 restore procedure that is never mixed with an older `/data`, and a drill

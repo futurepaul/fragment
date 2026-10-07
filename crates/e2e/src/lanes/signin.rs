@@ -546,12 +546,12 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor does a fragment origin's sign-in", escaped.is_empty(), format!("{escaped:?}"));
 
     // the browser and the CLI decide alike, and as the model says (docs/MODEL.md,
-    // Visibility): public, link, members; a page, a file, the tree, an app
+    // Visibility): public, link, members; a page, a file, the file list, an app
     // route (which sees who is asking), operations
     let member_f2 = site_cookie(api, &member_session, &f)?;
     let outsider_f = site_cookie(api, &outsider_session, &f)?;
     // Each asker's answer on each route, in the order `paths` names them: a
-    // page, its HEAD, a file, the tree, an app route, a public query, a
+    // page, its HEAD, a file, the file list, an app route, a public query, a
     // public mutation, and a mutation that needs an editor (the member is a
     // viewer). Whoever may see the fragment gets 200; short of it, a signed
     // asker is 403 and an anonymous one 401. A public fragment is everyone's
@@ -599,7 +599,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
                 ("GET", "", None),
                 ("HEAD", "", None),
                 ("GET", "app.js", None),
-                ("GET", "__tree", None),
+                ("GET", "__files", None),
                 ("GET", "hello", None),
                 ("POST", "__op/count", Some(&count)),
                 ("POST", "__op/say", Some(&say)),

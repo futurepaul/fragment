@@ -79,13 +79,13 @@ impl FragmentCell {
         check_sha(sha)?;
         let mime = req.headers().get("content-type")?.as_deref().and_then(blob::served_type);
         let key = self.blob_key(sha)?;
-        let (size, stored) = match js::blob_head(self.env.as_ref(), &key).await? {
+        let (size, stored) = match js::blob_head(&self.env, &key).await? {
             Some(size) => (size, false),
             None => {
                 let body = req.inner().body().ok_or_else(|| CellError::invalid("a blob upload carries the bytes as its body"))?;
-                let (size, digest) = js::blob_put(self.env.as_ref(), &key, body.into()).await?;
+                let (size, digest) = js::blob_put(&self.env, &key, body).await?;
                 if digest != sha {
-                    js::blob_delete(self.env.as_ref(), &[key]).await?;
+                    js::blob_delete(&self.env, &[key]).await?;
                     return Err(CellError::invalid(format!("the bytes hash to {digest}, not {sha}")));
                 }
                 (size, true)
@@ -110,7 +110,7 @@ impl FragmentCell {
         let rows = self.rows("SELECT mime FROM blobs WHERE sha = ?", vec![sha.into()])?;
         let mime = rows.first().and_then(|r| r["mime"].as_str()).unwrap_or("application/octet-stream").to_string();
         let mut resp = if req.method() == Method::Head {
-            let size = js::blob_head(self.env.as_ref(), &self.blob_key(sha)?).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no blob {sha}")))?;
+            let size = js::blob_head(&self.env, &self.blob_key(sha)?).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no blob {sha}")))?;
             let h = Headers::new();
             h.set("content-type", &mime)?;
             h.set("content-length", &size.to_string())?;
@@ -135,8 +135,8 @@ impl FragmentCell {
         assert!(mime.is_none_or(|m| blob::served_type(m) == Some(m)), "a blob is typed as passive media, not {mime:?}");
         let key = self.blob_key(sha)?;
         let size = bytes.len() as u64;
-        if js::blob_head(self.env.as_ref(), &key).await?.is_none() {
-            js::blob_put_bytes(self.env.as_ref(), &key, &bytes).await?;
+        if js::blob_head(&self.env, &key).await?.is_none() {
+            js::blob_put_bytes(&self.env, &key, &bytes).await?;
         }
         self.record_blob(sha, size, mime)
     }
@@ -146,7 +146,7 @@ impl FragmentCell {
         self.require(caller, false, Role::Viewer)?;
         check_sha(sha)?;
         if head {
-            let size = js::blob_head(self.env.as_ref(), &self.blob_key(sha)?).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no blob {sha}")))?;
+            let size = js::blob_head(&self.env, &self.blob_key(sha)?).await?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no blob {sha}")))?;
             let h = Headers::new();
             h.set("content-length", &size.to_string())?;
             return Ok(Response::empty()?.with_headers(h));
@@ -156,7 +156,7 @@ impl FragmentCell {
 
     /// A blob as a response: its bytes (or the asked range), immutable.
     pub(crate) async fn stream_blob(&self, sha: &str, mime: &str, range: Option<&str>) -> CellResult<Response> {
-        let found = js::blob_get(self.env.as_ref(), &self.blob_key(sha)?, range).await?;
+        let found = js::blob_get(&self.env, &self.blob_key(sha)?, range).await?;
         let b = found.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("the bytes of blob {sha} are gone")))?;
         let h = Headers::new();
         h.set("content-type", mime)?;
@@ -249,7 +249,7 @@ impl FragmentCell {
         let stale: Vec<String> = self.rows(query, vec![SqlStorageValue::Integer(before)])?.into_iter().filter_map(|r| r["sha"].as_str().map(str::to_string)).collect();
         if !stale.is_empty() {
             let keys = stale.iter().map(|sha| self.blob_key(sha)).collect::<CellResult<Vec<_>>>()?;
-            js::blob_delete(self.env.as_ref(), &keys).await?;
+            js::blob_delete(&self.env, &keys).await?;
             for sha in &stale {
                 self.exec("DELETE FROM blobs WHERE sha = ?", vec![sha.as_str().into()])?;
             }
@@ -264,11 +264,11 @@ impl FragmentCell {
         assert!(prefix.ends_with('/') && pages > 0, "a life's blobs, a bounded number of pages");
         for _ in 0..pages {
             // each page listed is deleted, so the next list starts afresh
-            let (keys, next) = js::blob_list(self.env.as_ref(), prefix, None).await?;
+            let (keys, more) = js::blob_list(&self.env, prefix).await?;
             if !keys.is_empty() {
-                js::blob_delete(self.env.as_ref(), &keys).await?;
+                js::blob_delete(&self.env, &keys).await?;
             }
-            if next.is_none() {
+            if !more {
                 return Ok(true);
             }
         }

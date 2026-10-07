@@ -9,14 +9,11 @@
 //!                          the gateway, its answer to the hold; then, until
 //!                          SIGTERM, the agents followed as they change
 //!                          (agents.rs)
-//! hermes-boot stamped <name> <input> -- <cmd…>
-//!                          a setup step, skipped when this image already ran
-//!                          it on this exact input
 //! hermes-boot readahead    warm the page cache with the gateway's files
 //! hermes-boot screen-start (the bridge's, when a viewer finds the screen
 //!                          down) the first agent's desktop
-//! hermes-boot build-info   (at image build) the lean plugin list, Hermes'
-//!                          revision, the image's Chromium, the platform skill
+//! hermes-boot build-info   (at image build) the lean plugin list, the
+//!                          image's Chromium, the platform skill
 //! ```
 
 mod agents;
@@ -108,7 +105,6 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("pre-init") => pre_init(),
         Some("main") => tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("a runtime").block_on(boot_main()),
-        Some("stamped") => stamped(&args[2..]),
         Some("readahead") => readahead(),
         Some("screen-start") => screen_start(),
         Some("build-info") => build_info(),
@@ -116,7 +112,7 @@ fn main() {
         Some("check-restore") => check_restore(),
         Some("quick-check") => quick_check(&args[2..]),
         Some("sqlite-report") => sqlite_report(&args[2..]),
-        _ => fail("hermes-boot pre-init | main | stamped | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
+        _ => fail("hermes-boot pre-init | main | readahead | screen-start | build-info | copy | check-restore | quick-check | sqlite-report"),
     }
 }
 
@@ -461,42 +457,6 @@ fn write_private(path: &str, text: &str) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-// ---- stamped setup steps ----
-
-fn image_rev() -> String {
-    std::fs::read_to_string(format!("{OPT}/image-rev")).map(|s| s.trim().to_string()).unwrap_or_else(|_| "unknown".into())
-}
-
-fn stamp_key(input: &Path) -> String {
-    let h = std::fs::read(input).map(|b| sync::hash(&b)[..16].to_string()).unwrap_or_else(|_| "none".into());
-    format!("{}:{h}", image_rev())
-}
-
-/// `stamped <name> <input> -- <cmd…>`: a setup step is a pure function of
-/// (the image, its input under the Hermes home); when both match what its
-/// last run recorded, it has nothing to do (S3b).
-fn stamped(args: &[String]) -> ! {
-    let (Some(name), Some(input), Some(sep)) = (args.first(), args.get(1), args.get(2)) else { fail("stamped <name> <input> -- <cmd…>") };
-    if sep != "--" || args.len() < 4 {
-        fail("stamped <name> <input> -- <cmd…>");
-    }
-    let stamp = home().join(".fragment-stamps").join(name);
-    let input = PathBuf::from(input);
-    if std::fs::read_to_string(&stamp).ok().as_deref() == Some(stamp_key(&input).as_str()) {
-        ev!("setup.skipped", { "step": name });
-        std::process::exit(0);
-    }
-    let t = Instant::now();
-    let status = Command::new(&args[3]).args(&args[4..]).status().unwrap_or_else(|e| fail(&format!("{}: {e}", args[3])));
-    if status.success() {
-        // Re-keyed after the step: it may have rewritten its input.
-        let _ = std::fs::create_dir_all(stamp.parent().expect("a parent"));
-        let _ = std::fs::write(&stamp, stamp_key(&input));
-    }
-    ev!("setup.ran", { "step": name, "ms": t.elapsed().as_millis() as u64, "ok": status.success() });
-    std::process::exit(status.code().unwrap_or(1));
-}
-
 fn readahead() -> ! {
     let Ok(list) = std::fs::read_to_string(format!("{OPT}/readahead.list")) else { std::process::exit(0) };
     let mut buf = vec![0u8; 1 << 16];
@@ -534,8 +494,6 @@ fn screen_start() -> ! {
 fn build_info() -> ! {
     let plugins = hermes::lean_plugins(Path::new("/opt/hermes/plugins"));
     std::fs::write(format!("{OPT}/lean-plugins.txt"), plugins.join("\n")).unwrap_or_else(|e| fail(&e.to_string()));
-    let rev = std::fs::read("/etc/hermes/image-provenance.json").ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).and_then(|v| v["revision"].as_str().map(str::to_string)).unwrap_or_else(|| "unknown".into());
-    std::fs::write(format!("{OPT}/image-rev"), &rev).unwrap_or_else(|e| fail(&e.to_string()));
     // the image's Chromium (hermes::CHROMIUM): Playwright's two browsers,
     // with the flags a container needs, whatever the runtime
     let playwright = Path::new("/opt/hermes/.playwright");
@@ -550,7 +508,7 @@ fn build_info() -> ! {
     }
     let skill = skills::platform_skill(&String::from_utf8_lossy(&cli.stdout)).unwrap_or_else(|e| fail(&e));
     skills::write_platform_skill(Path::new(skills::PLATFORM_DIR), &skill).unwrap_or_else(|e| fail(&format!("{}: {e}", skills::PLATFORM_DIR)));
-    println!("{} plugins disabled; Hermes {rev}; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
+    println!("{} plugins disabled; Chromium {full:?} and {shell:?} as {}; the platform skill, {} bytes", plugins.len(), hermes::CHROMIUM, skill.len());
     std::process::exit(0);
 }
 
@@ -708,15 +666,24 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     work_dirs(&dir, a, ids);
     // Which agent this profile is: what retiring it later reads.
     let _ = std::fs::write(dir.join(".fragment-agent"), &a.fragment);
-    let agent_json = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await.ok();
-    let tier = hermes::Tier::of(agent_json.as_deref(), high_on);
-    write_whole(&dir.join("config.yaml"), &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    // A tier the platform did not answer for is said, and the config the
+    // last boot wrote stays, its tier with it: never a tier the agent did
+    // not choose, but for a profile with no config yet.
+    let config = dir.join("config.yaml");
+    let answer = api.file(&a.fragment, &a.fragment, "agent.json", 64 * 1024).await;
+    let tier = hermes::Tier::read(&answer, high_on).or_else(|| {
+        ev!("profile.tier_unread", { "agent": a.fragment, "error": answer.as_ref().err().map(ToString::to_string), "configKept": config.exists() });
+        (!config.exists()).then_some(hermes::Tier::Medium)
+    });
+    if let Some(tier) = tier {
+        write_whole(&config, &hermes::profile_config(a, tier, model, credential_env, &dir.join(hermes::CREDENTIALS_FILE)), ids);
+    }
     // who the agent is and its credentials, for Hermes and its terminal (the
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
-    match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
-        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
+    match sync::round(api, a, &dir, &own).await {
+        Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.map(hermes::Tier::name), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
 }
@@ -1045,7 +1012,9 @@ async fn boot_main() {
     let default_cfg = home.join("config.yaml");
     let ours = std::fs::read_to_string(&default_cfg).is_ok_and(|t| t.starts_with("# Written by hermes-boot"));
     if !ours {
-        // Written once: the stamped config migration keys on this file.
+        // Written once (over the template stage2 seeds): stage2's config
+        // migration, at every boot, stamps its version once, then finds
+        // nothing to do.
         let _ = std::fs::write(&default_cfg, hermes::default_config(&model));
         chown(&default_cfg, ids);
     }
@@ -1172,7 +1141,7 @@ async fn boot_main() {
                 last_sync = Instant::now();
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+                    match sync::round(&api, a, &dir, &own).await {
                         Ok(d) if d != sync::Done::default() => ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted }),
                         Ok(_) => {}
                         Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),

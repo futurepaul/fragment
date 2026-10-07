@@ -33,6 +33,7 @@ struct Hit {
     path: String,
     authorization: String,
     hops: String,
+    idempotency: String,
     /// JSON bodies (a delivery's), else null.
     body: Value,
 }
@@ -54,6 +55,7 @@ impl Upstream {
                 path: req.path.clone(),
                 authorization: header("authorization"),
                 hops: header("x-fragment-hops"),
+                idempotency: header("idempotency-key"),
                 body: serde_json::from_slice(&req.body).unwrap_or(Value::Null),
             });
             match req.path.as_str() {
@@ -62,6 +64,7 @@ impl Upstream {
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
                 "/down" => Response::json(503, &json!({ "error": "down" })),
+                "/endless" => Response::endless(),
                 "/page" => Response::bytes(200, "text/html", b"<html><head><title> A page to title </title></head></html>".to_vec()),
                 "/moved" => Response::json(302, &json!({})).with_header("location", "http://127.0.0.1:1/private"),
                 _ => Response::json(404, &json!({ "error": "no" })),
@@ -232,7 +235,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.op(&owner, &name, "digest", "d3", json!({ "url": upstream.url("/flaky") }))?;
     let flaky = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
     s.ok("an upstream 503 is retried until it answers", flaky["status"] == "succeeded" && upstream.hits("/flaky").len() == 3, &flaky);
-    let r = api.op(&owner, &name, "careful", "c1", json!({ "url": upstream.url("/down") }))?;
+    let r = api.op(&owner, &name, "careful", "c1", json!({ "url": upstream.url("/down"), "method": "POST" }))?;
     let careful_id = started(&r);
     let r = api.op(&owner, &name, "careful", "c2", json!({ "url": "ftp://example.com/x" }))?;
     let refused = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
@@ -240,6 +243,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "a refused fetch fails its step at once, and the job may catch it",
         refused["output"]["caught"] == true && refused["output"]["name"] == "StepError" && refused["output"]["message"].as_str().is_some_and(|m| m.contains("http and https")),
         &refused,
+    );
+    let r = api.op(&owner, &name, "careful", "c3", json!({ "url": upstream.url("/endless") }))?;
+    let endless = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a body that never ends is read to the fetch's limit, no further, and fails its step for good",
+        endless["output"]["caught"] == true && endless["output"]["message"].as_str().is_some_and(|m| m.contains(&format!("more than {} bytes", limits::FETCH_RESPONSE_MAX_BYTES))),
+        &endless,
     );
 
     let r = api.op(&owner, &name, "probe", "probe-1", json!({ "url": upstream.url("/moved") }))?;
@@ -309,12 +319,19 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         careful["output"]["caught"] == true && careful["output"]["message"].as_str().is_some_and(|m| m.contains("503")) && upstream.hits("/down").len() == 5,
         &careful,
     );
+    // a step runs at least once: each try of a POST names the step, the same key every time
+    let keys: Vec<String> = upstream.hits("/down").into_iter().map(|h| h.idempotency).collect();
+    s.ok(
+        "a POST's every try carries its step's Idempotency-Key; a GET carries none",
+        keys.len() == 5 && keys.iter().all(|k| *k == keys[0]) && keys[0].ends_with(&format!("-r{careful_id}-s0")) && upstream.hits("/data").iter().all(|h| h.idempotency.is_empty()),
+        format!("{keys:?}"),
+    );
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=digest"), None)?;
     s.ok("runs filter by operation, newest first", r.body["runs"].as_array().is_some_and(|a| a.len() == 2 && a[0]["id"].as_i64() > a[1]["id"].as_i64()), &r);
 
     // a long job: each step's answer is kept by the cell, and the body
     // reads all of them back, in order, at every step
-    let (steps, _) = jobs_fragment(s, api, &owner, "jobsteps", |_| {})?;
+    let (steps, steps_c) = jobs_fragment(s, api, &owner, "jobsteps", |_| {})?;
     let r = api.op(&owner, &steps, "count_up", "fifty", json!({ "n": 50 }))?;
     let fifty = settle(api, &owner, &steps, started(&r), &["succeeded", "held"], Duration::from_secs(120));
     let published: Vec<i64> = (1..=45).collect();
@@ -355,6 +372,23 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "a run whose kept answers are lost is held (replay it), not run on without them",
         caught && held["status"] == "held" && held["attempt"] == 1 && held["error"].as_str().is_some_and(|e| e.contains("no kept answer")),
         format!("caught between steps: {caught}; {held}"),
+    );
+
+    // A deploy that changes the app's code while a run is between steps:
+    // its kept answers are the old code's, so it starts over, as its next
+    // attempt on the new code, with no one to replay it.
+    lever("hold-advances", json!({ "on": true }))?;
+    let r = api.op(&owner, &steps, "nap", "moved", json!({ "ms": 100 }))?;
+    let moved = started(&r);
+    let caught = s.eventually(Duration::from_secs(20), || lever("advance-held", json!({})).is_ok_and(|r| r.body["run"] == moved));
+    ship(s, &steps_c, &[JOBS_APP, b"\n// the next version\n".as_slice()].concat(), JOBS_JSON);
+    lever("hold-advances", json!({ "on": false }))?;
+    let again = settle(api, &owner, &steps, moved, &["succeeded", "held"], long);
+    let restarted = events(api, &owner, &steps).iter().any(|e| e["kind"] == "run.restarted" && e["data"]["run"] == moved && e["data"]["attempt"] == 2);
+    s.ok(
+        "a run whose app code changed between its steps starts over on the new code, and succeeds",
+        caught && restarted && again["status"] == "succeeded" && again["attempt"] == 2 && again["output"]["slept"] == 100,
+        format!("caught between steps: {caught}; run.restarted: {restarted}; {again}"),
     );
 
     // the CLI

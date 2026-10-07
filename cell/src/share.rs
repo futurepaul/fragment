@@ -225,7 +225,7 @@ pub(crate) async fn ask(env: &Env, url: &Url, name: &str, who: &Signed, method: 
     let mut at = url.clone();
     at.set_query(None);
     let headers = Headers::new();
-    Routed { name: name.to_string(), url: at, mode: None, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
+    Routed { name: name.to_string(), url: at, signed: Some(who.clone()), credential: None }.to_headers(&headers)?;
     if body.is_some() {
         headers.set("content-type", "application/json")?;
     }
@@ -489,7 +489,7 @@ fn carried(req: &Request, url: &Url) -> CellResult<Option<calls::Session>> {
 }
 
 async fn sheet(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let signed_out = || auth::to_login(&platform, &format!("/share/{name}"));
     let Some(session) = carried(req, url)? else { return signed_out() };
     let token = session.token.clone();
@@ -540,7 +540,7 @@ pub(crate) async fn poster(req: &mut Request, env: &Env, url: &Url, platform: &s
 }
 
 async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (session, live, fields) = match poster(&mut req, env, url, &platform, &purpose("share", name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),
@@ -586,8 +586,8 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", Some(json!({ "visibility": v }))).await,
             None => Err(CellError::invalid("choose who can open it")),
         },
-        // the share link only: the inbox's token and the webhook's secret are
-        // integrations', rotated with the CLI
+        // the share link only: the inbox's token is an integration's,
+        // rotated with the CLI
         "rotate" => ask(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await,
         _ => Err(CellError::invalid("no such change")),
     };
@@ -628,7 +628,7 @@ fn invite_token(url: &Url) -> Option<String> {
 }
 
 async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let Some(token) = invite_token(url) else { return notice(400, "Not an invite", "This link holds no invite. Ask for it again.") };
     let Some((session, live)) = auth::platform_session(req, env, url).await? else {
         return auth::to_login(&platform, &format!("/join/{name}?token={token}"));
@@ -683,7 +683,7 @@ async fn join_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str
 }
 
 async fn join_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
-    let platform = cfg.platform(url);
+    let platform = cfg.platform();
     let (_, live, fields) = match poster(&mut req, env, url, &platform, &purpose("join", name)).await? {
         Ok(posted) => posted,
         Err(page) => return Ok(page),

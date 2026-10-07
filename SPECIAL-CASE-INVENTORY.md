@@ -33,7 +33,7 @@ still holds a place of the shell's, as a page of its own. `/` and
 Every fragment gets these routes (docs/api.md, Serving), and none of
 them knows what a fragment is for: `__fragment.js`, `__signin` and
 `__signout`, `__op`, `__live` and `__watch`, `__people`, `__members`,
-`__blob`, `__files`, `__file` and `__tree` (the vault UI), `__sw.js` and
+`__blob`, `__files` and `__file` (the vault UI), `__sw.js` and
 `__push-*`, `__preview.svg`, people's pictures
 (`/api/users/{u}/picture`), and the frame-session redeem path the
 shell's tabs use (`__signin?token=` in a frame, from `/auth/frame`). A
