@@ -380,13 +380,14 @@ pub const STOP_WORDS: &str = "Stop.";
 /// Hermes asking its person something to answer in words, as Relay carries
 /// it: an open `clarify` (the base adapter's `❓ <question>`, its choices
 /// numbered when it has some) or, after "Other" on a clarify's card,
-/// `✏️ Type your answer:`. The words to show for it; `None` for any other
-/// message. Hermes takes the person's next message as the answer (its
-/// gateway's clarify intercept), even while the turn runs.
+/// `✏️ Type your answer:`. Read by the glyph alone: the words are English
+/// in v0.21.5, and upstream's translations (`locales/`) keep each glyph.
+/// The words to show for it; `None` for any other message. Hermes takes
+/// the person's next message as the answer (its gateway's clarify
+/// intercept), even while the turn runs.
 pub fn question(text: &str) -> Option<String> {
     let t = text.trim_start();
-    let asked = t.strip_prefix('❓').or_else(|| t.strip_prefix("✏️").filter(|rest| rest.trim_start().starts_with("Type your answer")))?;
-    let asked = asked.trim();
+    let asked = t.strip_prefix('❓').or_else(|| t.strip_prefix("✏️"))?.trim();
     (!asked.is_empty()).then(|| asked.to_string())
 }
 
@@ -463,14 +464,15 @@ mod tests {
 
     /// A question in words is an open clarify (`❓`, as Hermes' base
     /// adapter sends it, with or without numbered choices) or the prompt to
-    /// type after "Other"; anything else, an empty question or a `✏️` that
-    /// asks nothing included, is not one.
+    /// type after "Other", in any language; anything else, an empty
+    /// question included, is not one.
     #[test]
     fn a_question_in_words() {
         assert_eq!(question("❓ What do you plant in your garden?").as_deref(), Some("What do you plant in your garden?"));
         assert_eq!(question("  ❓ Which?\n\n  1. a\n  2. b\n\nReply with the number").as_deref(), Some("Which?\n\n  1. a\n  2. b\n\nReply with the number"));
         assert_eq!(question("✏️ Type your answer:").as_deref(), Some("Type your answer:"));
-        for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️ edited notes.md", "💻 terminal ❓"] {
+        assert_eq!(question("✏️ Digita la tua risposta:").as_deref(), Some("Digita la tua risposta:"));
+        for not in ["What do you plant?", "📖 read_file x", "❓", "❓   ", "✏️", "💻 terminal ❓", "✍️ Writing notes.md"] {
             assert_eq!(question(not), None, "{not}");
         }
     }

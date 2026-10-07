@@ -306,7 +306,8 @@ get_chat_info`.
   token.
 - A question to answer in words: an open `clarify` (`❓ …`, the base
   adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
-  clarify's card. It is a `send`: the bridge shows it as a reply part and
+  clarify's card, each read by its glyph (Hermes' translations keep
+  them). It is a `send`: the bridge shows it as a reply part and
   the turn asks (`Asked`). Hermes blocks until the person's next message,
   which its gateway's clarify intercept takes even mid-turn, so the
   asker's next message goes back at once as an inbound in the same chat
