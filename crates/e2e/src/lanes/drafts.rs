@@ -3,10 +3,11 @@
 //! and is refused everything that spends, holds a secret, reaches out or
 //! shares; a person claims it at its link (signed in, its code, the key
 //! approved) and it becomes theirs with its limits lifted; a second claim
-//! is refused; one no one claims ends; and a create or a claim sent again
-//! changes nothing. Its addresses are forged (`CF-Connecting-IP`, which the
-//! local node takes as sent and Cloudflare sets itself), so it runs on a
-//! local node alone.
+//! is refused; a wipe of its claimer ends it as theirs; one no one claims
+//! ends, its repo with it; and a create or a claim sent again changes
+//! nothing. Its addresses are forged (`CF-Connecting-IP`, which the local
+//! node takes as sent and Cloudflare sets itself), so it runs on a local
+//! node alone.
 
 use std::time::Duration;
 
@@ -65,8 +66,26 @@ fn code_of(created: &Value) -> String {
     claim.split_once("?code=").map(|(_, c)| c.to_string()).unwrap_or_default()
 }
 
+/// Its cron schedule due now (the `cron-now` lever), and whether its alarm
+/// took it: its next tick moved past now.
+fn cron_now(s: &Suite, api: &Api, keys: &Keys, name: &str) -> Result<bool> {
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "cron-now" })))?;
+    anyhow::ensure!(r.status == 200 && r.body["due"] == 1, "cron-now: {r}");
+    let t = now_ms();
+    Ok(s.eventually(Duration::from_secs(10), || {
+        let r = api.signed(keys, "GET", &format!("/api/f/{name}/triggers"), None).ok();
+        r.and_then(|r| r.body["triggers"][0]["nextAt"].as_i64()).is_some_and(|at| at > t)
+    }))
+}
+
+/// Its cron's runs.
+fn ticks(api: &Api, keys: &Keys, name: &str) -> Result<usize> {
+    let r = api.signed(keys, "GET", &format!("/api/f/{name}/runs?op=tick"), None)?;
+    r.body["runs"].as_array().map(Vec::len).with_context(|| format!("runs: {r}"))
+}
+
 pub fn drafts(s: &mut Suite, api: &Api) -> Result<()> {
-    if !s.section("drafts", &[crate::Need::Node, crate::Need::Levers]) {
+    if !s.section("drafts", &[crate::Need::Node, crate::Need::Levers, crate::Need::Operator]) {
         return Ok(());
     }
     let maker = Keys::generate();
@@ -123,6 +142,9 @@ pub fn drafts(s: &mut Suite, api: &Api) -> Result<()> {
     let ask = api.op(&maker, &name, "ask", "j2", json!({ "text": "hello" }))?;
     let asked = settle(api, &maker, &name, started(&ask), &["succeeded", "held"], Duration::from_secs(30));
     s.ok("and an AI step: a draft pays for nothing", asked["status"] == "held" && asked["error"].as_str().is_some_and(|e| e.contains("runs no AI step")), &asked);
+    let took = cron_now(s, api, &maker, &name)?;
+    let n = ticks(api, &maker, &name)?;
+    s.ok("its cron's tick passes and starts no run (a run a minute, all day, is no draft's)", took && n == 0, format!("taken {took}, {n} runs"));
     let mut refused = vec![];
     for (method, path, body) in [
         ("PUT", "secrets/KEY", None),
@@ -243,29 +265,51 @@ pub fn drafts(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&maker, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": started(&ask) })))?;
     let asked = settle(api, &maker, &name, started(&ask), &["succeeded"], Duration::from_secs(30));
     s.ok("and its held AI step, replayed, runs on its owner's ledger", r.status == 200 && asked["status"] == "succeeded" && asked["output"]["text"] == "echo: hello", &asked);
+    cron_now(s, api, &maker, &name)?;
+    let ran = s.eventually(Duration::from_secs(20), || ticks(api, &maker, &name).is_ok_and(|n| n > 0));
+    s.ok("and its cron starts its runs", ran, ticks(api, &maker, &name).map_or_else(|e| e.to_string(), |n| format!("{n} runs")));
     let r = claim(api, &paula, &name, &code)?;
     s.ok("the claim again changes nothing: it is theirs, and on to it", r.status == 303, &r);
     let r = with_session(api, "GET", &format!("/claim/{name}"), &paula)?;
-    s.ok("(its claim page says it is theirs)", r.status == 200 && r.text.contains("It is yours"), &r);
+    s.ok("(its claim page says it is theirs, and offers its key again: a claim cut short is finished there)", r.status == 200 && r.text.contains("It is yours") && r.text.contains("Add it"), &r);
     let bob = api.sign_in(&format!("claim2-{}@e2e.test", &maker_hex[..10]))?;
     let r = claim(api, &bob, &name, &code)?;
     s.ok("a second claim, by someone else, is refused (409)", r.status == 409, &r);
     let r = api.status(&maker, &name)?;
     s.ok("(and it stays the first claimer's)", r.body["owner"] == paula_id.as_str(), &r);
+    let wiper = s.wiper.clone().context("Need::Operator lends an operator key")?;
+    let dry = api.signed(&wiper, "GET", &format!("/api/people/{paula_id}/wipe"), None)?;
+    let found = dry.body["found"]["fragments"]["names"].as_array().is_some_and(|n| n.iter().any(|n| n == name.as_str()));
+    let mut report = Value::Null;
+    // bounded: each call goes on where the last stopped
+    for _ in 0..20 {
+        let r = api.signed(&wiper, "POST", &format!("/api/people/{paula_id}/wipe"), Some(&json!({ "confirm": paula_id })))?;
+        report = r.body;
+        if r.status != 200 || report["done"] == true {
+            break;
+        }
+    }
+    let gone = api.status(&maker, &name)?;
+    s.ok(
+        "a wipe of its claimer finds it theirs under its own name, and ends it with everything else of theirs",
+        found && report["done"] == true && gone.status == 404,
+        format!("{dry} / {report} / {gone}"),
+    );
 
     // one no one claims ends, as a delete ends it
     let late = Keys::generate();
     let r = make(api, &late, json!({ "template": "blank" }), "198.51.100.2")?;
     let lapsed = r.body["name"].as_str().unwrap_or("").to_string();
+    let repo = r.body["repo"].as_str().unwrap_or("").to_string();
     let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": lapsed, "op": "expire-draft" })))?;
     let gone = s.eventually(Duration::from_secs(20), || api.status(&late, &lapsed).is_ok_and(|r| r.status == 404));
     s.ok("an unclaimed draft ends at its end: from then it is 404", r.status == 200 && lever.status == 200 && gone, &lever);
     let (cleaned, last) = s.ended_cleaned(api, &lapsed);
-    s.ok("and its life is cleaned up as a delete's is", cleaned, last);
+    s.ok("and its life is cleaned up as a delete's is, its repo with it (its life's alone)", cleaned && s.fake.repo_deleted(&repo), last);
     let r = make(api, &late, json!({ "template": "blank" }), "198.51.100.2")?;
     s.ok(
-        "its key makes it again: the same name, a new life with a new end",
-        r.status == 200 && r.body["name"] == lapsed.as_str() && r.body["draft"]["expiresAt"].as_i64().is_some_and(|at| at > now_ms() + day - 60_000),
+        "its key makes it again: the same name, a new life with a new end and a repo of its own",
+        r.status == 200 && r.body["name"] == lapsed.as_str() && r.body["draft"]["expiresAt"].as_i64().is_some_and(|at| at > now_ms() + day - 60_000) && r.body["repo"] != repo.as_str(),
         &r,
     );
 

@@ -17,7 +17,8 @@
 //! (`deleteAll`).
 //!
 //! A delete keeps the life's code.storage repo (made again, the name finds
-//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators)
+//! it). A wipe's end of a life (`end_life_wiped`: docs/api.md, Operators),
+//! and an unclaimed draft's end (its repo is its life's alone: drafts.rs),
 //! is the same end with its repo recorded beside it (`ended_repos`), which
 //! the alarm deletes with the rest, retried as the rest are: the life is
 //! cleaned up only once its repo is gone too.
@@ -152,10 +153,11 @@ impl FragmentCell {
         Ok(Ended { owner })
     }
 
-    /// A wipe's end of this life (docs/api.md, Operators): `end_life`, and
-    /// its repo recorded for the alarm to delete, in the same synchronous
-    /// step (no await): a crash leaves the life whole, or ended with its
-    /// repo's delete recorded. A delete keeps its repo; a wipe never does.
+    /// A wipe's end of this life (docs/api.md, Operators), or an unclaimed
+    /// draft's: `end_life`, and its repo recorded for the alarm to delete,
+    /// in the same synchronous step (no await): a crash leaves the life
+    /// whole, or ended with its repo's delete recorded. A delete keeps its
+    /// repo; a wipe never does, nor a draft's end.
     pub(crate) fn end_life_wiped(&self) -> CellResult<Ended> {
         let [created_at, repo] = self.metas([MetaKey::CreatedAt, MetaKey::Repo])?;
         let incarnation: i64 = created_at.and_then(|c| c.parse().ok()).ok_or_else(|| missing(MetaKey::CreatedAt))?;

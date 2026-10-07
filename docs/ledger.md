@@ -28,9 +28,10 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   the fragments shared with them, whose writes bill those fragments'
   owners.
 - **An unclaimed draft bills no one.** Made by a key no one holds, it has
-  no ledger: it spends nothing (no AI steps, fetches, push or cards), its
-  writes are its own caps', and its meter rows wait in its outbox until a
-  claim makes it someone's, whose ledger they go to with the rest.
+  no ledger: it spends nothing (no AI steps, fetches, cron runs, push or
+  cards), its writes are its own caps', and its meter rows wait in its
+  outbox until a claim makes it someone's, whose ledger they go to with
+  the rest.
 - **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
   included, a computer that sleeps); `seat_always_on` ($200 a month,
   $100 included, an always-on computer whose awake time is not metered).

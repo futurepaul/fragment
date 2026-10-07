@@ -232,7 +232,12 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                 if i >= rules::FRAGMENTS_PER_CALL * 4 || js::now_ms() > deadline {
                     return Ok(Did { done: false, deleted: 0, note: Some(format!("{} fragments not looked at yet", names.len() - i)) });
                 }
-                let v = crate::fragment::ask(env, name, "wipe/end", &json!({ "owner": person })).await?;
+                let v = match crate::fragment::ask(env, name, "wipe/end", &json!({ "owner": person })).await {
+                    Ok(v) => v,
+                    // someone else's draft they were in, made again: nothing of theirs to wait for
+                    Err(e) if e.code == ErrorCode::Forbidden && fragment_proto::is_draft_name(name) => continue,
+                    Err(e) => return Err(e),
+                };
                 if v["left"].as_u64() != Some(0) {
                     busy.push(name.clone());
                 }
@@ -300,13 +305,15 @@ async fn list(env: &Env, principal: &str) -> CellResult<Vec<(String, Option<Role
 /// The fragments that are the person's (under their username, or owned
 /// under another: a draft they claimed) on their and their agents' lists
 /// (`live`: those a role still names; else every one, ended ones with
-/// their rows left), and the agent fragments the registry names: each
-/// once, sorted.
+/// their rows left, a draft's among them: once ended its row names no
+/// role, so whose it was is its own to say), and the agent fragments the
+/// registry names: each once, sorted.
 async fn theirs(env: &Env, facts: &WipeFacts, live: bool) -> CellResult<Vec<String>> {
     let mut names = facts.agent_fragments.clone();
     for (principal, _) in whom(facts) {
         for (fragment, role) in list(env, &principal).await? {
-            if (role.is_some() || !live) && rules::whose(&fragment, facts.username.as_deref(), role) == Whose::Theirs {
+            let ended_draft = !live && role.is_none() && fragment_proto::is_draft_name(&fragment);
+            if ended_draft || ((role.is_some() || !live) && rules::whose(&fragment, facts.username.as_deref(), role) == Whose::Theirs) {
                 names.push(fragment);
             }
         }

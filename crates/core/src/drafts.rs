@@ -75,6 +75,14 @@ pub fn maker(key_hex: &str) -> String {
     crate::npub::identity(d[..16].try_into().expect("16 of 32 bytes"))
 }
 
+/// What a draft's repo is named for (`codestorage::repo_name`'s owner): its
+/// life's own key (the fragment's, 64 hex), so its key's draft made again
+/// never finds the repo its life before ended with, and an end deletes it.
+pub fn repo_owner(fragment_key_hex: &str) -> String {
+    let d = digest("repo", fragment_key_hex);
+    crate::npub::identity(d[..16].try_into().expect("16 of 32 bytes"))
+}
+
 /// Whether `id`, signing with `key_hex`, is a draft's maker: a key no one
 /// holds, which the router names so on a draft's routes alone.
 pub fn is_maker(id: &str, key_hex: Option<&str>) -> bool {
@@ -190,6 +198,10 @@ mod tests {
         assert!(!is_maker(&maker(&a), Some(&b)), "another key's maker is no one's");
         assert!(!is_maker(&maker(&a), None), "a session is no draft's maker");
         assert!(!is_maker("id:00000000000000000000000000000000", Some(&a)));
+        // a life's repo is its own: named for the fragment's key, never the maker's
+        assert!(crate::npub::is_identity(&repo_owner(&a)));
+        assert_ne!(repo_owner(&a), repo_owner(&b));
+        assert_ne!(repo_owner(&a), maker(&a));
     }
 
     #[test]

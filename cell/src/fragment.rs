@@ -1115,12 +1115,18 @@ impl FragmentCell {
         self.set_meta(MetaKey::ClaimedAt, &js::now_ms().to_string())?;
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
+            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             // the one place a repo's name is derived: its owner's, so a
-            // username held later by another identity never finds it
-            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
+            // username held later by another identity never finds it; a
+            // draft's, its own life's, so the same key's draft made again
+            // never finds the repo its life before ended with (drafts.rs)
+            let named_for = match &draft {
+                Some(_) => fragment_core::drafts::repo_owner(&pubkey),
+                None => owner.clone(),
+            };
+            let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &named_for)
                 .ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>, and its owner an identity"))?;
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
-            let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))
         };
         let (repo, fragment_pub, sealed) = match made.await {
@@ -1205,7 +1211,8 @@ impl FragmentCell {
     async fn delete(&self, caller: &Caller) -> CellResult<Response> {
         let name = self.name()?;
         self.require(caller, false, Role::Owner)?;
-        let ended = self.end_life()?;
+        // an unclaimed draft's repo is its life's alone: it goes with it (drafts.rs)
+        let ended = if self.draft()?.is_some() { self.end_life_wiped()? } else { self.end_life()? };
         self.tell_ended(Some(&ended.owner)).await;
         self.schedule().await?;
         json_response(&json!({ "ok": true, "deleted": name }))

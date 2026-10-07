@@ -26,20 +26,6 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
-## An ended draft keeps its repo
-
-- **Observed:** 2026-10-07, drafts (docs/api.md, Drafts). A draft no one
-  claims ends as a delete ends it, and a delete keeps its code.storage
-  repo, so its key making it again finds its files.
-- **Risk:** abandoned drafts' repos pile up in code.storage, at most the
-  deployment's day's starts (`limits::DRAFTS_PER_DAY`) a day, each a few
-  KiB to `limits::DRAFT_FILES_MAX_BYTES`.
-- **First proof:** the org's repos named `*--draft--*` outnumbering its
-  claimed drafts many times over.
-- **Delete when:** a draft's end deletes its repo as a wipe's end does
-  (`end_life_wiped`), its cleanup sparing a repo the same name's next life
-  holds (the same key's draft made again finds the same name and repo).
-
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
