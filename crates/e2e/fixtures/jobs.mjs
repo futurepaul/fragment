@@ -75,9 +75,9 @@ export class App extends DurableObject {
   }
 
   // A step that fails for good, caught by the job.
-  async careful({ url }, job) {
+  async careful({ url, method }, job) {
     try {
-      await job.fetch(url);
+      await job.fetch(url, { method });
       return { caught: false };
     } catch (e) {
       return { caught: true, name: e.name, message: e.message };
