@@ -44,7 +44,7 @@ pub(crate) const PRINCIPAL_HEADER: &str = fragment_proto::routed::AGENT_PRINCIPA
 pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, segments: &[&str]) -> CellResult<Response> {
     // an inbox delivery carries its own capability, its token
     if let (Method::Post, ["api", "a", _, "inbox", _]) = (req.method(), segments) {
-        return js::service_fetch(env.as_ref(), "AGENTS", req).await;
+        return Ok(env.service("AGENTS")?.fetch_request(req).await?);
     }
     let body = read_body(&mut req, fragment_proto::limits::BODY_MAX_BYTES).await?;
     let who = signer(env, &req, url, &body).await?;
@@ -96,7 +96,7 @@ pub(crate) async fn ask(env: &Env, method: Method, path: &str, principal: &str, 
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
     let req = Request::new_with_init(&format!("https://agents.internal{path}"), &init)?;
-    js::service_fetch(env.as_ref(), "AGENTS", req).await
+    Ok(env.service("AGENTS")?.fetch_request(req).await?)
 }
 
 /// `ask`, for its JSON answer; a refusal comes back as its error.
