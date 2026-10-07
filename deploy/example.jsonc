@@ -9,7 +9,13 @@
 {
   // Your Cloudflare account (`wrangler whoami`), and the zone the
   // deployment's routes are on. The zone needs one proxied wildcard DNS
-  // record (`*` AAAA 100::), which Universal SSL covers.
+  // record (`*` AAAA 100::), which Universal SSL covers. wrangler deploys
+  // with CLOUDFLARE_API_TOKEN: a token on this account and zone with
+  // Account · Workers Scripts, Workers R2 Storage, Workflows, Queues,
+  // Containers, Browser Rendering and AI Gateway · Edit; Workers KV
+  // Storage, Account Settings and Secrets Store · Read; Zone · Workers
+  // Routes and DNS · Edit; User · Memberships and User Details · Read
+  // (`wrangler delete`, in a teardown, reads the account's KV namespaces).
   "account_id": "0123456789abcdef0123456789abcdef",
   "zone": "example.dev",
   // A Cloudflare API token with Zone · DNS · Edit on the zone(s) (and
