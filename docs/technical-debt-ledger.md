@@ -635,18 +635,22 @@ fragment.club until cutover (decisions 34–35).
 ## A Hermes turn's end is read from its reactions
 
 - **Observed:** phase 4, against the real image. Relay has no
-  turn-level end; the bridge reads `👀` off then `✅`/`❌`, and Hermes'
-  multiplexed gateway brackets a message twice (an empty dispatch
-  bracket, then the turn's). The relay runtime ends a turn at `✅` only
-  once it said something, and an empty one only after 20 s with no new
-  `👀` (`EMPTY_SETTLE_MS`).
-- **Risk:** a turn that answers nothing holds the keepalive 20 s longer;
-  a Hermes release that brackets differently ends turns early (their
-  replies then post as turns of their own) or late.
-- **First proof:** a turn that says nothing, or a reply posted under a
-  `said` turn rather than its message's.
-- **Delete when:** Hermes' Relay sends a turn's end (or brackets once),
-  proven by the real-Hermes lane with `EMPTY_SETTLE_MS` gone.
+  turn-level end; the bridge reads its processing hooks' reactions
+  (`👀` off, then `✅`/`❌`). Hermes brackets a message it took while its
+  gateway was starting twice, the first empty (docs/hermes-relay.md), so
+  the relay runtime ends a turn at `❌`, at `✅` only once it said
+  something (Hermes ends no person's turn without a word), and, stopped,
+  at `👀` off. No clock (#156 cut the 1.5 s and 20 s windows).
+- **Risk:** a Hermes release that ends a person's turn saying nothing,
+  or cancels one the bridge did not stop, leaves it running until the
+  idle bound (15 minutes, then an error); one that stops reacting does
+  so for every turn (loudly: the Docker rung's turns never end). Hermes'
+  clarify questions are read by their glyphs (`❓`, `✏️`) the same way.
+- **First proof:** a turn that ends "the agent stopped answering" though
+  Hermes answered,
+  or a reply posted under a `said` turn rather than its message's.
+- **Delete when:** Hermes' Relay sends a turn's end and its questions as
+  structure, proven by the real-Hermes lane.
 
 ## Hermes' tool steps are its progress text
 
