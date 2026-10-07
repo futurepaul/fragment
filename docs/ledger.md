@@ -277,10 +277,11 @@ mark sends the same batch again, which answers as before.
   ledger waives an always-on seat's awake time; no wake starts when
   `may_spend(wake)` refuses.
 - **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
-  SQLite (its own and its app facet's) and its blobs, and meters `bytes ×
-  hours since the last sample` (`store:<fragment>@<incarnation>:<class>:<at>`)
-  to the fragment's owner. Its git repository is not sampled yet (the
-  debt ledger). A computer's backups bill the computer's owner.
+  own SQLite and its blobs, and meters `bytes × hours since the last
+  sample` (`store:<fragment>@<incarnation>:<class>:<at>`) to the
+  fragment's owner. Its app facet's database and its git repository are
+  not sampled (the debt ledger). A computer's backups bill the computer's
+  owner.
 - **Requests** (the Fragment DO, which sees each one the router hands
   it): a row per minute (`req:<fragment>@<incarnation>:<minute>`) to the
   fragment's owner, closed once the minute has passed.
