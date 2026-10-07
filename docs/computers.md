@@ -938,6 +938,12 @@ for a host) and finds the same `HOME`, `~` and modes.
   (`fail-saves`), and so is an always-on plan (`always-on`). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays.
+- The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
+  whose `/data` holds a file its agent wrote and a save, wiped with its
+  owner (its first step alone, then across a node's crash): no computer
+  from that step, its saves gone, its owner's next identity's computer a
+  new one that restores nothing and reads no such file; hosted, the same
+  on the deployment's own image.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
   first's turn runs included, and an install as root (a `.deb` through
