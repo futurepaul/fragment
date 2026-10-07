@@ -603,6 +603,50 @@ pub struct FragmentStatus {
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_min_bytes: Option<u64>,
+    /// What the page reported as its last preview card's shot loaded it
+    /// (docs/api.md, Cards); absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageReport>,
+}
+
+/// The errors a page reported as the platform loaded it for its preview
+/// card, as a visitor without an account sees it: as it loaded and in
+/// the second after, with no interaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageReport {
+    /// The live commit the shot loaded.
+    pub live: String,
+    /// When the shot landed (ms).
+    pub at: i64,
+    /// The first it reported, in order (at most `fragment_core::card::ERRORS_MAX`).
+    pub errors: Vec<PageError>,
+    /// How many more it reported past those.
+    pub dropped: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageError {
+    pub kind: PageErrorKind,
+    /// What the page or the browser said (cut to
+    /// `fragment_core::card::ERROR_BYTES_MAX`, as `source` is).
+    pub text: String,
+    /// The script or resource it names (`url`, or `url:line:column`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageErrorKind {
+    /// An uncaught exception or an unhandled rejection (a syntax error too).
+    Exception,
+    /// `console.error`, or a `console.assert` that failed.
+    Console,
+    /// A load that failed: the page itself, a script, an image, a fetch.
+    Network,
+    /// A load the browser refused for its security: a Content Security
+    /// Policy violation, mixed content.
+    Security,
 }
 
 /// A fragment the signer holds a role on.
