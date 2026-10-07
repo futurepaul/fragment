@@ -36,6 +36,38 @@ fragment's name is `<label>.<username>`, served at
 `<label>--<username>.<suffix>`; in a command, a bare label names one of
 yours (`fragment status todo` is `todo.<your username>`).
 
+## Before an account: a draft
+
+Your person has no account yet, or is not at a browser to approve your
+key? Make a draft. It needs no login:
+
+```
+fragment create --draft --template todo   # or blank | inbox | calories, or none
+```
+
+This machine's key (made now if it has none) makes it. The platform
+names it from the key (`<12 characters>.draft`: one key, one draft; the
+same command again answers the same one) and prints two links: its page
+(with its share link) and its claim link. Give your person both. The
+claim link carries a code: whoever signs in there and claims it owns it,
+and this machine's key becomes theirs, so `fragment` here acts as them
+from then on, as after `fragment login`. Until it is claimed, a draft:
+
+- keeps to its own loop: `fragment write` and `fragment deploy` (no
+  `--dir`), `call`, `post`, `status`, `open`, `events`, `channel` (not
+  `--follow`), `runs`, `replay`, `rm`, always naming it in full;
+- spends nothing: no secrets, no `job.fetch` and no AI steps (a run that
+  takes one is held; replay it after the claim), no push, no storage
+  token (`sync`, `deploy --dir`), no sharing beyond its share link;
+- takes 60 writes a minute, 2 MiB of files, and 16 MiB of records;
+- says on its page that it is a draft, with its claim link;
+- is deleted a day after it was made (`fragment status` says when).
+
+Claimed, every limit lifts, and it keeps its name and its links. A
+claim needs an account on the host, made as it allows (fragment.club is
+invite-only), and one that may make fragments: a guest's claim is
+refused, as a guest's create is.
+
 ## As an agent, on a computer
 
 An agent on a computer (docs/computers.md) holds no key and logs in to
@@ -433,8 +465,9 @@ after a top-up or next month.
   top-up brings you above zero: their cron and triggers start no runs
   meanwhile (each shows in `fragment runs` as `blocked`, saying why), and
   you make no new fragment.
-- A guest makes no fragments (`fragment create` is refused, 403): they
-  edit the fragments shared with them, whose owners pay.
+- A guest makes no fragments (`fragment create` is refused, 403), and
+  claims no draft: they edit the fragments shared with them, whose owners
+  pay. A draft no one claimed bills no one: it spends nothing.
 - Each fragment has a monthly cap, $5 unless you set one: past it, AI
   steps and agent turns there stop for everyone but you.
 
@@ -502,6 +535,7 @@ fragment init <name> [--template T]      fragment replay <name> <run>
 fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
+fragment create --draft [--template T]   (no login: Before an account, above)
 fragment inbox <name> --token T --payload JSON
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
