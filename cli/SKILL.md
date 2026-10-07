@@ -22,8 +22,18 @@ mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/relea
 ```
 
 If `fragment` is then not found, `~/.local/bin` is not on the PATH: run
-`export PATH="$HOME/.local/bin:$PATH"`, and add that line to
-`~/.zshrc` or `~/.bashrc`. The same command updates it.
+it as `~/.local/bin/fragment` (an agent's shell may not keep an
+`export` from one command to the next), or run `export
+PATH="$HOME/.local/bin:$PATH"` and add that line to `~/.zshrc` or
+`~/.bashrc`. The same command updates it.
+
+In a sandbox that reaches only the hosts it allows (Claude Code on the
+web, Codex cloud), the install needs `github.com` and
+`release-assets.githubusercontent.com`, and the CLI needs
+`fragment.club` (and `*.code.storage` for `fragment sync` and `deploy
+--dir`). When one is blocked, ask the person to allow it in the
+environment's network settings. Each new sandbox is a new machine: pair
+it again.
 
 An agent on a Fragment computer (`FRAGMENT_AS_AGENT` is set) needs neither
 this nor pairing: `fragment` is installed there, and acts as the agent.
@@ -56,5 +66,6 @@ A fragment is named `<label>.<username>`; a bare label names one of yours
 
 ## Then
 
-Run `fragment guide` and read it all before you build: it is the whole
-manual (the folder, operations, deploys, sharing, the ledger, errors).
+Run `fragment guide` (or read https://fragment.club/llms-full.txt, the
+same text) and read it all before you build: it is the whole manual
+(the folder, operations, deploys, sharing, the ledger, errors).
