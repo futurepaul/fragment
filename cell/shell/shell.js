@@ -49,6 +49,7 @@ const CATALOG = [
   { template: "brief", name: "Brief", about: "Your feeds, summed up each morning, with a push." },
   { template: "hook", name: "Hook", about: "CI, deploys and payments, live from their webhooks." },
   { template: "wiki", name: "Wiki", about: "Your team's pages in markdown, edited here or in a folder." },
+  { template: "split", name: "Split", about: "Shared costs: snap a receipt, see who owes whom, live." },
   { template: "blank", name: "Blank", about: "One page to start from." },
   // blessed (decision 40): named, not copied, and made with a title, as a chat is
   { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },

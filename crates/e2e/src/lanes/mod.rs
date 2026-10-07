@@ -35,6 +35,7 @@ mod share;
 mod shell;
 mod signin;
 mod site;
+mod split;
 mod sync;
 mod templates;
 mod wall;
@@ -73,6 +74,7 @@ const LANES: &[Lane] = &[
     when::when,
     wall::wall,
     board::board,
+    split::split,
     share::share,
     mcp::mcp,
     isolation::isolation,
@@ -141,7 +143,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
     &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
-    &["when", "wall", "board", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher", "brief", "hook", "wiki"],
+    &["when", "wall", "board", "split", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher", "brief", "hook", "wiki"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
