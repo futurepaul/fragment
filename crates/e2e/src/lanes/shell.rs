@@ -967,7 +967,13 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("it takes two agents or more, in the order picked: the first leads", one == true && order == json!(["Lead", "2", false]), &order);
     let _ = b.screenshot(page, &shots.join("desktop-new-group.png"));
     b.eval(page, "document.getElementById('new-group-form').requestSubmit()")?;
-    let made = b.until(page, "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open", wait);
+    // made once its row is in the sidebar and its chat's heading has drawn its two agents
+    let made = b.until(
+        page,
+        "document.querySelector('#chats .agent-row[data-group=\"2\"]') && !document.getElementById('new-group-dialog').open \
+         && document.querySelectorAll('#agent-mark .avatar-stack .agent-avatar').length === 2",
+        wait,
+    );
     let row = b.eval(
         page,
         "(() => { const g = document.querySelector('#chats .agent-row[data-group=\"2\"]'); if (!g) return null; const color = (a) => a.style.getPropertyValue('--agent-color'); \
