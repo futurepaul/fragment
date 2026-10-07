@@ -673,7 +673,7 @@ fn transcription_form(fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
 }
 
 /// A transcription, signed by `keys`: the form's fields and its audio.
-fn transcribe(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
+pub(super) fn transcribe(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
     api.call(Call {
         method: "POST",
         url: format!("{}{TRANSCRIBE_ROUTE}", api.base),

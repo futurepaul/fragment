@@ -417,6 +417,36 @@ fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str,
     Ok(6)
 }
 
+/// The model route's transcription on the deployment's own Whisper
+/// (decision 9), here and hosted: an agent of the owner's sends a two
+/// seconds' memo (words, to the fake; silence, to Workers AI's Whisper),
+/// and is answered in OpenAI's shape, settled at the length Whisper heard
+/// (46.63 neurons a minute: about 1,555 thousandths for 2 s), never at its
+/// reservation. Hosted, it is the proof that Workers AI's own answer reads
+/// as the route reads it (the cell logs its shape, `model.transcribed`):
+/// one paid call.
+fn route_transcribes(s: &mut Suite, api: &Api, owner: &crate::Keys, owner_id: &str) -> Result<()> {
+    let hand = &crate::Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let memo = fragment_fakes::workers_ai::spoken_wav("a memo for the record", 2);
+    let r = super::ledger::transcribe(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
+    println!("      (transcribed: {} {})", r.status, r.text.chars().take(200).collect::<String>());
+    let heard = |e: &Value| {
+        let usage = &e["entry"]["end"]["usage"];
+        end_of(e) == "settled" && e["entry"]["end"]["basis"] == "usage" && usage["kind"] == "neurons" && usage["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m))
+    };
+    let settled = s.eventually(Duration::from_secs(60), || entries(api, owner_id, "aig:").iter().any(heard));
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and settled at the 2 s it heard, in neurons",
+        r.status == 200 && r.body["text"].is_string() && settled,
+        json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "settled": aig.iter().filter(|e| heard(e)).collect::<Vec<_>>() }),
+    );
+    Ok(())
+}
+
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("computers", &[crate::Need::Computers, crate::Need::Models]) {
         return Ok(());
@@ -693,6 +723,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             json!(aig),
         );
     }
+    route_transcribes(s, api, &owner, &owner_id)?;
 
     // asleep, a record wakes it, restored, and nothing runs twice
     std::thread::sleep(QUEUE_DRAIN);

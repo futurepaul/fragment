@@ -156,13 +156,19 @@ impl Bounded {
     }
 }
 
-/// Whisper's answer as its catalog's output schema says, as the binding
-/// answers it raw, or the same inside `result`, as Workers AI's REST API
-/// wraps an answer (crate::media reads an image's so too).
+/// Whether Whisper's answer came inside `result`, as Workers AI's REST API
+/// wraps an answer, rather than as its catalog's output schema says, as the
+/// binding answers it raw (crate::media reads an image's either way too).
+/// The cell logs which (`model.transcribed`): the hosted lane's to settle.
+pub fn wrapped(answer: &Value) -> bool {
+    answer.get("result").is_some() && answer.get("text").is_none() && answer.get("transcription_info").is_none()
+}
+
 fn unwrapped(answer: &Value) -> &Value {
-    match answer.get("result") {
-        Some(inner) if answer.get("text").is_none() && answer.get("transcription_info").is_none() => inner,
-        _ => answer,
+    if wrapped(answer) {
+        &answer["result"]
+    } else {
+        answer
     }
 }
 
@@ -274,5 +280,6 @@ mod tests {
         let wrapped = json!({ "result": w, "success": true });
         assert_eq!(answer(Format::Text, &wrapped), Some(("text/plain; charset=utf-8", b"hello there".to_vec())));
         assert_eq!(usage_of(&wrapped), usage_of(&w));
+        assert!(super::wrapped(&wrapped) && !super::wrapped(&w));
     }
 }

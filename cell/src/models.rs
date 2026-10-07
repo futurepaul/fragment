@@ -493,6 +493,10 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
         }
     };
     let whisper: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
+    // its shape, never its words: which keys Whisper's answer has, and
+    // whether it came inside `result` (fragment_core::transcribe reads both)
+    let keys: Vec<&str> = whisper.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    console_log!("{}", json!({ "event": "model.transcribed", "ref": held.reference, "keys": keys, "wrapped": transcribe::wrapped(&whisper), "bytes": answer.len() }));
     held.settle(transcribe::usage_of(&whisper), log_id).await;
     let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));
