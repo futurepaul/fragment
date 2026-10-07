@@ -193,6 +193,22 @@ pub mod limits {
     pub const SEARCH_MESSAGES_MAX: usize = 50;
     /// A hit's snippet of its message.
     pub const SEARCH_SNIPPET_MAX_BYTES: usize = 300;
+    /// A draft (docs/api.md, Drafts): how long it lives unless it is
+    /// claimed, …
+    pub const DRAFT_TTL_MS: i64 = 24 * 3600 * 1000;
+    /// … the drafts one address (an IPv4 address, an IPv6 /64) and the
+    /// whole deployment start in a day (a key's own draft made again
+    /// counts once), …
+    pub const DRAFTS_PER_ADDRESS_PER_DAY: u64 = 10;
+    pub const DRAFTS_PER_DAY: u64 = 10_000;
+    /// … its writes a minute (operations that write, posts, file writes,
+    /// deploys, inbox deliveries, replays), …
+    pub const DRAFT_WRITES_PER_MIN: u32 = 60;
+    /// … its files at `main` in all (it holds no blobs), and its
+    /// supervisor's database (records, runs, events) past which it takes
+    /// no write.
+    pub const DRAFT_FILES_MAX_BYTES: u64 = 2 * 1024 * 1024;
+    pub const DRAFT_STORAGE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 }
 
 // A person's list keeps every entry one fragment sends it, and room for
@@ -242,12 +258,18 @@ pub fn valid_label(label: &str) -> bool {
 }
 
 /// Words no one may take as a username: the platform's own hosts and paths.
-pub const RESERVED_USERNAMES: [&str; 25] = [
+pub const RESERVED_USERNAMES: [&str; 26] = [
     "www", "api", "app", "apps", "auth", "admin", "root", "system", "platform", "fragment", "fragments", "static", "assets",
     "cdn", "mail", "docs", "blog", "help", "support", "status", "new", "cli", "anonymous", "operator",
     // a computer's origin is `<id>--computer` (computer.rs): never a fragment's host
     "computer",
+    // drafts are `<label>.draft`, made before anyone has an account (`DRAFT_USERNAME`)
+    "draft",
 ];
+
+/// What a draft's name has where a username goes (docs/api.md, Drafts):
+/// no one holds it, and it names fragments all the same.
+pub const DRAFT_USERNAME: &str = "draft";
 
 /// A username: chosen once, a label of 3 to 32 bytes, not reserved.
 pub fn valid_username(username: &str) -> bool {
@@ -257,15 +279,22 @@ pub fn valid_username(username: &str) -> bool {
 }
 
 /// A fragment's name: `<label>.<username>` (decision R16), served at
-/// `<label>--<username>.<suffix>` ([`flat_name`]).
+/// `<label>--<username>.<suffix>` ([`flat_name`]); a draft's is
+/// `<label>.draft`.
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
 }
 
-/// (label, username) of a fragment's name.
+/// (label, username) of a fragment's name (a draft's "username" is `draft`).
 pub fn split_fragment_name(name: &str) -> Option<(&str, &str)> {
     let (label, username) = name.split_once('.')?;
-    (valid_label(label) && valid_username(username)).then_some((label, username))
+    (valid_label(label) && (valid_username(username) || username == DRAFT_USERNAME)).then_some((label, username))
+}
+
+/// Whether a fragment's name is a draft's (made before an account, and
+/// named so for good: a claim keeps it).
+pub fn is_draft_name(name: &str) -> bool {
+    split_fragment_name(name).is_some_and(|(_, username)| username == DRAFT_USERNAME)
 }
 
 /// A fragment's name from its label and its owner's username.
@@ -285,7 +314,7 @@ pub fn flat_name(name: &str) -> Option<String> {
 /// The fragment a flat name (`<label>--<username>`) names.
 pub fn from_flat_name(flat: &str) -> Option<String> {
     let (label, username) = flat.split_once("--")?;
-    (valid_label(label) && valid_username(username)).then(|| fragment_name(label, username))
+    valid_fragment_name(&fragment_name(label, username)).then(|| fragment_name(label, username))
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -528,6 +557,26 @@ pub struct CreateFragment {
     pub title: Option<String>,
 }
 
+/// `POST /api/drafts`: a draft, signed by a key no one holds (docs/api.md,
+/// Drafts). Its name is the platform's, from the key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct MakeDraft {
+    /// A template it starts from: `blank`, `todo`, `inbox` or `calories`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+}
+
+/// A draft not yet claimed: when it ends, and where it is claimed. Its
+/// maker's `claim` carries the claim code (`?code=`); a link holder's is
+/// the page alone, which asks for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftStatus {
+    pub expires_at: i64,
+    pub claim: String,
+}
+
 /// The answer to a create.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -540,6 +589,9 @@ pub struct Created {
     pub inbox_token: String,
     pub repo: String,
     pub canonical: String,
+    /// A draft's (`POST /api/drafts`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -603,6 +655,9 @@ pub struct FragmentStatus {
     /// git (absent from hosts without blobs: the TypeScript runtime).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_min_bytes: Option<u64>,
+    /// A draft not yet claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftStatus>,
 }
 
 /// A fragment the signer holds a role on.
@@ -1379,6 +1434,12 @@ mod tests {
         for not in ["todo", "todo--", "--paul", "a--b--c", "Todo--paul", "todo--pa", "todo.x--paul"] {
             assert_eq!(from_flat_name(not), None, "{not}");
         }
+        // a draft's: no one takes `draft`, and it names fragments all the same
+        assert!(!valid_username(DRAFT_USERNAME));
+        assert!(valid_fragment_name("k3x9.draft") && is_draft_name("k3x9.draft"));
+        assert!(!is_draft_name("todo.paul") && !is_draft_name("draft.paul") && !is_draft_name("draft"));
+        assert_eq!(from_flat_name("k3x9--draft").as_deref(), Some("k3x9.draft"));
+        assert_eq!(flat_name("k3x9.draft").as_deref(), Some("k3x9--draft"));
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));

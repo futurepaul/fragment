@@ -205,8 +205,9 @@ impl FragmentCell {
     /// Closes the minutes that are over into rows (every counted minute,
     /// with `close_all`: a test's flush), then sends the waiting batch, or
     /// a new one: one at a time, each sent again until it is acknowledged.
+    /// An unclaimed draft's wait, counted, for its claimer (drafts.rs).
     pub(crate) async fn flush_meters(&self, close_all: bool) -> CellResult<()> {
-        if self.meta(MetaKey::CreatedAt)?.is_none() {
+        if self.meta(MetaKey::CreatedAt)?.is_none() || self.draft()?.is_some() {
             return Ok(());
         }
         let key = self.meter_key()?;
@@ -266,8 +267,11 @@ impl FragmentCell {
 
     /// When the outbox next needs the alarm: the end of the oldest minute
     /// counted, now for rows not yet in a batch (when none waits), or a
-    /// waiting batch's resend.
+    /// waiting batch's resend; never while it is an unclaimed draft's.
     pub(crate) fn meter_due_at(&self) -> CellResult<Option<i64>> {
+        if self.draft()?.is_some() {
+            return Ok(None);
+        }
         let rows = self.rows(
             "SELECT MIN(at) AS at FROM (
                SELECT (MIN(minute) + 1) * ? AS at FROM meter_requests
@@ -355,8 +359,12 @@ impl FragmentCell {
     /// Whether the fragment takes writes now (decision 27): refused, 402,
     /// once its owner's balance is past the overdraft, until a top-up
     /// brings it above zero. A guest's fragments are billed nothing and
-    /// take writes.
+    /// take writes. An unclaimed draft has no owner to ask: it takes writes
+    /// under its own caps (drafts.rs).
     pub(crate) async fn writable(&self) -> CellResult<()> {
+        if self.draft()?.is_some() {
+            return self.draft_writes();
+        }
         match self.read_only().await? {
             None => Ok(()),
             Some(why) => Err(read_only_refusal(why)),
@@ -371,6 +379,10 @@ impl FragmentCell {
     /// an outage costs cents at most; that answer is not kept, so the next
     /// question asks again.
     pub(crate) async fn read_only(&self) -> CellResult<Option<Why>> {
+        // an unclaimed draft's maker has no ledger to ask
+        if self.draft()?.is_some() {
+            return Ok(None);
+        }
         let now = js::now_ms();
         let seen = *self.standing.borrow();
         if let Some((at, why)) = seen.filter(|(at, _)| now - at < STANDING_CACHE_MS) {

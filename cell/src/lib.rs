@@ -36,6 +36,7 @@ mod connections;
 mod channels;
 mod computer;
 mod deliveries;
+mod drafts;
 mod ended;
 mod cs;
 mod error;
@@ -440,6 +441,52 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     Ok(made)
 }
 
+/// `POST /api/drafts` (docs/api.md, Drafts): a draft, signed by a key no one
+/// holds. The registry counts its start against the day's caps (once a
+/// key; its address's, Cloudflare's `CF-Connecting-IP`, and the
+/// deployment's), then the draft its key names is made, that key its maker
+/// (`fragment_core::drafts`).
+async fn make_draft(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+    let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
+    let asked: fragment_proto::MakeDraft = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+    if acting_for(url)?.is_some() {
+        return Err(CellError::invalid("a draft is its key's own: `for` means nothing here"));
+    }
+    let key = authenticate(&req, url, Payload::Read(&body))?;
+    // a template that is copied, never a blessed one (a chat, an agent): asked before a start counts
+    if let Some(t) = asked.template.as_deref().filter(|t| publish::template(t).is_none()) {
+        let names: Vec<&str> = publish::TEMPLATES.iter().map(|(n, _)| *n).collect();
+        return Err(CellError::invalid(format!("a draft starts from {}, not {t:?}", names.join(", "))));
+    }
+    // a request no edge named an address for (a node of our own) counts in one bucket
+    let address = req.headers().get("cf-connecting-ip")?.as_deref().and_then(fragment_core::drafts::address).unwrap_or_else(|| "unknown".into());
+    ask_registry(env, &calls::StartDraft { key: key.clone(), address }).await?;
+    let routed = Routed { name: fragment_core::drafts::name(&key), url: url.clone(), signed: Some(draft_maker(key)), credential: None };
+    // a fresh request: nothing of the caller's but what the router decided
+    let bare = Request::new(url.as_str(), Method::Post)?;
+    let asked = serde_json::to_vec(&asked).map_err(|e| CellError::host(e.to_string()))?;
+    forward(env, &bare, bytes_body(asked), Forward { routed, inner: "/draft".into(), extra: vec![] }).await
+}
+
+/// A draft's maker: the key that made it, which no one holds until the
+/// draft is claimed, as the principal its key names.
+fn draft_maker(key: String) -> Signed {
+    let identity = fragment_proto::Identity { id: fragment_core::drafts::maker(&key), kind: IdentityKind::Person, owner: None, username: None, held: None };
+    Signed::new(identity, Some(key))
+}
+
+/// `signer_for`, or, on a draft's routes, a key no one holds as the
+/// draft's maker: the draft admits it only if it made it and no one has
+/// claimed it (drafts.rs `draft_gate`).
+async fn signer_or_maker(env: &Env, req: &Request, url: &Url, body: &[u8], name: &str) -> CellResult<Signed> {
+    match signer_for(env, req, url, body).await {
+        Err(e) if e.code == ErrorCode::Unauthenticated && fragment_proto::is_draft_name(name) && acting_for(url)?.is_none() => {
+            Ok(draft_maker(authenticate(req, url, Payload::Read(body))?))
+        }
+        signed => signed,
+    }
+}
+
 /// `GET /api/fragments/watch`: a socket on which the caller's list says
 /// it changed (principal.rs, Watching). A key signs it (the CLI's); the
 /// shell opens it with the platform session, which a socket carries
@@ -478,12 +525,13 @@ async fn watch_list(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellRe
     Ok(env.durable_object("PRINCIPAL")?.get_by_name(&identity)?.fetch_with_request(watch).await?)
 }
 
-/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`):
-/// its refusal is theirs to read, 403 for a guest and 402 past the
-/// overdraft. A ledger that does not answer refuses nothing, as a write's
-/// does (meter.rs `writable`): making a fragment is the product, and an
-/// outage lets at most a guest's fragment through, billed nothing.
-async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
+/// Whether `maker`'s ledger lets them make a fragment (`Spend::Create`), or
+/// claim a draft (share.rs): its refusal is theirs to read, 403 for a guest
+/// and 402 past the overdraft. A ledger that does not answer refuses
+/// nothing, as a write's does (meter.rs `writable`): making a fragment is
+/// the product, and an outage lets at most a guest's fragment through,
+/// billed nothing.
+pub(crate) async fn may_create(env: &Env, maker: &str) -> CellResult<()> {
     let may = ledger::MaySpend { spend: fragment_core::ledger::Spend::Create, fragment: None, by_owner: true };
     match ledger::ask(env, maker, &may).await {
         Ok(_) => Ok(()),
@@ -1014,7 +1062,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
-        (_, ["share" | "join", _]) => {
+        (_, ["share" | "join" | "claim", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
@@ -1033,6 +1081,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             create_fragment(env, cfg, &url, create, principal).await
         }
+        (Method::Post, ["api", "drafts"]) => make_draft(req, env, &url).await,
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
@@ -1139,7 +1188,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
                     }
                     None
                 }
-                _ => Some(signer_for(env, &req, &url, &body).await?),
+                _ => Some(signer_or_maker(env, &req, &url, &body, name).await?),
             };
             // An agent on a reserved route: deleting and the cap are never
             // its, and it shares only for its own owner, unheld (Paul,

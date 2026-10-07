@@ -177,6 +177,10 @@ impl FragmentCell {
             Err(skip) => return Ok(Err(skip)),
         };
         let origin = self.cfg.outside_origin(&self.name()?);
+        // an unclaimed draft's maker pays for nothing (drafts.rs)
+        if self.draft()?.is_some() {
+            return Ok(Err(Skip::OwnerPays));
+        }
         let owner = self.must(MetaKey::Owner)?;
         match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Create, fragment: None, by_owner: true }).await {
             Ok(_) => {}

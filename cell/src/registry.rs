@@ -52,13 +52,14 @@ macro_rules! username_join {
 }
 
 pub(crate) mod calls;
+mod drafts;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
     Hold, SubjectOf,
     Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
     Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
-    Resolve, RevokeKey, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
+    Resolve, RevokeKey, Session, SetPicture, StartDraft, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -107,6 +108,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
+        state.storage().sql().exec(drafts::SCHEMA, None).expect("the drafts' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -717,6 +719,7 @@ impl RegistryCell {
             Mint::PATH => reply::<Mint>(self.mint(body(&bytes)?).await),
             Redeem::PATH => reply::<Redeem>(self.redeem(body(&bytes)?)),
             ApproveKey::PATH => reply::<ApproveKey>(self.add_by_session(body(&bytes)?)),
+            StartDraft::PATH => reply::<StartDraft>(self.start_draft(body(&bytes)?).await),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),

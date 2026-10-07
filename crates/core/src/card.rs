@@ -75,7 +75,8 @@ pub enum Skip {
     NotAnApp,
     /// A members-only fragment: an anonymous visitor gets its refusal.
     MembersOnly,
-    /// Its owner pays for nothing now (a guest), or is past the overdraft.
+    /// Its owner pays for nothing now (a guest, or an unclaimed draft's
+    /// maker), or is past the overdraft.
     OwnerPays,
 }
 
@@ -84,7 +85,7 @@ impl Skip {
         match self {
             Skip::NotAnApp => "a chat or an agent is not an app: it has no card",
             Skip::MembersOnly => "a members-only fragment has no card: a visitor without an account sees only its refusal",
-            Skip::OwnerPays => "its owner's ledger takes no shot now (a guest pays for nothing; past the overdraft, nothing new is made)",
+            Skip::OwnerPays => "its owner's ledger takes no shot now (a guest, or a draft no one claimed, pays for nothing; past the overdraft, nothing new is made)",
         }
     }
 }

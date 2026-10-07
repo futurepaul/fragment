@@ -816,8 +816,16 @@ impl FragmentCell {
         Ok(json!({ "kept": index }))
     }
 
-    /// Performs one step of `run`.
+    /// Performs one step of `run`. An unclaimed draft reaches nothing
+    /// outside and pays for nothing (drafts.rs): its fetch and AI steps
+    /// fail for good, and a replay after its claim takes them.
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
+        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) {
+            self.draft_refuses("fetches nothing and runs no AI step").map_err(|e| match e.code {
+                ErrorCode::Forbidden => permanent(e.message),
+                _ => StepFail::Retry(e.message),
+            })?;
+        }
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
             Step::Fetch(f) => self.step_fetch(run, index, f).await,
