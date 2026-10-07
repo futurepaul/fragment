@@ -124,9 +124,8 @@ async fn main() {
                 held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
                 left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
-                agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
             };
-            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
+            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending });
             if let Some(screen) = screen_config() {
                 let stop = stop.clone();
                 tokio::spawn(async move {
