@@ -340,6 +340,9 @@ function indicator(label) {
   return h("div.working", { role: "status" }, h("span.dots", null, h("i"), h("i"), h("i")), label ? h("span", { text: label }) : null);
 }
 
+// the page looks again once a message's "heard" moment has passed
+let heardTimer = 0;
+
 /// The thread's items, in order, for `reconcile`.
 function items(id) {
   const box = S.msgs.get(id);
@@ -349,11 +352,13 @@ function items(id) {
   let prevAt = null;
   let steps = null;
   let side = null; // "you" | "agent": who spoke last, for bylines
+  let you = "start"; // the key of what the person last said: an answer's byline is keyed by it
   let lastAt = 0;
   const placed = new Set();
 
-  const agentSide = (p, at, key) => {
-    if (side !== "agent") out.push({ key: `by:${key}`, sig: `${p?.id}|${p?.emoji}|${p?.name}`, make: () => byline(p, at) });
+  // a byline keeps its node from "Thinking" to the draft to the reply
+  const agentSide = (p, at) => {
+    if (side !== "agent") out.push({ key: `by:${you}`, sig: `${p?.id}|${p?.emoji}|${p?.name}|${at ?? ""}`, make: () => byline(p, at) });
     side = "agent";
   };
   const flush = (live = false) => {
@@ -380,7 +385,7 @@ function items(id) {
       const call = m.kind === "tool" ? parseTool(m.text) : null;
       if (call?.name === "computer") {
         flush();
-        agentSide(p, m.at, m.i);
+        agentSide(p, m.at);
         const next = list[k + 1];
         const started = next?.kind === "echo" ? reportOf(next.text) : null;
         const tid = m.task ?? started?.task ?? `call-${m.i}`;
@@ -390,7 +395,7 @@ function items(id) {
         out.push({ key: `k:${tid}`, sig: taskSig(S.tasks.get(tid), text), make: () => taskNode(tid, text) });
         continue;
       }
-      if (!steps) agentSide(p, m.at, m.i);
+      if (!steps) agentSide(p, m.at);
       steps ??= { first: m.i, items: [] };
       steps.items.push(m);
       continue;
@@ -400,14 +405,17 @@ function items(id) {
       const rep = reportOf(m.text);
       if (rep && (S.tasks.has(rep.task) || /[\d_]/.test(rep.task))) {
         side = "you";
-        out.push({ key: `r:${m.i}`, sig: "r", make: () => h("div.divider.report-mark", null, h("span", null, icon("monitor"), "Your computer reported back")) });
+        you = `r:${m.i}`;
+        out.push({ key: you, sig: "r", make: () => h("div.divider.report-mark", null, h("span", null, icon("monitor"), "Your computer reported back")) });
         continue;
       }
       side = "you";
-      out.push({ key: `u:${m.i}`, sig: m.text, make: () => h("div.msg.you", { title: when(m.at) }, md(m.text)) });
+      // a message that was shown as sent keeps that node
+      you = S.landed.get(m.i) || `u:${m.i}`;
+      out.push({ key: you, sig: m.text, make: () => h("div.msg.you", { title: when(m.at) }, md(m.text)) });
     } else if (m.kind === "talk") {
-      agentSide(p, m.at, m.i);
-      out.push({ key: `a:${m.i}`, sig: m.text, make: () => h("div.msg.agent", null, md(m.text), h("div.msg-tools", null, copyButton(m.text, "Copy reply"))) });
+      agentSide(p, m.at);
+      out.push({ key: `a:${m.i}`, sig: m.text, quiet: S.landed.has(m.i), make: () => h("div.msg.agent", null, md(m.text), h("div.msg-tools", null, copyButton(m.text, "Copy reply"))) });
     } else if (m.kind === "note") {
       side = null;
       out.push({ key: `n:${m.i}`, sig: m.text, make: () => h("div.note", null, h("div.note-label", null, icon("note"), "Noted"), md(m.text)) });
@@ -430,9 +438,10 @@ function items(id) {
   // said here, not yet in the log
   for (const pnd of S.pending.get(id) ?? []) {
     side = "you";
+    you = `p:${pnd.key}`;
     lastAt = Math.max(lastAt, pnd.at);
     out.push({
-      key: `p:${pnd.key}`,
+      key: you,
       sig: String(pnd.failed ?? ""),
       make: () =>
         h(
@@ -446,7 +455,7 @@ function items(id) {
 
   const p = persona(picked.get(id) ?? thread?.persona) ?? currentPersona();
   if (draft) {
-    if (side !== "agent") out.push({ key: "by:draft", sig: p.id ?? "", make: () => byline(p) });
+    agentSide(p);
     out.push({
       key: "draft",
       sig: draft,
@@ -454,7 +463,7 @@ function items(id) {
       update: (node) => node.replaceChildren(md(draft)),
     });
   } else if (on) {
-    if (side !== "agent") out.push({ key: "by:work", sig: p.id ?? "", make: () => byline(p) });
+    agentSide(p);
     const label = S.stopping.has(id) ? "Stopping" : turn?.state === "settling" ? "Gathering what I remember" : list.at(-1)?.kind === "tool" || list.at(-1)?.kind === "echo" ? "" : "Thinking";
     if (label) out.push({ key: "working", sig: label, make: () => indicator(label) });
   } else {
@@ -464,7 +473,10 @@ function items(id) {
     if (unanswered && fresh) {
       const elsewhere = S.status?.turn?.running && S.status.turn.thread && S.status.turn.thread !== id;
       out.push({ key: "heard", sig: String(elsewhere), make: () => indicator(elsewhere ? "Finishing another chat first" : "") });
-      setTimeout(changed, PENDING_MS);
+      heardTimer ||= setTimeout(() => {
+        heardTimer = 0;
+        changed();
+      }, PENDING_MS);
     } else if (turn && turn.at >= lastAt - 1000 && (turn.state === "error" || turn.state === "stopped")) {
       out.push({
         key: `end:${turn.at}`,

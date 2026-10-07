@@ -301,7 +301,7 @@ const summaryOf = (th) => {
 };
 const publicThread = (th) => ({ id: th.id, title: th.title, persona: th.persona, started: th.started, last: th.last, summary: summaryOf(th), topics: threadTopic.get(th.id) ?? [], count: log.slice(th.first_i, th.last_i + 1).filter((m) => m.thread === th.id).length });
 const publicMsg = ({ i, kind, text, at, thread, persona, task }) => ({ i, kind, text, at, thread, persona, task });
-const publicTask = (t) => ({ id: t.id, thread: t.thread, text: t.text, state: t.state, steps: t.steps, report: t.report, started: t.started, ended: t.ended });
+const publicTask = (t) => ({ id: t.id, thread: t.thread, text: t.text, state: t.state, steps: t.steps, report: t.report, started: t.started, ended: t.ended, turn: t.turn });
 let turnNow = null; // {thread, since}
 
 const QUERIES = {
@@ -464,6 +464,17 @@ function logged(kind, text, thread, personaId, task = null) {
   return m;
 }
 
+// a pretend Clef: a thread is in a topic when a word of the topic is in it
+function classify(thread) {
+  const th = threads.get(thread);
+  if (!th) return;
+  const text = log.slice(th.first_i).filter((m) => m.thread === thread && (m.kind === "user" || m.kind === "talk")).map((m) => m.text.toLowerCase()).join(" ");
+  const list = topics.filter((t) => (`${t.name} ${t.description}`.toLowerCase().match(/[\p{L}]{5,}/gu) ?? []).some((w) => text.includes(w))).map((t) => ({ id: t.id, p: 0.9 }));
+  threadTopic.set(thread, list);
+  publish("log", { type: "topics", thread, topics: list });
+  changed();
+}
+
 // a pretend compactor: new messages are summarized a moment later
 function pump() {
   setTimeout(() => {
@@ -479,21 +490,21 @@ const REPLIES = [
   () => "Got it. I'll keep that in mind for every chat from here on, whichever persona you're talking to.",
 ];
 
+// as the platform streams: whole text so far, and no closing frame (the
+// `talk` record or the turn's end replaces it); one late frame, as a
+// throttled stream can send after the record
 async function stream(thread, personaId, text) {
   const turn = `turn:${thread}`;
   const words = text.split(/(?<=\s)/);
   let so = "";
   for (const w of words) {
-    if (turnNow?.stop) {
-      draft("log", turn, null);
-      return false;
-    }
+    if (turnNow?.stop) return false;
     so += w;
     draft("log", turn, so);
     await sleep(28 + rnd() * 40);
   }
   logged("talk", text, thread, personaId);
-  draft("log", turn, null);
+  setTimeout(() => draft("log", turn, so), 120);
   return true;
 }
 
@@ -510,7 +521,7 @@ async function runTurn() {
     publish("log", { type: "turn", thread, state: "thinking" });
     await sleep(600);
     let ok = true;
-    const words = text.toLowerCase().match(/[\p{L}]{5,}/gu) ?? [];
+    const words = (text.toLowerCase().match(/[\p{L}]{5,}/gu) ?? []).sort((a, b) => b.length - a.length);
     let hit = null;
     if (report) {
       ok = await stream(thread, p.id, `Your computer is done. ${firstSentence(report.report)}\n\nWant me to change anything on it?`);
@@ -528,7 +539,7 @@ async function runTurn() {
     } else if (p.hands && /\b(make|build|set up|create|fix|clean|check|install|deploy)\b/i.test(text) && !turnNow.stop) {
       const id = `k_${hex(6)}`;
       logged("tool", `computer ${JSON.stringify({ task: text })}`, thread, p.id, id);
-      const task = { id, thread, text: `${text}\n\n(task ${id}, thread ${thread})`, state: "running", steps: [], report: "", started: Date.now(), ended: null, plan: { id, steps: [["shell", "ls ~/work"], ["edit", "notes/plan.md"], ["shell", "fragment deploy"], ["browser", "check the page"]], report: "Done. I made the change and checked it in the browser; it works. Notes are in `notes/plan.md`." } };
+      const task = { id, thread, text: `${text}\n\n(task ${id}, thread ${thread})`, state: "running", steps: [], report: "", started: Date.now(), ended: null, plan: { id, steps: [["shell", "ls ~/work"], ["edit", "notes/plan.md"], ["shell", "fragment deploy"], ["browser", "check the page"]], report: "Made it and checked it in the browser: it works on a phone too. What I did is written up in `notes/plan.md`.", narration: ["Looking at what's in ~/work first. ", "Writing it down as a plan, then the page itself. ", "Deploying it as a fragment. ", "Opening it in the browser to check it. "] } };
       tasks.set(id, task);
       publish("log", { type: "task", ...publicTask(task) });
       logged("echo", `[${id}] started`, thread, p.id, id);
@@ -541,6 +552,7 @@ async function runTurn() {
     turnNow = null;
     changed();
     pump();
+    setTimeout(() => classify(thread), 1200);
   }
   turning = false;
 }
@@ -549,8 +561,11 @@ async function runTurn() {
 /// `chat`'s draft under the bridge's turn, then its report as a message.
 async function hands(task, every) {
   const turn = `wt_${hex(24)}`;
+  // the mind records goose's turn against its task once `turn.start` comes
+  task.turn = turn;
+  publish("log", { type: "task", ...publicTask(task) });
   const plan = task.plan;
-  const narration = [
+  const narration = plan.narration ?? [
     "Starting from what the mind remembers about the beds. ",
     "I'll scaffold a blank fragment and write the page by hand: no framework, one HTML file and a stylesheet. ",
     "The planting dates come from your notes: the tomatoes went in on April 2, basil by the fence on May 20. ",
@@ -576,7 +591,6 @@ async function hands(task, every) {
     changed();
   }
   await sleep(every);
-  draft("chat", turn, null, "id:goose");
   task.state = "done";
   task.report = plan.report;
   task.ended = Date.now();

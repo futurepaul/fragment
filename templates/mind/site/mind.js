@@ -17,7 +17,7 @@
 
 import { memoryScreen, searchScreen, topicScreen, topicsScreen } from "./browse.js";
 import { avatar, go } from "./pieces.js";
-import { personaSheet, settingsSheet } from "./sheets.js";
+import { personaSheet, platformOrigin, settingsSheet } from "./sheets.js";
 import { S, busy, changed, currentPersona, onChange, persona, running, start } from "./store.js";
 import { newScreen, threadScreen } from "./thread.js";
 import { ago, cleanSummary, firstLine, h, icon, iconButton, parseTool, plural, reconcile } from "./ui.js";
@@ -128,7 +128,7 @@ export function mount(root, fragment) {
           sig: JSON.stringify([line, sum, on, working, hands, ago(t.last ?? t.started), persona(t.persona)?.emoji]),
           make: () =>
             h(
-              `a.recent-row${on ? ".on" : ""}${working ? ".working" : ""}`,
+              `a.recent-row${on ? ".on" : ""}${working ? ".busy" : ""}`,
               { href: `#/t/${id}`, title: t.title || line },
               h("span.recent-face", { "aria-hidden": "true", text: persona(t.persona)?.emoji ?? "·" }),
               h("span.recent-text", { text: line || "A chat" }),
@@ -148,6 +148,7 @@ export function mount(root, fragment) {
         h("span.me-name", { text: name }),
         icon("settings"),
       ),
+      h("a.icon-btn", { href: `${platformOrigin()}/?apps`, target: "_top", title: "Your apps", "aria-label": "Your apps" }, icon("grid")),
     );
   }
 

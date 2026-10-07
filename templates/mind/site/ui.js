@@ -36,7 +36,8 @@ export function h(tag, props, ...kids) {
 /// Brings `parent`'s children to `items`, in order, keeping the node of a
 /// key whose `sig` is unchanged. A changed one is patched by `update(node)`
 /// when the item has one, else made again. New nodes after the first pass
-/// get the class `enter` (their arrival animates), unless `quiet`.
+/// get the class `enter` (their arrival animates), unless `quiet` (or the
+/// item is: it takes the place of something already shown).
 export function reconcile(parent, items, { quiet = false } = {}) {
   const old = new Map();
   for (const n of parent.children) if (n.__key !== undefined) old.set(n.__key, n);
@@ -57,7 +58,7 @@ export function reconcile(parent, items, { quiet = false } = {}) {
       n = it.make();
       n.__key = it.key;
       n.__sig = it.sig;
-      if (!quiet && parent.__painted) n.classList.add("enter");
+      if (!quiet && !it.quiet && parent.__painted) n.classList.add("enter");
     }
     keep.add(n);
     const want = prev ? prev.nextSibling : parent.firstChild;

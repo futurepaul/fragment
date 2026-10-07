@@ -37,6 +37,8 @@ export const S = {
   about: null, // the person's about-me
   turns: new Map(), // thread -> { state, error, at }
   drafts: new Map(), // thread -> { text, at }: the main agent's reply as it streams
+  said: new Map(), // thread -> the text of its latest `talk`, which a late draft frame repeats
+  landed: new Map(), // message i -> the key of what it took the place of (a pending message's; "" for a draft)
   tasks: new Map(), // task id -> { id, thread, text, state, steps, report, started, ended, turn? }
   handDrafts: new Map(), // bridge turn -> { text, at }: goose's words as they stream
   turnTask: new Map(), // bridge turn -> task id, learned
@@ -138,9 +140,15 @@ function onLog(record) {
         if (m.kind === "user") {
           const list = S.pending.get(m.thread);
           const at = list?.findIndex((p) => p.text.trim() === m.text.trim());
-          if (at >= 0) list.splice(at, 1);
+          if (at >= 0) {
+            S.landed.set(m.i, `p:${list[at].key}`);
+            list.splice(at, 1);
+          }
         }
-        if (m.kind === "talk") S.drafts.delete(m.thread);
+        if (m.kind === "talk") {
+          if (S.drafts.delete(m.thread)) S.landed.set(m.i, "");
+          S.said.set(m.thread, m.text);
+        }
         const t = S.threads.get(m.thread);
         if (t) {
           if (!(t.last >= m.at)) {
@@ -154,6 +162,7 @@ function onLog(record) {
     case "turn": {
       if (typeof b.thread !== "string") return;
       S.turns.set(b.thread, { state: str(b.state), error: str(b.error), at: record.at ?? Date.now() });
+      if (b.state === "settling") S.said.delete(b.thread);
       if (b.state !== "thinking" && b.state !== "settling") {
         S.drafts.delete(b.thread);
         S.stopping.delete(b.thread);
@@ -191,34 +200,47 @@ function onLog(record) {
   changed();
 }
 
+// A draft has no end of its own (no null frame): its `talk` record or its
+// turn's end replaces it. A frame that comes after either (drafts are sent
+// at most 4 a second, records at once) is the reply already shown: dropped.
 function onLogDraft(d) {
   if (typeof d.turn !== "string" || !d.turn.startsWith("turn:")) return;
   const thread = d.turn.slice(5);
   if (typeof d.text !== "string") S.drafts.delete(thread);
-  else S.drafts.set(thread, { text: d.text, at: Date.now() });
+  else {
+    const turn = S.turns.get(thread);
+    if (turn && turn.state !== "thinking" && turn.state !== "settling") return;
+    if (S.said.get(thread)?.startsWith(d.text)) return;
+    S.drafts.set(thread, { text: d.text, at: Date.now() });
+  }
   changed();
 }
 
 function onChatDraft(d) {
   if (typeof d.turn !== "string") return;
   if (typeof d.text !== "string") S.handDrafts.delete(d.turn);
-  else S.handDrafts.set(d.turn, { text: d.text, at: Date.now() });
+  else {
+    // a turn is matched to its hand-off when first heard, in order
+    if (!S.handDrafts.has(d.turn)) taskOfTurn(d.turn);
+    S.handDrafts.set(d.turn, { text: d.text, at: Date.now() });
+  }
   changed();
 }
 
 export const running = (task) => !!task && !/^(done|idle|ended|answered|error|failed|lost|stopped)$/.test(task.state ?? "");
 
-/// The task a bridge turn is: as its record names it, else (when the
-/// backend does not say) the one hand-off running while it streams.
+/// The task a bridge turn is: as its record names it (`turn`), else, when
+/// the backend does not say, the oldest running hand-off no turn has
+/// claimed yet: goose takes hand-offs in the order they were opened, so
+/// turns first heard in that order map one to one.
 export function taskOfTurn(turn) {
   const known = S.turnTask.get(turn);
   if (known) return S.tasks.get(known) ?? null;
-  const open = [...S.tasks.values()].filter((t) => running(t) && !t.turn && ![...S.turnTask.values()].includes(t.id));
-  if (open.length === 1) {
-    S.turnTask.set(turn, open[0].id);
-    return open[0];
-  }
-  return null;
+  const claimed = new Set(S.turnTask.values());
+  const open = [...S.tasks.values()].filter((t) => running(t) && !t.turn && !claimed.has(t.id)).sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
+  if (!open.length) return null;
+  S.turnTask.set(turn, open[0].id);
+  return open[0];
 }
 
 /// goose's words so far on `task`, if it is streaming them.

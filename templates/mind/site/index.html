@@ -19,8 +19,7 @@
     // for the fragment, never on a fragment's own host (whose first label
     // holds `--`), so a mind's page never loads it.
     const mock = new URLSearchParams(location.search).has("mock") && !location.hostname.includes("--");
-    const fragment = await import(mock ? "./mock.js" : "./__fragment.js");
-    const { mount } = await import("./mind.js");
+    const [fragment, { mount }] = await Promise.all([import(mock ? "./mock.js" : "./__fragment.js"), import("./mind.js")]);
     mount(document.body, fragment);
   </script>
 </body>

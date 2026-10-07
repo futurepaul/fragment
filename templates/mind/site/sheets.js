@@ -105,10 +105,13 @@ export function personaSheet(p) {
   });
 }
 
-/// The platform's own page (the shell, with every app): the page that
-/// frames this one, else guessed from this host (a branch's fragments are
-/// `<label>--<user>--<branch>.<zone>`, its shell `<branch>.<zone>`; the
-/// dev stack's are `*.fragment.localhost`, its shell 127.0.0.1).
+/// The platform's origin (its shell lists every app at `/?apps`): the page
+/// that frames this one, else read from this host. A fragment's host is
+/// `<label>--<user>[--<branch>].<zone>` and the platform's `[<branch>.]<zone>`;
+/// the dev stack's fragments are `*.fragment.localhost`, its platform
+/// 127.0.0.1. (A deployment whose fragments have a zone of their own, as
+/// fragment.boats beside fragment.club, is not read right: the page has
+/// no way to ask.)
 export function platformOrigin() {
   const framing = location.ancestorOrigins?.[location.ancestorOrigins.length - 1];
   if (window.parent !== window && framing) return framing;
@@ -161,7 +164,7 @@ export function settingsSheet() {
       h("h3", { text: "Memory" }),
       h("p.quiet", { text: st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt} still being summarized` : ", all summarized"}. ${st.hands ? "Your computer is connected." : "No computer is connected."}` : "…" }),
     ),
-    h("a.apps-link", { href: platformOrigin(), target: "_top" }, icon("grid"), h("span", null, h("b", { text: "Your apps" }), h("small", { text: "Everything else on fragment" })), icon("open")),
+    h("a.apps-link", { href: `${platformOrigin()}/?apps`, target: "_top" }, icon("grid"), h("span", null, h("b", { text: "Your apps" }), h("small", { text: "Everything else on fragment" })), icon("open")),
   );
   sheet("Settings", body, { cls: "wide" });
 }
