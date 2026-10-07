@@ -184,11 +184,13 @@ that names a PID from before a sleep can name a live process after it.
 - **The restore's check** (optional): an image may carry an executable
   `/usr/local/bin/computer-check`. The DO runs it, as root, after it
   restores `/data` and before it opens the gate, so nothing reads `/data`
-  meanwhile (at most 2 minutes). It may put what it copied under the hold
-  back in place, and check what it restored. Exit 0: whole. Exit 3: the
-  save is unusable, and the DO marks it so and starts again from the save
-  before it. Any other exit: the check itself failed, a failed start like
-  any (tried again, on the same save). Our Hermes image's puts its
+  meanwhile (at most 2 minutes: past them it is killed, SIGKILL, as any
+  exec of the DO's is past its bound, and the start fails). It may put
+  what it copied under the hold back in place, and check what it
+  restored. Exit 0: whole. Exit 3: the save is unusable, and the DO
+  marks it so and starts again from the save before it. Any other exit:
+  the check itself failed, a failed start like any (tried again, on the
+  same save). Our Hermes image's puts its
   databases' copies back and runs `PRAGMA quick_check` on each.
 - The hold (above, `/run/computer/hold`) is read the same way: our
   bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
