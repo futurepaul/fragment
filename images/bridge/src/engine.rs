@@ -46,6 +46,19 @@
 //!   (`to`, else `@mentions` of this computer's agents), else for the lead,
 //!   the first agent added (decision 8). An agent's reply is for another
 //!   agent only when it names it, at most `HOPS_MAX` hand-offs deep.
+//! - The hop is the answering bridge's to count (`hop_of`), never fewer
+//!   than the record claims: a record by an agent of this computer is one
+//!   hop past the turn that agent is in (here, or just ended here; else its
+//!   deepest elsewhere; else, in none, the last hop allowed), so a post made
+//!   around the bridge (the CLI, the API) resets nothing. A person's agents
+//!   all run on one computer (decision 13), so every hand-off between them
+//!   is counted here; another computer's agent is held by its claim.
+//! - A chat's agents start at most `AGENT_TURNS_PER_CHAT_MAX` turns of each
+//!   other in `AGENT_TURNS_WINDOW_MS` (the causing records' times, kept in
+//!   the state); past it a hand-off is refused, its end saying why.
+//! - An agent's `tasks` hears only its own fragment (its cron, the
+//!   platform's `joined`) and its owner: another agent acting for the owner
+//!   starts no routine there.
 //! - Only a turn's asker stops it; only an agent's owner answers its
 //!   prompts, the first answer wins, and an unanswered prompt expires
 //!   (decision 42).
@@ -59,7 +72,7 @@
 //!   idle sleep (docs/bridge.md, "A card keeps its computer awake": a cut
 //!   one left Hermes to meet the next message with the cut request).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,6 +94,17 @@ pub const LOST: &str = "lost when the computer restarted";
 pub const REFUSED_QUEUED: &str = "too many messages are waiting for this agent; send it again once it answers";
 pub const REFUSED_BUSY: &str = "this computer is too busy right now";
 
+/// Why an agent's hand-off is refused a turn: the chat's agents started as
+/// many turns of each other as they may in the window
+/// (`limits::AGENT_TURNS_PER_CHAT_MAX`).
+pub fn refused_budget() -> String {
+    format!(
+        "agents in this chat started {} turns of each other in {} minutes, the most they may; ask again in a few minutes",
+        limits::AGENT_TURNS_PER_CHAT_MAX,
+        limits::AGENT_TURNS_WINDOW_MS / 60_000
+    )
+}
+
 /// What the bridge keeps across restarts (`/data/bridge/state.json`): a
 /// cache of where to read from and what it has in hand, never the
 /// authority on which turns have run (the journal is).
@@ -100,11 +124,18 @@ pub struct State {
     /// Messages the runtime said on its own so far (their turns' ids, with
     /// the life).
     pub said: u64,
+    /// Per chat, the times (the causing records' `at`, ms, ascending) of
+    /// the turns its agents started of each other here lately: its budget
+    /// (`limits::AGENT_TURNS_PER_CHAT_MAX` in `AGENT_TURNS_WINDOW_MS`).
+    /// Kept, so a restart spends none of it again. A state without it (an
+    /// earlier bridge's) starts each chat's count afresh.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_turns: BTreeMap<String, Vec<i64>>,
 }
 
 impl Default for State {
     fn default() -> State {
-        State { version: STATE_VERSION, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0 }
+        State { version: STATE_VERSION, boot: 0, cursors: BTreeMap::new(), turns: BTreeMap::new(), admitted: 0, said: 0, agent_turns: BTreeMap::new() }
     }
 }
 
@@ -325,10 +356,24 @@ pub struct Engine {
     agents: Vec<Agent>,
     views: HashMap<String, ChatView>,
     keepalive: bool,
+    /// Turns that ran here and ended lately, oldest first (at most
+    /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
+    /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
+    ended: VecDeque<EndedTurn>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
     now: u64,
+}
+
+/// A turn that ran here and ended: whose, where, how deep, and when (the
+/// engine's clock).
+#[derive(Debug, Clone, PartialEq)]
+struct EndedTurn {
+    agent: String,
+    fragment: String,
+    hop: u32,
+    at: u64,
 }
 
 pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
@@ -346,7 +391,20 @@ impl Engine {
     pub fn new(state: State, settings: Settings, life: &str) -> Result<Engine, Corrupt> {
         assert!(records::valid_life(life), "a life is 32 lowercase hex: {life}");
         check(&state)?;
-        Ok(Engine { state, settings, life: life.to_string(), connected: false, claiming: BTreeSet::new(), agents: Vec::new(), views: HashMap::new(), keepalive: false, out: Vec::new(), dirty: false, now: 0 })
+        Ok(Engine {
+            state,
+            settings,
+            life: life.to_string(),
+            connected: false,
+            claiming: BTreeSet::new(),
+            agents: Vec::new(),
+            views: HashMap::new(),
+            keepalive: false,
+            ended: VecDeque::new(),
+            out: Vec::new(),
+            dirty: false,
+            now: 0,
+        })
     }
 
     pub fn state(&self) -> &State {
@@ -496,7 +554,18 @@ impl Engine {
         }
         match record.channel.as_str() {
             records::CHAT => self.said(&agent, fragment, &record),
-            records::TASKS if fragment == agent.fragment => self.task(&agent, &record),
+            records::TASKS if fragment == agent.fragment => {
+                // Only the agent's own fragment (its cron, the platform's
+                // `joined`: neither is an identity) and its owner ask it
+                // anything here. Another agent, though it acts for the owner
+                // and may post here, starts no routine: it would start a
+                // turn no hop counts.
+                if record.principal != agent.owner && records::is_identity(&record.principal) {
+                    crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "principal": record.principal, "why": "only the agent's owner, or its own fragment, asks it on tasks" });
+                    return;
+                }
+                self.task(&agent, &record)
+            }
             _ => {}
         }
     }
@@ -505,14 +574,14 @@ impl Engine {
         match records::said(&record.body) {
             Said::Message(m) => {
                 let view = self.views.get(fragment).cloned().unwrap_or_default();
-                let hop = self.addressed(agent, &view, &record.principal, &m);
+                let hop = self.addressed(agent, fragment, &view, &record.principal, &m);
                 if hop == Some(0) && self.told(agent, fragment, &record.principal, &view, &m, record.seq) {
                     return;
                 }
                 if let Some(hop) = hop {
                     let asker_name = view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into());
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, &record.principal, asker_name, &m, hop, false);
+                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, false);
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
@@ -527,7 +596,7 @@ impl Engine {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 let m = Message { text, ..Message::default() };
                 let owner = agent.owner.clone();
-                self.admit(agent, &chat, cause, &owner, "your routine".into(), &m, 0, true);
+                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, true);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             Task::Other => {}
@@ -535,11 +604,18 @@ impl Engine {
     }
 
     /// Whether a message is for `agent`, and the hop its turn is at.
-    fn addressed(&self, agent: &Agent, view: &ChatView, principal: &str, m: &Message) -> Option<u32> {
+    fn addressed(&self, agent: &Agent, fragment: &str, view: &ChatView, principal: &str, m: &Message) -> Option<u32> {
         let from_agent = view.agents.iter().any(|a| a == principal) || self.agents.iter().any(|a| a.identity == principal);
         if from_agent {
-            let named = m.to.iter().any(|t| t == &agent.identity);
-            return (named && m.hop <= limits::HOPS_MAX).then_some(m.hop);
+            if !m.to.iter().any(|t| t == &agent.identity) {
+                return None;
+            }
+            let hop = self.hop_of(fragment, principal, m.hop);
+            if hop > limits::HOPS_MAX {
+                crate::ev!("handoff.too_deep", { "agent": agent.fragment, "fragment": fragment, "from": principal, "hop": hop, "claimed": m.hop });
+                return None;
+            }
+            return Some(hop);
         }
         if !m.to.is_empty() {
             return m.to.iter().any(|t| t == &agent.identity).then_some(0);
@@ -552,19 +628,87 @@ impl Engine {
         (view.lead() == Some(agent.identity.as_str())).then_some(0)
     }
 
+    /// How many hand-offs led to a record an agent posted in `fragment`:
+    /// this bridge's count, never fewer than the record `claimed`. For an
+    /// agent of this computer it is one past the turn the agent is in: its
+    /// turn in this chat (running, or ended within `ENDED_HOPS_MS`, which a
+    /// reply read after its turn was let go is), else its deepest running
+    /// elsewhere (a post from a turn into another chat, as `fragment ask`
+    /// makes), else, in no turn at all, the last hop allowed: answered once,
+    /// handing on nothing. So a post made around the bridge (the CLI, the
+    /// API: no `hop`, or `hop: 0`) counts as the reply would. Another
+    /// computer's agent, whose turns this bridge cannot see, is one hop at
+    /// least, as it claims; the chat's budget holds it too.
+    fn hop_of(&self, fragment: &str, principal: &str, claimed: u32) -> u32 {
+        let Some(poster) = self.agents.iter().find(|a| a.identity == principal) else {
+            return claimed.max(1);
+        };
+        let running = |t: &&Turn| t.agent == poster.fragment && t.active();
+        let here = self.state.turns.values().filter(running).find(|t| t.fragment == fragment).map(|t| t.hop).or_else(|| {
+            let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
+            self.ended.iter().rev().filter(fresh).find(|e| e.agent == poster.fragment && e.fragment == fragment).map(|e| e.hop)
+        });
+        let elsewhere = self.state.turns.values().filter(running).filter(|t| t.fragment != fragment).map(|t| t.hop).max();
+        let from = here.into_iter().chain(elsewhere).max().unwrap_or(limits::HOPS_MAX - 1);
+        from.saturating_add(1).max(claimed)
+    }
+
+    /// Whether the chat's agents may start another turn of each other at
+    /// `at` (a causing record's time): fewer than
+    /// `AGENT_TURNS_PER_CHAT_MAX` in the window before it. Times older than
+    /// the window are let go; a later one (another follower's, ahead of
+    /// this one) still counts.
+    fn agent_turn_allowed(&mut self, chat: &str, at: i64) -> bool {
+        let Some(times) = self.state.agent_turns.get_mut(chat) else { return true };
+        let before = times.len();
+        times.retain(|t| *t > at.saturating_sub(limits::AGENT_TURNS_WINDOW_MS));
+        if times.len() != before {
+            self.dirty = true;
+        }
+        if times.is_empty() {
+            self.state.agent_turns.remove(chat);
+            return true;
+        }
+        times.len() < limits::AGENT_TURNS_PER_CHAT_MAX
+    }
+
+    /// Counts a turn the chat's agents started of each other at `at`.
+    fn spend_agent_turn(&mut self, chat: &str, at: i64) {
+        let times = self.state.agent_turns.entry(chat.to_string()).or_default();
+        let place = times.partition_point(|t| *t <= at);
+        times.insert(place, at);
+        // the newest only: the oldest past the cap could never refuse one
+        if times.len() > limits::AGENT_TURNS_PER_CHAT_MAX {
+            let over = times.len() - limits::AGENT_TURNS_PER_CHAT_MAX;
+            times.drain(..over);
+        }
+        self.dirty = true;
+        // bounded: the chat counted least lately goes
+        while self.state.agent_turns.len() > limits::AGENT_TURN_CHATS_MAX {
+            let stalest = self.state.agent_turns.iter().min_by_key(|(_, t)| t.last().copied().unwrap_or(i64::MIN)).map(|(c, _)| c.clone()).expect("over the cap, so not empty");
+            self.state.agent_turns.remove(&stalest);
+        }
+    }
+
+    /// A turn for `agent` in `fragment`, caused by a record at `at` (the
+    /// platform's time); `hop` past zero is a hand-off from another agent,
+    /// which the chat's budget counts.
     #[allow(clippy::too_many_arguments)]
-    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, asker: &str, asker_name: String, m: &Message, hop: u32, routine: bool) {
+    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, routine: bool) {
         let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
         if self.state.turns.contains_key(&id) {
             // The cursor makes this impossible; a state that says otherwise
             // is not trusted to go on.
             panic!("turn {id} admitted twice: the cursor of {} is behind its turns", cursor_key(&agent.fragment, &cause.fragment, &cause.channel));
         }
+        assert!(!routine || hop == 0, "a routine is its owner's ask, no hand-off");
         let waiting = self.state.turns.values().filter(|t| t.agent == agent.fragment && t.fragment == fragment && t.phase == Phase::Queued).count();
-        let refusal = if waiting >= limits::QUEUED_PER_CHAT_MAX {
-            Some(REFUSED_QUEUED)
+        let refusal = if hop > 0 && !self.agent_turn_allowed(fragment, at) {
+            Some(refused_budget())
+        } else if waiting >= limits::QUEUED_PER_CHAT_MAX {
+            Some(REFUSED_QUEUED.to_string())
         } else if self.state.turns.len() >= limits::TURNS_OPEN_MAX {
-            Some(REFUSED_BUSY)
+            Some(REFUSED_BUSY.to_string())
         } else {
             None
         };
@@ -595,7 +739,7 @@ impl Engine {
         self.dirty = true;
         if let Some(why) = refusal {
             crate::ev!("turn.refused", { "turn": id, "agent": agent.fragment, "fragment": fragment, "why": why });
-            let outcome = Outcome::Error(why.into());
+            let outcome = Outcome::Error(why);
             if self.state.turns.len() < limits::TURNS_OPEN_MAX {
                 self.state.turns.insert(id.clone(), turn);
                 self.end_unrun(&id, outcome);
@@ -610,6 +754,9 @@ impl Engine {
             return;
         }
         crate::ev!("turn.admitted", { "turn": id, "agent": agent.fragment, "fragment": fragment, "seq": turn.cause.seq, "hop": hop });
+        if hop > 0 {
+            self.spend_agent_turn(fragment, at);
+        }
         self.state.turns.insert(id, turn);
         self.pump(&agent.fragment, fragment);
     }
@@ -1055,8 +1202,13 @@ impl Engine {
         t.owed = vec![end.clone()];
         // over, it asks nothing: its asker's next message is a turn
         t.asking = false;
-        let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
+        let (agent, fragment, hop) = (t.agent.clone(), t.fragment.clone(), t.hop);
         self.dirty = true;
+        // its replies may be read after it is let go: one hop past it
+        self.ended.push_back(EndedTurn { agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
+        while self.ended.len() > limits::ENDED_HOPS_MAX {
+            self.ended.pop_front();
+        }
         crate::ev!("turn.end", { "turn": id, "agent": agent, "fragment": fragment, "outcome": match &outcome { Outcome::Idle => "idle", Outcome::Stopped => "stopped", Outcome::Error(_) => "error" } });
         for p in prompts.iter().filter(|p| !p.closed) {
             self.post(&agent, &fragment, records::WORK, records::work_id(id, &format!("pc:{}", p.id)), records::turn_prompt_closed(id, &p.id, unanswered, None), Vec::new());
@@ -1163,6 +1315,17 @@ pub fn check(state: &State) -> Result<(), Corrupt> {
         let own = format!("wk:{id}:");
         if let Some(o) = t.owed.iter().find(|o| !o.id.starts_with(&own) || o.body["turn"] != id.as_str()) {
             return Err(Corrupt(format!("turn {id} owes {}, not one of its own", o.id)));
+        }
+        if t.routine && t.hop != 0 {
+            return Err(Corrupt(format!("turn {id} is a routine at hop {}", t.hop)));
+        }
+    }
+    if state.agent_turns.len() > limits::AGENT_TURN_CHATS_MAX {
+        return Err(Corrupt(format!("{} chats' agent turns is past the bound", state.agent_turns.len())));
+    }
+    for (chat, times) in &state.agent_turns {
+        if times.is_empty() || times.len() > limits::AGENT_TURNS_PER_CHAT_MAX || !times.windows(2).all(|w| w[0] <= w[1]) {
+            return Err(Corrupt(format!("chat {chat}'s agent turns are not 1 to {} times in order", limits::AGENT_TURNS_PER_CHAT_MAX)));
         }
     }
     Ok(())
