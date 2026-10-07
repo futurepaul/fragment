@@ -33,7 +33,7 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
    `docs/phase-5.md` — agents as members (the record: its goose agents
-   went on 2026-10-06);
+   went on 2026-10-07);
    `docs/durable-computers.md` — how a computer's state survives a
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
@@ -196,7 +196,8 @@ prebuilt bundle is in the debt ledger).
   library), `inbox` (a trigger, a job, the inbox), and `notes` (files as
   the state, read through `App.fetch`, refreshed by a file trigger).
   `fragment new|init --template` scaffolds any of `templates/` (also
-  `blank`); the shell's catalog offers `todo`, `inbox` and `blank`.
+  `blank`, and `calories`: a channel trigger and a text step); the
+  shell's catalog offers `todo`, `inbox` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store

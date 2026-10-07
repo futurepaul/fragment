@@ -75,7 +75,8 @@ cd garden                                 # the folder is the fragment's working
 
 Templates (`fragment new --list`): `blank` (one page), `todo` (operations,
 a channel, a live page), `inbox` (webhooks in, a job), `notes` (a folder
-of markdown as a live site). Start from the closest one and read its files: they are working examples.
+of markdown as a live site), `calories` (a channel trigger whose job asks
+a model, then logs). Start from the closest one and read its files: they are working examples.
 
 When the human wants one of the platform's templates as it is, with no
 folder of yours, make it on the platform alone:

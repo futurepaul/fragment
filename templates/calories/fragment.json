@@ -1,0 +1,37 @@
+{
+  "name": "calories",
+  "operations": {
+    "log_food": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["who", "food", "calories"],
+        "additionalProperties": false,
+        "properties": {
+          "who": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "food": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "calories": { "type": "integer", "minimum": 0, "maximum": 10000 }
+        }
+      }
+    },
+    "today": {
+      "kind": "query",
+      "role": "viewer",
+      "input": { "type": "object", "additionalProperties": false, "properties": { "since": { "type": "integer", "minimum": 0 } } }
+    },
+    "forget": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "heard": { "kind": "job" },
+    "summarize": { "kind": "job", "role": "viewer", "input": { "type": "object", "additionalProperties": false, "properties": {} } }
+  },
+  "channels": {
+    "ask": { "read": "viewer", "post": "viewer", "signedIn": true },
+    "replies": { "read": "viewer" }
+  },
+  "triggers": [{ "channel": "ask", "run": "heard" }],
+  "meta": { "title": "Calories", "description": "Say what you ate in plain words: a model reads it, logs each item, and your day adds up live." }
+}

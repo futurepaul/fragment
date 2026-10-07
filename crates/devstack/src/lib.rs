@@ -102,11 +102,11 @@ pub fn read_config(project: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&strip_comments(&text)).with_context(|| format!("parse {}", path.display()))
 }
 
-/// A copy of a built project at `dir`: its config (without its `build`
-/// step: a staged copy has no source to build), its `files`, and its
-/// `build/`, so a node run from it keeps its state and variables apart
-/// from the source tree, where `xtask dev` runs.
-fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
+/// A copy of the built cell project at `dir`: its config (without its
+/// `build` step: a staged copy has no source to build), its shim, and its
+/// `build/`, so a node run from it keeps its state and variables apart from
+/// the source tree, where `xtask dev` runs.
+pub fn stage_project(dir: &Path) -> Result<PathBuf> {
     fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
@@ -120,12 +120,13 @@ fn stage(from: &Path, dir: &Path, files: &[&str]) -> Result<PathBuf> {
         }
         Ok(())
     }
+    let from = cell_dir();
     fs::create_dir_all(dir)?;
-    let mut config = read_config(from)?;
+    let mut config = read_config(&from)?;
     config.as_object_mut().context("a wrangler config is an object")?.remove("build");
-    absolute_images(&mut config, from)?;
+    absolute_images(&mut config, &from)?;
     fs::write(dir.join("wrangler.jsonc"), serde_json::to_string_pretty(&config)?)?;
-    for f in files {
+    for f in ["entry.mjs", "storage.mjs"] {
         fs::copy(from.join(f), dir.join(f)).with_context(|| format!("stage {f}"))?;
     }
     let _ = fs::remove_dir_all(dir.join("build"));
@@ -196,11 +197,6 @@ pub fn clear_state(project: &Path) -> Result<()> {
         fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
     }
     Ok(())
-}
-
-/// A copy of the built cell project at `dir` (its config, shim, and build).
-pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.

@@ -1078,10 +1078,7 @@ pub struct ChannelPage {
 
 /// What a subscription's URL receives (`POST`, unsigned: the URL is the
 /// subscriber's capability): one new record of the channel it follows.
-/// A struct with its `type` as a field, not an internally tagged enum:
-/// serde buffers a tagged enum's content, and a record's raw body cannot
-/// pass through that buffer either way.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Delivery {
     #[serde(rename = "type")]
     pub kind: DeliveryType,
@@ -1091,7 +1088,7 @@ pub struct Delivery {
 }
 
 /// The kinds of `Delivery` (one so far).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryType {
     Record,
@@ -1477,29 +1474,15 @@ mod tests {
         assert_eq!(canonical_json(&a), r#"{"a":{"c":3,"d":2},"b":1}"#);
     }
 
-    /// Goal: a delivery names its record's place, or it does not decode.
-    /// Method: the wire shape round-trips; one without `seq`, or of another
-    /// type, is an error (an agent keyed a seq-less one `…/null`).
+    /// A delivery is its documented shape: `type` beside the record, whose
+    /// body passes as it was stored.
     #[test]
-    fn deliveries_decode_whole_or_not_at_all() {
+    fn a_delivery_is_its_documented_shape() {
         let wire = serde_json::json!({ "type": "record", "fragment": "f", "channel": "chat",
             "record": { "channel": "chat", "seq": 7, "at": 1, "principal": "id:0123456789abcdef0123456789abcdef", "kind": "say", "body": { "text": "hi" } } });
-        // from text, as a delivery arrives. A record's raw body decodes from a
-        // parsed Value as well; what cannot hold one is serde's buffer for an
-        // internally tagged enum, which is why Delivery is a struct.
-        let decode = |v: &Value| serde_json::from_str::<Delivery>(&v.to_string());
-        let delivery = decode(&wire).unwrap();
-        assert_eq!((delivery.kind, delivery.fragment.as_str(), delivery.channel.as_str(), delivery.record.seq), (DeliveryType::Record, "f", "chat", 7));
-        let encoded = serde_json::to_string(&delivery).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&encoded).unwrap(), wire);
-        let from_value: Delivery = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(from_value.record.body.get(), r#"{"text":"hi"}"#);
-        let mut no_seq = wire.clone();
-        no_seq["record"].as_object_mut().unwrap().remove("seq");
-        assert!(decode(&no_seq).is_err());
-        let mut other = wire.clone();
-        other["type"] = serde_json::json!("push");
-        assert!(decode(&other).is_err());
+        let record: ChannelRecord = serde_json::from_value(wire["record"].clone()).unwrap();
+        let delivery = Delivery { kind: DeliveryType::Record, fragment: "f".into(), channel: "chat".into(), record };
+        assert_eq!(serde_json::to_value(&delivery).unwrap(), wire);
     }
 
     /// The contract states the step limit with the code's number (it said

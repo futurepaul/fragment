@@ -164,7 +164,7 @@ secrets earlier deploys uploaded (`FRAGMENT_HOST_SECRET`,
 `CODESTORAGE_PRIVATE_KEY`, `WORKOS_API_KEY`, `FRAGMENT_KEY_<NAME>`) stay
 on each Worker, unread, until Paul deletes them (`wrangler secret delete
 <name> --name fragment-<branch>`); the files, once moved, are Paul's to
-delete too. The agents' Worker went with the goose agent (2026-10-06):
+delete too. The agents' Worker went with the goose agent (2026-10-07):
 a deployment made before keeps an unbound `fragment-agent[-<branch>]`
 that no deploy or teardown touches, Paul's to remove (`wrangler delete
 --name fragment-agent-<branch>`).

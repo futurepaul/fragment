@@ -32,11 +32,9 @@ mechanism names the celld primitive it uses; read with the celld docs
    (a page everyone who may see it gets alike asks nothing). Grants,
    invites, and revocations are transactional and take effect on the
    next request. Each fragment is its own browser origin.
-5. **Agents are add-ons a fragment declares** (ROADMAP decisions 19–20);
-   a fragment that declares none carries nothing of them. Agents are
-   hosted members with durable turns. Computers (decision 21) went at the
-   cut (tag `celld-final`) and come back on Cloudflare
-   (docs/cloudflare-v1.md, phase 4).
+5. **Agents are fragments a computer runs** (docs/cloudflare-v1.md,
+   decisions 13 to 15), members of the fragments they work in (Agents,
+   below). No fragment declares one.
 
 ## Anatomy of a fragment, in celld terms
 
@@ -237,7 +235,7 @@ docs/chat-records.md). It acts on fragments through the platform's API
 as their member, for whoever asked: every call names them (`for`), and
 acts with the lower of their role and the agent's cap (ROADMAP decision
 17). The in-fragment goose agent (a loop in a Durable Object of its own,
-a fragment's `agent` block, `job.agent`) went on 2026-10-06 (issue
+a fragment's `agent` block, `job.agent`) went on 2026-10-07 (issue
 #156): one runtime, with one set of turn semantics.
 
 ## Computers

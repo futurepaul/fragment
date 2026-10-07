@@ -1,10 +1,9 @@
 //! Channel subscriptions (phase 7): a member asks the fragment to deliver
-//! each new record of a channel it may read to a URL, such as an agent's
-//! inbox (MODEL.md, Agents: "the agent member subscribes"). Records go out
-//! through the delivery outbox and queue (deliveries.rs) as `{type:
-//! "record", fragment, channel, record}` (`fragment_proto::Delivery`, the
-//! type the agents' inbox decodes), unsigned: the URL is the subscriber's
-//! capability. A member's subscriptions end with its
+//! each new record of a channel it may read to a URL, or to wake the
+//! computer it runs on (runs_on.rs). Records go out through the delivery
+//! outbox and queue (deliveries.rs) as `{type: "record", fragment,
+//! channel, record}` (`fragment_proto::Delivery`), unsigned: the URL is
+//! the subscriber's capability. A member's subscriptions end with its
 //! membership.
 
 use fragment_core::{egress, npub};

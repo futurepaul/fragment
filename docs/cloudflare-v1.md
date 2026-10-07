@@ -419,13 +419,15 @@ speaking Cloudflare's APIs) returns once this product works.
       - every e2e lane for them.
     - The chat and agent templates are rebuilt on the rule above.
     - The krun engine moves to its own repo, which Paul creates.
-    - The in-fragment goose agent went too (2026-10-06, issue #156's
-      head scratcher 6): the `agent/` Worker on the goose fork, a
-      fragment's `agent` block, `job.agent`, `fragment agent`, the
-      calories template, and their e2e sections. Agents are fragments a
-      computer runs (decisions 14 and 15): one runtime, with one set of
-      turn, tool, progress and recovery semantics. An app's own model
-      calls are its AI steps.
+    - The in-fragment goose agent went too (Paul, 2026-10-07; issue
+      #156's head scratcher 6): the `agent/` Worker on the goose fork, a
+      fragment's `agent` block, `job.agent`, `fragment agent`, and their
+      e2e sections. Agents are fragments a computer runs (decisions 14
+      and 15): one runtime, with one set of turn, tool, progress and
+      recovery semantics. An app's own model calls are its AI steps: the
+      calories template reads what someone ate with a text step its
+      channel's trigger runs. goose may come back later, as a
+      fragment-native alternative to Hermes.
     - Nothing on fragment.club migrates. People sign in again with the
       same WorkOS identity, and one seed carries usernames across.
 34. **Infra comes down after cutover**, one irreversible step at a

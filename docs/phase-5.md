@@ -2,7 +2,7 @@
 
 **The record of a phase.** Its agents (the `agent/` Worker on goose's
 loop, the fragment `agent` block, `job.agent`, `fragment agent`) went on
-2026-10-06 (issue #156, head scratcher 6; the code is at `1da3b4a`):
+2026-10-07 (Paul; issue #156, head scratcher 6; the code is at `1da3b4a`):
 agents are fragments a computer runs (docs/cloudflare-v1.md, decisions
 14 and 15). What stays is the identity model: agents as members, each
 owned by a person, acting `for` whoever asked with the lower of their

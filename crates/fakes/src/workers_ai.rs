@@ -27,8 +27,9 @@
 //! (`describe_image`: its kind and size), so a test sees which image a
 //! model was shown.
 //!
-//! A call answers an echo of its last message, or, for a real agent runtime
-//! (`transcripts`), `transcript_reply`: a pure function of the transcript
+//! A call answers the text a test set for it (`say_next`), else an echo of
+//! its last message, or, for a real agent runtime (`transcripts`),
+//! `transcript_reply`: a pure function of the transcript
 //! (lesson 13), which an agent's own auxiliary calls (titles, its approval
 //! guardian) cannot put out of order; its answer after a tool's result
 //! waits `FOLLOW_UP_MS`.
@@ -112,6 +113,8 @@ struct State {
     calls: Vec<AiCall>,
     /// How the next calls answer, in order: a status, or `None` as they would.
     failures: VecDeque<Option<u16>>,
+    /// The texts the next calls answer, in order; then as they would.
+    said: VecDeque<String>,
     /// The usage the next answers report, in order; then the default.
     usage: VecDeque<Used>,
     /// The next streamed answers end before their usage, in order.
@@ -450,13 +453,18 @@ fn answer(s: &mut State, req: &Request) -> Response {
         return problem(400, &why);
     }
     let last = body["messages"].as_array().and_then(|m| m.last()).map(|m| m["content"].clone()).unwrap_or(Value::Null);
+    let said = s.said.pop_front();
     let used = s.usage.pop_front();
     s.sleep_ms = s.delays.pop_front().unwrap_or(0);
-    if s.transcripts && follows_a_tool(&body) {
+    if s.transcripts && said.is_none() && follows_a_tool(&body) {
         s.sleep_ms = s.sleep_ms.max(FOLLOW_UP_MS);
     }
     let broken = s.breaks.pop_front().unwrap_or(false);
-    let reply = if s.transcripts { transcript_reply(&body) } else { Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))) };
+    let reply = match said {
+        Some(text) => Reply::Text(text),
+        None if s.transcripts => transcript_reply(&body),
+        None => Reply::Text(format!("echo: {}", last.as_str().unwrap_or(""))),
+    };
     if body["stream"] == true {
         let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
         let written = match &reply {
@@ -524,12 +532,18 @@ impl WorkersAi {
         self.state.lock().expect("workers ai state")
     }
 
-    /// Drops any usages, breaks and delays set and not yet used.
+    /// Drops any texts, usages, breaks and delays set and not yet used.
     pub fn clear_script(&self) {
         let mut s = self.state();
+        s.said.clear();
         s.usage.clear();
         s.breaks.clear();
         s.delays.clear();
+    }
+
+    /// The texts the next calls answer, in order (a model's JSON, say).
+    pub fn say_next(&self, texts: &[&str]) {
+        self.state().said.extend(texts.iter().map(|t| t.to_string()));
     }
 
     /// What the next answers report they used, in order.

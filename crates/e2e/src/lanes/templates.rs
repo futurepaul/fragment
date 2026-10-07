@@ -58,7 +58,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 

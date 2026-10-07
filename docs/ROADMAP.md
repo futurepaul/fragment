@@ -12,7 +12,7 @@ desktop and one home (decision 25), the personal agent's chat, and the
 fleet's deploy path left `master`. Their decisions and phases below
 (6, 8, and C–F) are the record; their code and docs are at the tag
 `celld-final`.
-Cut 2026-10-06 (issue #156, head scratcher 6): the in-fragment goose
+Cut 2026-10-07 (Paul; issue #156, head scratcher 6): the in-fragment goose
 agent (decisions 10 and 20, phase 5, and D's agent add-on) left
 `master`; agents are fragments a computer runs, today Hermes. Those
 decisions and phases are the record; their code is at `1da3b4a`.
@@ -31,7 +31,7 @@ be cheap while idle, safe to share, easy for an agent to build and fix,
 and simple enough that the system does not collapse under its own
 weight.
 
-## The model: one fragment, two add-ons
+## The model: fragments and computers
 
 1. **Fragment.** The product: a stateful web app with multiplayer built
    in, published from the CLI. One code.storage repo (files, history,
@@ -40,21 +40,16 @@ weight.
    and members (identity → role). Hosting, permissions, sharing, crons,
    jobs, and channels are built in; sharing anything is a grant.
    fragment.club lists your fragments; fragment.boats serves them.
-2. **Two add-ons a fragment declares** in `fragment.json`. A fragment
-   that declares neither carries nothing of them.
-   - **An agent** (decision 20): goose's loop in its own cell, answering
-     one postable channel or a job step, calling the operations it may.
-   - **A computer** (decision 21): an identity with its own key, and
-     later a Sprite running the `fragment` CLI, which talks back to its
-     fragment and can build and publish fancier ones.
+2. **Agents are fragments a computer runs** (docs/cloudflare-v1.md,
+   decisions 13 to 15): today Hermes profiles on a person's computer,
+   members of the fragments they work in. No fragment declares an agent
+   (decision 20's add-on went on 2026-10-07).
 3. **Identities underneath.** People, agents, computers, and fragments
    are identities with one or more nostr keys, in a registry shaped like
    finite.computer's BANKS (which identity a key belongs to, who owns an
    agent or a computer). Grants name identities, not keys. Resource
    permissions belong to the service that owns the resource, never to
    the registry (`docs/finite-integration.md`, decision 15).
-4. **One showcase: the desktop**, a template (chats, apps, and files on
-   one page) that shows off the add-ons. It is not the core.
 
 The verbs are the CLI's: login (pairing), create, sync, deploy (preview,
 rollback), members and invites, call (operations), and read and follow
