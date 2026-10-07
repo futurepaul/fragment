@@ -77,8 +77,9 @@ pub fn approval_timeout_s(setting: Option<&str>) -> u64 {
 }
 
 /// The managed overlay: how every profile streams, shows progress, asks for
-/// approvals (waiting `approval_timeout_s` on each), and what it never runs.
-pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> String {
+/// approvals (waiting `approval_timeout_s` on each), when its desktop is
+/// idle (`screen_idle_ms`), and what it never runs.
+pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, screen_idle_ms: u64) -> String {
     let mut y = String::new();
     y.push_str("# Written by hermes-boot at every boot (images/hermes): Hermes' managed overlay,\n");
     y.push_str("# merged over each profile's own config. Hand edits are lost.\n");
@@ -113,12 +114,15 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64) -> S
     // rewrote four caches in its home while the computer was held
     // (docs/durable-computers.md, "What changes under the hold").
     y.push_str("model_catalog:\n  enabled: false\n");
-    // The first agent's desktop starts for the screen's first viewer (the
-    // bridge's `screen-start`), and any agent's at its first computer_use or
+    // Each agent's desktop starts for its screen's first viewer (the
+    // bridge's `screen-start`), or at the agent's first computer_use or
     // browser call, never at boot (measured: about 300 MiB more once it
     // runs). Its browser, on that desktop, is each profile's own config's
-    // (`profile_config`).
-    y.push_str("bot_desktop:\n  auto_start: true\n");
+    // (`profile_config`). Its idle stop is the boot's (desktop.rs: Hermes
+    // stops an idle desktop only from its TUI's gateway), said here too so
+    // Hermes' own watcher, were it to run, would agree.
+    let minutes = screen_idle_ms as f64 / 60_000.0;
+    y.push_str(&format!("bot_desktop:\n  auto_start: true\n  idle_stop_minutes: {minutes}\n"));
     if !disabled_plugins.is_empty() {
         // Messaging platforms this computer never serves (it is reached through its
         // bridge) and the dashboard's auth providers: the gateway imports every one
@@ -617,7 +621,7 @@ mod tests {
 
     #[test]
     fn configs_say_what_hermes_needs() {
-        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S);
+        let m = managed_config(&["platforms/discord".into(), "dashboard_auth/basic".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS);
         for want in [
             "transport: \"draft\"",
             "busy_input_mode: \"queue\"",
@@ -625,7 +629,7 @@ mod tests {
             "disabled_toolsets: [\"cronjob\"]",
             "mode: \"smart\"",
             "    - \"platforms/discord\"",
-            "bot_desktop:\n  auto_start: true\n",
+            "bot_desktop:\n  auto_start: true\n  idle_stop_minutes: 10\n",
             "\nmodel_catalog:\n  enabled: false\n",
         ] {
             assert!(m.contains(want), "managed config has {want}:\n{m}");
@@ -641,7 +645,8 @@ mod tests {
         assert_eq!(approval_timeout_s(Some("20")), 20);
         assert_eq!(approval_timeout_s(Some("1")), 10, "no shorter than the bridge's shortest prompt");
         assert_eq!(approval_timeout_s(Some("not a number")), APPROVAL_TIMEOUT_S);
-        assert!(managed_config(&[], 20).contains("timeout: 20\n"));
+        assert!(managed_config(&[], 20, crate::desktop::IDLE_STOP_MS).contains("timeout: 20\n"));
+        assert!(managed_config(&[], 20, 30_000).contains("  idle_stop_minutes: 0.5\n"), "a test's shorter idle bound, in Hermes' minutes");
         let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
         let p = profile_config(&agent(), Tier::Medium, "http://model.fragment.internal/", &[], creds);
         assert!(p.contains("base_url: \"http://model.fragment.internal/v1\""), "{p}");
@@ -721,7 +726,7 @@ mod tests {
         assert_eq!(pins.get("HERMES_SKIP_CHMOD"), Some(&"1"));
         assert!(PROFILE_DIRS.contains(&"home"), "every profile has its home: {PROFILE_DIRS:?}");
         let creds = Path::new("/data/hermes/profiles/juniper-paul/credentials.sh");
-        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S), default_config("http://m"), profile_config(&agent(), Tier::Medium, "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
+        let written = [managed_config(&["platforms/discord".into()], APPROVAL_TIMEOUT_S, crate::desktop::IDLE_STOP_MS), default_config("http://m"), profile_config(&agent(), Tier::Medium, "http://m", &[], creds), gateway_env("127.0.0.1:1", "c", &"s".repeat(32))];
         for (name, _) in RUNTIME_ENV {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");

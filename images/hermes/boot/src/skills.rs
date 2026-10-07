@@ -492,7 +492,7 @@ mod tests {
         assert!(body.contains(cli_body), "the CLI's skill, whole");
         let page = body.find("# Your computer").unwrap();
         assert!(page < body.find("# fragment").unwrap(), "the computer's page first");
-        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its computer's screen\"", "take over", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list"] {
+        for said in ["FRAGMENT_AS_AGENT", "skip its Install and Pair", "apps-finite", "brain-finite", "GOOGLE_OAUTH_ACCESS_TOKEN", "google-workspace-finite", "\"Its screen\"", "take over", "human_has_control", "another agent's desktop", "fragment create", "fragment write", "fragment deploy", "fragment call", "fragment list"] {
             assert!(body.contains(said), "it says {said:?}");
         }
         let lower = skill.to_lowercase();
