@@ -1467,7 +1467,11 @@ projection the fragments keep, as they keep the list:
   so a batch sent twice or late adds nothing. Leaving the fragment (or
   its deletion, or its making again) arrives as the row's change, which
   drops every entry of it, and a search reads entries only of rows that
-  name a role: search sees only what the person can see now.
+  name a role. Each row also names the channels searched now, and a list
+  keeps and takes only their messages: a deploy that tightens a channel
+  past `viewer` (or drops it) drops its messages from the fragment's log
+  and sends every row again, which drops them from every list. Search
+  sees only what the person can see now.
 - **Limits.** A list keeps a fragment's newest 10 000 entries
   (`SEARCH_ENTRIES_PER_FRAGMENT_MAX`, as many as a postable channel keeps
   records) and 100 000 in all (`SEARCH_ENTRIES_MAX`), the oldest going
