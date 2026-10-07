@@ -161,8 +161,6 @@ pub mod limits {
     /// A push's `who`, the tag a page subscribed with, in characters
     /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
     pub const PUSH_WHO_MAX_CHARS: usize = 64;
-    /// URLs `fragment.json`'s `notifyUrls` may name.
-    pub const NOTIFY_URLS_MAX: usize = 3;
     /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
     /// Finished runs are kept this long, and at most this many.

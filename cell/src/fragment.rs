@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS deliveries (key TEXT PRIMARY KEY, at INTEGER NOT NULL
 CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
-  modules TEXT NOT NULL DEFAULT '{}', notify TEXT NOT NULL DEFAULT '[]');
+  modules TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS pending (
   depth INTEGER NOT NULL, tries INTEGER NOT NULL, next_at INTEGER NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS pending_due ON pending (next_at);
 CREATE TABLE IF NOT EXISTS delivery_outbox (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push', 'notify')),
-  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, url TEXT, body TEXT,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')),
+  sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT,
   after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0,
   attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS delivery_outbox_due ON delivery_outbox (next_at);

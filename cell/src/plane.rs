@@ -429,13 +429,12 @@ impl FragmentCell {
             return Ok(());
         };
         assert!(!loader_id.is_empty(), "installed code has an identity");
-        let notify = serde_json::to_string(&manifest.notify_urls).expect("urls serialize");
         let module_count = modules.len();
         // The code row and its tables, in one step: no await until they are all written.
         self.exec(
-            "INSERT INTO code (id, sha, loader_id, source, cpu_ms, installed_at, modules, notify) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO code (id, sha, loader_id, source, cpu_ms, installed_at, modules) VALUES (1, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (id) DO UPDATE SET sha = excluded.sha, loader_id = excluded.loader_id, source = excluded.source,
-               cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules, notify = excluded.notify",
+               cpu_ms = excluded.cpu_ms, installed_at = excluded.installed_at, modules = excluded.modules",
             vec![
                 sha.into(),
                 loader_id.as_str().into(),
@@ -443,7 +442,6 @@ impl FragmentCell {
                 SqlStorageValue::Integer(limits::APP_CPU_MS.into()),
                 SqlStorageValue::Integer(js::now_ms()),
                 serde_json::to_string(&modules).expect("modules serialize").into(),
-                notify.into(),
             ],
         )?;
         let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
@@ -561,14 +559,9 @@ impl FragmentCell {
         if let Err(e) = self.sync_agent().await {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
-        // the file triggers' runs, the notifyUrls, and the alarm for newly installed schedules
+        // the file triggers' runs, and the alarm for newly installed schedules
         self.launch_queued().await;
         for (which, moved) in &out {
-            if which == "main" && moved.changed {
-                if let Err(e) = self.notify_urls(moved.to.as_deref(), &moved.paths).await {
-                    self.event("notify.failed", &e.message, json!({ "code": e.code }));
-                }
-            }
             // a move of live wants its preview card, which the alarm shoots (card.rs)
             if let (true, "live", Some(live)) = (moved.changed, which.as_str(), moved.to.as_deref()) {
                 if let Err(e) = self.card_wanted(live) {

@@ -20,7 +20,7 @@
   "workflows": [{ "name": "fragment-jobs", "binding": "JOBS", "class_name": "Job" }],
   // Blobs: the bytes of files of 1 MiB or more (blobs.rs).
   "r2_buckets": [{ "binding": "BLOBS", "bucket_name": "fragment-blobs" }],
-  // Deliveries: web push and notifyUrls, sent outside any request (deliveries.rs).
+  // Deliveries: channel records and web push, sent outside any request (deliveries.rs).
   // Meters: each fragment's batches of usage rows to its owner's ledger (meter.rs).
   "queues": {
     "producers": [
