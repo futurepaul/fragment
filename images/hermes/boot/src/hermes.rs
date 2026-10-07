@@ -34,6 +34,17 @@ impl Tier {
         }
     }
 
+    /// An agent's tier as the platform answered for its fragment's
+    /// `agent.json`: the file's (`of`), or the medium tier when it has none
+    /// (403, 404); `None` when the platform did not answer for it.
+    pub fn read(answer: &Result<bytes::Bytes, fragment_bridge::api::ApiError>, high_on: bool) -> Option<Tier> {
+        match answer {
+            Ok(b) => Some(Tier::of(Some(b), high_on)),
+            Err(e) if e.gone() => Some(Tier::of(None, high_on)),
+            Err(_) => None,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Tier::Cheap => "cheap",
@@ -486,6 +497,21 @@ mod tests {
         assert_eq!(Tier::of(Some(br#"{"tier":"high"}"#), true), Tier::High);
         assert_eq!(Tier::of(Some(b"not json"), true), Tier::Medium);
         assert_eq!(Tier::of(None, true), Tier::Medium);
+    }
+
+    /// An `agent.json` the platform answered for is a tier (none there is
+    /// the medium tier); one it did not answer for is none, never the
+    /// medium tier in its place.
+    #[test]
+    fn a_tier_unread_is_no_tier() {
+        use fragment_bridge::api::ApiError;
+        let refused = |status| Err(ApiError::Refused { status, error: String::new(), message: String::new() });
+        assert_eq!(Tier::read(&Ok(bytes::Bytes::from_static(br#"{"tier":"cheap"}"#)), false), Some(Tier::Cheap));
+        assert_eq!(Tier::read(&refused(404), false), Some(Tier::Medium), "no agent.json");
+        assert_eq!(Tier::read(&refused(403), false), Some(Tier::Medium));
+        for unread in [refused(500), refused(502), Err(ApiError::Transport("no answer in 15000 ms".into())), Err(ApiError::TooLarge)] {
+            assert_eq!(Tier::read(&unread, false), None, "{unread:?}");
+        }
     }
 
     #[test]
