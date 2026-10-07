@@ -647,5 +647,6 @@ settings and state):
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
   pure; the bridge against an in-process fake fragment API; and, with
   Docker, the images built and run against the fake API and a scripted
-  model on the host (`cargo test -p fragment-bridge --test docker --
-  --ignored`). These are lower rung: fakes at the platform's edge.
+  model on the host
+  (`cargo test -p fragment-bridge --test docker -- --ignored`). These are
+  lower rung: fakes at the platform's edge.
