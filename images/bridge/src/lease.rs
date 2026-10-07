@@ -83,6 +83,16 @@ pub struct Lease {
     pub epoch: u64,
 }
 
+impl Lease {
+    /// Whether `other` is this lease as a file holds it: its `since` read
+    /// back within a millisecond (a float written as text and parsed again
+    /// may come back a bit off: serde_json's parse is not exact to the last
+    /// bit, as CI found), the rest exactly.
+    pub fn same(&self, other: &Lease) -> bool {
+        self.holder == other.holder && self.epoch == other.epoch && self.reason == other.reason && (self.since - other.since).abs() < 1e-3
+    }
+}
+
 impl Default for Lease {
     /// No file: a fresh profile, the agent holds (Hermes' `Lease()`).
     fn default() -> Lease {
@@ -273,7 +283,7 @@ impl LeaseFile {
         std::fs::rename(&tmp, &self.path).map_err(|e| io(&self.path, e))?;
         let read = self.read();
         drop(lock);
-        if read == after {
+        if read.same(&after) {
             Ok((after, true))
         } else {
             Err(LeaseError::NotAsWritten { wrote: text, read: render(&read) })
@@ -343,6 +353,12 @@ mod tests {
         assert_eq!(parse(br#"{"holder": "agent", "viewer_id": null, "since": 1.5, "reason": "", "epoch": 2, "later": true}"#).holder, Holder::Agent, "a field Hermes adds later is its own");
         let round = human("v1", 9);
         assert_eq!(parse(render(&round).as_bytes()), round);
+        // a time read back is the time written, within a millisecond: this
+        // one comes back a bit off (CI, 2026-10-07: the read-back check
+        // refused a lease it had just written whole)
+        let off = Lease { since: 1_791_397_732.459_677_5, ..human("v1", 1) };
+        assert!(parse(render(&off).as_bytes()).same(&off), "{}", render(&off));
+        assert!(!Lease { epoch: 2, ..off.clone() }.same(&off) && !Lease { since: off.since + 1.0, ..off.clone() }.same(&off));
         assert!(render(&round).starts_with(r#"{"holder":"human","viewer_id":"v1","since":"#), "Hermes' field order");
         for bad in [&b""[..], b"[]", b"{}", br#"{"holder": "nobody"}"#, br#"{"holder": "agent", "epoch": "3"}"#, br#"{"holder": "agent", "epoch": -1}"#, br#"{"holder": "human", "viewer_id": 5}"#] {
             assert_eq!(parse(bad).holder, Holder::Human(Some(UNREADABLE.into())), "{:?} is no lease", String::from_utf8_lossy(bad));
@@ -371,10 +387,11 @@ mod tests {
         assert_eq!(f.read(), Lease::default(), "no file: the agent's");
         let (taken, changed) = f.change(|l| take(l, "v1", now_s())).unwrap();
         assert!(changed && taken.holder.is("v1") && taken.epoch == 1);
-        assert_eq!(f.read(), taken);
+        assert!(f.read().same(&taken), "{:?} read back as {:?}", taken, f.read());
         assert!(d.join("bot-desktop/lease.lock").exists() && !d.join("bot-desktop/lease.json.tmp").exists());
         let sig = f.signature();
-        assert_eq!(f.change(|l| take(l, "v1", now_s())).unwrap(), (taken, false), "taken again: no change");
+        let (again, changed) = f.change(|l| take(l, "v1", now_s())).unwrap();
+        assert!(!changed && again.same(&taken), "taken again: no change");
         assert_eq!(f.signature(), sig, "and nothing written");
         let (given, _) = f.change(|l| give(l, Some("v1"), now_s())).unwrap();
         assert_eq!((given.holder, given.epoch), (Holder::Agent, 2));
