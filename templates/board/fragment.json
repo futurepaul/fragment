@@ -1,0 +1,37 @@
+{
+  "name": "board",
+  "operations": {
+    "add": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["title"], "additionalProperties": false, "properties": { "title": { "type": "string", "minLength": 1, "maxLength": 200 } } }
+    },
+    "move": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": {
+        "type": "object",
+        "required": ["id", "column"],
+        "additionalProperties": false,
+        "properties": { "id": { "type": "integer", "minimum": 1 }, "column": { "enum": ["todo", "doing", "done"] } }
+      }
+    },
+    "assign": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": {
+        "type": "object",
+        "required": ["id", "to"],
+        "additionalProperties": false,
+        "properties": { "id": { "type": "integer", "minimum": 1 }, "to": { "type": ["string", "null"], "maxLength": 64 } }
+      }
+    },
+    "remove": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "board": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } }
+  },
+  "meta": { "title": "Board", "description": "A family's chores or a small team's tasks: who does what, live, with a push when one is yours." }
+}
