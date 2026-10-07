@@ -715,7 +715,7 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // fragment CLI, the skills' helpers, any SDK): written whole each time,
     // after the config
     write_credentials(a, home, ids);
-    match sync::round(api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+    match sync::round(api, a, &dir, &own).await {
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.name(), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
@@ -1172,7 +1172,7 @@ async fn boot_main() {
                 last_sync = Instant::now();
                 for a in &agents {
                     let dir = hermes::profile_dir(&home, &a.fragment);
-                    match sync::round(&api, a, &dir, &PathBuf::from("/data/hermes-sync"), &own).await {
+                    match sync::round(&api, a, &dir, &own).await {
                         Ok(d) if d != sync::Done::default() => ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted }),
                         Ok(_) => {}
                         Err(e) => ev!("sync.failed", { "agent": a.fragment, "error": e.to_string() }),
