@@ -1,4 +1,4 @@
-//! Sharing, on the platform's origin (phase 7, decision 4): the share sheet
+//! Sharing, on the platform's origin (docs/api.md, Sharing): the share sheet
 //! and accepting an invite. Both are the platform's pages, signed in by its
 //! session cookie, and each acts through the fragment's own handlers
 //! (members.rs) as the signed-in person: the fragment decides who may do

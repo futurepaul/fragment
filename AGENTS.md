@@ -27,18 +27,12 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — usernames and flat hosts, templates, your agent
-   making apps (its desktop and computers went at the cut);
-   `docs/phase-4.md` — sign-in, identities, budgets (live);
    `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
    the isolation findings;
-   `docs/phase-5.md` — agents (choices for review);
    `docs/durable-computers.md` — how a computer's state survives a
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
    (its connector went at the cut);
-   `docs/phase-3.md` — hosting on fragment.club;
-   `docs/phase-2.md` — the record of the core cut (slices A–G);
    `docs/operate.md` — the operator runbook (the `celld` branch's).
 3. `docs/finite-next-lessons.md` — what to port from finite-next and the
    gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.

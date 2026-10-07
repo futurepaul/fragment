@@ -1,5 +1,5 @@
-//! The agents' script (`agent/`), co-hosted in this fleet (docs/phase-6.md,
-//! step 4). It has no ingress of its own: this router authenticates each
+//! The agents' script (`agent/`), co-hosted in this fleet (docs/api.md,
+//! Agents). It has no ingress of its own: this router authenticates each
 //! request as it does its own (a signature resolved to an identity by the
 //! registry) and hands it on with the caller's identity, which the script
 //! trusts. An inbox delivery passes as it came: its token is the

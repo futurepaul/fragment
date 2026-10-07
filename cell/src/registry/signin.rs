@@ -1,4 +1,4 @@
-//! Sign-in (phase 4 slice B): people come from WorkOS, keyed by their
+//! Sign-in (docs/api.md, Sign-in): people come from WorkOS, keyed by their
 //! verified `(issuer, subject)`, never by email; browsers hold sessions.
 //! A platform session lives on the platform origin; each fragment origin
 //! gets its own site session through a single-use redemption the platform

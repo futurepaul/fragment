@@ -1,4 +1,4 @@
-//! Sign-in (phase 4 slice B), against the WorkOS fake: people are keyed by
+//! Sign-in (docs/api.md, Sign-in), against the WorkOS fake: people are keyed by
 //! their `(issuer, subject)`, browsers hold sessions (the platform's, then
 //! one per fragment origin through a single-use redemption), a CLI key
 //! joins a person through a browser approval, and a browser and the CLI

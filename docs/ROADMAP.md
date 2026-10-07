@@ -183,7 +183,7 @@ person who started the turn and a cap: the agent's own membership, or
 through an agent (since 2026-10-04, sharing does, for the agent's own
 owner: docs/cloudflare-v1.md, decision 36). Replaces decision 3's "a
 chat guest has the owner's full authority", which let a guest reach
-everything the owner has. `docs/phase-7.md`.
+everything the owner has. `docs/phase-7.md` at the tag.
 
 ### 18. Channels a fragment declares postable (Paul, 2026-09-25)
 
@@ -433,7 +433,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 
 ### 2. The core cut (done 2026-09-23)
 - Done in seven slices on Paul's go; the record (what landed, every
-  decision, what was deferred and to whom) is `docs/phase-2.md`. The
+  decision, what was deferred and to whom) is `docs/phase-2.md` at the tag. The
   Rust e2e passes 444 of 444; the TypeScript runtime, `scripts/`,
   `deploy/`, `notify-relay/`, and the Node packages are deleted.
 - Operations, channels, membership, the app facet, blob pointers, and
@@ -464,7 +464,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   passes the e2e on its `fly.dev` address, then `fragment.club` and
   `*.fragment.club` move to it (Paul adds the records at Namecheap; the
   VPS keeps running until he retires it). *Cut over 2026-09-23; the
-  record is `docs/phase-3.md`.* Until sign-in exists, only
+  record is `docs/phase-3.md` at the tag.* Until sign-in exists, only
   Paul's key may create fragments. An outbound firewall keeps jobs off
   the fleet's private network. Live checks: one OpenRouter call (text,
   one small image) and a push to a real phone.
@@ -478,7 +478,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 ### 4. Friends alpha: invite-only sign-in and budgets (built 2026-09-24)
 - Pulled forward so Paul can share fragment.club with friends without an
   obvious problem (2026-09-23); reshaped to finite.computer's identity
-  model (decision 15, 2026-09-24; slices in `docs/phase-4.md`; slices A,
+  model (decision 15, 2026-09-24; slices in `docs/phase-4.md` at the tag; slices A,
   the registry and identities, B, sign-in and sessions, and C, budgets,
   built 2026-09-24; D, the deploy, live on fragment.club the same day). A
   registry of identities (person, agent, fragment), their public keys,
@@ -522,11 +522,11 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
 - **Acceptance:** the goose spike's checks, ported to the Rust e2e (steer
   mid-tool, stop, SIGKILL mid-tool runs the effect once, SIGKILL between
   steps); an agent uses the todo fragment only through its operations.
-  *Met 2026-09-23 (`docs/phase-5.md`); hosted since phase 6, co-hosted
+  *Met 2026-09-23 (`docs/phase-5.md` at the tag); hosted since phase 6, co-hosted
   on the cell's nodes, on the owner's budget.*
 
 ### 6. The desktop (built 2026-09-24)
-- **Reframed 2026-09-24 (Paul): `docs/phase-6.md` is the plan.** Fragment
+- **Reframed 2026-09-24 (Paul): `docs/phase-6.md` at the tag is the plan.** Fragment
   is the core product and the desktop is a template anyone deploys with a
   click; people get usernames and fragments live at
   `<label>--<username>.fragment.club` (decision 16); the phase also brings
@@ -543,7 +543,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   reorders and closes panes, collapses both sides, and works at phone
   width; the layout survives a reload. **Met 2026-09-24** (e2e lane
   `desktop`, 17 checks; the desktop is `templates/desktop`), and live on
-  fragment.club the same day with the rest of `docs/phase-6.md`.
+  fragment.club the same day with the rest of `docs/phase-6.md` at the tag.
 
 ### 7. Chats and sharing (built 2026-09-25, except the share header)
 - A chat template (a `chat` channel) whose agent member answers new
@@ -554,7 +554,7 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   revoking closes the guest's socket and returns 403; a rewritten
   desktop cannot share without the sheet click.
 - *Built:* the chat template, the owner's agent in every new chat, the
-  share sheet, invites, direct URLs, and shared badges (`docs/phase-7.md`,
+  share sheet, invites, direct URLs, and shared badges (`docs/phase-7.md` at the tag,
   e2e `phase7`). *Not built:* the share header (decision 4), unscheduled.
 - *Folded 2026-09-26 (decision 19):* the chat half becomes the agent
   add-on (D) and the desktop rebuilt on it (F).

@@ -3,8 +3,8 @@
 The cell (`cell/`, Rust on Cloudflare Workers) answers everything below; the CLI and
 the browser library are its clients. Errors are `{"error": "<code>",
 "message": "..."}` (codes in `crates/proto`). `cargo xtask e2e` proves
-every route. The TypeScript runtime this replaced was deleted in phase 2
-slice G (its contract is in git history, last at `35f5e18`). Hermes,
+every route. The TypeScript runtime this replaced was deleted (its
+contract is in git history, last at `35f5e18`). Hermes,
 computers, the desktop, and the personal agent's chat went at the cut
 (docs/cloudflare-v1.md, decision 33); their contract is at the tag
 `celld-final`.
@@ -214,7 +214,7 @@ invites, visibility, and tokens; a member may leave. Each identity's
 list of fragments is kept in its `Principal` cell, fed from each
 fragment's outbox.
 
-## Identities (phase 4 slice A)
+## Identities
 
 The registry (`cell/src/registry.rs`; finite.computer's BANKS stands
 behind the same routes later) holds identities, the public keys each has
@@ -252,7 +252,7 @@ puts it under the creator's username; creating under someone else's is
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
 unsigned (an inbox, a webhook, a site) names it in full.
 
-## Sign-in (phase 4 slice B)
+## Sign-in
 
 A person is keyed by their verified `(issuer, subject)`: the issuer is
 `workos:<client id>` (the environment), the subject WorkOS's user id. The
@@ -453,7 +453,7 @@ only while someone starts more than 100000 in ten minutes, about 166 a
 second, sustained. Expired sign-ins, redemptions, and sessions are
 deleted in batches on the registry's alarm, never on a request.
 
-## Sharing (phase 7, decision 4)
+## Sharing
 
 The share sheet and accepting invites are the platform's pages, never a
 fragment's: a fragment's page is its author's code (or an agent's), and
@@ -1215,7 +1215,7 @@ browser's cookies and storage on the old host stay there, so each person
 signs in once more on each fragment, and a page loaded before the move
 has its calls refused until it is reloaded onto the new host.
 
-## Agents (`agent/`, phase 5; co-hosted since phase 6)
+## Agents (`agent/`)
 
 A second script in the platform's fleet, with no ingress of its own: the
 router authenticates `/api/agents` and `/api/a/*` like any signed
@@ -1549,7 +1549,7 @@ computer, or an agent its owner narrowed from that provider), 403
 it again, or has given no own key), 402 or 403 the ledger's (an operator
 key's call its owner's ledger refuses).
 
-### A chat's records (phase 7, slice C)
+### A chat's records
 
 docs/chat-records.md extends this for computers' agents (phase 4: turns,
 drafts, prompts, attachments, Stop, hand-offs, routines) and wins where

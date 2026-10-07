@@ -1,4 +1,4 @@
-//! A fragment's files from the platform (docs/phase-6.md, step 2): a
+//! A fragment's files from the platform (docs/api.md, Control API): a
 //! template as a new fragment's first commit and first deploy,
 //! `POST /api/files` (one commit to `main`, as a CLI sync makes), and
 //! `POST /api/deploy` (`live` to `main`'s tip, as `fragment deploy` does).
