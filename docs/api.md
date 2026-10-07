@@ -655,7 +655,9 @@ none: followed, it came back into the app at its `Location`).
 The app's database holds at most 16 MiB: a mutation that would leave it
 larger rolls back and answers 507 `storage_full`; the app still reads,
 and deleting rows makes room. A write from anywhere else (a query, the
-app's `fetch`) meets the node's own stop, 4 MiB above. The app runs
+app's `fetch`) is not stopped: every check on the app's database runs in
+the app's own code, a courtesy to it, not a wall (the debt ledger). The
+app runs
 without code generation from strings (`eval`, `new Function`) and
 without `Atomics.wait`, and a turn whose heap grows past twice the
 isolate's limit (128 MiB) ends with "Worker exceeded its memory limit"
