@@ -58,9 +58,12 @@ file is the newer word, and decision 18 points here.
   Measured in Docker: none of 54 held databases tore (none of 54 hot ones
   either: the hold makes rarely into never). docs/computers.md.
 - **Step 2, the seam (#149).** `/data/work` is the tools' (Hermes'
-  terminal's cwd and its browser's profile, per agent), saved as a
-  record of its own; the rest of `/data` is Hermes' home and the bridge's
-  state, saved beside it, restored together.
+  terminal's cwd, its home, and its browser's profile, per agent), saved
+  as a record of its own; the rest of `/data` is Hermes' home and the
+  bridge's state, saved beside it, restored together. An agent's home
+  (its terminal's `HOME`, its file tools' `~`) joined it on 2026-10-07
+  (Paul: the whole `~`, not only the browser), a hard cut: what agents
+  had written under `~` stayed where it was.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
   saves carry Hermes' databases whole. The S3 endpoint it wrote through
   (`storage.fragment.internal`) went after it (#156): no image used it.
@@ -71,8 +74,9 @@ file is the newer word, and decision 18 points here.
   the profile as `mesa_cache.db`, in Mesa's own format, and our image took
   every `*.db` for a SQLite database: its copy failed, and a failed copy
   answers nothing. Once that was fixed, the next hold refused was a
-  running Chromium's: it keeps its own databases (under Hermes' home) in
-  SQLite's exclusive locking mode, so no copy of one could be had. A
+  running Chromium's: it keeps its own databases (then under Hermes'
+  home, the agent's `~`; now in its work) in SQLite's exclusive locking
+  mode, so no copy of one could be had. A
   database is now a `*.db` file that begins with SQLite's header, and one
   its owner holds locked through the copy is kept hot, as one made after
   the copy is, while the rest are copied and answered. A guest may say
@@ -165,7 +169,7 @@ tests, each leaving master whole:
      replicas are never read (F8).
 2. **The seam.** `/data` splits into Hermes' home (its databases,
    sessions, profiles) and a work directory for everything its tools
-   write (projects, scratch files, the browser profile), each saved on
+   write (projects, scratch files, its home, the browser profile), each saved on
    its own. Nothing moves yet; the split is what lets each live
    elsewhere later. *Built (#149): the platform names no runtime, so its
    contract is `/data/work` (the tools') and the rest of `/data` (the

@@ -241,9 +241,10 @@ pub fn chromium_script(full: &Path, shell: &Path) -> String {
 ///
 /// - `TERMINAL_HOME_MODE=profile`: each agent's terminal, `execute_code`
 ///   and file tools' `~` have the agent's own `HOME`, its profile's `home`
-///   (one of `PROFILE_DIRS`). Taken for a host, every agent's would be the
-///   gateway's own, `/data/hermes`: one `~` for all the computer's agents,
-///   among Hermes' own files (its `.env`, `config.yaml`).
+///   (one of `PROFILE_DIRS`), a link to its home in its work (`home_dir`).
+///   Taken for a host, every agent's would be the gateway's own,
+///   `/data/hermes`: one `~` for all the computer's agents, among Hermes'
+///   own files (its `.env`, `config.yaml`).
 /// - `HERMES_SKIP_CHMOD=1`: Hermes leaves the modes of its home's
 ///   directories and files as the image and the boot make them. Taken for
 ///   a host, it makes them owner-only (0700, 0600) at each start; the
@@ -258,10 +259,72 @@ pub const RUNTIME_ENV: [(&str, &str); 2] = [("TERMINAL_HOME_MODE", "profile"), (
 /// of its own (docs/computers.md, "Data and the restore gate").
 pub const WORK: &str = "/data/work";
 
-/// An agent's work directory: its terminal's cwd, and its browser's
-/// profile (`BROWSER_PROFILE`).
+/// An agent's work directory: its terminal's cwd, its home (`home_dir`),
+/// and its browser's profile (`BROWSER_PROFILE`).
 pub fn work_dir(agent_fragment: &str) -> PathBuf {
     Path::new(WORK).join(wire::profile(agent_fragment))
+}
+
+/// An agent's home: its terminal's `HOME` and its file tools' `~`, which
+/// Hermes takes to be its profile's `home` (`TERMINAL_HOME_MODE=profile`,
+/// `RUNTIME_ENV`), there a link to this. What its tools write under `~` (a
+/// browser's default profile and its databases, a CLI's login) is its work,
+/// saved with it, never Hermes' home (Paul, 2026-10-07).
+pub fn home_dir(agent_fragment: &str) -> PathBuf {
+    work_dir(agent_fragment).join("home")
+}
+
+/// A profile's `home`, as Hermes names it (one of `PROFILE_DIRS`).
+pub const PROFILE_HOME: &str = "home";
+
+/// What a profile's `home` is set aside as when it has something in it from
+/// before an agent's home was its work: a hard cut, so nothing of it is
+/// carried over, and nothing deleted.
+pub const HOME_SET_ASIDE: &str = "home.before-work";
+
+/// What `link_home` found and did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HomeLink {
+    /// Already the link.
+    Kept,
+    /// Linked now: a fresh profile, an empty `home`, or a link elsewhere.
+    Linked,
+    /// A `home` with something in it, set aside unmoved (`HOME_SET_ASIDE`,
+    /// numbered when that is taken), then linked.
+    SetAside(PathBuf),
+}
+
+/// Makes `profile`'s `home` a link to `home` (made if missing), whatever it
+/// was. The caller gives both to the agent's user.
+pub fn link_home(profile: &Path, home: &Path) -> std::io::Result<HomeLink> {
+    std::fs::create_dir_all(home)?;
+    let link = profile.join(PROFILE_HOME);
+    let found = match std::fs::symlink_metadata(&link) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HomeLink::Linked,
+        Err(e) => return Err(e),
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::read_link(&link)? == home {
+                return Ok(HomeLink::Kept);
+            }
+            std::fs::remove_file(&link)?;
+            HomeLink::Linked
+        }
+        Ok(m) if m.is_dir() && std::fs::read_dir(&link)?.next().is_none() => {
+            std::fs::remove_dir(&link)?;
+            HomeLink::Linked
+        }
+        Ok(_) => {
+            // bounded: 100 names
+            let aside = (0..100)
+                .map(|n| profile.join(if n == 0 { HOME_SET_ASIDE.to_string() } else { format!("{HOME_SET_ASIDE}-{n}") }))
+                .find(|p| std::fs::symlink_metadata(p).is_err())
+                .ok_or_else(|| std::io::Error::other(format!("no name left to set {} aside as", link.display())))?;
+            std::fs::rename(&link, &aside)?;
+            HomeLink::SetAside(aside)
+        }
+    };
+    std::os::unix::fs::symlink(home, &link)?;
+    Ok(found)
 }
 
 /// Where Hermes keeps a profile's desktop browser's profile (its
@@ -654,6 +717,51 @@ mod tests {
             let key = name.strip_prefix("TERMINAL_").unwrap_or(name).to_ascii_lowercase();
             assert!(written.iter().all(|w| !w.contains(name) && !w.contains(&format!("{key}:"))), "{name} is the boot's environment's alone: {written:#?}");
         }
+    }
+
+    /// An agent's home is in its work, and its profile's `home` the link
+    /// to it: made for a fresh profile; kept when it is the link (each
+    /// boot); an empty `home` or a link elsewhere replaced; a `home` with
+    /// something in it set aside whole, and nothing of it carried over.
+    #[test]
+    fn a_profiles_home_is_a_link_into_its_work() {
+        assert_eq!(home_dir("juniper.paul"), PathBuf::from("/data/work/juniper-paul/home"));
+        assert!(PROFILE_DIRS.contains(&PROFILE_HOME), "Hermes' name for it: {PROFILE_DIRS:?}");
+        let root = std::env::temp_dir().join(format!("hermes-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (profile, home) = (root.join("hermes/profiles/juniper-paul"), root.join("work/juniper-paul/home"));
+        std::fs::create_dir_all(&profile).unwrap();
+        let link = profile.join(PROFILE_HOME);
+        let linked = |l: &Path| std::fs::read_link(l).ok();
+        // valid: a fresh profile, its home made
+        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
+        assert_eq!(linked(&link), Some(home.clone()));
+        assert!(home.is_dir());
+        std::fs::write(home.join(".gitconfig"), "[user]\n").unwrap();
+        // replay: the next boot keeps it, and what is in it
+        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Kept);
+        assert!(link.join(".gitconfig").is_file(), "written through the link, kept in the work");
+        // a link elsewhere is pointed home
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
+        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
+        assert_eq!(linked(&link), Some(home.clone()));
+        // an empty `home` (Hermes' own, made before the link) goes
+        std::fs::remove_file(&link).unwrap();
+        std::fs::create_dir(&link).unwrap();
+        assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::Linked);
+        assert!(!profile.join(HOME_SET_ASIDE).exists(), "nothing to set aside");
+        // a `home` from before, with files: set aside unmoved, twice numbered
+        for (n, aside) in [HOME_SET_ASIDE.to_string(), format!("{HOME_SET_ASIDE}-1")].iter().enumerate() {
+            std::fs::remove_file(&link).unwrap();
+            std::fs::create_dir_all(link.join(".config/chromium")).unwrap();
+            std::fs::write(link.join(".config/chromium/History"), format!("{n}")).unwrap();
+            assert_eq!(link_home(&profile, &home).unwrap(), HomeLink::SetAside(profile.join(aside)));
+            assert_eq!(std::fs::read_to_string(profile.join(aside).join(".config/chromium/History")).unwrap(), format!("{n}"), "set aside whole");
+            assert_eq!(linked(&link), Some(home.clone()));
+            assert!(!home.join(".config").exists(), "nothing of it carried into the work");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

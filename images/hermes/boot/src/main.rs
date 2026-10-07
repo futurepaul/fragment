@@ -622,11 +622,12 @@ fn write_credentials(a: &Agent, home: &Path, ids: Option<(u32, u32)>) {
 }
 
 /// An agent's work directory (`/data/work/<profile>`, the hermes user's:
-/// its terminal's cwd) and its desktop browser's profile in it, linked from
-/// where Hermes keeps one in the profile, so what its tools write is the
-/// work the computer saves on its own (step 2 of docs/durable-computers.md).
-/// A browser profile that is a directory already stays where it is:
-/// nothing is moved.
+/// its terminal's cwd), and its home and its desktop browser's profile in
+/// it, each linked from where Hermes keeps one in the profile, so what its
+/// tools write is the work the computer saves on its own (step 2 of
+/// docs/durable-computers.md). A `home` that had something in it is set
+/// aside, unmoved (`hermes::link_home`); a browser profile that is a
+/// directory already stays where it is.
 fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     let work = hermes::work_dir(&a.fragment);
     let browser = work.join("browser-profile");
@@ -636,6 +637,17 @@ fn work_dirs(profile: &Path, a: &Agent, ids: Option<(u32, u32)>) {
     }
     chown(&work, ids);
     chown(&browser, ids);
+    let home = hermes::home_dir(&a.fragment);
+    match hermes::link_home(profile, &home) {
+        Ok(found) => {
+            chown(&home, ids);
+            chown(&profile.join(hermes::PROFILE_HOME), ids);
+            if let hermes::HomeLink::SetAside(aside) = found {
+                ev!("profile.home_set_aside", { "agent": a.fragment, "to": aside.display().to_string() });
+            }
+        }
+        Err(e) => ev!("profile.work_failed", { "agent": a.fragment, "error": format!("its home: {e}") }),
+    }
     let link = profile.join(hermes::BROWSER_PROFILE);
     if let Some(parent) = link.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -663,7 +675,8 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     let own = move |p: &Path| chown(p, ids);
     let dir = hermes::profile_dir(home, &a.fragment);
     let fresh = !dir.exists();
-    for sub in hermes::PROFILE_DIRS {
+    // its `home` is a link into its work (work_dirs)
+    for sub in hermes::PROFILE_DIRS.iter().filter(|s| **s != hermes::PROFILE_HOME) {
         let _ = std::fs::create_dir_all(dir.join(sub));
         chown(&dir.join(sub), ids);
     }
