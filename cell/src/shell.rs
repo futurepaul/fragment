@@ -14,25 +14,21 @@ use worker::*;
 use crate::config::Config;
 
 /// The shell's files: published name, content type, and bytes.
-const FILES: [(&str, &str, &[u8]); 17] = [
+const FILES: [(&str, &str, &[u8]); 13] = [
     ("shell.js", "text/javascript; charset=utf-8", include_bytes!("../shell/shell.js")),
     ("shell.css", "text/css; charset=utf-8", include_bytes!("../shell/shell.css")),
     ("layout.js", "text/javascript; charset=utf-8", include_bytes!("../shell/layout.js")),
     ("viewer.js", "text/javascript; charset=utf-8", include_bytes!("../shell/viewer.js")),
     ("agent-identity.js", "text/javascript; charset=utf-8", include_bytes!("../shell/agent-identity.js")),
-    ("agent-identity.css", "text/css; charset=utf-8", include_bytes!("../shell/agent-identity.css")),
     ("app-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/app-icons.js")),
     ("lucide-icons.js", "text/javascript; charset=utf-8", include_bytes!("../shell/lucide-icons.js")),
-    ("icon-metrics.css", "text/css; charset=utf-8", include_bytes!("../shell/icon-metrics.css")),
     ("tooltips.js", "text/javascript; charset=utf-8", include_bytes!("../shell/tooltips.js")),
-    ("tooltips.css", "text/css; charset=utf-8", include_bytes!("../shell/tooltips.css")),
-    ("scrollbars.css", "text/css; charset=utf-8", include_bytes!("../shell/scrollbars.css")),
     ("vendor/split-grid.js", "text/javascript; charset=utf-8", include_bytes!("../shell/vendor/split-grid.js")),
     ("manifest.webmanifest", "application/manifest+json", include_bytes!("../shell/manifest.webmanifest")),
     ("icon.svg", "image/svg+xml", include_bytes!("../shell/icon.svg")),
     // the viewer's wallpaper: Teo Badini's photograph on Pexels (cell/shell/CREDITS.md)
     ("wallpaper.jpg", "image/jpeg", include_bytes!("../shell/wallpaper.jpg")),
-    // every agent's image, tinted to its colour (agent-identity.css; CREDITS.md)
+    // every agent's image, tinted to its colour (shell.css; CREDITS.md)
     ("agent.png", "image/png", include_bytes!("../shell/agent.png")),
 ];
 const PAGE: &str = include_str!("../shell/index.html");
