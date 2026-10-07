@@ -332,5 +332,14 @@ fn calories(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         landed && day["total"] == 220 && said[1]["body"]["text"].as_str().is_some_and(|t| t.starts_with("I couldn't tell")),
         json!({ "today": day, "replies": said }),
     );
+    let r = api.op(&owner, &name, "summarize", "s1", json!({}))?;
+    let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait);
+    let said = replies();
+    s.ok(
+        "its summary of the caller's day is a text step over their entries, answered for them",
+        run["status"] == "succeeded" && said.len() == 3 && said[2]["body"]["for"] == owner_id.as_str()
+            && said[2]["body"]["text"].as_str().is_some_and(|t| t.contains("2 eggs (140 kcal), toast (80 kcal); 220 kcal in all")),
+        json!({ "run": run, "replies": said }),
+    );
     Ok(())
 }
