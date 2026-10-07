@@ -142,7 +142,8 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /tmp/rh \
  && HERMES_HOME=/tmp/rh HOME=/tmp/rh /opt/hermes/.venv/bin/python -c "import sys, os, gateway.run, hermes_cli.gateway, gateway.relay.adapter, gateway.relay.ws_transport; fs = {m.__cached__ for m in list(sys.modules.values()) if getattr(m, '__cached__', None)}; fs |= {l.split()[-1] for l in open('/proc/self/maps') if '.so' in l}; open('/opt/fragment/readahead.list', 'w').write(chr(10).join(sorted(f for f in fs if os.path.isfile(f))) + chr(10))" \
  && rm -rf /tmp/rh \
- && mkdir -p /run/computer /var/lib/fragment-run
+ && mkdir -p /run/computer /var/lib/fragment-run \
+ && install -d -m 1777 /tmp/node-compile-cache
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
 # restated, without upstream's VOLUME. Three differ from upstream's:
@@ -162,6 +163,12 @@ RUN /opt/fragment/bin/hermes-boot build-info \
 #   which a computer configures none of (its model is the platform's route,
 #   its chat the relay). Software the agent wants is its terminal's to
 #   install.
+# Node's compile cache is kept under /tmp (NODE_COMPILE_CACHE, one directory
+# every user may write, each its own inside), never in /data: npm turns it on
+# at every start, under TMPDIR, which Hermes points into its home
+# (`cache/scratch`), so Hermes' own `npx --version` probes rewrote a file the
+# save keeps while the computer was held (docs/durable-computers.md, "What
+# changes under the hold"). A cache a start rebuilds.
 FROM scratch
 COPY --from=hermes / /
 ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -176,6 +183,7 @@ ENV PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/hermes/.local/bin:/usr/loc
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/hermes/lazy-packages \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
+    NODE_COMPILE_CACHE=/tmp/node-compile-cache \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     S6_CMD_RECEIVE_SIGNALS=1 \

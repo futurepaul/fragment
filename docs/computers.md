@@ -646,9 +646,18 @@ settings and state):
   own `hermes backup --quick` was not used: it copies a fixed list of files
   under one home, and its `_safe_copy_db` copies 256 pages a step with
   0.1 s between, which a busy database restarts. Once the hold goes the
-  copies go. At a start, before the gateway opens a database, the copies
-  go back over their live paths (each one's `-wal`, `-shm` and `-journal`
-  removed, its owner and mode as they were): after a restore its
+  copies go. Held, Hermes' gateway still writes on its own timers: its
+  heartbeat (every 30 s), its status and its cron ticker's stamps (every
+  60 s), its logs, and once per changed config its known-good copy of it.
+  Each is replaced whole, appended, or read only as a broken config's
+  fallback, so the save keeps it as it reads it. Its model-catalog
+  refresh, the one such writer that fetched from outside, is off
+  (`model_catalog.enabled: false` in the managed overlay). Node's compile
+  cache, which npm put in Hermes' home (its `TMPDIR`), is under /tmp
+  (`NODE_COMPILE_CACHE`). docs/durable-computers.md, "What changes under
+  the hold", has each writer and why. At a start, before the gateway
+  opens a database, the copies go back over their live paths (each one's
+  `-wal`, `-shm` and `-journal` removed, its owner and mode as they were): after a restore its
   `computer-check` does it, then `quick_check`s every database but its work's as the
   hermes user and exits 3 on one that fails; after a snapshot, `pre-init`
   does it, so both wakes leave the same `/data`.
