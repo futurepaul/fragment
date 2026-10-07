@@ -590,7 +590,11 @@ settings and state):
   "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
-  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
+  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23). One the
+  platform does not answer for (no 200, 403 or 404) is said
+  (`profile.tier_unread`), and the profile's config stays as the last boot
+  wrote it, its tier with it; a profile with none yet takes the medium
+  tier.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
