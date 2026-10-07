@@ -89,7 +89,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, when, wall, board, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, watcher, brief, hook, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, watcher, brief, hook, wiki, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
   sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
@@ -204,9 +204,10 @@ prebuilt bundle is in the debt ledger).
   to the person a card is given to, and `watch`: a cron job that fetches
   pages and pushes their changes, and `brief`: a cron job that fetches
   feeds and sums them up with a text step, and `hook`: the inbox's
-  trigger as a mutation, a live board, and push); the shell's catalog
-  offers `todo`, `inbox`, `when`, `wall`, `board`, `watch`, `brief`,
-  `hook` and `blank`.
+  trigger as a mutation, a live board, and push, and `wiki`: files as
+  the state, edited by a mutation or a synced folder, followed through a
+  file trigger); the shell's catalog offers `todo`, `inbox`, `when`,
+  `wall`, `board`, `watch`, `brief`, `hook`, `wiki` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store
