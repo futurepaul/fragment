@@ -96,7 +96,6 @@ What every image may rely on, and must do.
 | `FRAGMENT_COMPUTER` | its id, `computer:<hex>` |
 | `FRAGMENT_API` | `http://api.fragment.internal` |
 | `FRAGMENT_MODEL` | `http://model.fragment.internal` |
-| `FRAGMENT_STORAGE` | `http://storage.fragment.internal` (S3; any access key) |
 | `FRAGMENT_IMAGE` | the pinned image's name and digest |
 | `RESTORE_PENDING` | `1` when `/data` is being restored |
 
@@ -385,17 +384,6 @@ docs/durable-computers.md. A computer keeps its newest three saves of
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
-
-### Storage
-
-`http://storage.fragment.internal` is an S3 endpoint over the
-computer's own R2 prefix: any bucket name and key, scoped by the
-intercept. It is the image's, for whatever it keeps of its own outside
-`/data`. Ours keeps nothing there: its Litestream replicas went with
-step 1 of docs/durable-computers.md (P4 of
-docs/explorations/pi-durable.md: they were never read, and a restore of
-them would have put a `state.db` of seconds ago into a `/data` of the
-last save).
 
 ### Connections and operator keys
 

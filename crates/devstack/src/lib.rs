@@ -211,7 +211,7 @@ pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
 pub fn stage_project(dir: &Path) -> Result<PathBuf> {
-    stage(&cell_dir(), dir, &["entry.mjs", "storage.mjs"])
+    stage(&cell_dir(), dir, &["entry.mjs"])
 }
 
 /// What the node runs on: the pinned Node and the wrangler it runs.
