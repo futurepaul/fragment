@@ -62,8 +62,8 @@ file is the newer word, and decision 18 points here.
   record of its own; the rest of `/data` is Hermes' home and the bridge's
   state, saved beside it, restored together.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
-  saves carry Hermes' databases whole. The storage endpoint stays, the
-  image's for whatever it keeps outside `/data`.
+  saves carry Hermes' databases whole. The S3 endpoint it wrote through
+  (`storage.fragment.internal`) went after it (#156): no image used it.
 - **The hold is answered once the desktop has drawn (2026-10-06).** On
   the e2e preview every hold after an agent's desktop first drew went
   unanswered (`held: false` after the 20 s), so those saves carried hot

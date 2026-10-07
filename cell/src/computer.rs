@@ -692,7 +692,6 @@ impl ComputerCell {
             "FRAGMENT_COMPUTER": id,
             "FRAGMENT_API": "http://api.fragment.internal",
             "FRAGMENT_MODEL": "http://model.fragment.internal",
-            "FRAGMENT_STORAGE": "http://storage.fragment.internal",
             "FRAGMENT_IMAGE": image,
         });
         if restoring {

@@ -229,15 +229,15 @@ speaking Cloudflare's APIs) returns once this product works.
     image waits for before its own init runs. The DO retries a
     "temporarily unavailable" start (spike S3b).
 
-    The platform gives every computer an S3 endpoint scoped to its own
-    R2 prefix through an intercept, so the guest holds no credential. It
-    stays the image's, for whatever it keeps outside `/data`. The agent's
-    self is in its fragment. (The Hermes image streamed Hermes' SQLite to
-    it with Litestream, for disaster recovery, until step 1 of
-    docs/durable-computers.md cut it: P4 of docs/explorations/pi-durable.md.
-    Its replicas were never read, no restore drill existed, and a restore
-    would have put a `state.db` of seconds ago into a `/data` of the last
-    save. The saves themselves now carry Hermes' databases whole.)
+    The agent's self is in its fragment. (The Hermes image streamed
+    Hermes' SQLite with Litestream, for disaster recovery, to an S3
+    endpoint the platform gave every computer over its own R2 prefix,
+    until step 1 of docs/durable-computers.md cut it: P4 of
+    docs/explorations/pi-durable.md. Its replicas were never read, no
+    restore drill existed, and a restore would have put a `state.db` of
+    seconds ago into a `/data` of the last save. The saves themselves now
+    carry Hermes' databases whole. The endpoint went after it, #156: no
+    image used it.)
 
     *The design of record is now docs/durable-computers.md (Paul,
     2026-10-05): A+ now, toward E; messengers outside the computer (F).*
@@ -659,8 +659,8 @@ browser ── fragment.club (the shell) ─┐      ┌── <label>--<user>.f
                                      own SQLite)        + simplex-chat on $200 seats
  egress intercepts (generic, configured per computer):
    model route → AI Gateway (+ usage)   connections → WorkOS Pipes tokens
-   storage → its R2 prefix (S3)         fragment API → the computer's identity
- R2: blobs, site copies, screenshots, backups, replicas
+   fragment API → the computer's identity
+ R2: blobs, site copies, screenshots, backups
  code.storage: every fragment's git (apps, chats, agents, brains, skills)
  Queues: deliveries, push, ledger batches   Workflows: jobs and cron runs
  goose agent Worker (Rust): a fragment's own agent, behind a service binding
