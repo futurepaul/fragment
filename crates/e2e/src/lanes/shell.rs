@@ -614,7 +614,11 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // both agents in one chat, search, and archiving, as the person uses them
     let first_title = row.as_str().unwrap_or("").to_string();
-    groups_ui(s, api, &mut b, &page, &Person { session: &session, username: &username, first: &first_label, first_title: &first_title }, &shots)?;
+    let me = Person { session: &session, username: &username, first: &first_label, first_title: &first_title };
+    groups_ui(s, api, &mut b, &page, &me, &shots)?;
+    // the person's agents in any chat's @, and one asking another
+    roster_ui(s, api, &mut b, &page, &me, &shots)?;
+    ask_cli(s, api, &me)?;
 
     // an app's window
     b.click(&page, "#add-app")?;
@@ -1133,5 +1137,176 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
 
     // the phone's picture below is of the Reader's chat
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:reader-chat.{}", me.username))))?;
+    Ok(())
+}
+
+/// The person's agents (the computer's), by fragment label: their identities.
+fn agent_ids(api: &Api, session: &str, username: &str, labels: &[&str]) -> Result<Vec<String>> {
+    let r = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
+    let ids: Vec<String> = labels
+        .iter()
+        .map(|l| agents.iter().find(|a| a["fragment"] == format!("{l}.{username}").as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
+        .collect();
+    anyhow::ensure!(ids.iter().all(|i| i.starts_with("id:")), "the agents' identities: {r}");
+    Ok(ids)
+}
+
+/// What `@` lists in a framed chat's composer once its word is `typed`:
+/// each option's agent, and whether it is one the message adds (not in
+/// the chat yet). None while its composer is not ready.
+fn mention_list(b: &mut Browser, page: &Page, host: &str, typed: &str) -> Value {
+    let expr = format!(
+        "(() => {{ const t = document.getElementById('text'); if (!t || t.disabled) return null; t.focus(); t.value = {}; t.setSelectionRange(t.value.length, t.value.length); \
+         t.dispatchEvent(new Event('input', {{ bubbles: true }})); \
+         return [...document.querySelectorAll('#mentions:not([hidden]) button')].map((b) => ({{ agent: b.dataset.agent, outside: b.classList.contains('outside') }})); }})()",
+        js(typed)
+    );
+    b.eval_in_frame(page, host, &expr).unwrap_or(Value::Null)
+}
+
+/// Polls `mention_list` until it is `want`, at most `wait`: what it last listed.
+fn mentions_until(s: &Suite, b: &mut Browser, page: &Page, host: &str, typed: &str, want: &Value, wait: std::time::Duration) -> Value {
+    let mut last = Value::Null;
+    let _ = s.eventually(wait, || {
+        last = mention_list(b, page, host, typed);
+        &last == want
+    });
+    last
+}
+
+/// A person's agents in any chat's `@` (decision 8; docs/chat-records.md,
+/// "The page"): in a chat of their own, `@` lists its agent, then their
+/// other agent, marked as one the message adds; picking it and sending
+/// adds it to the chat (the shell's add, as an editor, after the lead), and
+/// it answers there while the lead does not. In a chat someone else owns,
+/// `@` lists that chat's own agents only: the shell hands a person's agents
+/// only to the pages of their own fragments.
+fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let agent_wait = std::time::Duration::from_secs(120);
+    let ids = agent_ids(api, me.session, me.username, &["reader", me.first])?;
+    let (reader, first) = (ids[0].clone(), ids[1].clone());
+    let chat = format!("reader-chat.{}", me.username);
+    let host = fragment_proto::flat_name(&chat).unwrap_or_default();
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
+    let listed = mentions_until(s, b, page, &host, "@", &want, wait);
+    let placeholder = b.eval_in_frame(page, &host, "document.getElementById('text')?.placeholder ?? null").unwrap_or(Value::Null);
+    s.ok(
+        "in a chat of their own, @ lists its agent, then their other agent, marked as one the message adds",
+        listed == want && placeholder.as_str().is_some_and(|p| p.ends_with(", or @ someone else")),
+        json!({ "listed": listed, "placeholder": placeholder }),
+    );
+    let _ = b.screenshot(page, &shots.join("desktop-roster.png"));
+
+    // picked with the keyboard, then sent
+    let partial: String = me.first.chars().take(3).collect();
+    let only = json!([{ "agent": first, "outside": true }]);
+    let narrowed = mentions_until(s, b, page, &host, &format!("@{partial}"), &only, wait);
+    let picked = b.eval_in_frame(
+        page,
+        &host,
+        "(() => { const t = document.getElementById('text'); t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); return t.value; })()",
+    )?;
+    let said = "hello from the roster";
+    let sent = b.eval_in_frame(
+        page,
+        &host,
+        &format!("(() => {{ const t = document.getElementById('text'); t.value += {}; t.dispatchEvent(new Event('input', {{ bubbles: true }})); document.getElementById('say').requestSubmit(); return true; }})()", js(said)),
+    )?;
+    s.ok("typing its name's start narrows @ to it, and Enter picks it", narrowed == only && picked == format!("@{} ", me.first).as_str() && sent == true, json!({ "narrowed": narrowed, "picked": picked }));
+    let mut members = Value::Null;
+    let added = s.eventually(wait, || {
+        members = shell(api, me.session, "GET", &format!("/api/f/{chat}/members"), None, &[]).map(|r| r.body).unwrap_or_default();
+        let agents: Vec<(Value, Value)> = members["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| (m["principal"].clone(), m["role"].clone())).collect();
+        agents == vec![(json!(reader), json!("editor")), (json!(first), json!("editor"))]
+    });
+    s.ok("sending adds it to the chat first, an editor after the lead (the shell's add)", added, &members);
+    let answered = s.eventually(agent_wait, || replies(api, me.session, &chat, &first, said) == 1);
+    let shown = s.eventually(wait, || b.eval_in_frame(page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches(said).count() >= 2)).unwrap_or(false));
+    s.ok(
+        "and it answers there, framed in the shell, while the chat's lead does not",
+        answered && shown && replies(api, me.session, &chat, &reader, said) == 0,
+        json!({ "answered": answered, "shown": shown }),
+    );
+    let _ = b.screenshot(page, &shots.join("desktop-roster-added.png"));
+
+    // a chat someone else owns, with the person's first agent in it
+    let me_id = super::signin::who(api, me.session)?["id"].as_str().unwrap_or("").to_string();
+    let other = api.person()?;
+    let theirs = api.qualified(&other, "their-chat")?;
+    let r = api.create_with(&other, json!({ "name": theirs, "template": "chat", "title": "Their chat" }))?;
+    anyhow::ensure!(r.status == 200, "their chat: {r}");
+    for (who, role) in [(first.as_str(), "editor"), (me_id.as_str(), "editor")] {
+        let r = api.signed(&other, "PUT", &format!("/api/f/{theirs}/members/{who}"), Some(&json!({ "role": role })))?;
+        anyhow::ensure!(r.status == 200, "a member of their chat: {r}");
+    }
+    let row = format!("#chats [data-key={}]", js(&format!("chat:{theirs}")));
+    let there = b.until(page, &format!("document.querySelector({})", js(&row)), wait);
+    b.click(page, &row)?;
+    let host = fragment_proto::flat_name(&theirs).unwrap_or_default();
+    let want = json!([{ "agent": first, "outside": false }]);
+    let listed = mentions_until(s, b, page, &host, "@", &want, wait);
+    // the roster would have come by now (it is asked as the page mounts)
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let still = mention_list(b, page, &host, "@");
+    s.ok(
+        "in a chat someone else owns, @ lists that chat's agents only: the person's other agent is not offered",
+        there && listed == want && still == want,
+        json!({ "listed": listed, "after": still }),
+    );
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
+    Ok(())
+}
+
+/// `fragment ask` as a person (an agent's runs in its computer: the hosted
+/// lane's, and our Hermes image's): their direct chat with the agent, its
+/// answer waited for and printed; the same `--id` again posts nothing and
+/// finds the same answer; `--chat` adds the agent to a chat it is not in
+/// first. Invalid: an agent that is none of theirs, an empty question.
+fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
+    let home = s.dir("ask-cli-home");
+    let keys = fragment_nip98::Keys::generate();
+    api.approve(me.session, &keys)?;
+    let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
+    std::fs::create_dir_all(&config)?;
+    std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
+    let ids = agent_ids(api, me.session, me.username, &["reader"])?;
+    let reader = ids[0].clone();
+    let said = "hello from the cli";
+    let args = ["ask", "reader", said, "--wait", "60", "--id", "ask-e2e-1", "--json"];
+    let r = s.cli_json(api, &home, &args)?;
+    let answer = |r: &Value| r["answer"]["replies"].as_array().into_iter().flatten().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n");
+    s.ok(
+        "fragment ask, as a person: their direct chat with the agent, the question to it, its answer waited for",
+        r["chat"] == format!("reader-chat.{}", me.username).as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
+        &r,
+    );
+    let again = s.cli_json(api, &home, &args)?;
+    s.ok(
+        "the same --id again posts nothing, and finds the same answer at once",
+        again["replayed"] == true && again["record"]["seq"] == r["record"]["seq"] && again["answer"]["turn"] == r["answer"]["turn"] && !again["answer"]["turn"].is_null(),
+        &again,
+    );
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "name": "ask-here", "template": "chat", "title": "Ask here" })), &[])?;
+    let here = made.body["name"].as_str().unwrap_or("").to_string();
+    let r = s.cli_json(api, &home, &["ask", "reader", "and here?", "--chat", &here, "--wait", "60", "--json"])?;
+    s.ok(
+        "--chat: an agent not in that chat is added first, and answers there",
+        made.status == 200 && r["chat"] == here.as_str() && r["added"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains("and here?"),
+        &r,
+    );
+    let refused = |s: &Suite, args: &[&str]| {
+        let out = s.cli(api, &home, args);
+        (out.status.code(), serde_json::from_slice::<Value>(&out.stdout).unwrap_or_default())
+    };
+    let (none_exit, none) = refused(s, &["ask", "nobody", "hi", "--json"]);
+    let (empty_exit, empty) = refused(s, &["ask", "reader", "  ", "--json"]);
+    s.ok(
+        "an agent that is none of theirs is not_found, and an empty question invalid_usage (exit 2)",
+        none_exit == Some(1) && none["error"]["code"] == "not_found" && empty_exit == Some(2) && empty["error"]["code"] == "invalid_usage",
+        json!({ "none": none, "empty": empty }),
+    );
     Ok(())
 }
