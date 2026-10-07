@@ -70,10 +70,7 @@ prebuilt bundle is in the debt ledger).
   from another package.json, package-lock.json or Node. Every JavaScript
   process (npm, wrangler as `<node> node_modules/wrangler/bin/wrangler.js`,
   and whatever they start) runs on it, with it first on PATH; no `node`
-  from PATH is ever used. `FRAGMENT_NODE=/abs/path/to/node` runs another
-  node instead, refused unless it is a release of Node 22 or 24 with its
-  own npm beside it; `WRANGLER_BIN` names another wrangler entry script (a
-  `bin/wrangler.js`), run on the same Node. Their caches are the repo's:
+  from PATH is ever used, and no other Node. Their caches are the repo's:
   `XDG_CACHE_HOME=target/cache` (miniflare keeps the Chrome for Testing
   that preview cards' local Browser Rendering downloads, 126, about 145
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
