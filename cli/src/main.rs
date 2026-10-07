@@ -418,7 +418,7 @@ enum MembersCmd {
         name: String,
         /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
         who: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// Lend the member's agents nothing: only the person acts with it
@@ -436,7 +436,7 @@ enum InviteCmd {
     /// Make an invite (the owner, or their agent for them); prints the token once
     Create {
         name: String,
-        /// viewer | editor
+        /// viewer | contributor | editor
         #[arg(long, default_value = "viewer")]
         role: String,
         /// how many people may join with it
@@ -1403,7 +1403,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             MembersCmd::Add { name, who, role, people_only } => {
                 let who = member_named(who)?;
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
@@ -1425,7 +1425,7 @@ fn run(cli: Cli) -> Result<()> {
         },
         Cmd::Invite { sub } => match sub {
             InviteCmd::Create { name, role, uses, ttl } => {
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
+                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer, contributor, or editor, not {role:?}")))?;
                 let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
                 let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
                 // the create is the one answer that carries the token

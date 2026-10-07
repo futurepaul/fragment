@@ -511,8 +511,8 @@ impl FragmentCell {
 
     pub(crate) fn create_invite(&self, caller: &Caller, body: CreateInvite) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        if !matches!(body.role, Role::Viewer | Role::Editor) {
-            return Err(CellError::invalid("an invite grants viewer or editor"));
+        if !matches!(body.role, Role::Viewer | Role::Contributor | Role::Editor) {
+            return Err(CellError::invalid("an invite grants viewer, contributor, or editor"));
         }
         if let Some(invitee) = &body.invitee {
             if !npub::is_identity(invitee) {
