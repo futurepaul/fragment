@@ -132,43 +132,6 @@ store secrets:
   it is a file, uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
   branch deploy.
 
-### Migration (2026-10-05): the files into the store
-
-A config naming a `*_file` field for a store secret is refused (a hard
-cut: `host_secret_file`, `codestorage.private_key_file`,
-`workos.client_id_file`, `workos.api_key_file`, a provider's `key_file`),
-the message naming its replacement. Move each file in once, with any
-config of the account (both of Paul's finite.place configs share it), its
-store name `fragment-` and the file's name (less `.pem`):
-
-```
-C=~/.config/finite-next/fragment-finite-place.jsonc
-S=~/.config/finite-next/secrets
-cargo xtask secret set fragment-finite-place-host-secret --config $C --from-file $S/finite-place-host-secret
-cargo xtask secret set fragment-codestorage-private-key --config $C --from-file $S/codestorage-private-key.pem
-cargo xtask secret set fragment-workos-staging-client-id --config $C --from-file $S/fragment-workos-staging-client-id
-cargo xtask secret set fragment-workos-staging-api-key --config $C --from-file $S/fragment-workos-staging-api-key
-cargo xtask secret set fragment-perplexity-api-key --config $C       # the operator keys have no files: each prompts
-cargo xtask secret set fragment-google-places-api-key --config $C
-cargo xtask secret set fragment-xai-api-key --config $C
-cargo xtask secret set fragment-elevenlabs-api-key --config $C
-cargo xtask secret list --config $C
-```
-
-The first makes the account's store. Then each config names them:
-`"host_secret": "fragment-finite-place-host-secret"`, `"codestorage":
-{"org": …, "private_key": "fragment-codestorage-private-key"}`,
-`"workos": {"client_id": "fragment-workos-staging-client-id", "api_key":
-"fragment-workos-staging-api-key"}`, and each operator row's `"key":
-"fragment-<name>-api-key"` in place of its `key_file`; `dns_token_file`
-and `test_secret_file` stay. The bindings' names are new, so the Worker
-secrets earlier deploys uploaded (`FRAGMENT_HOST_SECRET`,
-`CODESTORAGE_PRIVATE_KEY`, `WORKOS_API_KEY`, `FRAGMENT_KEY_<NAME>`) stay
-on each Worker, unread, until Paul deletes them (`wrangler secret delete
-<name> --name fragment-<branch>`, and `--name fragment-agent-<branch>`
-for `FRAGMENT_HOST_SECRET`); the files, once moved, are Paul's to delete
-too.
-
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a
