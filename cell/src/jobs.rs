@@ -23,14 +23,21 @@
 //! reads the answers back from there, so an advance carries a count, not
 //! every answer so far. A step the Workflow tries again because its reply
 //! was lost (a timeout, a crash) is answered from what was kept, not
-//! performed again: a fetch reaches its upstream once. Only an answer the
+//! performed again. One that was cut short before its answer was kept is
+//! performed again, so a step runs at least once, as a Workflow step does:
+//! each effect is keyed by its run and step (a call's operation id, a
+//! publish's record, a commit, a push, an `Idempotency-Key` on a fetch that
+//! may change something), so a repeat changes nothing twice where its
+//! receiver honours the key. Only an answer the
 //! cell never gave comes from the Workflow: a step that ran out of its
 //! retries, whose error the next advance carries (`failed`). The Workflow
 //! records each callback, so a crash resumes at the step it was on, and a
 //! step that fails for a reason that may pass (an upstream 5xx, a network
 //! error) is retried with backoff. A run that fails for good is **held**:
 //! kept with its input until someone replays it; its kept answers go when
-//! it finishes, and a replay takes every step afresh.
+//! it finishes, and a replay takes every step afresh. An attempt runs on
+//! the app's code installed at its first advance (`runs.code`): its kept
+//! answers are that code's steps', so an advance on other code starts it over.
 //!
 //! **Triggers** start runs as the fragment itself, with an editor's reach:
 //! cron schedules (on this object's alarm), records appended to a channel
@@ -66,8 +73,14 @@ use crate::{js, keys};
 pub const JOB_HEADER: &str = "x-fragment-job";
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
 pub const HOPS_HEADER: &str = "x-fragment-hops";
+/// What a fetch that is not a GET or a HEAD names its step by (`step_fetch`).
+const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+/// The attempt (replays count) at which a change of the app's code under
+/// a run holds it rather than starting it over, so code that keeps
+/// changing cannot spin it.
+const CODE_CHANGED_ATTEMPTS_MAX: u32 = 8;
 
 /// Test fleets: the longest an advance is held (`hold-advances`), and how
 /// often a held one looks again.
@@ -156,9 +169,11 @@ pub(crate) struct RunRow {
     pub created_at: i64,
     pub finished_at: Option<i64>,
     pub error: Option<String>,
+    /// The app's code (its loader id) this attempt took its first step on.
+    pub code: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error";
+const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error, code";
 /// What a run's paid steps were charged (`charges`, ai.rs).
 const RUN_COST: &str = "(SELECT SUM(micros) FROM charges WHERE charges.run = runs.id) AS cost_micros";
 
@@ -181,6 +196,7 @@ fn run_row(r: &Value) -> RunRow {
         created_at: int("created_at"),
         finished_at: r["finished_at"].as_i64(),
         error: r["error"].as_str().map(str::to_string),
+        code: r["code"].as_str().map(str::to_string),
     };
     assert!(row.attempt >= 1, "a run's attempts count from 1: {r}");
     row
@@ -403,12 +419,19 @@ impl FragmentCell {
         Ok(self.rows(q, binds)?.first().and_then(|r| r["n"].as_u64()).expect("COUNT(*) answers one integer"))
     }
 
-    /// A Workflow instance id: unique across the fleet (the binding is shared
-    /// by every fragment) and across a deleted fragment's reincarnations.
-    fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
+    /// A run's name beyond this fragment: unique across the fleet (the
+    /// Workflow binding is shared by every fragment, and a vendor scopes
+    /// idempotency keys by account) and across a deleted fragment's
+    /// reincarnations.
+    fn run_key(&self, run: i64) -> CellResult<String> {
         let [npub, created_at] = self.metas([MetaKey::Npub, MetaKey::CreatedAt])?;
         let (npub, created_at) = (npub.ok_or_else(|| missing(MetaKey::Npub))?, created_at.ok_or_else(|| missing(MetaKey::CreatedAt))?);
-        Ok(format!("{}-{}-r{run}-a{attempt}", &npub[5..25], created_at))
+        Ok(format!("{}-{}-r{run}", &npub[5..25], created_at))
+    }
+
+    /// A Workflow instance id: one per attempt of a run.
+    fn instance_id(&self, run: i64, attempt: u32) -> CellResult<String> {
+        Ok(format!("{}-a{attempt}", self.run_key(run)?))
     }
 
     /// Starts the Workflows of queued runs. A failure leaves them queued for
@@ -573,6 +596,18 @@ impl FragmentCell {
         if self.cfg.test_hooks && count > 0 {
             self.held_advance(run_id).await?;
         }
+        // An attempt runs on the code installed at its first advance: its
+        // kept answers fit that code's steps alone, so an advance on other
+        // code starts the run over, as the next attempt on the code then.
+        let code = self.installed_code()?;
+        if count == 0 {
+            self.exec("UPDATE runs SET code = ? WHERE id = ?", vec![code.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from), SqlStorageValue::Integer(run_id)])?;
+        } else if code != run.code {
+            if attempt >= CODE_CHANGED_ATTEMPTS_MAX {
+                return fail(format!("the app's code changed under attempt {attempt} too: replay it to run on the code installed now"));
+            }
+            return self.start_over(&run).await;
+        }
         let results = match self.kept_answers(run_id, attempt, count)? {
             Kept::All(results) => results,
             Kept::Missing(index) => return fail(format!("step {index} has no kept answer: replay it")),
@@ -647,6 +682,27 @@ impl FragmentCell {
         }
     }
 
+    /// A run whose app code changed under its attempt (`advance`) starts
+    /// over as the next one, on the code installed now, as a replay does
+    /// (its steps afresh; a call step's operation id is the same in every
+    /// attempt), with no one to ask: a template's release moves under its
+    /// fragments' triggered runs. Its Workflow is told to stop.
+    async fn start_over(&self, run: &RunRow) -> CellResult<Value> {
+        let (id, attempt) = (run.id, run.attempt);
+        let moved = self.rows(
+            "UPDATE runs SET status = 'queued', attempt = attempt + 1, code = NULL, launched_at = NULL
+             WHERE id = ? AND attempt = ? AND status IN ('queued', 'running') RETURNING attempt",
+            vec![SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
+        )?;
+        if !moved.is_empty() {
+            self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
+            let summary = format!("{} run #{id}: the app's code changed under attempt {attempt}; attempt {} starts on the new code", run.op, attempt + 1);
+            self.event("run.restarted", &summary, json!({ "run": id, "attempt": attempt + 1 }));
+            self.launch_queued().await;
+        }
+        Ok(json!({ "stop": true }))
+    }
+
     /// Test fleets: waits while `hold-advances` is on, at most
     /// `TEST_HOLD_MAX_MS`, naming the held run (`advance-held`).
     async fn held_advance(&self, run: i64) -> CellResult<()> {
@@ -707,13 +763,13 @@ impl FragmentCell {
         )
     }
 
-    /// The kind of a step's kept answer, when it has one.
-    fn kept_kind(&self, run: i64, attempt: u32, index: u32) -> CellResult<Option<String>> {
+    /// Whether a step has a kept answer.
+    fn is_kept(&self, run: i64, attempt: u32, index: u32) -> CellResult<bool> {
         let rows = self.rows(
-            "SELECT kind FROM steps WHERE run = ? AND attempt = ? AND idx = ?",
+            "SELECT idx FROM steps WHERE run = ? AND attempt = ? AND idx = ?",
             vec![SqlStorageValue::Integer(run), SqlStorageValue::Integer(attempt.into()), SqlStorageValue::Integer(index.into())],
         )?;
-        Ok(rows.first().map(|r| r["kind"].as_str().expect("steps.kind is TEXT NOT NULL").to_string()))
+        Ok(!rows.is_empty())
     }
 
     /// A run's input, as the call or trigger that started it gave it.
@@ -726,42 +782,35 @@ impl FragmentCell {
     /// `POST /job/effect`: one step, performed and its answer kept (a
     /// value, or a lasting failure the job sees) before the reply; a
     /// passing failure is a 502, which the Workflow retries. A step that
-    /// already has a kept answer (its reply was lost) is not performed again.
+    /// already has a kept answer (its reply was lost) is not performed again;
+    /// one kept as another kind (a job that did not reach its steps in the
+    /// same order) is the next advance's to refuse, in the app's platform code.
     async fn job_effect(&self, call: EffectCall) -> CellResult<Value> {
         let Some(run) = self.current_run(call.run, call.attempt)? else { return Ok(json!({ "stop": true })) };
         let index = call.index;
         if index as usize >= limits::JOB_STEPS_MAX {
             return Err(CellError::invalid(format!("step {index}: a job takes at most {} steps", limits::JOB_STEPS_MAX)));
         }
-        let kept = match self.kept_kind(run.id, run.attempt, index)? {
-            Some(kept) => kept,
-            None => {
-                let out = match Step::from_parts(&call.kind, call.args) {
-                    Ok(step) => self.perform(&run, index, step).await,
-                    // the args come from the app's realm: the job sees why, and may catch it
-                    Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
-                };
-                let outcome = match out {
-                    Ok(v) => StepOutcome::Value(v),
-                    Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
-                    Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
-                };
-                let mut answer = StepResult { kind: call.kind.clone(), outcome };
-                // the job's body reads every answer back at each later step
-                let size = serde_json::to_string(&answer).expect("a step result serializes").len();
-                if size > limits::RESULT_MAX_BYTES {
-                    answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES));
-                }
-                self.keep_step(run.id, run.attempt, index, &answer)?;
-                let kept = self.kept_kind(run.id, run.attempt, index)?.ok_or_else(|| CellError::host(format!("step {index}'s answer was not kept")))?;
-                // lost after the step ran and its answer was kept: the Workflow tries it again
-                self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
-                kept
+        if !self.is_kept(run.id, run.attempt, index)? {
+            let out = match Step::from_parts(&call.kind, call.args) {
+                Ok(step) => self.perform(&run, index, step).await,
+                // the args come from the app's realm: the job sees why, and may catch it
+                Err(why) => Err(permanent(format!("step {index} ({}): {why}", call.kind))),
+            };
+            let outcome = match out {
+                Ok(v) => StepOutcome::Value(v),
+                Err(StepFail::Permanent(m)) => StepOutcome::Error(clip(&m)),
+                Err(StepFail::Retry(m)) => return Err(CellError::new(ErrorCode::UpstreamFailed, m)),
+            };
+            let mut answer = StepResult { kind: call.kind, outcome };
+            // the job's body reads every answer back at each later step
+            let size = serde_json::to_string(&answer).expect("a step result serializes").len();
+            if size > limits::RESULT_MAX_BYTES {
+                answer.outcome = StepOutcome::Error(format!("the step's result is over {} bytes", limits::RESULT_MAX_BYTES));
             }
-        };
-        // one step, one kind: a retry names the kind its first try did
-        if kept != call.kind {
-            return Err(CellError::host(format!("step {index} of run #{} was kept as {kept}, and is {} now", run.id, call.kind)));
+            self.keep_step(run.id, run.attempt, index, &answer)?;
+            // lost after the step ran and its answer was kept: the Workflow tries it again
+            self.test_countdown(MetaKey::TestDropEffects, "the step's answer was lost on its way back")?;
         }
         self.launch_queued().await;
         Ok(json!({ "kept": index }))
@@ -771,7 +820,7 @@ impl FragmentCell {
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
         match step {
             Step::Call { op, input } => self.step_call(run, index, &op, input).await,
-            Step::Fetch(f) => self.step_fetch(run, f).await,
+            Step::Fetch(f) => self.step_fetch(run, index, f).await,
             Step::Publish { channel, kind, body } => self.step_publish(run, index, &channel, &kind, body).await,
             Step::Push { who, payload } => {
                 let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
@@ -847,8 +896,12 @@ impl FragmentCell {
 
     /// `job.fetch(url, init)`: the fragment's one way out. Header values
     /// may name secrets as `{{NAME}}`; they are opened here, at the egress
-    /// point, and never reach the app.
-    async fn step_fetch(&self, run: &RunRow, f: Fetch) -> Result<Value, StepFail> {
+    /// point, and never reach the app. A step is performed at least once (a
+    /// crash after the request, before its answer is kept, sends it again),
+    /// so a request that may change something names its step in an
+    /// `Idempotency-Key`, the same on every try and replay, unless the job
+    /// named its own: a vendor that honours the header acts on it once.
+    async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
         let url = egress::check(&f.url, self.cfg.egress_local).map_err(permanent)?;
         let method = match f.method.to_ascii_uppercase().as_str() {
             "GET" => Method::Get,
@@ -879,6 +932,10 @@ impl FragmentCell {
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
+        if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
+            let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
+            headers.set(IDEMPOTENCY_HEADER, &key).map_err(|e| permanent(e.to_string()))?;
+        }
         headers.set(HOPS_HEADER, &(run.depth + 1).to_string()).map_err(|e| permanent(e.to_string()))?;
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
@@ -892,21 +949,17 @@ impl FragmentCell {
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
-        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.0)))?;
-        let status = resp.status_code();
+        let max = limits::FETCH_RESPONSE_MAX_BYTES;
+        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.message)))?;
+        let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
         }
-        let declared: usize = resp.headers().get("content-length").ok().flatten().and_then(|l| l.parse().ok()).unwrap_or(0);
-        if declared > limits::FETCH_RESPONSE_MAX_BYTES {
-            return Err(permanent(format!("{host} answered {declared} bytes; a fetch reads at most {}", limits::FETCH_RESPONSE_MAX_BYTES)));
+        if answer.cut {
+            return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let bytes = resp.bytes().await.map_err(|e| StepFail::Retry(format!("{host}: {e}")))?;
-        if bytes.len() > limits::FETCH_RESPONSE_MAX_BYTES {
-            return Err(permanent(format!("{host} answered {} bytes; a fetch reads at most {}", bytes.len(), limits::FETCH_RESPONSE_MAX_BYTES)));
-        }
-        let out_headers: Map<String, Value> = resp.headers().entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
-        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&bytes) }))
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
+        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a

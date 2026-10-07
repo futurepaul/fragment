@@ -11,7 +11,7 @@ mod mockcs;
 use fragment_templates::ALL as TEMPLATES;
 
 use crate::api::{encode_q, Code, CodedError};
-use crate::codestorage::{Author, CodeStorage, CsError, LIVE, MAIN};
+use crate::codestorage::{Author, CodeStorage, CsError, LIVE};
 use crate::sync::{Mode, SyncOptions};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
@@ -101,7 +101,7 @@ enum Cmd {
         /// Its title (a blessed template's fragment only)
         #[arg(long, requires = "template")]
         title: Option<String>,
-        /// Show the share link, the webhook URL and the webhook secret (they
+        /// Show the share link and the webhook URL (they
         /// are credentials: `fragment open` shows the links later)
         #[arg(long)]
         show_tokens: bool,
@@ -122,8 +122,6 @@ enum Cmd {
     },
     /// Print the manifest
     Manifest { name: String },
-    /// Replace the manifest from a local JSON file
-    ManifestSet { name: String, file: PathBuf },
     /// Sync a local folder with the fragment's code.storage repo
     /// (default: bidirectional mirror)
     Sync {
@@ -147,12 +145,6 @@ enum Cmd {
         /// Allow a mass deletion to propagate (the guard refuses otherwise)
         #[arg(long)]
         apply_mass_delete: bool,
-        /// Delete local state and start fresh (folder moved/replaced)
-        #[arg(long)]
-        rebuild_state: bool,
-        /// Disable the live change channel in continuous mode (sweeps only)
-        #[arg(long)]
-        no_live: bool,
     },
     /// Full-hash audit of the folder against the fragment (no shortcuts)
     Verify { name: String, #[arg(long, default_value = ".")] dir: PathBuf },
@@ -166,9 +158,6 @@ enum Cmd {
         dir: Option<PathBuf>,
         #[arg(long)]
         note: Option<String>,
-        /// Preview only — point an ephemeral ref at main's tip, don't go live
-        #[arg(long)]
-        preview: bool,
     },
     /// List deploy history (commits of the `live` ref; newest is live)
     Drafts { name: String },
@@ -486,9 +475,6 @@ enum SecretCmd {
 struct Config {
     host: Option<String>,
     secret_key: Option<String>,
-    /// optional code.storage server override (backend-swap knob; the
-    /// storage-token response is the default source)
-    codestorage: Option<String>,
     agents: Option<String>,
 }
 
@@ -556,19 +542,7 @@ fn member_named(who: String) -> Result<String> {
 fn load_config() -> Config {
     let v: Value = std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
     let text = |k: &str| v[k].as_str().map(str::to_string);
-    Config { host: text("host"), secret_key: text("secret_key"), codestorage: text("codestorage").map(|u| u.trim_end_matches('/').to_string()), agents: text("agents") }
-}
-
-/// code.storage server override: FRAGMENT_CODESTORAGE_URL env, then the
-/// config file's `codestorage` key; else the host's storage-token response
-/// decides. Plain URL so the backend stays swappable.
-fn codestorage_override() -> Option<String> {
-    if let Ok(u) = std::env::var("FRAGMENT_CODESTORAGE_URL") {
-        if !u.trim().is_empty() {
-            return Some(u.trim().trim_end_matches('/').to_string());
-        }
-    }
-    load_config().codestorage
+    Config { host: text("host"), secret_key: text("secret_key"), agents: text("agents") }
 }
 
 fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
@@ -985,7 +959,7 @@ fn run(cli: Cli) -> Result<()> {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
                 let mut data = serde_json::to_value(&v)?;
                 if !show_tokens {
-                    for token in ["viewToken", "inboxToken", "webhookSecret"] {
+                    for token in ["viewToken", "inboxToken"] {
                         data.as_object_mut().expect("Created is an object").remove(token);
                     }
                 }
@@ -1036,31 +1010,11 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &v);
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Cmd::ManifestSet { name, file } => {
-            let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let v: Value = serde_json::from_slice(&bytes)
-                .with_context(|| format!("{} is not valid JSON", file.display()))?;
-            // fragment.json is a git file at the repo root: manifest-set is
-            // edit-and-commit (expected-parent CAS, bounded retries)
-            let writer = writer_id(&c);
-            let tip = sync::commit_single_file(&c, &name, "fragment.json", serde_json::to_vec(&v)?, &format!("manifest-set {name}"), &writer, codestorage_override().as_deref())
-                .map_err(cs_anyhow)?;
-            json_exit(j, &json!({ "updated": true, "commit": tip, "manifest": v }));
-            println!("manifest updated (commit {})", &tip[..8.min(tip.len())]);
-        }
-        Cmd::Sync {
-            name, dir, watch, mode, prune, live, apply_mass_delete,
-            rebuild_state, no_live,
-        } => {
+        Cmd::Sync { name, dir, watch, mode, prune, live, apply_mass_delete } => {
             // never stream JSON envelopes mid-run: watch prints progress
             // lines forever; a json consumer would choke on line 2
             if j && watch {
                 return Err(usage("sync --watch streams progress lines continuously, so --json does not apply: run single passes with --json (`fragment sync <name> --dir .`), or drop --json to watch"));
-            }
-            if rebuild_state {
-                let p = dir.join(".fragment").join("state.json");
-                std::fs::remove_file(&p).ok();
-                println!("state cleared: {}", p.display());
             }
             let opts = SyncOptions {
                 mode: match mode.as_deref() {
@@ -1074,10 +1028,9 @@ fn run(cli: Cli) -> Result<()> {
                 prune: prune || live,
                 live,
                 writer_id: writer_id(&c),
-                codestorage: codestorage_override(),
             };
             if watch {
-                watch::run(&c, &name, &dir, &opts, !no_live)?;
+                watch::run(&c, &name, &dir, &opts)?;
                 return Ok(());
             }
             let report = sync::sync_once(&c, &name, &dir, &opts).map_err(cs_anyhow)?;
@@ -1096,7 +1049,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("deleted fragment {name} (the repo stays; the name is reusable)");
         }
         Cmd::Verify { name, dir } => {
-            let report = sync::verify(&c, &name, &dir, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let report = sync::verify(&c, &name, &dir).map_err(cs_anyhow)?;
             if j {
                 emit_ok(&report);
             } else {
@@ -1104,26 +1057,6 @@ fn run(cli: Cli) -> Result<()> {
                 report.print();
             }
             std::process::exit(report.exit_code());
-        }
-        // no folder to sync and no preview: the platform moves live itself
-        // (POST …/deploy), so nothing here talks to git (an agent on a computer)
-        Cmd::Deploy { name, dir: None, note, preview: false } => {
-            let r = c.post_json(&format!("/api/f/{name}/deploy"), &json!({ "note": note }))?;
-            let v: Value = c.call_as(r)?;
-            let live_tip = v["live"].as_str().unwrap_or("").to_string();
-            let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-            if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip.as_str())) {
-                return Err(anyhow::Error::new(CodedError {
-                    code: Code::InvalidRequest,
-                    msg: format!("live moved to {}, but the platform refused its code, so the last good code keeps serving: {why}", &live_tip[..12.min(live_tip.len())]),
-                }));
-            }
-            let live_url = &st.urls.canonical;
-            json_exit(j, &json!({ "live": live_url, "liveTip": live_tip, "mainTip": live_tip }));
-            println!("live: {live_url}");
-            if let (Visibility::Link, Some(tok)) = (st.visibility, &st.view_token) {
-                println!("share link: {}", share_link(live_url, tok));
-            }
         }
         Cmd::Write { name, path, from, text, message } => {
             let text = match (from, text) {
@@ -1145,30 +1078,21 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "path": path, "commit": v["commit"] }));
             println!("wrote {path} to main ({}); `fragment deploy {name}` puts it live", v["commit"].as_str().map(|c| &c[..8.min(c.len())]).unwrap_or("?"));
         }
-        Cmd::Deploy { name, dir, note, preview } => {
-            let deployed = deploy(&c, &name, dir.as_deref(), note.as_deref(), preview, codestorage_override().as_deref())?;
+        Cmd::Deploy { name, dir, note } => {
+            let deployed = deploy(&c, &name, dir.as_deref(), note.as_deref())?;
             let synced = match &deployed {
                 Deployed::Guarded(report) => Some(report),
-                Deployed::Preview { synced, .. } | Deployed::Live { synced, .. } => synced.as_ref(),
+                Deployed::Live { synced, .. } => synced.as_ref(),
             };
             if let (Some(report), false) = (synced, j) {
                 report.print();
             }
-            let (live_tip, main_tip) = match deployed {
-                Deployed::Guarded(_) => {
-                    let dir = dir.as_deref().unwrap_or(Path::new("."));
-                    anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
-                }
-                Deployed::Preview { slug, sha, .. } => {
-                    json_exit(j, &json!({ "preview": slug, "sha": sha }));
-                    println!("preview: {slug} (ephemeral ref at {})", &sha[..12.min(sha.len())]);
-                    println!("go live with: fragment deploy {name}");
-                    return Ok(());
-                }
-                Deployed::Live { live_tip, main_tip, .. } => (live_tip, main_tip),
+            let Deployed::Live { live_tip, .. } = deployed else {
+                let dir = dir.as_deref().unwrap_or(Path::new("."));
+                anyhow::bail!("sync refused a mass deletion — deploy aborted before moving live. If the deletions are intended, run `fragment sync {} --dir {} --apply-mass-delete` first, then deploy again.", name, dir.display());
             };
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-            // the refresh installed live (or refused its code) before it answered
+            // the deploy installed live (or refused its code) before it answered
             if let Some(why) = st.code.error.as_deref().filter(|_| st.code.sha.as_deref() != Some(live_tip.as_str())) {
                 return Err(anyhow::Error::new(CodedError {
                     code: Code::InvalidRequest,
@@ -1176,14 +1100,14 @@ fn run(cli: Cli) -> Result<()> {
                 }));
             }
             let live_url = &st.urls.canonical;
-            json_exit(j, &json!({ "live": live_url, "liveTip": live_tip, "mainTip": main_tip }));
+            json_exit(j, &json!({ "live": live_url, "liveTip": live_tip }));
             println!("live: {live_url}");
             if let (Visibility::Link, Some(tok)) = (st.visibility, &st.view_token) {
                 println!("share link: {}", share_link(live_url, tok));
             }
         }
         Cmd::Rollback { name, to } => {
-            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let storage = CodeStorage::connect(&c, &name).map_err(cs_anyhow)?;
             let history = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
             let live_tip = history.first().map(|cm| cm.sha.clone())
                 .ok_or_else(|| anyhow!("live has no deploys yet (see `fragment deploy {name}`)"))?;
@@ -1200,7 +1124,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("rolled back to {}: live is now {}", &target[..8.min(target.len())], &new_tip[..8.min(new_tip.len())]);
         }
         Cmd::Drafts { name } => {
-            let storage = CodeStorage::connect(&c, &name, codestorage_override().as_deref()).map_err(cs_anyhow)?;
+            let storage = CodeStorage::connect(&c, &name).map_err(cs_anyhow)?;
             let commits = storage.list_commits(LIVE, 30).map_err(cs_anyhow)?;
             json_exit(j, &json!({ "deploys": commits }));
             if commits.is_empty() {
@@ -1247,7 +1171,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
-            let Deployed::Live { synced: Some(report), .. } = deploy(&c, &name, Some(&dir), None, false, codestorage_override().as_deref())? else {
+            let Deployed::Live { synced: Some(report), .. } = deploy(&c, &name, Some(&dir), None)? else {
                 anyhow::bail!("the first deploy of {name} did not go live");
             };
             if !j {
@@ -1372,8 +1296,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
-            // flags narrow the default both-scopes rotation (the webhook
-            // secret is code.storage's to know: rotate it only by asking the cell)
+            // flags narrow the default both-scopes rotation
             let scopes = match (inbox, view) {
                 (true, false) => vec!["inbox"],
                 (false, true) => vec!["view"],
@@ -1381,9 +1304,6 @@ fn run(cli: Cli) -> Result<()> {
             };
             let body = json!({ "scopes": scopes });
             let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
-            // the whole answer, webhook secret included: the code.storage
-            // push HMAC is only ever visible at create/rotate, and machine
-            // consumers (dev harnesses registering push webhooks) need it
             json_exit(j, &v);
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             println!("rotated: {}", v.rotated.join(", "));
@@ -1639,7 +1559,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Blob { sub: BlobCmd::Put { name, file } } => {
             let bytes = std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
-            let sha = sync::sha256_hex(&bytes);
+            let sha = fragment_core::blob::sha256_hex(&bytes);
             let kind = fragment_core::site::mime_for_path(&file.to_string_lossy());
             let path = format!("/api/f/{name}/blobs/{sha}");
             let v = c.call(c.put_blob(&path, bytes, Some(kind))?)?;
@@ -1715,52 +1635,29 @@ fn share_link(canonical: &str, token: &str) -> String {
 enum Deployed {
     /// the folder's sync refused a mass deletion, so nothing moved
     Guarded(sync::Report),
-    /// an ephemeral ref at main's tip
-    Preview { synced: Option<sync::Report>, slug: String, sha: String },
-    Live { synced: Option<sync::Report>, live_tip: String, main_tip: String },
+    Live { synced: Option<sync::Report>, live_tip: String },
 }
 
-/// `fragment deploy`: syncs `dir` first when one is given, then points
-/// live (or a new preview ref) at main's tip. One storage token serves the
-/// sync and the ref move, main's head is the one the sync ended on, and
-/// the cell's pins get one nudge for everything that moved.
-fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>, preview: bool, codestorage: Option<&str>) -> Result<Deployed> {
-    let writer = writer_id(c);
-    let storage = CodeStorage::connect(c, name, codestorage).map_err(cs_anyhow)?;
+/// `fragment deploy`: syncs `dir` first when one is given (fragment.json
+/// rides its commit, so files and machinery go live together; a pass that
+/// landed nudges the cell's pins), then the platform moves live to main's
+/// tip (POST …/deploy) under the fragment's plane lock: after a rollback
+/// that takes two steps (docs/api.md), and no pin ever serves the files
+/// live holds between them. It pins live before it answers.
+fn deploy(c: &api::Client, name: &str, dir: Option<&Path>, note: Option<&str>) -> Result<Deployed> {
     let synced = match dir {
-        Some(dir) => Some(sync::pass(c, &storage, name, dir, &SyncOptions { writer_id: writer.clone(), ..Default::default() }).map_err(cs_anyhow)?),
+        Some(dir) => {
+            let report = sync::sync_once(c, name, dir, &SyncOptions { writer_id: writer_id(c), ..Default::default() }).map_err(cs_anyhow)?;
+            if report.mass_delete_guard.is_some() {
+                return Ok(Deployed::Guarded(report));
+            }
+            Some(report)
+        }
         None => None,
     };
-    let (main_tip, landed) = match synced {
-        Some(report) if report.mass_delete_guard.is_some() => return Ok(Deployed::Guarded(report)),
-        // fragment.json rides the commit (it is a git file at the repo
-        // root): files and machinery go live together
-        Some(ref report) => (report.head.clone(), report.landed),
-        None => (storage.branch_head(MAIN).map_err(cs_anyhow)?, false),
-    };
-    let main_tip = main_tip.ok_or_else(|| anyhow!("nothing to deploy: main has no commits (sync a folder with --dir first)"))?;
-    if preview {
-        // ephemeral ref at main's tip: unguessable, invisible to clones,
-        // promoted by deploying. There is no served URL — the ref IS the
-        // preview.
-        let slug = format!("preview/{:012x}", rand::random::<u64>());
-        let sha = storage.create_branch(&main_tip, &slug, true).map_err(cs_anyhow)?;
-        // a preview moves no pin, but the sync's commit moved main
-        if landed {
-            sync::refresh_pins(c, name);
-        }
-        return Ok(Deployed::Preview { synced, slug, sha });
-    }
-    // the platform moves live (POST …/deploy), under the fragment's plane
-    // lock: after a rollback that takes two steps (docs/api.md), and no
-    // pin ever serves the files live holds between them
-    let r = c.post_json(&format!("/api/f/{name}/deploy"), &json!({ "note": note }))?;
-    let v: Value = c.call_as(r)?;
+    let v: Value = c.call_as(c.post_json(&format!("/api/f/{name}/deploy"), &json!({ "note": note }))?)?;
     let live_tip = v["live"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("the platform's deploy named no live commit: {v}"))?.to_string();
-    // the sync's commit and the live move, in one nudge: serving sees THIS
-    // deploy now, not at the next poll backstop
-    sync::refresh_pins(c, name);
-    Ok(Deployed::Live { synced, live_tip, main_tip })
+    Ok(Deployed::Live { synced, live_tip })
 }
 
 fn writer_id(c: &api::Client) -> String {
@@ -1898,8 +1795,8 @@ mod tests {
         mock.take_requests("");
         let count = |routes: &[(&str, u32)]| -> std::collections::BTreeMap<String, u32> { routes.iter().map(|(r, n)| (r.to_string(), *n)).collect() };
 
-        let Deployed::Live { live_tip, main_tip, .. } = deploy(&c, "t", Some(&dir), None, false, None).unwrap() else { panic!("a live deploy") };
-        assert_eq!((Some(&live_tip), Some(&main_tip)), (mock.branch("t", "live").as_ref(), mock.branch("t", "main").as_ref()));
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), None).unwrap() else { panic!("a live deploy") };
+        assert_eq!((mock.branch("t", "live"), mock.branch("t", "main")), (Some(live_tip.clone()), Some(live_tip)), "live at main's tip");
         assert_eq!(
             mock.take_requests(""),
             count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)]),
@@ -1907,7 +1804,7 @@ mod tests {
         );
 
         std::fs::write(dir.join("site/index.html"), "<h1>two</h1>").unwrap();
-        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), Some("two"), false, None).unwrap() else { panic!("a live deploy") };
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), Some("two")).unwrap() else { panic!("a live deploy") };
         assert_eq!(mock.file_at("t", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
         assert_eq!(Some(live_tip), mock.branch("t", "live"));
         assert_eq!(
@@ -1943,7 +1840,7 @@ mod tests {
 
     /// Goal: `fragment host <url>` changes the host and keeps the config's
     /// other keys (it rewrote the file with `host` and `secret_key` only,
-    /// so `codestorage` and `agents` were lost). Method: the config lives
+    /// so `agents` was lost). Method: the config lives
     /// under HOME, so this test runs the command in a copy of itself with a
     /// HOME of its own, then reads the file.
     #[test]
@@ -1954,7 +1851,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("fragment-host-config-{}", std::process::id()));
         let dir = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
         std::fs::create_dir_all(&dir).unwrap();
-        let config = |host: &str| json!({ "host": host, "secret_key": "07".repeat(32), "codestorage": "http://127.0.0.1:3", "agents": "http://127.0.0.1:4" });
+        let config = |host: &str| json!({ "host": host, "secret_key": "07".repeat(32), "agents": "http://127.0.0.1:4" });
         std::fs::write(dir.join("config.json"), config("http://127.0.0.1:1").to_string()).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::host_keeps_the_other_config_keys"])

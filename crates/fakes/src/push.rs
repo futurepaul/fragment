@@ -1,8 +1,9 @@
 //! A web push service, and a receiver for `notifyUrls` (phase 2 slice F).
 //! Subscriptions are made here as a browser would make them (a P-256 key
 //! and an auth secret per endpoint); a push is accepted only with a valid
-//! VAPID token for this service's origin, and decrypted as the browser
-//! would (RFC 8291), so tests read what the page would have shown.
+//! VAPID token for this service's origin, naming a contact a push service
+//! can reach (`reachable`), and decrypted as the browser would (RFC 8291),
+//! so tests read what the page would have shown.
 //! Levers: an endpoint that is gone (410), that fails a few times (503),
 //! or that is slow to answer. Each push is recorded with when it landed.
 
@@ -63,9 +64,26 @@ fn vapid_ok(header: &str, origin: &str) -> Result<(), String> {
     if claims["aud"] != origin {
         return Err(format!("aud {} is not {origin}", claims["aud"]));
     }
+    let sub = claims["sub"].as_str().unwrap_or("");
+    if !reachable(sub) {
+        return Err(format!("sub {sub:?} is no contact a push service can reach"));
+    }
     let key = VerifyingKey::from_sec1_bytes(&B64URL.decode(k).map_err(|_| "k")?).map_err(|_| "k is not a P-256 key")?;
     let sig = Signature::from_slice(&B64URL.decode(sig).map_err(|_| "sig")?).map_err(|_| "sig")?;
     key.verify(signing_input.as_bytes(), &sig).map_err(|_| "the signature does not verify".to_string())
+}
+
+/// Whether a token's `sub` names a contact, as Apple's push service holds
+/// it to (403 `BadJwtToken` otherwise): a `mailto:` or a URL (RFC 8292),
+/// on a domain that can exist, never the reserved `.invalid` (RFC 6761).
+/// Apple refuses an address it cannot reach (`localhost` too); the e2e's
+/// platform is on 127.0.0.1, so this fake holds the rest.
+fn reachable(sub: &str) -> bool {
+    let host = match sub.strip_prefix("mailto:") {
+        Some(address) => address.rsplit_once('@').map(|(_, domain)| domain),
+        None => sub.strip_prefix("https://").or_else(|| sub.strip_prefix("http://")).and_then(|rest| rest.split([':', '/']).next()),
+    };
+    host.is_some_and(|h| !h.is_empty() && !h.trim_end_matches('.').to_ascii_lowercase().ends_with(".invalid"))
 }
 
 /// A browser's side of RFC 8291: one push's body decrypted with the
@@ -222,6 +240,20 @@ mod tests {
         "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT",
         "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
     );
+
+    /// Goal: a token's contact is one a push service accepts. Method: the
+    /// platform's origin and a real address pass; none, a reserved domain
+    /// (the cell's old `mailto:webpush@fragment.invalid`), or no scheme
+    /// is refused.
+    #[test]
+    fn a_contact_is_one_a_push_service_can_reach() {
+        for ok in ["https://fragment.club", "http://127.0.0.1:8790", "mailto:ops@example.com"] {
+            assert!(reachable(ok), "{ok}");
+        }
+        for bad in ["", "mailto:webpush@fragment.invalid", "https://platform.invalid", "mailto:", "ops@example.com", "https://"] {
+            assert!(!reachable(bad), "{bad:?}");
+        }
+    }
 
     /// Goal: the fake browser reads a push as RFC 8291 says a browser
     /// does, so the push lane holds the cell to the real format. Method:

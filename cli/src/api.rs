@@ -59,8 +59,7 @@ impl Code {
             ErrorCode::InvalidRequest => Code::InvalidRequest,
             ErrorCode::Unauthenticated => Code::AuthFailed,
             ErrorCode::Forbidden | ErrorCode::NotConnected => Code::Forbidden,
-            // the CLI calls the platform's host, which never moves
-            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode | ErrorCode::Moved => Code::NotFound,
+            ErrorCode::NotFound | ErrorCode::UnknownOperation | ErrorCode::NoCode => Code::NotFound,
             ErrorCode::AlreadyExists => Code::NameTaken,
             ErrorCode::ConflictingBody => Code::ConflictingBody,
             ErrorCode::TooLarge => Code::TooLarge,
@@ -646,7 +645,6 @@ mod tests {
             (ErrorCode::StorageFull, "storage_full"),
             (ErrorCode::NodeFull, "unavailable"),
             (ErrorCode::WontWake, "unavailable"),
-            (ErrorCode::Moved, "not_found"),
             (ErrorCode::NotConnected, "forbidden"),
         ];
         for (error, cli) in table {
@@ -726,7 +724,7 @@ mod tests {
 
     #[test]
     fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live?v=2", "/api/fragments", "/api/fragments?x=1"] {
+        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
             assert!(honors_for(yes), "{yes}");
         }
         for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {

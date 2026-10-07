@@ -21,8 +21,9 @@
 //!   which. Restore commits take an ancestor's tree, and refuse (412) the
 //!   tip itself, a commit the branch does not hold, and no change. History
 //!   walks first parents.
-//! - Every branch move delivers a signed push webhook
-//!   (`X-Pierre-Signature`) to the URLs registered for that repo.
+//! - No branch move is announced: the platform takes no push webhooks
+//!   (cell/src/plane.rs), so a writer refreshes the fragment, as the CLI
+//!   does.
 //! - A call can be a round trip away (`set_latency`): the real service
 //!   answers a preview in about 100 ms, long enough for a fragment's alarm
 //!   to run beside the request that armed it.
@@ -36,20 +37,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use hmac::{Hmac, Mac};
 use p256::ecdsa::signature::Verifier;
 use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use p256::pkcs8::DecodePrivateKey;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha1::{Digest as _, Sha1};
-use sha2::Sha256;
 
-use crate::http::{self, Request, Response, Server};
-use fragment_core::codestorage::{Claims, OrgKey};
+use crate::http::{Request, Response, Server};
+use fragment_core::codestorage::{Claims, OrgKey, CHUNK_MAX};
 
-/// The documented cap on one decoded blob chunk.
-pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
 const ZERO: &str = "0000000000000000000000000000000000000000";
 
 pub struct Options {
@@ -99,17 +96,9 @@ struct Repo {
     repo_id: String,
     created_at_ms: i64,
     branches: BTreeMap<String, String>,
-    ephemeral: BTreeSet<String>,
     commits: BTreeMap<String, Commit>,
     #[serde(with = "b64map")]
     blobs: BTreeMap<String, Vec<u8>>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Hook {
-    url: String,
-    repo_url: String,
-    secret: String,
 }
 
 /// One file change, as the levers take them: `None` deletes.
@@ -134,7 +123,6 @@ struct Write<'a> {
 #[derive(Default, Serialize, Deserialize)]
 struct State {
     repos: BTreeMap<String, Repo>,
-    hooks: Vec<Hook>,
     counter: u64,
     #[serde(skip)]
     sabotage: u32,
@@ -145,10 +133,6 @@ struct State {
     commit_packs: u32,
     #[serde(skip)]
     refreshes: u32,
-    #[serde(skip)]
-    race: BTreeMap<String, Vec<OwnedChange>>,
-    #[serde(skip)]
-    deliveries: Vec<(String, Result<u16, String>)>,
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
@@ -177,14 +161,6 @@ struct Inner {
     state: Mutex<State>,
     /// How long every call waits before it is served (`set_latency`).
     latency_ms: AtomicU64,
-}
-
-/// A push webhook to deliver once the state lock is released (the cell's
-/// handler calls back into the fake).
-struct Delivery {
-    url: String,
-    secret: String,
-    body: String,
 }
 
 pub struct CodeStorage {
@@ -267,7 +243,6 @@ impl Repo {
             repo_id: repo_id.into(),
             created_at_ms: now_ms(),
             branches: BTreeMap::new(),
-            ephemeral: BTreeSet::new(),
             commits: BTreeMap::new(),
             blobs: BTreeMap::new(),
         }
@@ -366,8 +341,8 @@ impl State {
         self.repo_by(name_or_url).map(|r| r.url.clone())
     }
 
-    /// Writes a commit; returns (old, new) and queues the push webhooks.
-    fn commit(&mut self, url: &str, w: Write<'_>, out: &mut Vec<Delivery>) -> (String, String) {
+    /// Writes a commit; returns (old, new).
+    fn commit(&mut self, url: &str, w: Write<'_>) -> (String, String) {
         let Write { branch, message, author, changes, from } = w;
         let tag = format!("{url}|{branch}|{message}");
         let sha = fresh_sha(&mut self.counter, &tag);
@@ -392,34 +367,12 @@ impl State {
         let parents: Vec<String> = old.iter().cloned().chain(extra_parent.filter(|p| Some(*p) != old.as_deref()).map(str::to_string)).collect();
         repo.commits.insert(sha.clone(), Commit { parents, tree, message: message.into(), author: author.into(), at_ms: now_ms() });
         repo.branches.insert(branch.into(), sha.clone());
-        let old = old.unwrap_or_else(|| ZERO.to_string());
-        self.announce(url, branch, &old, &sha, out);
-        (old, sha)
+        (old.unwrap_or_else(|| ZERO.to_string()), sha)
     }
 
-    fn move_branch(&mut self, url: &str, branch: &str, to: &str, out: &mut Vec<Delivery>) -> String {
+    fn move_branch(&mut self, url: &str, branch: &str, to: &str) -> String {
         let repo = self.repos.get_mut(url).expect("move on a known repo");
-        let old = repo.branches.insert(branch.into(), to.into()).unwrap_or_else(|| ZERO.to_string());
-        self.announce(url, branch, &old, to, out);
-        old
-    }
-
-    fn announce(&self, url: &str, branch: &str, before: &str, after: &str, out: &mut Vec<Delivery>) {
-        if before == after {
-            return;
-        }
-        let repo = &self.repos[url];
-        for hook in self.hooks.iter().filter(|h| h.repo_url == url) {
-            let body = json!({
-                "repository": { "id": repo.repo_id, "url": repo.url },
-                "ref": format!("refs/heads/{branch}"),
-                "before": before,
-                "after": after,
-                "customer_id": "fragment-dev",
-                "pushed_at": iso(now_ms()),
-            });
-            out.push(Delivery { url: hook.url.clone(), secret: hook.secret.clone(), body: body.to_string() });
-        }
+        repo.branches.insert(branch.into(), to.into()).unwrap_or_else(|| ZERO.to_string())
     }
 }
 
@@ -459,42 +412,24 @@ impl Inner {
         Ok(jwt.repo)
     }
 
-    /// Webhooks for a push over HTTP go out after the answer, as the real
-    /// service queues them: a caller may see its push announced while it is
-    /// still reading the answer, or after.
-    fn handle(self: &Arc<Self>, req: &Request) -> Response {
+    fn handle(&self, req: &Request) -> Response {
         // served as it arrives at a service that far away
         let latency = self.latency_ms.load(Ordering::Relaxed);
         if latency > 0 {
             std::thread::sleep(std::time::Duration::from_millis(latency));
         }
-        let mut deliveries = Vec::new();
-        let resp = {
-            let mut st = self.state.lock().expect("fake state lock");
-            *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
-            let resp = self.route(&mut st, req, &mut deliveries);
-            if req.method != "GET" && req.method != "HEAD" {
-                self.persist(&st);
-            }
-            resp
-        };
-        if !deliveries.is_empty() {
-            let me = Arc::clone(self);
-            std::thread::spawn(move || {
-                for d in deliveries {
-                    deliver(&d, &me.state);
-                }
-            });
+        let mut st = self.state.lock().expect("fake state lock");
+        *st.requests.entry((bearer_subject(req), repo_of(req), route_key(req))).or_default() += 1;
+        let resp = self.route(&mut st, req);
+        if req.method != "GET" && req.method != "HEAD" {
+            self.persist(&st);
         }
         resp
     }
 
-    fn route(&self, st: &mut State, req: &Request, out: &mut Vec<Delivery>) -> Response {
+    fn route(&self, st: &mut State, req: &Request) -> Response {
         let path = req.path.as_str();
         let m = req.method.as_str();
-        if path == "/healthz" {
-            return Response::json(200, &json!({ "ok": true }));
-        }
         if self.host_routes {
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
@@ -523,10 +458,10 @@ impl Inner {
                     Some(live) if live == main => live,
                     Some(live) if !st.repos[&url].is_ancestor(&live, &main) => {
                         let tree = st.repos[&url].commits[&main].tree.clone();
-                        st.commit(&url, Write { branch: "live", message: "deploy", author: "host", changes: &[], from: Some((&main, tree)) }, out).1
+                        st.commit(&url, Write { branch: "live", message: "deploy", author: "host", changes: &[], from: Some((&main, tree)) }).1
                     }
                     _ => {
-                        st.move_branch(&url, "live", &main, out);
+                        st.move_branch(&url, "live", &main);
                         main
                     }
                 };
@@ -568,7 +503,7 @@ impl Inner {
                 return r;
             }
             // the service's paging: newest first, 20 a page by default, at
-            // most 100, an opaque cursor; `q` matches the url form
+            // most 100, an opaque cursor
             let limit = req.query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20usize).clamp(1, 100);
             let start: usize = match req.query.get("cursor") {
                 None => 0,
@@ -577,8 +512,7 @@ impl Inner {
                     None => return problem(400, "invalid cursor"),
                 },
             };
-            let q = req.query.get("q").map(|q| q.trim().to_ascii_lowercase()).unwrap_or_default();
-            let mut all: Vec<&Repo> = st.repos.values().filter(|r| q.is_empty() || r.url.to_ascii_lowercase().contains(&q)).collect();
+            let mut all: Vec<&Repo> = st.repos.values().collect();
             all.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms).then(b.repo_id.cmp(&a.repo_id)));
             let page: Vec<Value> = all
                 .iter()
@@ -629,10 +563,10 @@ impl Inner {
             ("GET" | "HEAD", "file") => file(&st.repos[&url], req),
             ("GET", "commits") => commits(&st.repos[&url], req),
             ("GET", "merge/preview") => merge_preview(&st.repos[&url], req),
-            ("POST", "commit-pack") => self.commit_pack(st, &url, req, out),
-            ("POST", "branches/create") => branch_create(st, &url, req, out),
-            ("POST", "merge") => merge(st, &url, req, out),
-            ("POST", "restore-commit") => restore(st, &url, req, out),
+            ("POST", "commit-pack") => self.commit_pack(st, &url, req),
+            ("POST", "branches/create") => branch_create(st, &url, req),
+            ("POST", "merge") => merge(st, &url, req),
+            ("POST", "restore-commit") => restore(st, &url, req),
             _ => problem(404, &format!("no route {m} {op}")),
         }
     }
@@ -654,16 +588,13 @@ impl Inner {
         Response::json(200, &json!({ "files": files, "commits": {}, "ref": r, "has_more": has_more, "next_cursor": next }))
     }
 
-    fn commit_pack(&self, st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
+    fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
-        if let Some(changes) = st.race.remove(url) {
-            st.commit(url, Write { branch: "main", message: "racing writer", author: "racer", changes: &changes, from: None }, out);
-        }
         if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
             let competitor = [("competitor.txt".to_string(), Some(format!("competitor {n}").into_bytes()))];
-            let (_, tip) = st.commit(url, Write { branch: "main", message: "competitor", author: "competitor", changes: &competitor, from: None }, out);
+            let (_, tip) = st.commit(url, Write { branch: "main", message: "competitor", author: "competitor", changes: &competitor, from: None });
             return cas_failed("main", &tip);
         }
         let text = String::from_utf8_lossy(&req.body);
@@ -713,8 +644,7 @@ impl Inner {
             }
         }
         let current = st.repos[url].branches.get(branch).cloned().unwrap_or_else(|| ZERO.to_string());
-        let expected = meta["expected_target_sha"].as_str().or_else(|| meta["expected_head_sha"].as_str());
-        if let Some(exp) = expected {
+        if let Some(exp) = meta["expected_target_sha"].as_str() {
             let exp = if exp.is_empty() { ZERO } else { exp };
             if exp != current {
                 return cas_failed(branch, &current);
@@ -725,7 +655,7 @@ impl Inner {
         }
         let author = meta["author"]["name"].as_str().unwrap_or("unknown");
         let message = meta["commit_message"].as_str().unwrap_or("");
-        let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None }, out);
+        let (old, new) = st.commit(url, Write { branch, message, author, changes: &changes, from: None });
         if let Some(left @ 1..) = st.unanswered.get_mut(url) {
             *left -= 1;
             return Response::unanswered();
@@ -772,9 +702,7 @@ fn file(repo: &Repo, req: &Request) -> Response {
         return problem(404, "file not found");
     };
     let bytes = repo.blobs.get(&entry.blob).cloned().unwrap_or_default();
-    let len = bytes.len().to_string();
     Response::bytes(200, "application/octet-stream", bytes)
-        .with_header("content-length", &len)
         .with_header("etag", &format!("\"{}\"", entry.blob))
         .with_header("x-blob-sha", &entry.blob)
         .with_header("x-last-commit-sha", &entry.last_commit)
@@ -797,7 +725,7 @@ fn commits(repo: &Repo, req: &Request) -> Response {
     Response::json(200, &json!({ "commits": list, "has_more": has_more }))
 }
 
-fn branch_create(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
+fn branch_create(st: &mut State, url: &str, req: &Request) -> Response {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let Some(target) = body["target_branch"].as_str().filter(|s| !s.is_empty()) else { return problem(400, "target_branch is required") };
     let Some(base) = st.repos[url].resolve(body["base_ref"].as_str().unwrap_or("")) else { return problem(404, "base_ref not found") };
@@ -808,10 +736,7 @@ fn branch_create(st: &mut State, url: &str, req: &Request, out: &mut Vec<Deliver
         return problem(409, &format!("branch already exists: {target}"));
     }
     let ephemeral = body["target_is_ephemeral"].as_bool().unwrap_or(false);
-    if ephemeral {
-        st.repos.get_mut(url).expect("known repo").ephemeral.insert(target.to_string());
-    }
-    st.move_branch(url, target, &base, out);
+    st.move_branch(url, target, &base);
     Response::json(
         201,
         &json!({ "message": "branch created", "target_branch": target, "target_is_ephemeral": ephemeral, "commit_sha": base }),
@@ -849,7 +774,7 @@ fn merge_conflict(base: &str, paths: &[String]) -> Response {
     Response::json(409, &json!({ "error": "merge conflict", "conflict_type": "merge_conflict", "conflict_paths": paths, "merge_base_sha": base }))
 }
 
-fn merge(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
+fn merge(st: &mut State, url: &str, req: &Request) -> Response {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let target = body["target_branch"].as_str().unwrap_or("");
     let Some(source) = st.repos[url].resolve(body["source_ref"].as_str().unwrap_or("")) else { return problem(404, "source_ref not found") };
@@ -863,14 +788,14 @@ fn merge(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> R
         None => return problem(400, "refusing to merge unrelated histories"),
         Some(Merging::NoOp) => (old.clone(), "no_op"),
         Some(Merging::FastForward) => {
-            st.move_branch(url, target, &source, out);
+            st.move_branch(url, target, &source);
             (source, "ff")
         }
         Some(Merging::Merge { base, merged: Err(paths) }) => return merge_conflict(&base, &paths),
         Some(Merging::Merge { merged: Ok(tree), .. }) => {
             let msg = body["commit_message"].as_str().unwrap_or("merge").to_string();
             let author = body["author"]["name"].as_str().unwrap_or("unknown").to_string();
-            let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&source, tree)) }, out);
+            let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&source, tree)) });
             (new, "merge_commit")
         }
     };
@@ -908,10 +833,10 @@ fn merge_preview(repo: &Repo, req: &Request) -> Response {
     )
 }
 
-fn restore(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) -> Response {
+fn restore(st: &mut State, url: &str, req: &Request) -> Response {
     let text = String::from_utf8_lossy(&req.body);
     let Some(Ok(first)) = text.lines().find(|l| !l.trim().is_empty()).map(serde_json::from_str::<Value>) else { return problem(400, "a bad metadata line") };
-    let meta = if first["metadata"].is_object() { &first["metadata"] } else { &first };
+    let meta = &first["metadata"];
     let target = meta["target_branch"].as_str().unwrap_or("");
     let Some(old) = st.repos[url].branches.get(target).cloned() else { return problem(404, &format!("branch not found: {target}")) };
     // as the service refuses a restore that cannot move the branch: to its
@@ -936,7 +861,7 @@ fn restore(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) ->
     let tree = repo.commits[&base].tree.clone();
     let msg = meta["commit_message"].as_str().unwrap_or("restore").to_string();
     let author = meta["author"]["name"].as_str().unwrap_or("unknown").to_string();
-    let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&base, tree)) }, out);
+    let (_, new) = st.commit(url, Write { branch: target, message: &msg, author: &author, changes: &[], from: Some((&base, tree)) });
     Response::json(
         201,
         &json!({
@@ -944,34 +869,6 @@ fn restore(st: &mut State, url: &str, req: &Request, out: &mut Vec<Delivery>) ->
             "result": { "target_branch": target, "branch": target, "old_sha": old, "new_sha": new, "success": true, "status": "ok" },
         }),
     )
-}
-
-/// `X-Pierre-Signature` for a delivery at `t` (unix seconds), as
-/// code.storage signs one: `t=<t>,sha256=<hex>`, the hex HMAC-SHA256 of
-/// `<t>.<body>` under the webhook's secret. The cell only verifies
-/// (`fragment_core::webhook`); this side is the fake's, pinned to a
-/// signature computed outside this code.
-pub fn signature(body: &[u8], secret: &str, t: i64) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC takes any key length");
-    mac.update(format!("{t}.").as_bytes());
-    mac.update(body);
-    format!("t={t},sha256={}", hex::encode(mac.finalize().into_bytes()))
-}
-
-fn deliver(d: &Delivery, state: &Mutex<State>) {
-    let mut result = Err(String::new());
-    for attempt in 0..3 {
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        }
-        let t = now_ms() / 1000;
-        let sig = signature(d.body.as_bytes(), &d.secret, t);
-        result = http::post(&d.url, &[("content-type", "application/json"), ("x-pierre-event", "push"), ("x-pierre-signature", &sig)], d.body.as_bytes());
-        if matches!(result, Ok(200..=299)) {
-            break;
-        }
-    }
-    state.lock().expect("fake state lock").deliveries.push((d.url.clone(), result));
 }
 
 /// What a request is counted under: its method and route (`GET branch`,
@@ -1072,11 +969,10 @@ impl CodeStorage {
     /// A repo whose url is its name, with `files` on `main` in one commit.
     /// Seeding an existing name resets it (same identity, a new world).
     pub fn seed_repo(&self, name: &str, files: &[(&str, &[u8])]) {
-        let mut out = Vec::new();
         self.with(|st| {
             st.repos.insert(name.into(), Repo::new(name, name, &format!("repo_{name}")));
             let changes: Vec<OwnedChange> = files.iter().map(|(p, b)| (p.to_string(), Some(b.to_vec()))).collect();
-            st.commit(name, Write { branch: "main", message: "seed", author: "seed", changes: &changes, from: None }, &mut out);
+            st.commit(name, Write { branch: "main", message: "seed", author: "seed", changes: &changes, from: None });
         });
     }
 
@@ -1105,14 +1001,6 @@ impl CodeStorage {
         self.with(|st| st.repo_by(repo)?.branches.get(branch).cloned())
     }
 
-    pub fn branches(&self, repo: &str) -> BTreeMap<String, String> {
-        self.with(|st| st.repo_by(repo).map(|r| r.branches.clone()).unwrap_or_default())
-    }
-
-    pub fn is_ephemeral(&self, repo: &str, branch: &str) -> bool {
-        self.with(|st| st.repo_by(repo).is_some_and(|r| r.ephemeral.contains(branch)))
-    }
-
     pub fn file_at(&self, repo: &str, branch: &str, path: &str) -> Option<Vec<u8>> {
         self.with(|st| {
             let r = st.repo_by(repo)?;
@@ -1130,65 +1018,23 @@ impl CodeStorage {
         })
     }
 
-    /// A commit from some other writer (no CAS), announced like any other.
+    /// A commit from some other writer (no CAS), a git push with a storage
+    /// token: no one is told, until the writer refreshes the fragment.
     pub fn external_commit(&self, repo: &str, branch: &str, changes: &[Change<'_>], message: &str) -> String {
-        let mut out = Vec::new();
-        let sha = self.with(|st| {
+        self.with(|st| {
             let url = st.url_of(repo).expect("external_commit on a known repo");
             let changes: Vec<OwnedChange> = changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect();
-            st.commit(&url, Write { branch, message, author: "external", changes: &changes, from: None }, &mut out).1
-        });
-        for d in &out {
-            deliver(d, &self.inner.state);
-        }
-        sha
-    }
-
-    /// Points a branch at a commit (a deploy's ref move), announced.
-    pub fn set_branch(&self, repo: &str, branch: &str, sha: &str) {
-        let mut out = Vec::new();
-        self.with(|st| {
-            let url = st.url_of(repo).expect("set_branch on a known repo");
-            assert!(st.repos[&url].commits.contains_key(sha), "set_branch to a known commit");
-            st.move_branch(&url, branch, sha, &mut out);
-            self.inner.persist(st);
-        });
-        for d in &out {
-            deliver(d, &self.inner.state);
-        }
-    }
-
-    /// Moves a branch without announcing it (a lost webhook).
-    pub fn silent_commit(&self, repo: &str, branch: &str, changes: &[Change<'_>], message: &str) -> String {
-        self.with(|st| {
-            let url = st.url_of(repo).expect("silent_commit on a known repo");
-            let changes: Vec<OwnedChange> = changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect();
-            st.commit(&url, Write { branch, message, author: "external", changes: &changes, from: None }, &mut Vec::new()).1
+            st.commit(&url, Write { branch, message, author: "external", changes: &changes, from: None }).1
         })
     }
 
-    /// Delivers push webhooks for `repo` to `url`, signed with `secret` (the
-    /// dashboard registration the real service has).
-    pub fn register_webhook(&self, repo: &str, url: &str, secret: &str) {
+    /// Points a branch at a commit (a deploy's ref move).
+    pub fn set_branch(&self, repo: &str, branch: &str, sha: &str) {
         self.with(|st| {
-            let repo_url = st.url_of(repo).expect("register_webhook on a known repo");
-            st.hooks.retain(|h| !(h.repo_url == repo_url && h.url == url));
-            st.hooks.push(Hook { url: url.into(), repo_url, secret: secret.into() });
+            let url = st.url_of(repo).expect("set_branch on a known repo");
+            assert!(st.repos[&url].commits.contains_key(sha), "set_branch to a known commit");
+            st.move_branch(&url, branch, sha);
             self.inner.persist(st);
-        });
-    }
-
-    /// Webhook deliveries so far: (url, status or error).
-    pub fn deliveries(&self) -> Vec<(String, Result<u16, String>)> {
-        self.with(|st| st.deliveries.clone())
-    }
-
-    /// The next commit pack for `repo` first lands these changes on main as
-    /// another writer (a writer between the client's head read and its commit).
-    pub fn arm_race(&self, repo: &str, changes: &[Change<'_>]) {
-        self.with(|st| {
-            let url = st.url_of(repo).expect("arm_race on a known repo");
-            st.race.insert(url, changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect());
         });
     }
 
@@ -1306,6 +1152,7 @@ mod b64map {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http;
     use p256::pkcs8::EncodePrivateKey;
 
     fn get(url: &str, token: &str) -> (u16, Value) {
@@ -1394,16 +1241,5 @@ mod tests {
         assert_eq!(cs.branch("r", "main").as_deref(), Some(head.as_str()), "no commit was made");
         assert_eq!(post(&[FileChange::Upsert { path: "a", bytes: b"1" }, FileChange::Upsert { path: "b", bytes: b"2" }]), 201, "one file changed");
         assert_ne!(cs.branch("r", "main").as_deref(), Some(head.as_str()));
-    }
-
-    /// Goal: the fake signs a webhook as code.storage does, so the cell's
-    /// verifier is held to the real format, not to the fake's agreement
-    /// with it. Method: the signature OpenSSL computes (`printf '%s'
-    /// "1790000000.$BODY" | openssl dgst -sha256 -hmac s3cret`), written
-    /// out; fragment_core::webhook's test verifies the same answer.
-    #[test]
-    fn a_webhook_is_signed_as_code_storage_signs_it() {
-        let body = br#"{"ref":"refs/heads/main","before":"0","after":"1"}"#;
-        assert_eq!(signature(body, "s3cret", 1_790_000_000), "t=1790000000,sha256=4d38e01ea6039c2094e98395081b85c0efd6af8ae2740ebfab403ded420cb4b8");
     }
 }

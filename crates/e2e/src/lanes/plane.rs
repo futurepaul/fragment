@@ -1,4 +1,4 @@
-//! The file plane: storage tokens, pins moved by webhooks, the refresh
+//! The file plane: storage tokens, pins moved by the refresh
 //! route, and the poll backstop; then the CLI's deploy, preview, rollback,
 //! and drafts against the cell.
 
@@ -7,10 +7,10 @@ use std::time::Duration;
 use anyhow::Result;
 use base64::Engine;
 use fragment_nip98::Keys;
-use fragment_proto::{limits, ErrorCode};
+use fragment_proto::limits;
 use serde_json::{json, Value};
 
-use crate::api::{now_s, second_start, Api, Call};
+use crate::api::{Api, Call};
 use crate::Suite;
 
 fn listing(api: &Api, keys: &Keys, name: &str) -> Vec<(String, u64)> {
@@ -26,18 +26,6 @@ fn listing(api: &Api, keys: &Keys, name: &str) -> Vec<(String, u64)> {
 fn read(api: &Api, keys: &Keys, name: &str, path: &str) -> Option<String> {
     let r = api.signed(keys, "GET", &format!("/api/f/{name}/file?path={path}"), None).ok()?;
     (r.status == 200).then_some(r.text)
-}
-
-fn signed_webhook(api: &Api, name: &str, secret: &str, body: &Value, at: i64, event: &str) -> Result<crate::api::Reply> {
-    let bytes = body.to_string().into_bytes();
-    api.call(Call {
-        method: "POST",
-        url: format!("{}/api/f/{name}/webhook", api.base),
-        body: Some(bytes.clone()),
-        content_type: Some("application/json"),
-        extra: vec![("x-pierre-event", event.into()), ("x-pierre-signature", fragment_fakes::codestorage::signature(&bytes, secret, at))],
-        ..Call::default()
-    })
 }
 
 fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
@@ -64,16 +52,8 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("code.storage accepts it (a fresh repo has no main: 404, branch not found)", st == 404 && why == "branch not found", format!("{st} {why}"));
 
     s.commit(&c, &[("notes/a.md", Some(b"hello v1\n"))]);
-    s.ok("a pushed file is listed after the webhook", listing(api, &owner, &name).contains(&("notes/a.md".into(), 9)), "");
+    s.ok("a pushed file is listed after the refresh", listing(api, &owner, &name).contains(&("notes/a.md".into(), 9)), "");
     s.ok("the file reads through the cell", read(api, &owner, &name, "notes/a.md").as_deref() == Some("hello v1\n"), "");
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file/stat?path=notes/a.md"), None)?;
-    s.ok(
-        "stat reports the blob identity",
-        r.body["stat"]["present"] == true && r.body["stat"]["blobSha"].as_str().is_some_and(|b| b.len() == 40),
-        &r,
-    );
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file/stat?path=notes/nope.md"), None)?;
-    s.ok("stat of an absent path reports present: false", r.body["stat"]["present"] == false, &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=../etc/passwd"), None)?;
     s.ok("a path outside the repo is 400", r.status == 400, &r);
     s.commit(&c, &[("notes/a.md", Some(b"hello v2\n"))]);
@@ -91,40 +71,16 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("the event log says fragment.json's access keys are ignored", r.text.contains("manifest.ignored"), &r);
 
-    // deliveries
-    let secret = c["webhookSecret"].as_str().unwrap_or("").to_string();
-    let body = json!({ "repository": { "url": repo }, "ref": "refs/heads/main", "before": "0", "after": "1", "pushed_at": "t1" });
-    let r = signed_webhook(api, &name, "wrong-secret", &body, now_s(), "push")?;
-    s.ok("a webhook with a bad signature is 401", r.status == 401, &r);
-    // the window's edges, on either side of now: a delivery stamped the
-    // window ahead is taken and one stamped a second past it behind is
-    // refused, however late the node reads its clock (it shares ours);
-    // sent as a second begins, the first is judged at the edge itself
-    let window = limits::WEBHOOK_WINDOW_S;
-    let edge = json!({ "repository": { "url": repo }, "ref": "refs/heads/main", "before": "0", "after": "1", "pushed_at": "t0" });
-    let now = second_start();
-    let ahead = signed_webhook(api, &name, &secret, &edge, now + window, "push")?;
-    let behind = signed_webhook(api, &name, &secret, &body, now - window - 1, "push")?;
-    s.ok(
-        "a webhook stamped at the edge of the window is taken, and one a second past it is 401",
-        ahead.status == 200 && ahead.body["interpreted"] == true && behind.code() == Some(ErrorCode::Unauthenticated),
-        format!("{ahead} {behind}"),
-    );
-    let r = signed_webhook(api, &name, &secret, &body, now_s(), "push")?;
-    s.ok("a signed webhook is interpreted", r.status == 200 && r.body["interpreted"] == true, &r);
-    let r = signed_webhook(api, &name, &secret, &body, now_s(), "push")?;
-    s.ok("its redelivery is acknowledged, not interpreted", r.status == 200 && r.body["redelivery"] == true, &r);
-    let r = signed_webhook(api, &name, &secret, &json!({}), now_s(), "repo.created")?;
-    s.ok("other events are ignored", r.status == 200 && r.body["ignored"] == "repo.created", &r);
-
-    // lost webhooks
-    s.fake.silent_commit(&repo, "main", &[("quiet.md", Some(b"no webhook"))], "silent");
+    // pushes no one refreshed
+    s.fake.external_commit(&repo, "main", &[("quiet.md", Some(b"unannounced"))], "unannounced");
     let r = api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     s.ok("refresh moves main at once", r.status == 200 && r.body["refs"]["main"]["moved"] == true && r.body["refs"]["live"]["absent"] == true, &r);
-    s.ok("refresh made the file visible", read(api, &owner, &name, "quiet.md").as_deref() == Some("no webhook"), "");
-    s.fake.silent_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "silent");
+    s.ok("refresh made the file visible", read(api, &owner, &name, "quiet.md").as_deref() == Some("unannounced"), "");
+    s.fake.external_commit(&repo, "main", &[("polled.md", Some(b"found by the poll"))], "unannounced");
     let polled = s.eventually(Duration::from_secs(u64::from(crate::POLL_S) * 5), || read(api, &owner, &name, "polled.md").is_some());
-    s.ok("the poll backstop finds a commit no webhook announced", polled, "");
+    s.ok("the poll backstop finds a commit no one refreshed, a storage token since", polled, "");
+    let r = api.unsigned("POST", &format!("/api/f/{name}/webhook"), Some(&json!({})))?;
+    s.ok("code.storage's push webhooks are not taken", r.status == 401, &r);
     let stranger = api.person()?;
     let r = api.signed(&stranger, "GET", &format!("/api/f/{name}/files"), None)?;
     s.ok("a stranger cannot list files", r.status == 403, &r);
@@ -154,15 +110,14 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     let plain = s.cli_json(api, &home, &["create", &s.name("deploy-plain"), "--json"])?;
     s.ok(
         "create --json leaves out the tokens unless asked",
-        plain["name"].is_string() && ["viewToken", "inboxToken", "webhookSecret"].iter().all(|t| plain.get(t).is_none()),
+        plain["name"].is_string() && ["viewToken", "inboxToken"].iter().all(|t| plain.get(t).is_none()),
         &plain,
     );
     let out = s.cli(api, &home, &["create", &s.name("deploy-human")]);
     s.ok("and create prints none, pointing at `fragment open`", out.status.success() && !text(&out).contains("?view=") && !text(&out).contains("?t=") && text(&out).contains("fragment open"), text(&out));
     let created = s.cli_json(api, &home, &["create", &s.name("deploy"), "--show-tokens", "--json"])?;
-    s.ok("--show-tokens shows them", created["viewToken"].is_string() && created["webhookSecret"].is_string(), &created);
+    s.ok("--show-tokens shows them", created["viewToken"].is_string() && created["inboxToken"].is_string(), &created);
     let name = created["name"].as_str().unwrap_or("").to_string();
-    s.hook(api, &created);
     let view = created["viewToken"].as_str().unwrap_or("").to_string();
     let cookie = format!("fragview={view}");
     let page = |api: &Api| api.page(&name, "", Some(&cookie)).map(|r| r.text).unwrap_or_default();
@@ -213,16 +168,6 @@ pub fn deploy(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the site serves the rolled-back content", s.eventually(Duration::from_secs(10), || page(api).contains("v1 marker")), page(api));
     let st3 = s.cli_json(api, &home, &["status", &name, "--json"])?;
     s.ok("rollback is a new live commit", st3["pins"]["live"] != st2["pins"]["live"], &st3);
-
-    let out = s.cli(api, &home, &["deploy", &name, "--dir", site.to_str().unwrap(), "--preview"]);
-    let slug = text(&out).split_whitespace().find(|w| w.starts_with("preview/")).map(str::to_string).unwrap_or_default();
-    s.ok("a preview names its ephemeral ref", !slug.is_empty(), text(&out));
-    match s.hosted() {
-        true => s.skip("the preview ref is ephemeral at main's tip", "it reads the code.storage fake's refs (a preview's git is real)"),
-        false => s.ok("the preview ref is ephemeral at main's tip", s.fake.is_ephemeral(repo, &slug) && s.fake.branch(repo, &slug) == s.fake.branch(repo, "main"), &slug),
-    }
-    let st4 = s.cli_json(api, &home, &["status", &name, "--json"])?;
-    s.ok("a preview leaves live alone", st4["pins"]["live"] == st3["pins"]["live"] && page(api).contains("v1 marker"), &st4);
 
     // code arrives with a deploy
     std::fs::write(site.join("app.mjs"), include_str!("../../fixtures/todo.mjs"))?;

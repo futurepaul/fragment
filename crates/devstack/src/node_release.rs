@@ -9,10 +9,6 @@
 /// and ends 2027-04-30; 26 is no LTS line before 2026-10-28.
 pub const NODE_VERSION: &str = "24.21.0";
 
-/// The majors an override (`FRAGMENT_NODE`) may be: the LTS lines from
-/// wrangler's minimum to the pin's.
-pub const OVERRIDE_MAJORS: [u32; 2] = [22, 24];
-
 /// One platform's official tarball: `node-v<NODE_VERSION>-<platform>.tar.gz`
 /// at https://nodejs.org/dist/v<NODE_VERSION>/.
 #[derive(Debug, PartialEq, Eq)]

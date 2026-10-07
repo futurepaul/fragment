@@ -125,7 +125,7 @@ fn lever(api: &Api, fragment: &str, op: &str, extra: Value) -> Result<Reply> {
     api.unsigned("POST", "/api/test/fragment", Some(&body))
 }
 
-/// Waits for a deploy to land (by the webhook): a query answers once it has.
+/// Waits for a deploy to land: a query answers once it has.
 fn landed(s: &Suite, api: &Api, keys: &Keys, name: &str, wait: Duration) {
     s.eventually(wait, || api.op(keys, name, "notes", "q", json!({})).is_ok_and(|r| r.status == 200));
 }
@@ -248,16 +248,13 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a guest's fragment still takes writes (it is billed nothing)", r.status == 200, &r);
     // a guest pays for nothing, so a deploy of theirs is not shot (decision
     // 31): this deploy's own skip, after any its first deploy had, and no
-    // card wanted or out once the alarm has decided (a deploy's answer
-    // comes before the alarm looks)
+    // card wanted once the alarm has decided (a deploy's answer comes
+    // before the alarm looks)
     let skips = || super::site::event_kinds(api, &guest, &guest_app).iter().filter(|k| *k == "card.skipped").count();
     let skips_before = skips();
     s.commit(&c, &[("notes/guest.md", Some(b"a guest deploys"))]);
     s.deploy(&c);
-    let unshot = || {
-        let cards = super::site::cards(api, &guest_app);
-        cards["cards"]["wanted"].is_null() && cards["cards"]["flight"].is_null()
-    };
+    let unshot = || super::site::cards(api, &guest_app)["cards"]["wanted"].is_null();
     let skipped = s.eventually(wait, || skips() > skips_before && unshot());
     s.ok(
         "a guest's deploy gets no preview card: its ledger takes no shot",

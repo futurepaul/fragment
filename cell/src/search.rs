@@ -12,6 +12,12 @@
 //!   `limits::SEARCH_ENTRIES_PER_FRAGMENT_MAX`, as a person's list does. A
 //!   channel only some members may read is never searched (decision 9 is
 //!   about chats, and both of a chat's channels are every member's).
+//! - **The fence.** Every list's row names the channels searched now
+//!   (`searched`, read at each send), and a list keeps, and takes, only
+//!   their messages. An install that changes them (a channel's read role
+//!   tightened past `viewer`, a channel gone, a new one) drops the log's
+//!   messages of the channels no longer searched and sends every row again
+//!   (`search_fence`): a copy never outlives every member's right to read it.
 //! - **The outbox.** Each person holds a cursor, `search_outbox`: the last
 //!   `n` their list took. It follows their index row (`index_change`): made
 //!   at 0 when a role is named (a new member gets the log from its start),
@@ -41,6 +47,11 @@ const FLUSH_PEOPLE_MAX: i64 = 32;
 /// them meanwhile, and a flush that died lets them go after this.
 const CLAIM_MS: i64 = 60_000;
 
+/// Whether a channel read by `read` is searched: every member may read it.
+fn searched(read: Role) -> bool {
+    read <= Role::Viewer
+}
+
 /// A due cursor, as a flush claims it.
 #[derive(Deserialize)]
 struct Cursor {
@@ -53,7 +64,7 @@ impl FragmentCell {
     /// Logs a record's text for search, when it is a message's on a channel
     /// every member may read (`read`). Runs in its append's turn.
     pub(crate) fn log_search(&self, read: Role, channel: &str, seq: i64, at: i64, body: &Value) -> CellResult<()> {
-        if read > Role::Viewer {
+        if !searched(read) {
             return Ok(());
         }
         let Some(text) = search::record_text(body) else { return Ok(()) };
@@ -74,6 +85,27 @@ impl FragmentCell {
             self.search_woke.set(true);
         }
         Ok(())
+    }
+
+    /// The channels its people search, as installed now: those every
+    /// member may read. Every list's row names them (members.rs `flush_index`).
+    pub(crate) fn searched_channels(&self) -> CellResult<Vec<String>> {
+        Ok(self.declared_channels()?.into_iter().filter(|(_, d)| searched(d.read)).map(|(c, _)| c).collect())
+    }
+
+    /// Fences search to the channels searched now, when they changed since
+    /// the rows last named them (an install, or a fragment from before rows
+    /// named them): the log drops the messages of the others, and every
+    /// list's row is sent again, which drops theirs there. Runs after each
+    /// install and before each index flush.
+    pub(crate) fn search_fence(&self) -> CellResult<()> {
+        let now = serde_json::to_string(&self.searched_channels()?).expect("names serialize");
+        if self.meta(MetaKey::Searched)?.as_deref() == Some(now.as_str()) {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::Searched, &now)?;
+        self.exec("DELETE FROM search_log WHERE channel NOT IN (SELECT value FROM json_each(?))", vec![now.into()])?;
+        self.reindex()
     }
 
     /// A person's cursor follows their index row: made (from the log's

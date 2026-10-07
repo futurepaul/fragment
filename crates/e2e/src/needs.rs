@@ -8,7 +8,7 @@
 /// One thing a section needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Need {
-    /// A vendor fake it writes or scripts: code.storage's git or webhooks,
+    /// A vendor fake it writes or scripts: code.storage's git,
     /// the scripted model, WorkOS beyond sign-in (Pipes' accounts), the
     /// push service, the swap's upstream, a local server a job fetches.
     Fakes,
