@@ -7,11 +7,10 @@
 use std::cell::OnceCell;
 
 use anyhow::{anyhow, bail, Result};
-use fragment_core::blob;
+use fragment_core::blob::{self, sha256_hex};
 use fragment_proto::FragmentStatus;
 
 use crate::api::Client;
-use crate::sync::sha256_hex;
 
 pub struct Blobs<'a> {
     client: &'a Client,
