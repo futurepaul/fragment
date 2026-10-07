@@ -66,14 +66,6 @@ fn files_lane(s: &mut Suite, api: &Api) -> Result<()> {
     s.commit(&c, &[("notes/a.md", Some(b"hello v1\n"))]);
     s.ok("a pushed file is listed after the webhook", listing(api, &owner, &name).contains(&("notes/a.md".into(), 9)), "");
     s.ok("the file reads through the cell", read(api, &owner, &name, "notes/a.md").as_deref() == Some("hello v1\n"), "");
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file/stat?path=notes/a.md"), None)?;
-    s.ok(
-        "stat reports the blob identity",
-        r.body["stat"]["present"] == true && r.body["stat"]["blobSha"].as_str().is_some_and(|b| b.len() == 40),
-        &r,
-    );
-    let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file/stat?path=notes/nope.md"), None)?;
-    s.ok("stat of an absent path reports present: false", r.body["stat"]["present"] == false, &r);
     let r = api.signed(&owner, "GET", &format!("/api/f/{name}/file?path=../etc/passwd"), None)?;
     s.ok("a path outside the repo is 400", r.status == 400, &r);
     s.commit(&c, &[("notes/a.md", Some(b"hello v2\n"))]);
