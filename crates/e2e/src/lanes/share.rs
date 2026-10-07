@@ -1,4 +1,4 @@
-//! Sharing (phase 7, decision 4; the ROADMAP's phase 7 acceptance): the
+//! Sharing (docs/api.md, Sharing): the
 //! share sheet and the join page on the platform's origin, on a node
 //! shaped as fragment.club is (the platform cross-site from every fragment,
 //! so its session reaches a fragment's page only on a top-level visit), in

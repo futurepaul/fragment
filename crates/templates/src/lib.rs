@@ -1,5 +1,5 @@
 //! The templates under `templates/`, embedded: `fragment new` scaffolds
-//! them, and the cell makes a fragment from one (docs/phase-6.md, step 2).
+//! them, and the cell makes a fragment from one (docs/api.md, Control API).
 
 /// A template's files: path (relative to the fragment's root) and bytes.
 pub type Template = &'static [(&'static str, &'static [u8])];
