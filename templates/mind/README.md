@@ -44,11 +44,14 @@ release of this code, and its repo holds only its face.
   that writes them) keep a pump and a turn's settle from building the same
   node.
 - **Hand-offs:** `computer` publishes the task on `chat` (to the agent),
-  then `task_open` records it with the record's `seq`. goose's records
-  (`hands_worked`, `hands_said`) follow it; one that arrives before
-  `task_open` is kept as an orphan by `seq` and adopted. At `turn.end`
-  (after 2 s, for its last replies) the report is queued as `[<task>] …`
-  and runs a turn.
+  then `task_open` records it with the turn the agent's bridge gives that
+  record (24 hex of SHA-256 of `<agent fragment>|<mind>/chat/<seq>`).
+  goose posts one reply a hand-off, its report; `hands_said` (`chat`'s
+  trigger) queues it as `[<task>] …`, which runs a turn. A reply that
+  comes before its `task_open` is kept for it. The page follows goose's
+  steps on `work` itself, by `turn`; the mind runs nothing for them. A
+  task with no reply in 30 minutes is `lost` (a later reply still
+  reports).
 - **Topics:** `classify` asks Clef (`job.ai.decide`, `clef-flash`) one
   `noul` per topic about a thread; a thread is in a topic at p ≥ 0.6.
   `topic_add` publishes `{topic}` on `sort`, whose trigger classifies the
@@ -80,9 +83,9 @@ blocks a chain past 16).
   kept. Moving the log out (R2, git) is not in the spike.
 - **`log` is never trimmed** (no post role): every message is a record
   there too, at most 48 KiB.
-- **Triggered runs pause past 120 an hour** (docs/api.md, Jobs):
-  `hands_worked` runs once per goose `work` record, so a hand-off with
-  many steps can pause it, and its report would not arrive.
+- **Triggered runs pause past 120 an hour** (docs/api.md, Jobs): one
+  `hands_said` a hand-off, and one `heard` a message, so only a person
+  saying 120 things an hour reaches it.
 - **A turn that dies holds the lock** until it runs out (15 minutes after
   its last touch); its messages wait for the next message or report.
 - **A node that never builds** (a model that refuses one message) blocks

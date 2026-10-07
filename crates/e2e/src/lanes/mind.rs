@@ -11,16 +11,17 @@
 //! summaries and the view settles over the whole log; search finds a
 //! message; a topic added classifies the threads about it, and only them.
 //! With its agent (the stub) an editor of the mind, a turn of a persona
-//! with hands hands a task to it on `chat`; the agent's turn on `work` and
-//! its reply become the task's steps and report, and the report comes back
-//! as a `[<task>] …` user message that runs a turn of its own.
+//! with hands hands a task to it on `chat`, recorded under the turn the
+//! agent's bridge gives that record; the agent's one reply is the task's
+//! report, and comes back as a `[<task>] …` user message that runs a turn
+//! of its own. Its steps on `work` start nothing (a page follows them).
 
 use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use super::computers::{phase, told, AGENT_JSON};
+use super::computers::{agent_replies, phase, told, turn_of, AGENT_JSON};
 use super::jobs::records;
 use crate::api::{Api, Socket};
 use crate::Keys;
@@ -238,23 +239,35 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     });
     let said = messages(api, &owner, &mind, shed);
     let report = said.iter().find(|m| m["kind"] == "user" && m["task"] == task.as_str()).cloned().unwrap_or(Value::Null);
+    // the agent's one reply on chat, under the turn its bridge gave the task's record
+    let seq = handed.and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
+    let turn = turn_of(&agent_name, &mind, "chat", seq);
+    let replies: Vec<Value> = agent_replies(&records(api, &owner, &mind, "chat"), &identity).into_iter().filter(|r| r["body"]["turn"] == turn.as_str()).collect();
     s.ok(
-        "the agent's turn ends, and its reply comes back as a [task] user message in the thread",
-        reported && report["text"].as_str().is_some_and(|t| t.contains("tidy the shed")),
-        json!(said),
+        "the agent replies once, and that reply comes back as the [task] user message in the thread",
+        reported
+            && replies.len() == 1
+            && replies[0]["body"]["text"].as_str().is_some_and(|t| t.contains("tidy the shed") && report["text"] == format!("[{task}] {t}").as_str()),
+        json!({ "said": said, "replies": replies }),
     );
     let answered = s.eventually(TURN, || messages(api, &owner, &mind, shed).iter().any(|m| m["kind"] == "talk" && m["i"].as_i64() > report["i"].as_i64()));
     s.ok("which runs a turn of its own", answered, json!(messages(api, &owner, &mind, shed)));
     let work = records(api, &owner, &mind, "work");
-    let seq = handed.and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
     let done = op(api, &owner, &mind, "tasks", json!({ "thread": shed }));
     s.ok(
-        "the agent claimed the task's record on work, and the task is done with its report",
-        work.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["kind"] == "turn.start" && r["body"]["cause"]["seq"] == seq)
+        "the task names the agent's turn, claimed on work, and is done with its reply as the report",
+        work.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["kind"] == "turn.start" && r["body"]["turn"] == turn.as_str() && r["body"]["cause"]["seq"] == seq)
+            && done["tasks"][0]["turn"] == turn.as_str()
             && done["tasks"][0]["state"] == "done"
-            && done["tasks"][0]["report"].as_str().is_some_and(|t| t.contains("tidy the shed"))
-            && logged(api, &owner, &mind, "task").iter().any(|t| t["body"]["id"] == task.as_str() && t["body"]["state"] == "done"),
+            && done["tasks"][0]["report"] == replies.first().map_or(Value::Null, |r| r["body"]["text"].clone())
+            && logged(api, &owner, &mind, "task").iter().any(|t| t["body"]["id"] == task.as_str() && t["body"]["turn"] == turn.as_str() && t["body"]["state"] == "done"),
         json!({ "work": work, "tasks": done }),
+    );
+    let runs = api.signed(&owner, "GET", &format!("/api/f/{mind}/triggers"), None)?;
+    s.ok(
+        "goose's steps on work start no run: only its reply on chat does",
+        runs.body["triggers"].as_array().is_some_and(|t| t.iter().all(|t| t["channel"] != "work") && t.iter().any(|t| t["channel"] == "chat" && t["run"] == "hands_said")),
+        &runs,
     );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;

@@ -158,7 +158,6 @@
     "pump": { "kind": "job" },
     "classify": { "kind": "job" },
     "hands_said": { "kind": "job" },
-    "hands_worked": { "kind": "job" },
     "hear": { "kind": "mutation" },
     "turn_begin": { "kind": "mutation" },
     "turn_touch": { "kind": "mutation" },
@@ -167,7 +166,6 @@
     "pump_plan": { "kind": "query", "role": "editor" },
     "node_built": { "kind": "mutation" },
     "task_open": { "kind": "mutation" },
-    "hands_step": { "kind": "mutation" },
     "hands_reply": { "kind": "mutation" },
     "topics_set": { "kind": "mutation" }
   },
@@ -181,7 +179,6 @@
   "triggers": [
     { "channel": "say", "from": "person", "run": "heard" },
     { "channel": "chat", "from": "agent", "run": "hands_said" },
-    { "channel": "work", "from": "agent", "run": "hands_worked" },
     { "channel": "sort", "run": "classify" }
   ],
   "meta": {

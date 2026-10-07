@@ -65,15 +65,14 @@ const NODE_TEXT_MAX = 2 * M.NODE;
 // a record's JSON may take of the platform's 64 KiB.
 const RECORD_TEXT_MAX = 48 * 1024;
 const RECORD_JSON_MAX = 60 * 1024;
-const TASK_STEPS_KEPT = 50;
 const TASK_TEXT_MAX = 30 * 1024;
 const TASK_RECORD_TEXT_MAX = 4096;
 const TASK_RECORD_REPORT_MAX = 16 * 1024;
-// A hand-off's last replies may land after its end: its end waits this long.
-const REPLY_GRACE_MS = 2000;
-const REPLIES_TURNS_MAX = 32;
-const ORPHANS_MAX = 32;
-const ORPHAN_MS = 60 * 60_000;
+// A hand-off with no reply this long after it opened is `lost`.
+const TASK_LOST_MS = 30 * 60_000;
+// Replies whose task is not recorded yet (its `task_open` a step behind),
+// kept for it, at most this many.
+const EARLY_REPLIES_MAX = 32;
 const SEARCH_TOOL_MAX = 20;
 const SEARCH_MAX = 50;
 const SNIPPET_MAX_BYTES = 300;
@@ -181,28 +180,18 @@ function namesOf(text, have) {
   return out;
 }
 
-// A goose `work` record's body, its fields held to chat-records' sizes.
-function workBody(b) {
-  const s = (v, n) => (typeof v === "string" ? v.slice(0, n) : undefined);
-  return {
-    kind: b.kind,
-    turn: b.turn,
-    cause: b.cause && typeof b.cause === "object" ? { channel: s(b.cause.channel, 64), seq: Number.isSafeInteger(b.cause.seq) ? b.cause.seq : null } : null,
-    step: Number.isSafeInteger(b.step) ? b.step : null,
-    tool: s(b.tool, 140),
-    args: s(b.args, 140),
-    ok: typeof b.ok === "boolean" ? b.ok : null,
-    excerpt: s(b.excerpt, 300),
-    text: s(b.text, 300),
-    prompt: s(b.prompt, 64),
-    options: Array.isArray(b.options) ? b.options.slice(0, 8).map((o) => ({ id: s(o?.id, 32), label: s(o?.label, 140), style: s(o?.style, 16) })) : undefined,
-    asks: s(b.asks, 128),
-    expiresAt: Number.isSafeInteger(b.expiresAt) ? b.expiresAt : undefined,
-    outcome: s(b.outcome, 32),
-    option: s(b.option, 32),
-    by: s(b.by, 128),
-    error: s(b.error, 300),
-  };
+// The bridge's turn for a record (images/bridge/src/records.rs `turn_id`,
+// docs/chat-records.md): 24 hex of SHA-256 of `<agent>|<fragment>/<channel>/<seq>`.
+async function turnOf(agentFragment, fragment, channel, seq) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${agentFragment}|${fragment}/${channel}/${seq}`));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 24);
+}
+
+// A hand-off's state from its one reply: goose's `(ended: <outcome>: <why>)`
+// when it stopped or failed, else done.
+function endedBy(text) {
+  const m = /^\(ended: ([a-z]+)/.exec(text.trim());
+  return m === null ? "done" : m[1] === "stopped" ? "stopped" : "error";
 }
 
 // A run's steps, counted with the size of their answers, so a run stays
@@ -244,6 +233,10 @@ class Steps {
 
   members() {
     return this.#took(this.job.members());
+  }
+
+  people(ids) {
+    return this.#took(this.job.people(ids));
   }
 
   left() {
@@ -474,6 +467,11 @@ export class App extends DurableObject {
     this.#setJson("turn", { run, thread, since: now, touched: now, stop: false });
     const settled = M.first(m) >= tail;
     call.publish("log", { type: "turn", thread, state: settled ? "thinking" : "settling" });
+    // hand-offs with no reply in TASK_LOST_MS are lost (a reply later still reports)
+    for (const { id } of sql.exec("SELECT id FROM task WHERE state = 'running' AND started < ? LIMIT 32", now - TASK_LOST_MS).toArray()) {
+      sql.exec("UPDATE task SET state = 'lost' WHERE id = ?", id);
+      this.#publishTask(call, this.#task(id));
+    }
     return { took: true, thread, persona, about: this.#get("about") ?? "", texts, taken, tail, settled };
   }
 
@@ -585,137 +583,72 @@ export class App extends DurableObject {
     });
   }
 
-  // A hand-off opened: its task, published on `chat` at `seq`, recorded;
-  // what goose did before this (an orphan) adopted.
-  task_open({ id, thread, text, seq }, call) {
+  // A hand-off opened: its task, published on `chat` at `seq`, recorded
+  // with the turn the agent's bridge gives that record. A reply that came
+  // first (this a step behind it) is its report at once.
+  task_open({ id, thread, text, seq, turn }, call) {
     need(typeof id === "string" && /^w\d+-\d+$/.test(id), "task_open: id is a task's");
-    need(typeof thread === "string" && typeof text === "string" && isInt(seq), "task_open: {id, thread, text, seq}");
+    need(typeof thread === "string" && typeof text === "string" && isInt(seq), "task_open: {id, thread, text, seq, turn}");
+    need(typeof turn === "string" && /^[0-9a-f]{24}$/.test(turn), "task_open: turn is the bridge's, 24 hex");
     const sql = this.ctx.storage.sql;
     return this.#changing((m) => {
-      if (sql.exec("SELECT id FROM task WHERE id = ?", id).toArray().length) return { id, opened: false };
+      if (sql.exec("SELECT id FROM task WHERE id = ?", id).toArray().length) return { id, turn, opened: false };
       sql.exec(
-        "INSERT INTO task (id, thread, i, text, seq, turn, state, report, steps, started, ended) VALUES (?, ?, NULL, ?, ?, NULL, 'running', NULL, '[]', ?, NULL)",
-        id, thread, M.capText(text), seq, Date.now(),
+        "INSERT INTO task (id, thread, i, text, seq, turn, state, report, steps, started, ended) VALUES (?, ?, NULL, ?, ?, ?, 'running', NULL, '[]', ?, NULL)",
+        id, thread, M.capText(text), seq, turn, Date.now(),
       );
-      const orphans = this.#json("orphans", {});
-      const o = orphans[seq];
-      if (o) {
-        delete orphans[seq];
-        this.#setJson("orphans", orphans);
-        sql.exec("UPDATE task SET turn = ?, steps = ? WHERE id = ?", o.turn, JSON.stringify(o.steps.slice(-TASK_STEPS_KEPT)), id);
-        if (o.end) return { id, opened: true, ...this.#endTask(call, m, this.#task(id), o.end) };
+      const early = this.#json("early", {});
+      if (turn in early) {
+        const said = early[turn].text;
+        delete early[turn];
+        this.#setJson("early", early);
+        return { id, turn, opened: true, ...this.#endTask(call, m, this.#task(id), said) };
       }
       this.#publishTask(call, this.#task(id));
-      return { id, opened: true };
+      return { id, turn, opened: true };
     });
   }
 
+  // A task as the page reads it: `lost` once it has waited TASK_LOST_MS
+  // for its reply.
   #task(id) {
     const t = this.ctx.storage.sql.exec("SELECT * FROM task WHERE id = ?", id).toArray()[0] ?? null;
-    return t && { ...t, steps: JSON.parse(t.steps) };
+    return t && { ...t, state: t.state === "running" && Date.now() - t.started > TASK_LOST_MS ? "lost" : t.state };
   }
 
-  // A task's record: its newest steps, as many as the record holds.
   #publishTask(call, t) {
-    const body = { type: "task", id: t.id, thread: t.thread, state: t.state, text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX) };
+    const body = { type: "task", id: t.id, thread: t.thread, state: t.state, text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX), turn: t.turn };
     if (t.report !== null && t.report !== undefined) body.report = M.cutBytes(t.report, TASK_RECORD_REPORT_MAX);
-    let room = RECORD_JSON_MAX - sizeOf(body) - 16;
-    const steps = [];
-    for (let k = t.steps.length - 1; k >= 0; k--) {
-      room -= sizeOf(t.steps[k]) + 1;
-      if (room < 0) break;
-      steps.unshift(t.steps[k]);
-    }
-    body.steps = steps;
     call.publish("log", body);
   }
 
-  // A hand-off's end: its report (goose's replies, joined) queued as a
-  // `user` message `[<task>] …` in its thread, which starts a turn.
-  #endTask(call, m, t, end) {
-    if (t.state !== "running") return { ended: false };
-    const replies = this.#json("replies", {});
-    const parts = replies[t.turn]?.parts ?? {};
-    delete replies[t.turn];
-    this.#setJson("replies", replies);
-    const said = Object.keys(parts).map(Number).sort((a, b) => a - b).map((s) => parts[s]).join("\n\n").trim();
-    const outcome = end.outcome ?? "idle";
-    const state = outcome === "idle" ? "done" : outcome === "stopped" ? "stopped" : "error";
-    const report = M.capText(said || `ended: ${outcome}${end.error ? ` (${end.error})` : ""}`);
+  // A hand-off's end: its one reply is its report, queued as a `user`
+  // message `[<task>] …` in its thread, which starts a turn. A reply to a
+  // task that ended already (a later part) changes nothing.
+  #endTask(call, m, t, said) {
+    if (t.report !== null) return { task: t.id, ended: false };
+    const report = M.capText(said.trim() || "(ended: idle: no words)");
+    const state = endedBy(report);
     this.ctx.storage.sql.exec("UPDATE task SET state = ?, report = ?, ended = ? WHERE id = ?", state, report, Date.now(), t.id);
     this.#publishTask(call, { ...t, state, report });
     const q = this.#enqueue(call, m, { text: `[${t.id}] ${report}`, thread: t.thread, task: t.id });
-    return { ended: true, running: q.running, i: q.i };
+    return { task: t.id, ended: true, running: q.running, i: q.i };
   }
 
-  // One `work` record of goose's: a hand-off's turn claimed, a step, a
-  // prompt, or its end. A turn whose task is not recorded yet (its
-  // `task_open` still to come) is kept as an orphan for it to adopt.
-  hands_step({ seq, body }, call) {
-    need(body && typeof body.kind === "string" && typeof body.turn === "string", "hands_step: body is a turn's record");
-    const sql = this.ctx.storage.sql;
-    return this.#changing((m) => {
-      const now = Date.now();
-      const orphans = this.#json("orphans", {});
-      for (const [s, o] of Object.entries(orphans)) if (now - o.at > ORPHAN_MS) delete orphans[s];
-      const bySeq = (s) => (isInt(s) ? sql.exec("SELECT id FROM task WHERE seq = ?", s).toArray()[0]?.id : null);
-      const byTurn = sql.exec("SELECT id FROM task WHERE turn = ?", body.turn).toArray()[0]?.id ?? null;
-      const id = body.kind === "turn.start" && body.cause?.channel === "chat" ? bySeq(body.cause.seq) ?? byTurn : byTurn;
-      if (!id) {
-        // its task_open is still to come: kept for it, by the record that caused it
-        let at = body.kind === "turn.start" && isInt(body.cause?.seq) ? body.cause.seq : null;
-        if (at === null) at = Object.keys(orphans).find((s) => orphans[s].turn === body.turn) ?? null;
-        if (at !== null) {
-          const o = orphans[at] ?? { turn: body.turn, steps: [], end: null, at: now };
-          if (body.kind === "turn.step" || body.kind === "turn.prompt") o.steps.push(body);
-          if (body.kind === "turn.end") o.end = body;
-          orphans[at] = o;
-          const keys = Object.keys(orphans);
-          if (keys.length > ORPHANS_MAX) for (const old of keys.slice(0, keys.length - ORPHANS_MAX)) delete orphans[old];
-        }
-        this.#setJson("orphans", orphans);
-        return { task: null, ended: false };
-      }
-      this.#setJson("orphans", orphans);
-      const t = this.#task(id);
-      switch (body.kind) {
-        case "turn.start":
-          sql.exec("UPDATE task SET turn = ? WHERE id = ?", body.turn, id);
-          this.#publishTask(call, { ...t, turn: body.turn });
-          return { task: id, ended: false };
-        case "turn.step":
-        case "turn.prompt":
-        case "turn.prompt.closed": {
-          const steps = t.steps;
-          if (body.kind === "turn.prompt.closed") {
-            const p = steps.find((s) => s.kind === "turn.prompt" && s.prompt === body.prompt);
-            if (p) Object.assign(p, { outcome: body.outcome, option: body.option, by: body.by });
-          } else steps.push(body);
-          const kept = steps.slice(-TASK_STEPS_KEPT);
-          sql.exec("UPDATE task SET steps = ? WHERE id = ?", JSON.stringify(kept), id);
-          this.#publishTask(call, { ...t, steps: kept });
-          return { task: id, ended: false };
-        }
-        case "turn.end":
-          return { task: id, ...this.#endTask(call, m, t, body) };
-        default:
-          return { task: id, ended: false };
-      }
-    });
-  }
-
-  // One reply of goose's on `chat`, kept by its turn until the turn ends.
-  hands_reply({ seq, turn, text }) {
-    need(isInt(seq) && typeof turn === "string" && typeof text === "string", "hands_reply: {seq, turn, text}");
-    const replies = this.#json("replies", {});
-    const r = replies[turn] ?? { at: Date.now(), parts: {} };
-    r.parts[seq] = M.capText(text);
-    delete replies[turn];
-    replies[turn] = r;
-    const keys = Object.keys(replies);
-    if (keys.length > REPLIES_TURNS_MAX) for (const old of keys.slice(0, keys.length - REPLIES_TURNS_MAX)) delete replies[old];
-    this.#setJson("replies", replies);
-    return { kept: Object.keys(r.parts).length };
+  // A reply of goose's on `chat`: the report of the task its turn names.
+  // One whose task is not recorded yet is kept for `task_open`.
+  hands_reply({ turn, text }, call) {
+    need(typeof turn === "string" && typeof text === "string", "hands_reply: {turn, text}");
+    const id = this.ctx.storage.sql.exec("SELECT id FROM task WHERE turn = ?", turn).toArray()[0]?.id ?? null;
+    if (id === null) {
+      const early = this.#json("early", {});
+      if (!(turn in early)) early[turn] = { text: M.capText(text), at: Date.now() };
+      const keys = Object.keys(early);
+      if (keys.length > EARLY_REPLIES_MAX) for (const old of keys.slice(0, keys.length - EARLY_REPLIES_MAX)) delete early[old];
+      this.#setJson("early", early);
+      return { task: null, ended: false };
+    }
+    return this.#changing((m) => this.#endTask(call, m, this.#task(id), text));
   }
 
   // Clef's answers: for each thread, its topics among `scope` replaced by
@@ -906,14 +839,15 @@ export class App extends DurableObject {
     // newest first until the result's budget; a report whole is its message's
     const tasks = [];
     let bytes = 0;
+    const now = Date.now();
     for (const t of rows) {
       const one = {
         id: t.id,
         thread: t.thread,
         i: t.i,
+        turn: t.turn,
         text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX),
-        state: t.state,
-        steps: JSON.parse(t.steps),
+        state: t.state === "running" && now - t.started > TASK_LOST_MS ? "lost" : t.state,
         report: t.report === null ? null : M.cutBytes(t.report, TASK_RECORD_REPORT_MAX),
         started: t.started,
         ended: t.ended,
@@ -1107,7 +1041,7 @@ export class App extends DurableObject {
           let out;
           if (k >= TOOL_CALLS_MAX) out = { text: `Error: at most ${TOOL_CALLS_MAX} tool calls run in one answer; call this one again.` };
           else if (args === null || typeof args !== "object") out = { text: "Error: the arguments are not a JSON object." };
-          // a tool's steps (2 at most), this answer's log, and a last call and its log
+          // a tool's steps (3 at most), this answer's log, and a last call and its log
           else if (s.left() < 6) {
             out = { text: "Error: this turn is out of steps; answer with what you have." };
             last = true;
@@ -1261,10 +1195,14 @@ export class App extends DurableObject {
         if (!ctx.hands) return { text: "Error: no computer is at hand for this persona; answer yourself." };
         const task = String(args.task ?? "").trim();
         if (!task) return { text: "Error: computer needs the task, in words." };
+        // the agent's fragment names the turn its bridge gives the task
+        const agentFragment = (await s.people([ctx.agent]))?.[ctx.agent]?.fragment;
+        if (typeof agentFragment !== "string" || !agentFragment) return { text: "Error: the computer's agent has no fragment to hand work to." };
         // the run and this step: the same id on every re-run
         const id = `w${job.run}-${s.n}`;
         const posted = await s.publish("chat", { text: `${M.cutBytes(task, TASK_TEXT_MAX)}\n\n(task ${id}, thread ${ctx.thread})`, to: [ctx.agent] });
-        await s.call("task_open", { id, thread: ctx.thread, text: task, seq: posted.seq });
+        const turn = await turnOf(agentFragment, job.fragment, "chat", posted.seq);
+        await s.call("task_open", { id, thread: ctx.thread, text: task, seq: posted.seq, turn });
         return { text: `[${id}] started`, task: id };
       }
       default:
@@ -1358,27 +1296,15 @@ export class App extends DurableObject {
     return { names };
   }
 
-  // `chat`'s trigger, for goose's records there: a reply kept by its turn.
+  // `chat`'s trigger, for goose's records there: a hand-off's one reply,
+  // its report, queued and a turn run on it. goose's steps on `work` are
+  // the page's to follow (by `turn`); the mind runs nothing for them.
   async hands_said(input = {}, job) {
     if (job.via !== "channel") return { why: "only the chat channel's trigger takes goose's replies" };
-    const r = input?.record;
-    const b = r?.body;
+    const b = input?.record?.body;
     if (!b || typeof b !== "object" || typeof b.turn !== "string" || (b.kind !== undefined && b.kind !== "message")) return { why: "not a reply" };
-    await job.call("hands_reply", { seq: r.seq, turn: b.turn, text: typeof b.text === "string" ? b.text : "" });
-    return { kept: true };
-  }
-
-  // `work`'s trigger, for goose's records there: the hand-off's steps, and
-  // at its end the report queued and a turn run on it.
-  async hands_worked(input = {}, job) {
-    if (job.via !== "channel") return { why: "only the work channel's trigger takes goose's steps" };
-    const r = input?.record;
-    const b = r?.body;
-    if (!b || typeof b !== "object" || typeof b.kind !== "string" || typeof b.turn !== "string") return { why: "not a turn's record" };
     const s = new Steps(job);
-    // its last replies (on `chat`) may be a moment behind its end
-    if (b.kind === "turn.end") await s.sleep(REPLY_GRACE_MS);
-    const h = await s.call("hands_step", { seq: r.seq, body: workBody(b) });
+    const h = await s.call("hands_reply", { turn: b.turn, text: typeof b.text === "string" ? b.text : "" });
     if (!h.ended || h.running) return h;
     return this.#turns(job, s);
   }

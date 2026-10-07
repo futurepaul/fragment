@@ -295,11 +295,13 @@ mod tests {
 
     /// Goal: a mind (docs/optchat.md) is the contract its page, its MCP
     /// server and goose code against. Method: its kind; a person's `say`
-    /// starts a turn, goose's records on `chat` and `work` reach its hands
-    /// jobs, a new topic's `sort` record classifies; `log` takes no posts
-    /// (so it is never trimmed); its memory is the template's own pure
-    /// module beside its prompts; and every operation the contract names
-    /// is declared, the five an MCP client sees described.
+    /// starts a turn, goose's reply on `chat` reaches `hands_said`, and its
+    /// steps on `work` run nothing (one run a hand-off, under the triggered
+    /// runs' hourly breaker); a new topic's `sort` record classifies; `log`
+    /// takes no posts (so it is never trimmed); its memory is the
+    /// template's own pure module beside its prompts; and every operation
+    /// the contract names is declared, the five an MCP client sees
+    /// described.
     #[test]
     fn a_mind_is_its_contract() {
         let m = manifest("mind").unwrap();
@@ -308,7 +310,8 @@ mod tests {
         use fragment_proto::IdentityKind::{Agent, Person};
         assert_eq!(runs("say"), Some(("heard", Some(Person))));
         assert_eq!(runs("chat"), Some(("hands_said", Some(Agent))));
-        assert_eq!(runs("work"), Some(("hands_worked", Some(Agent))));
+        assert_eq!(runs("work"), None, "goose's steps are the page's to follow");
+        assert!(m.channels["work"].post.is_some(), "goose claims its turns on work");
         assert_eq!(runs("sort"), Some(("classify", None)));
         assert!(m.channels["log"].post.is_none() && m.channels["sort"].post.is_none(), "log and sort are the app's alone");
         assert!(m.channels["say"].signed_in, "say takes people signed in");
@@ -317,11 +320,12 @@ mod tests {
         for op in [
             "view", "zoom", "date", "search", "note", "threads", "thread", "context", "memory", "node", "topics", "personas", "tasks", "status",
             "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop", "topic_suggest",
-            "heard", "pump", "classify", "hands_said", "hands_worked", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan",
-            "node_built", "task_open", "hands_step", "hands_reply", "topics_set",
+            "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan", "node_built",
+            "task_open", "hands_reply", "topics_set",
         ] {
             assert!(m.operations.contains_key(op), "the mind declares {op}");
         }
+        assert_eq!(m.operations.len(), 37, "and nothing else");
         let raw: serde_json::Value = serde_json::from_slice(template("mind").unwrap().iter().find(|(p, _)| *p == "fragment.json").unwrap().1).unwrap();
         let described: Vec<&str> = raw["operations"].as_object().unwrap().iter().filter(|(_, d)| d.get("description").is_some()).map(|(k, _)| k.as_str()).collect();
         assert_eq!(described, ["date", "note", "search", "view", "zoom"], "the MCP tools");

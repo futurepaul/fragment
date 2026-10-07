@@ -96,7 +96,6 @@ Inspiration:
   "triggers": [
     { "channel": "say",  "from": "person", "run": "heard" },
     { "channel": "chat", "from": "agent",  "run": "hands_said" },
-    { "channel": "work", "from": "agent",  "run": "hands_worked" },
     { "channel": "sort", "run": "classify" }
   ]
 }
@@ -129,7 +128,7 @@ thread(id TEXT PRIMARY KEY, title TEXT, persona TEXT, started INTEGER, last INTE
 topic(id TEXT PRIMARY KEY, name TEXT, description TEXT, made INTEGER)
 thread_topic(thread TEXT, topic TEXT, p REAL, PRIMARY KEY (thread, topic))
 persona(id TEXT PRIMARY KEY, name TEXT, emoji TEXT, instructions TEXT, hands INTEGER, made INTEGER)
-task(id TEXT PRIMARY KEY, thread TEXT, i INTEGER, text TEXT, seq INTEGER, turn TEXT, state TEXT, report TEXT, steps TEXT, started INTEGER, ended INTEGER)
+task(id TEXT PRIMARY KEY, thread TEXT, i INTEGER, text TEXT, seq INTEGER, turn TEXT, state TEXT, report TEXT, steps TEXT, started INTEGER, ended INTEGER)  -- steps: '[]', unread (goose's are on work)
 kv(k TEXT PRIMARY KEY, v TEXT)                                 -- default persona, about-me, turn lock, queue
 log_fts USING fts5(text, content='log', content_rowid='i')    -- search
 ```
@@ -254,24 +253,31 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
 1. **The task.** The tool's step publishes
    `{text: "<task>\n\n(task <task id>, thread <thread>)", to: [<goose agent id>]}`
    on `chat` as the fragment (`job.publish`, which answers the record's
-   `seq`); then `task_open` records the task and that `seq`. The task id
-   is `w<run>-<step>`. goose's records for a task `task_open` has not
-   recorded yet are kept by `seq` as an orphan, which it adopts.
+   `seq`); then `task_open` records the task, that `seq`, and the turn
+   the agent's bridge gives that record: 24 hex of SHA-256 of `<agent
+   fragment>|<mind>/chat/<seq>` (images/bridge `turn_id`; the agent
+   fragment's full name from `job.people`). The task id is
+   `w<run>-<step>`.
 2. **goose's turn.** The bridge admits it as a turn: the agent is the
    mind's lead, and the record is from neither the agent nor `anon:`.
-   Its turn id is the hash of `<agent>|<mind>/chat/<seq>` (chat-records).
    It claims the turn on `work` (`turn.start`, whose `cause.seq` names
-   the task) and posts steps there. Its replies go on `chat` (`rp:<turn>:<n>`)
-   and its end on `work`.
-3. **The mind follows along.** `hands_worked` (each `work` record from
-   an agent) records the turn against its task, keeps up to 50 steps for
-   the page, and publishes them on `log`. On `turn.end` it waits 2 s
-   (the turn's last replies trigger runs of their own), then puts the
-   report on the queue as a `user` message: `[<task id>] <the turn's
-   replies joined>`, or `[<task id>] ended: <outcome>` with none. It
-   then starts a turn like `heard` does, in the task's thread.
-   `hands_said` keeps each reply part by turn.
-4. **goose's context.** At the start of each hand-off turn, the goose
+   the task) and posts its steps and end there. It posts **one reply** on
+   `chat` (`rp:<turn>:1`): its report, or `(ended: <outcome>: <why>)`
+   when it stopped or failed.
+3. **The mind takes the reply.** `hands_said` (`chat`'s trigger, each
+   record an agent posts there) matches the reply to its task by
+   `body.turn`. The first is the report: it puts it on the queue as a
+   `user` message, `[<task id>] <reply>`, and starts a turn like `heard`
+   does, in the task's thread. A later part changes nothing. A reply
+   that comes before its `task_open` is kept for it. The task's state is
+   `done`, or `stopped` or `error` from an `(ended: …)` reply. The mind
+   runs nothing for `work`: a page follows goose's steps there itself,
+   mapping `turn` to its task, so a hand-off is one triggered run, well
+   under the platform's 120 an hour.
+4. **Lost.** A task with no reply 30 minutes after it opened is `lost`:
+   `tasks` says so, and a turn's start records it and publishes it. A
+   reply that comes later still reports.
+5. **goose's context.** At the start of each hand-off turn, the goose
    runtime calls `POST /api/f/<mind>/ops/view` (a query) for the
    rendered view. It starts a fresh session whose first message is the
    spec's subagent framing, VIEW_DOC, the view, and then the task.
@@ -297,7 +303,7 @@ membership, which only its owner and the agent hold. Operations with a
 | `node` | query | `{id, n}` → `{children: [{id, n, text, built}]}` or, for n = 1, `{message}` |
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
-| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, text, state, steps, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
+| `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
 | `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}]}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed |
 | `settings` | query | `{}` → `{about}` |
 | `topic_add` / `topic_remove` | mutation | `{name, description?}` / `{id}` |
@@ -310,9 +316,8 @@ The internal mutations (editor, no description) are named here so the
 two halves agree: `hear`, `turn_begin`, `turn_touch`, `turn_end`,
 `logged` (log one step's messages; it touches the lock and answers
 whether Stop was asked), `pump_plan` (a query, editor), `node_built`,
-`task_open`, `hands_step`, `hands_reply`, `topics_set`. The jobs are
-`heard`, `pump`, `classify`, `topic_suggest`, `hands_said` and
-`hands_worked`.
+`task_open`, `hands_reply`, `topics_set`. The jobs are `heard`, `pump`,
+`classify`, `topic_suggest` and `hands_said`.
 
 Seeded personas:
 - **Mind**, the default: plain, warm, brief.
@@ -324,7 +329,9 @@ Seeded personas:
 - `{type: "msg", i, kind, text, thread, at, persona, task}`, where
   `text` is at most 48 KiB, cut.
 - `{type: "turn", thread, state: "thinking" | "settling" | "done" | "error" | "stopped", error?}`.
-- `{type: "task", id, thread, state, text, steps?, report?}`.
+- `{type: "task", id, thread, state, text, turn, report?}`: as it opens,
+  as its reply reports, and as it is found lost. Its live steps are
+  goose's own records on `work` under `turn`, which the page follows.
 - `{type: "topics", thread, topics: [{id, p}]}`.
 - `{type: "thread", id, title}`.
 - `{type: "suggest", names}`.
