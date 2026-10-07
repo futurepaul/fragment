@@ -7,11 +7,12 @@
 //   esbuild viewer.mjs --bundle --format=esm --splitting --minify
 //     --target=es2022 --outdir=assets --entry-names=[name]
 //     --chunk-names=chunks/[name]-[hash]
-// then keep only the shared chunks and the languages the viewer names
-// (markdown, json, javascript, typescript, rust, python, bash, yaml, css,
-// html, xml, diff, sql, toml, c, cpp, go, java, ruby, swift, lua, and the
-// pierre-dark and pierre-light themes); a missing chunk falls back to
-// <pre>. The last build script is `scripts/build-templates.mjs` at 35f5e18.
+// then keep only the languages the viewer names (markdown, json,
+// javascript, typescript, rust, python, bash, yaml, css, html, xml, diff,
+// sql, toml, c, cpp, go, java, ruby, swift, lua, and the pierre-dark and
+// pierre-light themes) and the chunks viewer.js and they import, nothing
+// else; a missing chunk falls back to <pre>. The last build script is
+// `scripts/build-templates.mjs` at 35f5e18.
 import { marked } from "marked";
 import { File as PierreFile, preloadHighlighter } from "@pierre/diffs";
 

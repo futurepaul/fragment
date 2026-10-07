@@ -235,6 +235,37 @@ mod tests {
         assert_eq!(code("todo"), Ok(None), "and its code is no release's");
     }
 
+    /// Goal: the notes viewer's bundle (the brain's too) carries no chunk
+    /// it never loads (templates/notes/src/viewer.mjs, its recipe). Method:
+    /// from viewer.js, every `"./…"` a file names, statically imported or
+    /// not, is followed; every chunk is reached.
+    #[test]
+    fn the_viewer_carries_no_chunk_it_never_loads() {
+        let files: std::collections::BTreeMap<&str, &[u8]> = crate::NOTES.iter().filter_map(|(p, b)| Some((p.strip_prefix("site/assets/")?, *b))).collect();
+        let (mut reached, mut queue) = (std::collections::BTreeSet::from(["viewer.js"]), vec!["viewer.js"]);
+        // bounded: each file is queued once
+        while let Some(f) = queue.pop() {
+            let dir = f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
+            for named in std::str::from_utf8(files[f]).expect("JavaScript is UTF-8").split("\"./").skip(1).filter_map(|s| s.split_once('"')).map(|(n, _)| format!("{dir}{n}")) {
+                if let Some((&path, _)) = files.get_key_value(named.as_str()) {
+                    if reached.insert(path) {
+                        queue.push(path);
+                    }
+                }
+            }
+        }
+        let unread: Vec<&&str> = files.keys().filter(|p| p.starts_with("chunks/") && !reached.contains(*p)).collect();
+        assert!(unread.is_empty(), "chunks nothing imports: {unread:?}");
+    }
+
+    /// Goal: every agent's image is one file (cell/shell/CREDITS.md).
+    /// Method: the chat's is the agent's, one copy in the binary.
+    #[test]
+    fn the_agent_image_is_one_file() {
+        let (chat, agent) = (site_file("chat", "site/agent.png").expect("the chat's"), site_file("agent", "site/agent.png").expect("the agent's"));
+        assert!(std::ptr::eq(chat.as_ptr(), agent.as_ptr()), "embedded once");
+    }
+
     /// Goal: a brain (decision 30) is the notes viewer and the brain's own
     /// code, all of it the template's. Method: its page loads the viewer and
     /// its search; the viewer's files are the notes template's very bytes
