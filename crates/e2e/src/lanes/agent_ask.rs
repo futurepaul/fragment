@@ -124,8 +124,11 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
         (phase(api, &keys, &id) == "awake" && follows).then_some(())
     };
     let ready = within(FIRST_START, following).is_some();
-    s.ok("its computer wakes, and Juniper follows its chat", ready, phase(api, &keys, &id));
+    // its whole view when it did not come up: `why` says what its starts met
+    let view = api.signed(&keys, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    s.ok("its computer wakes, and Juniper follows its chat", ready, &view);
     if !ready {
+        let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
         return Ok(());
     }
 
@@ -153,6 +156,11 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
         None => (None, vec![], vec![]),
     };
     println!("      (Juniper's turn: {:.1?}, {} paid calls; the agents' chat: {})", took, paid(api, &owner_id).saturating_sub(calls), pair.as_deref().unwrap_or("none"));
+    let line = |t: &str| t.chars().take(200).collect::<String>().replace('\n', " ");
+    let terminal: Vec<String> = work.iter().filter(|w| w["kind"] == "turn.step").map(|w| format!("{} {}", w["tool"].as_str().unwrap_or(""), line(w["args"].as_str().unwrap_or("")))).collect();
+    println!("      (Juniper's steps: {terminal:?})");
+    println!("      (asked, in the agents' chat: {}; Fred answered: {:?})", question.as_ref().map(|q| q["body"].to_string()).unwrap_or_default(), answer.iter().map(|a| line(a)).collect::<Vec<_>>());
+    println!("      (Fred's turns there: {:?}; Juniper told its person: {:?})", fred_turns.iter().map(|t| t["cause"].clone()).collect::<Vec<_>>(), told.iter().map(|t| line(t)).collect::<Vec<_>>());
     let detail = json!({ "work": work, "told": told, "pair": pair, "question": question, "answer": answer, "fredTurns": fred_turns });
     std::fs::write(evidence.join("agent-ask.json"), serde_json::to_vec_pretty(&detail)?)?;
     s.ok("asked to, Juniper's turn runs `fragment ask` in its terminal (model-dependent)", ran && ended.is_some(), &detail);
