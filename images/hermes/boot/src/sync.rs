@@ -273,13 +273,13 @@ pub async fn round(api: &Api, agent: &Agent, profile: &Path, own: &(dyn Fn(&Path
                 match resolve(known.get(&p), local_by.get(&p), &h) {
                     Resolution::Same => {}
                     Resolution::Pull => {
-                        write(&target, &bytes, own).map_err(wrote)?;
+                        write(profile, &target, &bytes, own).map_err(wrote)?;
                         done.pulled += 1;
                     }
                     Resolution::Conflict => {
                         let keep = target.with_file_name(format!("{}.local-{}", target.file_name().and_then(|n| n.to_str()).unwrap_or("file"), fragment_bridge::log::now_ms()));
                         std::fs::rename(&target, &keep).map_err(wrote)?;
-                        write(&target, &bytes, own).map_err(wrote)?;
+                        write(profile, &target, &bytes, own).map_err(wrote)?;
                         done.conflicts += 1;
                         ev!("sync.conflict", { "agent": agent.fragment, "path": p, "kept": keep.display().to_string() });
                     }
@@ -359,10 +359,15 @@ async fn commit(api: &Api, agent: &Agent, batch: Vec<FileChange>, paths: Vec<(St
     Ok(())
 }
 
-fn write(target: &Path, bytes: &[u8], own: &(dyn Fn(&Path) + Sync)) -> std::io::Result<()> {
+/// Writes a file of the profile. It and each directory made for it, up to
+/// the profile, are Hermes' (`own`): Hermes writes beside what is pulled.
+fn write(profile: &Path, target: &Path, bytes: &[u8], own: &(dyn Fn(&Path) + Sync)) -> std::io::Result<()> {
     let dir = target.parent().expect("a file under the profile");
+    let made: Vec<&Path> = dir.ancestors().take_while(|d| d.starts_with(profile) && *d != profile && !d.exists()).collect();
     std::fs::create_dir_all(dir)?;
-    own(dir);
+    for d in made.into_iter().rev() {
+        own(d);
+    }
     std::fs::write(target, bytes)?;
     own(target);
     Ok(())
@@ -578,6 +583,24 @@ mod tests {
         assert_eq!(s.files.iter().map(|l| l.path.as_str()).collect::<Vec<_>>(), ["SOUL.md", "memories/MEMORY.md", "skills/mine/SKILL.md"]);
         assert_eq!(s.unsynced.iter().map(String::as_str).collect::<Vec<_>>(), ["memories/big.md", "memories/link.md"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A pulled file and every directory made for it are Hermes'; what was
+    /// there before (the profile, its `skills/`) is left as it was.
+    #[test]
+    fn a_pull_gives_hermes_each_directory_it_makes() {
+        let profile = std::env::temp_dir().join(format!("hermes-boot-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&profile);
+        std::fs::create_dir_all(profile.join("skills")).unwrap();
+        let owned = std::sync::Mutex::new(Vec::new());
+        let own = |p: &Path| owned.lock().unwrap().push(p.strip_prefix(&profile).unwrap().to_string_lossy().into_owned());
+        write(&profile, &profile.join("skills/research/pesto/references/a.md"), b"a", &own).unwrap();
+        assert_eq!(*owned.lock().unwrap(), ["skills/research", "skills/research/pesto", "skills/research/pesto/references", "skills/research/pesto/references/a.md"]);
+        // replay: the directories are there now, only the file is written
+        owned.lock().unwrap().clear();
+        write(&profile, &profile.join("skills/research/pesto/references/a.md"), b"b", &own).unwrap();
+        assert_eq!(*owned.lock().unwrap(), ["skills/research/pesto/references/a.md"]);
+        let _ = std::fs::remove_dir_all(&profile);
     }
 
     /// A profile and its agent's repo behind the fake files route.
