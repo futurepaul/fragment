@@ -1,7 +1,7 @@
 //! The Node.js every JavaScript tool here runs on, named explicitly: npm
 //! (`npm ci`), wrangler (`dev`, `deploy`, and its bundle of the Sandbox
 //! SDK), and every process those start. Never the first `node` on PATH: a
-//! machine's own (once Hermes' v26 alpha, under which miniflare's unpack of
+//! machine's own (once a v26 alpha, under which miniflare's unpack of
 //! Chrome hung and left a half-extracted cache behind) is never picked up.
 //!
 //! The pin (node_release.rs) is fetched once from nodejs.org/dist into
@@ -463,7 +463,7 @@ mod tests {
         assert!(!tools.join(".partial").exists(), "the staging directory is gone");
         let node = installed(&home).expect("it answers as the pin");
         assert_eq!(node.bin, home.join("bin"));
-        // a node that answers otherwise (Hermes' v26 alpha, say) is not the pin
+        // a node that answers otherwise (a v26 alpha, say) is not the pin
         fs::write(home.join("bin/node"), "#!/bin/sh\necho v26.8.0-alpha.0.0.0\n").unwrap();
         assert!(matches!(installed(&home), Err(NodeError::Corrupt { .. })));
         fs::remove_dir_all(&tools).unwrap();

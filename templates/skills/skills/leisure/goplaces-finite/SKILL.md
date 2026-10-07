@@ -5,10 +5,9 @@ version: 1.0.0
 author: local
 license: MIT
 metadata:
-  hermes:
-    tags: [Google, Places, Maps, business lookup, local search]
-    related_skills: [find-nearby-finite]
-    homepage: https://developers.google.com/maps/documentation/places/web-service/text-search
+  tags: [Google, Places, Maps, business lookup, local search]
+  related_skills: [find-nearby-finite]
+  homepage: https://developers.google.com/maps/documentation/places/web-service/text-search
 ---
 
 # GoPlaces
@@ -33,13 +32,13 @@ this deployment does not offer the `google-places` key: use
 Search:
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py search --query "best coffee shops in austin"
+python ${SKILL_DIR}/scripts/google_places.py search --query "best coffee shops in austin"
 ```
 
 Place details:
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py details --place-id ChIJ...
+python ${SKILL_DIR}/scripts/google_places.py details --place-id ChIJ...
 ```
 
 ## Common Patterns
@@ -47,25 +46,25 @@ python ${HERMES_SKILL_DIR}/scripts/google_places.py details --place-id ChIJ...
 ### Text Search
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py search   --query "best sushi near downtown Austin"   --max-results 5
+python ${SKILL_DIR}/scripts/google_places.py search   --query "best sushi near downtown Austin"   --max-results 5
 ```
 
 ### Location-Biased Search
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py search   --query "pharmacy"   --lat 30.2672 --lon -97.7431 --radius-meters 2500
+python ${SKILL_DIR}/scripts/google_places.py search   --query "pharmacy"   --lat 30.2672 --lon -97.7431 --radius-meters 2500
 ```
 
 ### Full JSON Output
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py search   --query "coworking spaces in chicago"   --json
+python ${SKILL_DIR}/scripts/google_places.py search   --query "coworking spaces in chicago"   --json
 ```
 
 ### Place Details
 
 ```bash
-python ${HERMES_SKILL_DIR}/scripts/google_places.py details --place-id ChIJN1t_tDeuEmsRUsoyG83frY4
+python ${SKILL_DIR}/scripts/google_places.py details --place-id ChIJN1t_tDeuEmsRUsoyG83frY4
 ```
 
 ## Guidance

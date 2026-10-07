@@ -5,8 +5,7 @@ version: 1.1.0
 author: Hermes Agent
 license: MIT
 metadata:
-  hermes:
-    tags: [Linear, Project Management, Issues, GraphQL, API, Productivity]
+  tags: [Linear, Project Management, Issues, GraphQL, API, Productivity]
 ---
 
 # Linear
@@ -16,7 +15,7 @@ Use the bundled helper instead of hand-writing GraphQL curl commands.
 Script path:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py --help
+python3 ${SKILL_DIR}/scripts/linear_api.py --help
 ```
 
 Your computer holds no keys. The helper acts through your owner's connected
@@ -39,30 +38,30 @@ means they kept this agent from it.
 Current user:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py viewer
+python3 ${SKILL_DIR}/scripts/linear_api.py viewer
 ```
 
 Teams and workflow states:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py teams
+python3 ${SKILL_DIR}/scripts/linear_api.py teams
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py workflow-states \
+python3 ${SKILL_DIR}/scripts/linear_api.py workflow-states \
   --team-key ENG
 ```
 
 Issue lists:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issues \
+python3 ${SKILL_DIR}/scripts/linear_api.py issues \
   --limit 20
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issues \
+python3 ${SKILL_DIR}/scripts/linear_api.py issues \
   --team-key ENG \
   --state-type started \
   --limit 20
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issue-search \
+python3 ${SKILL_DIR}/scripts/linear_api.py issue-search \
   --query "bug login" \
   --limit 10
 ```
@@ -70,40 +69,40 @@ python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issue-search \
 Single issue:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issue \
+python3 ${SKILL_DIR}/scripts/linear_api.py issue \
   --issue-id ENG-123
 ```
 
 Projects, users, labels:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py projects
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py users
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py labels
+python3 ${SKILL_DIR}/scripts/linear_api.py projects
+python3 ${SKILL_DIR}/scripts/linear_api.py users
+python3 ${SKILL_DIR}/scripts/linear_api.py labels
 ```
 
 Mutations:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py create-issue \
+python3 ${SKILL_DIR}/scripts/linear_api.py create-issue \
   --team-id TEAM_UUID \
   --title "Fix login bug" \
   --description "Users cannot login with SSO" \
   --priority 2
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py update-state \
+python3 ${SKILL_DIR}/scripts/linear_api.py update-state \
   --issue-id ENG-123 \
   --state-id STATE_UUID
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py assign \
+python3 ${SKILL_DIR}/scripts/linear_api.py assign \
   --issue-id ENG-123 \
   --assignee-id USER_UUID
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py set-priority \
+python3 ${SKILL_DIR}/scripts/linear_api.py set-priority \
   --issue-id ENG-123 \
   --priority 1
 
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py add-comment \
+python3 ${SKILL_DIR}/scripts/linear_api.py add-comment \
   --issue-id ISSUE_UUID \
   --body "Investigated. Root cause is X."
 ```
@@ -111,14 +110,14 @@ python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py add-comment \
 Raw GraphQL escape hatch:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py request \
+python3 ${SKILL_DIR}/scripts/linear_api.py request \
   --query 'query { viewer { id name } }'
 ```
 
 Machine-readable output:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/linear_api.py issues \
+python3 ${SKILL_DIR}/scripts/linear_api.py issues \
   --team-key ENG \
   --json
 ```

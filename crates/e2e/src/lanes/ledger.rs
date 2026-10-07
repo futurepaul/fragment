@@ -601,9 +601,9 @@ fn png_url(bytes: usize) -> String {
 
 /// The model route's `vision` (Paul, 2026-10-05): the deployment's vision
 /// model, GLM-5.3 Flash unless its config names another, for a runtime's
-/// calls about an image (Hermes' screenshots: the hermes lane drives one),
-/// metered on the payer's ledger as any call; and a call as large as
-/// Hermes' shrunk screenshot fits the route, one past its cap refused
+/// calls about an image (a screenshot), metered on the payer's ledger as
+/// any call; and a call carrying the largest image the route allows
+/// (`IMAGE_DATA_URL_MAX_BYTES`) fits the route, one past its cap refused
 /// before anything is reserved or sent. Its payer is a person of its own,
 /// whose credit covers the large call's worst case (its bytes as tokens).
 fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
@@ -633,14 +633,13 @@ fn vision(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let r = api.signed(hand, "POST", route, Some(&json!({ "model": "medium", "messages": look(&small)["messages"] })))?;
     s.ok("an image sent to the medium tier is the model's refusal (GLM-5.3 reads none), passed through", r.status == 400 && r.text.contains("takes no image input"), &r);
 
-    // Hermes shrinks a screenshot a call refused as too large to 5 MiB of
-    // data URL and tries once more: that call fits
+    // the largest image the route allows, 5 MiB of data URL: that call fits
     let calls = s.ai.calls().len();
     let shrunk = png_url(fragment_core::models::IMAGE_DATA_URL_MAX_BYTES);
     let r = api.signed(hand, "POST", route, Some(&look(&shrunk)))?;
     let sent = s.ai.calls().get(calls).map(|c| c.body["messages"][0]["content"][1]["image_url"]["url"].as_str().map_or(0, str::len));
     s.ok(
-        &format!("a call carrying Hermes' shrunk screenshot ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
+        &format!("a call carrying the largest image allowed ({} bytes of image) fits the route and reaches the model whole", shrunk.len()),
         r.status == 200 && sent == Some(shrunk.len()),
         json!({ "status": r.status, "sent": sent, "message": r.message() }),
     );

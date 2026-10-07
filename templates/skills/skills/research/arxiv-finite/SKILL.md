@@ -5,9 +5,8 @@ version: 1.1.0
 author: Hermes Agent
 license: MIT
 metadata:
-  hermes:
-    tags: [Research, Arxiv, Papers, Academic, Science, API]
-    related_skills: [ocr-and-documents-finite]
+  tags: [Research, Arxiv, Papers, Academic, Science, API]
+  related_skills: [ocr-and-documents-finite]
 ---
 
 # arXiv Research
@@ -17,7 +16,7 @@ Use the helper script instead of piping XML or JSON into ad hoc Python one-liner
 Script path:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py --help
+python3 ${SKILL_DIR}/scripts/search_arxiv.py --help
 ```
 
 ## Workflow
@@ -32,7 +31,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py --help
 Search arXiv:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py search \
   --query "GRPO reinforcement learning" \
   --max-results 5 \
   --sort date
@@ -41,11 +40,11 @@ python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
 Search by author or category:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py search \
   --author "Yann LeCun" \
   --max-results 5
 
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py search \
   --category cs.AI \
   --sort date \
   --max-results 10
@@ -54,32 +53,32 @@ python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
 Get one or more specific papers:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py get \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py get \
   --id-list "2402.03300,2401.12345"
 ```
 
 Generate BibTeX:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py bibtex \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py bibtex \
   --id 1706.03762
 ```
 
 Semantic Scholar details:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py semantic-paper \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py semantic-paper \
   --id 2402.03300
 
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py citations \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py citations \
   --id 2402.03300 \
   --limit 10
 
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py references \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py references \
   --id 2402.03300 \
   --limit 10
 
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py recommend \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py recommend \
   --id 2402.03300 \
   --limit 5
 ```
@@ -87,11 +86,11 @@ python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py recommend \
 Semantic Scholar search:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py semantic-search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py semantic-search \
   --query "GRPO reinforcement learning" \
   --limit 5
 
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py author-search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py author-search \
   --query "Yann LeCun" \
   --limit 5
 ```
@@ -99,7 +98,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py author-search \
 Machine-readable output:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/search_arxiv.py search \
+python3 ${SKILL_DIR}/scripts/search_arxiv.py search \
   --query "chain of thought" \
   --json
 ```

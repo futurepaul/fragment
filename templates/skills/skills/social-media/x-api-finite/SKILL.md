@@ -25,10 +25,10 @@ does not yet): say so rather than hunting for one.
 Use the local helper directly:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/x-api.py lookup https://x.com/jack/status/20
-python3 ${HERMES_SKILL_DIR}/x-api.py search "from:jack nostr" --limit 5
-python3 ${HERMES_SKILL_DIR}/x-api.py user @jack
-python3 ${HERMES_SKILL_DIR}/x-api.py conversation https://x.com/jack/status/20 --limit 10
+python3 ${SKILL_DIR}/x-api.py lookup https://x.com/jack/status/20
+python3 ${SKILL_DIR}/x-api.py search "from:jack nostr" --limit 5
+python3 ${SKILL_DIR}/x-api.py user @jack
+python3 ${SKILL_DIR}/x-api.py conversation https://x.com/jack/status/20 --limit 10
 ```
 
 ## Workflow
