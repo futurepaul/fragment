@@ -250,10 +250,10 @@ prebuilt bundle is in the debt ledger).
 
 - The deployment's secrets live in its account's Cloudflare Secrets
   Store: set with `cargo xtask secret`, named in its config, bound to the
-  Worker by name, and read only by `cell/src/keys.rs` (docs/secrets.md). Only the DNS token and a
-  preview's test secret are files read by path. Never print them, pass
-  them on a command line (no `--value`), or commit them; deleting one is
-  Paul's.
+  Worker by name, and read only by `cell/src/keys.rs` (docs/secrets.md).
+  Only the DNS token and a preview's test secret are files read by path.
+  Never print them, pass them on a command line (no `--value`), or commit
+  them; deleting one is Paul's.
 - `cargo xtask dev` runs `wrangler dev` on `cell/`, which rebuilds when it
   changes; the e2e runs a staged copy (`target/e2e/<run>/cell`) with its own
   variables, state and dev registry, so the two can run at once.
