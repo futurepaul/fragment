@@ -35,9 +35,9 @@
   // and prints the npub to list here); without one it is a skip.
   "operators": [],
   "computers": {
-    "default_image": "hermes",
+    "default_image": "goose",
     "images": {
-      "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+      "goose": { "dockerfile": "images/goose/Dockerfile", "build_context": "." }
     }
   },
   // The platform's catalog (Paul, 2026-10-04): Google, and the operator's

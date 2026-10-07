@@ -105,7 +105,7 @@ PYEOF
 2. **cairosvg broken**: This runtime lacks libcairo.so.2. Don't try to convert SVGs with cairosvg — find PNG/JPG alternatives instead.
 3. **Python -c timeouts**: Running `python3 -c "..."` with complex imports can time out. Use a heredoc (`<< 'PYEOF'`) instead.
 4. **execute_code sandbox isolation**: The `execute_code` tool can use a separate Python environment. For runtime packages, use `terminal` with `python3` and a heredoc instead.
-5. **Pillow missing**: install it in a virtualenv of your own (`python3 -m venv ~/.venvs/images && ~/.venvs/images/bin/pip install Pillow`); do not change Hermes' own environment.
+5. **Pillow missing**: install it in a virtualenv of your own (`python3 -m venv ~/.venvs/images && ~/.venvs/images/bin/pip install Pillow`); do not change the system's own Python.
 6. **Transparency**: Always convert to RGBA before compositing. Convert to RGB before saving as JPEG.
 7. **Positioning**: Use `vision_analyze` on the template FIRST to understand where elements need to go, rather than guessing coordinates.
 8. **Verify before compositing**: After downloading any image, verify it's a real image file (check magic bytes with `od`). Many meme sites serve HTML redirects or 404 pages that look like successful downloads.
@@ -113,6 +113,6 @@ PYEOF
 
 ## Dependencies
 
-- Pillow (in a virtualenv of your own if Hermes' Python lacks it)
+- Pillow (in a virtualenv of your own if the system Python lacks it)
 - curl for downloading templates
 - vision_analyze for verifying results

@@ -5,9 +5,8 @@ version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
 metadata:
-  hermes:
-    tags: [delegation, subagent, implementation, workflow, parallel]
-    related_skills: [writing-plans-finite, requesting-code-review-finite, test-driven-development-finite]
+  tags: [delegation, subagent, implementation, workflow, parallel]
+  related_skills: [writing-plans-finite, requesting-code-review-finite, test-driven-development-finite]
 ---
 
 # Subagent-Driven Development

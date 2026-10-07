@@ -125,7 +125,7 @@ pub struct Config {
     pub price_book_version: u32,
     /// `FRAGMENT_VISION_MODEL` (the deploy config's `vision_model`): the
     /// model the route's `vision` runs, for a runtime's calls about an
-    /// image (Hermes' screenshots: docs/computers.md, Models). GLM-5.3
+    /// image (a screenshot: docs/computers.md, Models). GLM-5.3
     /// Flash unless named; one the price book does not price is refused
     /// (`fragment_core::models::vision_model`), at the deploy and here.
     pub vision_model: String,

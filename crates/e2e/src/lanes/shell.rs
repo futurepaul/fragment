@@ -518,7 +518,8 @@ fn fill(selector: &str, value: &str) -> String {
 }
 
 /// The shell in a browser (phase 5's exit, at desktop and phone sizes):
-/// first run (a username, the first agent), the agent's chat framed and
+/// first run (a username, the first agent and the person's mind, which
+/// opens at `/`), then the shell at `/?apps`: the agent's chat framed and
 /// signed in on its own origin with the agent's answer in it, a second
 /// agent, an app's window, settings (at `/settings`, which the address
 /// keeps), and the phone's layout. The agents run on the stub image
@@ -546,35 +547,69 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
 
-    // first run: a username, then the default agent, made while the shell
-    // waits with no question asked (Paul, 2026-10-03)
+    // first run: a username, then the default agent and the person's mind,
+    // made while the shell waits with no question asked (Paul, 2026-10-03),
+    // and the mind opens full-screen (docs/optchat.md)
     let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
     s.ok("signed in with no username, the shell asks for one", asked, "");
     let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
     b.eval(&page, &fill("#first-run-card input[name=username]", &username))?;
     b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
     let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
-    s.ok("then the shell makes their default agent, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
+    s.ok("then the shell makes their default agent and their mind, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
     let _ = b.screenshot(&page, &shots.join("creating.png"));
+    let mind = format!("mind.{username}");
+    let mind_host = format!("{}.", fragment_proto::flat_name(&mind).unwrap_or_default());
+    let landed = b.until(&page, &format!("location.hostname.startsWith({}) && location.pathname === '/'", js(&mind_host)), agent_wait);
+    if !landed {
+        let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
+    }
+    let listed = shell(api, &session, "GET", "/api/fragments", None, &[])?;
+    let rows = listed.body["fragments"].as_array().cloned().unwrap_or_default();
+    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
+    let agent = computers.body["computers"][0]["agents"][0].clone();
+    let members = shell(api, &session, "GET", &format!("/api/f/{mind}/members"), None, &[])?;
+    let editor = members.body["members"].as_array().is_some_and(|l| l.iter().any(|m| m["principal"] == agent["identity"] && m["role"] == "editor"));
+    s.ok(
+        "their mind opens full-screen on its own origin: their agent is on their computer and an editor of the mind, and no chat is made",
+        landed && rows.iter().any(|f| f["name"] == mind.as_str() && f["kind"] == "mind" && f["role"] == "owner") && rows.iter().all(|f| f["kind"] != "chat") && editor,
+        json!({ "at": b.eval(&page, "location.href")?, "fragments": rows, "agent": agent, "members": members.body }),
+    );
+    // the shell itself is at /?apps; the rest of this lane is its: the
+    // first agent's direct chat, made as the shell's new agent makes one
+    let agent_fragment = agent["fragment"].as_str().unwrap_or("").to_string();
+    let title = rows.iter().find(|f| f["name"] == agent_fragment.as_str()).and_then(|f| f["title"].as_str()).unwrap_or("").to_string();
+    let label = agent_fragment.split('.').next().unwrap_or("");
+    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": format!("{label}-chat"), "template": "chat", "title": title })), &[])?;
+    let joined = shell(api, &session, "PUT", &format!("/api/f/{label}-chat.{username}/members/{}", agent["identity"].as_str().unwrap_or("")), Some(&json!({ "role": "editor" })), &[])?;
+    anyhow::ensure!(made.status == 200 && joined.status == 200, "the first agent's chat: {made} {joined}");
+    b.eval(&page, &format!("(location.href = {}, true)", js(&format!("{}/?apps", api.base))))?;
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
     if !opened {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
     let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
-    s.ok("the agent is made, named, and its chat opens once it is ready", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
+    s.ok("at /?apps, the shell: the agent, named, and its chat open", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     // the chat's name as the sidebar holds it: a title like "Starfire 40K"
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
     let first_label = chat.split('.').next().unwrap_or("").trim_end_matches("-chat").to_string();
     let host = fragment_proto::flat_name(&chat).unwrap_or_default();
-    // ready is ready: its computer awake, and the agent following its chat
-    let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
-    let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
-    let awake = computers.body["computers"][0]["phase"] == "awake";
-    let follows = subs.body["subscriptions"].as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"));
-    s.ok("as it opens, its computer is awake and the agent follows the chat", awake && follows, json!({ "computer": computers.body["computers"][0]["phase"], "subscriptions": subs.body["subscriptions"] }));
+    // ready is ready: its computer awake (the first run woke it), and the
+    // agent following its chat
+    let ready = || -> (Value, Value) {
+        let computers = shell(api, &session, "GET", "/api/computers", None, &[]).map(|r| r.body).unwrap_or_default();
+        let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[]).map(|r| r.body).unwrap_or_default();
+        (computers["computers"][0]["phase"].clone(), subs["subscriptions"].clone())
+    };
+    let up = s.eventually(agent_wait, || {
+        let (phase, subs) = ready();
+        phase == "awake" && subs.as_array().is_some_and(|l| l.iter().any(|x| x["wake"] == true && x["channel"] == "chat"))
+    });
+    let (phase, subs) = ready();
+    s.ok("its computer wakes, and the agent follows the chat", up, json!({ "computer": phase, "subscriptions": subs }));
     let signed = b.until(&page, "[...document.querySelectorAll('#frames iframe')].some(f => !f.dataset.blocked)", wait);
     // the person's first message, answered by an agent already up
     let t0 = std::time::Instant::now();
@@ -684,12 +719,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
     s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
     b.click(&page, "#chats .agent-row")?;
-    let home = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
+    let home = b.until(&page, "location.pathname + location.search === '/?apps' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
     b.eval(&page, "history.back(), true")?;
     let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
     b.eval(&page, "history.forward(), true")?;
-    let forward = b.until(&page, "location.pathname === '/' && document.getElementById('settings-page').hidden", wait);
-    s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname")?);
+    let forward = b.until(&page, "location.pathname + location.search === '/?apps' && document.getElementById('settings-page').hidden", wait);
+    s.ok("a chat opened from settings is at /?apps, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname + location.search")?);
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;
@@ -825,7 +860,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let keys = fragment_nip98::Keys::generate();
     api.approve(session, &keys)?;
     let (agent, _) = super::delegation::agent_of(api, &keys)?;
-    let second = b.open(&format!("{}/", api.base))?;
+    let second = b.open(&format!("{}/?apps", api.base))?;
     let ready = b.until(&second, "!document.getElementById('layout').hidden && document.querySelectorAll('#apps .row[data-key]').length === 1", wait);
     // what the first tab shows: its open chat (counting its frame's loads) and its rows, marked
     let marked = b.eval(
@@ -1309,8 +1344,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     Ok(())
 }
 
-/// `fragment ask` as a person (an agent's runs in its computer: the hosted
-/// lane's, and our Hermes image's): their direct chat with the agent, its
+/// `fragment ask` as a person (an agent's runs in its computer): their direct chat with the agent, its
 /// answer waited for and printed; the same `--id` again posts nothing and
 /// finds the same answer; `--chat` adds the agent to a chat it is not in
 /// first. Invalid: an agent that is none of theirs, an empty question.

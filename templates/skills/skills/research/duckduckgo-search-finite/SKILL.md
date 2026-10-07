@@ -5,10 +5,9 @@ version: 1.2.0
 author: gamedevCloudy
 license: MIT
 metadata:
-  hermes:
-    tags: [search, duckduckgo, web-search, free, fallback]
-    related_skills: [arxiv-finite]
-    fallback_for_toolsets: [web]
+  tags: [search, duckduckgo, web-search, free, fallback]
+  related_skills: [arxiv-finite]
+  fallback_for_toolsets: [web]
 prerequisites:
   commands: [ddgs]
 ---

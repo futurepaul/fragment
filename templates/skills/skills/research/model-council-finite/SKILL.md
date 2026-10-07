@@ -24,7 +24,7 @@ intentionally expensive compared with a normal answer.
 4. Run the council script:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/model_council.py \
+python3 ${SKILL_DIR}/scripts/model_council.py \
   --mode decision \
   --question "Should we do X or Y?"
 ```

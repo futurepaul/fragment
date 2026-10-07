@@ -1,5 +1,8 @@
 # fragment v1 on Cloudflare
 
+On branch `claude/optchat`, goose replaces Hermes as the computer's agent
+runtime (docs/optchat.md, which wins here); Hermes below is history.
+
 Status: **decided 2026-10-02** (Paul, in a grilling session that merged
 the "Self-hosted sandbox service" and "cloudflare-ify" threads, then
 revised the same day by the rule below). It superseded
@@ -17,10 +20,10 @@ generic as possible (Paul, 2026-10-02: "the thicker our platform grows
 outside that and is special-cased around hermes the harder it will be to
 change"; finite v2 is the warning).
 
-- We happen to run **Hermes** on computers today, and we chat with it
-  through a fragment. Hermes is not a platform concept. Its image, the
-  bridge in that image, and the chat and agent templates are data the
-  platform runs. The platform contains no Hermes code.
+- We happen to run **goose** on computers today (Hermes before it), and
+  we chat with it through a fragment. Neither is a platform concept. Its
+  image, the bridge in that image, and the chat and agent templates are
+  data the platform runs. The platform contains no runtime's code.
 - Anything not expressible as a fragment or a computer is listed, with
   its reason, in `SPECIAL-CASE-INVENTORY.md`. A thing is platform only
   when that is a security win, or it is the thin shell users can't
@@ -35,7 +38,7 @@ fragment is a personal-agent product (in the space of Muse, Grok Bot and
 Dot) with the magic of fragments: multiplayer apps, edited together in
 git, that your agents build for you. You sign in to the shell at
 `fragment.club/chat`. Your agents are fragments run by a computer of
-your own (today, Hermes profiles). You chat with them in chat fragments.
+your own (today, goose). You chat with them in chat fragments.
 They use your connected accounts, drive their own screen, and publish
 apps, sites and brains as fragments that you share with other people.
 
@@ -92,7 +95,7 @@ speaking Cloudflare's APIs) returns once this product works.
 
 6. **The shell is the platform's one page.** Sign-in, a sidebar of your
    fragments (by kind: agents, chats, apps and brains) and your
-   computers, and tabs that frame them. It knows nothing about Hermes.
+   computers, and tabs that frame them. It knows no agent runtime.
    Everything inside a tab is a fragment or a computer. It ships with a
    preview URL per version.
 7. **Layout:** the sidebar (agents across the top, then chats, then
@@ -146,7 +149,7 @@ speaking Cloudflare's APIs) returns once this product works.
 13. **One computer per person for now.** A computer is its own entity,
     so ephemeral computers and bring-your-own machines can return
     without a redesign. A computer runs an image. The image, not the
-    platform, decides what runs: today, Hermes. The default size is 2 vCPU
+    platform, decides what runs: today, goose. The default size is 2 vCPU
     and 6 GiB (Paul, 2026-10-02), the smallest 2-vCPU shape Cloudflare
     allows at 3 GiB per vCPU.
 14. **An agent is a fragment** (kind `agent`) with its own identity.

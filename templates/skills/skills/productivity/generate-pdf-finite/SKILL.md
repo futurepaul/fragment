@@ -5,8 +5,7 @@ version: 1.1.0
 author: community
 license: MIT
 metadata:
-  hermes:
-    tags: [PDF, Documents, Generation, Reports, Python]
+  tags: [PDF, Documents, Generation, Reports, Python]
 ---
 
 # Generate PDF with fpdf2
