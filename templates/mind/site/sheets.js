@@ -8,9 +8,10 @@ import { F, S, changed, problem } from "./store.js";
 import { copyButton, h, icon, iconButton, plural } from "./ui.js";
 
 const FACES = ["🌿", "🛠️", "🧭", "🌙", "✨", "🦉", "🐙", "🍄", "🔭", "📚", "🎨", "🧪", "🌊", "🔥", "🍋", "🐝", "🪴", "🎧", "🧘", "🗺️", "🦊", "🐢", "☕", "🪐"];
-const NAME_MAX = 40;
+// fragment.json's limits: persona_set's name and instructions, settings_set's about
+const NAME_MAX = 48;
 const INSTRUCTIONS_MAX = 4000;
-const ABOUT_MAX = 4000;
+const ABOUT_MAX = 8000;
 
 /// Opens a sheet; returns its close.
 export function sheet(titleText, body, { foot = null, cls = "" } = {}) {

@@ -10,7 +10,8 @@ import { EVERYTHING_PAGE, F, S, changed, problem, putThread } from "./store.js";
 import { topBar } from "./thread.js";
 import { ago, h, icon, kb, period, plural, reconcile, when } from "./ui.js";
 
-const SEARCH_LIMIT = 60;
+/// The most hits one search answers (fragment.json: `search.limit`).
+const SEARCH_LIMIT = 50;
 const SEARCH_WAIT_MS = 110;
 /// The view's budget (the spec's VIEW), for the Memory screen's gauge.
 const VIEW_BYTES = 128_000;
@@ -164,8 +165,8 @@ const hue = (name) => {
 export function topicsScreen() {
   const addBtn = h("button.pill", { type: "button" }, icon("plus"), "New topic");
   const suggestBtn = h("button.pill.ghost", { type: "button" }, icon("sparkles"), "Suggest some");
-  const name = h("input.field", { placeholder: "Name, like “Garden” or “The house”", maxlength: 60, "aria-label": "Topic name" });
-  const desc = h("input.field", { placeholder: "What belongs here (optional)", maxlength: 280, "aria-label": "What belongs here" });
+  const name = h("input.field", { placeholder: "Name, like “Garden” or “The house”", maxlength: 48, "aria-label": "Topic name" });
+  const desc = h("input.field", { placeholder: "What belongs here (optional)", maxlength: 400, "aria-label": "What belongs here" });
   const form = h("form.add-topic", { hidden: true }, name, desc, h("div.row", null, h("span.grow"), h("button.ghost", { type: "button", onclick: () => (form.hidden = true) }, "Cancel"), h("button.primary", { type: "submit" }, "Add topic")));
   const sugg = h("div.suggestions");
   const grid = h("div.topic-grid");
@@ -341,6 +342,7 @@ export function memoryScreen() {
   let parts = [];
   let bytes = 0;
   let T = 0;
+  let cut = 0;
 
   newest.addEventListener("click", () => scroll.scrollTo({ top: scroll.scrollHeight, behavior: "smooth" }));
   scroll.addEventListener("scroll", () => newest.classList.toggle("away", scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 400));
@@ -384,6 +386,8 @@ export function memoryScreen() {
       const fresh = painted;
       items.push({ key: `${p.id}+${p.n}`, sig: `${p.built}|${p.text}`, make: () => memRow(p, { fresh }) });
     }
+    // the newest lines past what one answer holds (`memory`'s `cut`)
+    if (cut) items.push({ key: "cut", sig: String(cut), make: () => h("p.empty.mem-cut", { text: `And ${plural(cut, "newer line")}, more than one answer holds. Search finds them.` }) });
     reconcile(list, items, { quiet: true });
     // the strata: each level's stretch, as wide as (the root of) what it covers
     const deepest = Math.max(1, ...runs.map((r) => Math.log2(r.n)));
@@ -408,11 +412,14 @@ export function memoryScreen() {
     );
     const unbuilt = parts.filter((p) => p.built === false).length;
     const pct = Math.min(100, Math.round((bytes / VIEW_BYTES) * 100));
+    // lines whose summary keeps failing (`status.failing`): said, not hidden
+    const failing = Array.isArray(S.status?.failing) ? S.status.failing : [];
     stats.replaceChildren(
       h("div.stat", null, h("b", { text: T.toLocaleString() }), h("span", { text: "messages" })),
-      h("div.stat", null, h("b", { text: parts.length.toLocaleString() }), h("span", { text: "lines" })),
+      h("div.stat", null, h("b", { text: (parts.length + cut).toLocaleString() }), h("span", { text: "lines" })),
       h("div.stat.gauge", null, h("b", { text: kb(bytes) }), h("span", { text: `of ${kb(VIEW_BYTES)}` }), h("span.bar", { "aria-hidden": "true" }, h("i", { style: `width:${pct}%` }))),
       unbuilt ? h("div.stat.live", null, icon("loader", "spin"), h("span", { text: `summarizing ${plural(unbuilt, "new message")}` })) : h("div.stat.settled", null, icon("check"), h("span", { text: "all summarized" })),
+      failing.length ? h("div.stat.failing", { title: failing.map((f) => `${f.id}+${f.n}: ${f.error} (${f.tries} tries)`).join("\n") }, icon("alert"), h("span", { text: `${plural(failing.length, "line")} won't summarize yet` })) : null,
     );
     painted = true;
   }
@@ -424,6 +431,7 @@ export function memoryScreen() {
       parts = (r.parts ?? []).filter((p) => Number.isInteger(p.id) && Number.isInteger(p.n));
       bytes = Number(r.bytes) || 0;
       T = Number(r.T) || 0;
+      cut = Number(r.cut) || 0;
       draw();
     },
     (e) => problem(`Could not read memory: ${e.message}`),

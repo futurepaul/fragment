@@ -7,6 +7,9 @@
 import { F, S, persona, putThread, titleOf } from "./store.js";
 import { ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, when } from "./ui.js";
 
+/// The widest `context` asks on either side (fragment.json).
+const CONTEXT_MAX = 50;
+
 export const go = (path) => {
   if (location.hash !== `#${path}`) location.hash = path;
 };
@@ -101,7 +104,7 @@ export function contextView(i, { q = "", before = 2, after = 3 } = {}) {
   async function load() {
     try {
       // the log is one: ask wider, and keep the hit's own thread
-      const r = await F.call("context", { i, before: b * 3, after: a * 3 });
+      const r = await F.call("context", { i, before: Math.min(CONTEXT_MAX, b * 3), after: Math.min(CONTEXT_MAX, a * 3) });
       const all = (r.messages ?? []).filter((m) => Number.isInteger(m.i)).sort((x, y) => x.i - y.i);
       const thread = all.find((m) => m.i === i)?.thread ?? null;
       const mine = all.filter((m) => m.thread === thread);
