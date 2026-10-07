@@ -129,7 +129,7 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
 /// before is served untyped. A channel trigger's posters (`from`) came
 /// after the trigger table: one from before fires for every record, as it
 /// was installed to. A run's code came after the run table (jobs.rs
-/// `advance`): a run in flight from before is held at its next step.
+/// `advance`): a run in flight from before starts over at its next step.
 /// Runs in the constructor, before anything reads these tables.
 pub(crate) fn migrate_code(sql: &SqlStorage) {
     for (table, column, decl) in [

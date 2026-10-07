@@ -32,7 +32,7 @@
 //! kept with its input until someone replays it; its kept answers go when
 //! it finishes, and a replay takes every step afresh. An attempt runs on
 //! the app's code installed at its first advance (`runs.code`): its kept
-//! answers are that code's steps', so an advance on other code holds it.
+//! answers are that code's steps', so an advance on other code starts it over.
 //!
 //! **Triggers** start runs as the fragment itself, with an editor's reach:
 //! cron schedules (on this object's alarm), records appended to a channel
@@ -70,6 +70,10 @@ pub const JOB_HEADER: &str = "x-fragment-job";
 pub const HOPS_HEADER: &str = "x-fragment-hops";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
+/// The attempt (replays count) at which a change of the app's code under
+/// a run holds it rather than starting it over, so code that keeps
+/// changing cannot spin it.
+const CODE_CHANGED_ATTEMPTS_MAX: u32 = 8;
 
 /// Test fleets: the longest an advance is held (`hold-advances`), and how
 /// often a held one looks again.
@@ -580,12 +584,15 @@ impl FragmentCell {
         }
         // An attempt runs on the code installed at its first advance: its
         // kept answers fit that code's steps alone, so an advance on other
-        // code holds it, and a replay runs it afresh on the code then.
+        // code starts the run over, as the next attempt on the code then.
         let code = self.installed_code()?;
         if count == 0 {
             self.exec("UPDATE runs SET code = ? WHERE id = ?", vec![code.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from), SqlStorageValue::Integer(run_id)])?;
         } else if code != run.code {
-            return fail("the app's code changed while the run was in flight: replay it to run on the new code".into());
+            if attempt >= CODE_CHANGED_ATTEMPTS_MAX {
+                return fail(format!("the app's code changed under attempt {attempt} too: replay it to run on the code installed now"));
+            }
+            return self.start_over(&run).await;
         }
         let results = match self.kept_answers(run_id, attempt, count)? {
             Kept::All(results) => results,
@@ -659,6 +666,27 @@ impl FragmentCell {
             }
             OpKind::Query => fail(format!("{op} is a query; queries do not run as jobs")),
         }
+    }
+
+    /// A run whose app code changed under its attempt (`advance`) starts
+    /// over as the next one, on the code installed now, as a replay does
+    /// (its steps afresh; a call step's operation id is the same in every
+    /// attempt), with no one to ask: a template's release moves under its
+    /// fragments' triggered runs. Its Workflow is told to stop.
+    async fn start_over(&self, run: &RunRow) -> CellResult<Value> {
+        let (id, attempt) = (run.id, run.attempt);
+        let moved = self.rows(
+            "UPDATE runs SET status = 'queued', attempt = attempt + 1, code = NULL, launched_at = NULL
+             WHERE id = ? AND attempt = ? AND status IN ('queued', 'running') RETURNING attempt",
+            vec![SqlStorageValue::Integer(id), SqlStorageValue::Integer(attempt.into())],
+        )?;
+        if !moved.is_empty() {
+            self.exec("DELETE FROM steps WHERE run = ?", vec![SqlStorageValue::Integer(id)])?;
+            let summary = format!("{} run #{id}: the app's code changed under attempt {attempt}; attempt {} starts on the new code", run.op, attempt + 1);
+            self.event("run.restarted", &summary, json!({ "run": id, "attempt": attempt + 1 }));
+            self.launch_queued().await;
+        }
+        Ok(json!({ "stop": true }))
     }
 
     /// Test fleets: waits while `hold-advances` is on, at most

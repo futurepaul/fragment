@@ -21,8 +21,8 @@
 // job.call / job.fetch / job.publish / job.sleep` is a durable step. The
 // body re-runs from the top at every step with the results so far, so it
 // must reach its steps in the same order each time and change nothing
-// except through steps (docs/api.md, Jobs); the supervisor holds a run whose
-// code changed under it, so the results are always this code's.
+// except through steps (docs/api.md, Jobs); the supervisor starts a run over
+// when its code changes under it, so the results are always this code's.
 //
 // Every answer is an envelope, so no value an author returns can be
 // mistaken for a platform answer: a query's { result }, a mutation's
