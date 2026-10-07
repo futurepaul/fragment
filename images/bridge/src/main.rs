@@ -2,8 +2,8 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script)
-//! fragment-bridge screen   only the screen on BRIDGE_SCREEN_LISTEN
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script), and
+//!                          its screens on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
 //!
@@ -75,9 +75,13 @@ fn left_out() -> Vec<String> {
 
 fn screen_config() -> Option<screen::ScreenConfig> {
     let listen: SocketAddr = env("BRIDGE_SCREEN_LISTEN")?.parse().unwrap_or_else(|_| fail("BRIDGE_SCREEN_LISTEN is not host:port"));
-    let target = env("BRIDGE_SCREEN_RFB").map(|t| screen::Target::parse(&t).unwrap_or_else(|e| fail(&e)));
+    // one display for every agent was the cut model: each agent's is its own now
+    if env("BRIDGE_SCREEN_RFB").is_some() {
+        fail("BRIDGE_SCREEN_RFB is gone: name each agent's display in BRIDGE_SCREENS_FILE");
+    }
+    let screens_file = env("BRIDGE_SCREENS_FILE").map(PathBuf::from);
     let start = env("BRIDGE_SCREEN_START").map(|s| s.split_whitespace().map(str::to_string).collect());
-    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), target, start })
+    Some(screen::ScreenConfig { listen, dir: PathBuf::from(env_or("BRIDGE_SCREEN_DIR", "/opt/fragment/screen")), screens_file, start })
 }
 
 /// SIGTERM (or SIGINT) turns `stop` true; the process is gone within
@@ -107,13 +111,6 @@ async fn main() {
         "version" => {
             println!("fragment-bridge {}", env!("CARGO_PKG_VERSION"));
         }
-        "screen" => {
-            on_signal(stop_tx);
-            let cfg = screen_config().unwrap_or_else(|| fail("BRIDGE_SCREEN_LISTEN names where the screen listens"));
-            if let Err(e) = screen::serve(cfg, stop).await {
-                fail(&e);
-            }
-        }
         "run" => {
             on_signal(stop_tx);
             let api = env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address"));
@@ -128,16 +125,9 @@ async fn main() {
                 left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
                 agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
+                screen: screen_config(),
             };
             ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
-            if let Some(screen) = screen_config() {
-                let stop = stop.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = screen::serve(screen, stop).await {
-                        ev!("screen.failed", { "error": e });
-                    }
-                });
-            }
             match driver::run(cfg, runtime(), stop).await {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
@@ -146,6 +136,6 @@ async fn main() {
                 }
             }
         }
-        other => fail(&format!("{other:?}: run, screen, or version")),
+        other => fail(&format!("{other:?}: run or version")),
     }
 }

@@ -1,6 +1,7 @@
-//! A viewer of a computer's screen as the screen page's noVNC is one: the
-//! RFB stream over the bridge's `websockify?viewer=` socket, and Take over
-//! over its `control?viewer=` socket (docs/computers.md, Ports). Just
+//! A viewer of an agent's screen as the screen page's noVNC is one: the
+//! RFB stream over the bridge's `websockify?viewer=&agent=` socket, and
+//! Take over over its `control?viewer=&agent=` socket (docs/computers.md,
+//! Ports). Just
 //! enough RFB 3.8 to read a whole frame (raw, 32-bit true colour) and send
 //! pointer and key events; and, as noVNC 1.7.0 does, it asks for the
 //! extended clipboard and answers the server's capabilities with its own
@@ -36,11 +37,11 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    /// Opens the screen as viewer `id`: the RFB handshake (no auth, shared),
-    /// then 32-bit true colour, raw encoding only. The bridge starts the
-    /// display when it is down, so the first bytes may take a while.
-    pub async fn open(base: &Base, id: &str, wait: Duration) -> Result<Viewer, String> {
-        let ws = net::connect_ws(base, &format!("/websockify?viewer={id}"), &[]).await?;
+    /// Opens `agent`'s screen as viewer `id`: the RFB handshake (no auth,
+    /// shared), then 32-bit true colour, raw encoding only. The bridge starts
+    /// the display when it is down, so the first bytes may take a while.
+    pub async fn open(base: &Base, id: &str, agent: &str, wait: Duration) -> Result<Viewer, String> {
+        let ws = net::connect_ws(base, &format!("/websockify?viewer={id}&agent={agent}"), &[]).await?;
         let mut v = Viewer { ws, buf: Vec::new(), width: 0, height: 0, name: String::new(), clipboard_caps: false };
         let version = v.take(12, wait).await?;
         if &version[..4] != b"RFB " {
@@ -191,17 +192,17 @@ pub fn colours(frame: &[u32]) -> usize {
     seen.len()
 }
 
-/// The screen's control socket, as the page's `control?viewer=`.
+/// An agent's screen's control socket, as the page's `control?viewer=&agent=`.
 pub struct Control {
     ws: ClientWs,
 }
 
 impl Control {
-    pub async fn open(base: &Base, id: &str) -> Result<Control, String> {
-        Ok(Control { ws: net::connect_ws(base, &format!("/control?viewer={id}"), &[]).await? })
+    pub async fn open(base: &Base, id: &str, agent: &str) -> Result<Control, String> {
+        Ok(Control { ws: net::connect_ws(base, &format!("/control?viewer={id}&agent={agent}"), &[]).await? })
     }
 
-    /// The next `{type: "control", holder}` it says.
+    /// The next `{type: "control", agent, name, holder}` it says.
     pub async fn next(&mut self) -> Result<Value, String> {
         let read = async {
             // bounded by the socket and the timeout around it

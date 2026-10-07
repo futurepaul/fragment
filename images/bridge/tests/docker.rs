@@ -289,7 +289,7 @@ async fn the_hermes_image() {
         assert!(calls.iter().any(|c| c.model == "cheap"), "the agent's tier from agent.json: {calls:?}");
     }
     // The screen: its viewer page, noVNC, and the socket's refusal of a
-    // viewer that names no id (the display itself starts at a viewer).
+    // viewer that names no id and no agent (a display starts at a viewer).
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
@@ -886,10 +886,10 @@ async fn the_hermes_desktop() {
 
     // before any agent's call: the page, the control socket, the RFB stream
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
-    let mut watching = Control::open(&base, "watcher").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
-    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "holder": null }), "a viewer hears who holds control");
+    let mut watching = Control::open(&base, "watcher", "juniper.paul").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }), "a viewer hears whose screen it is, and who holds control");
     let t = Instant::now();
-    let opened = Viewer::open(&base, "watcher", Duration::from_secs(60)).await;
+    let opened = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await;
     let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"])));
     eprintln!("desktop: first viewer to the RFB greeting {} ms; {}x{} {:?}", t.elapsed().as_millis(), watcher.width, watcher.height, watcher.name);
     // the desktop drawn: its wallpaper and panel, not one colour
@@ -904,9 +904,9 @@ async fn the_hermes_desktop() {
     assert!(colours(&frame) > 16, "the desktop shows something: {} colours\n{}", colours(&frame), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"]));
 
     // Take over: the holder's pointer moves the screen's; a watcher's does not
-    let mut driving = Control::open(&base, "driver").await.unwrap();
+    let mut driving = Control::open(&base, "driver", "juniper.paul").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
-    let mut driver = Viewer::open(&base, "driver", Duration::from_secs(30)).await.unwrap();
+    let mut driver = Viewer::open(&base, "driver", "juniper.paul", Duration::from_secs(30)).await.unwrap();
     assert!(driver.clipboard_caps, "Xvnc offers its extended clipboard, and the viewer answers it as noVNC does (a ClientCutText of negative length)");
     driving.say("take").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], "driver");
@@ -978,7 +978,7 @@ async fn the_hermes_desktop() {
     let ended = tokio::time::timeout(Duration::from_secs(15), watcher.frame()).await.map(|r| r.map(|f| f.len()));
     assert!(matches!(ended, Ok(Err(_))), "the watcher's stream ends with its display: {ended:?}");
     let t = Instant::now();
-    let mut again = Viewer::open(&base, "watcher", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
+    let mut again = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
     eprintln!("desktop: the watcher back on a desktop started for it in {} ms", t.elapsed().as_millis());
     let turn = browse(&fake);
     fake.until(240_000, "the browser's reply after the restart", |w| reply(w, &turn).is_some()).await;
@@ -1009,6 +1009,152 @@ async fn the_hermes_desktop() {
         "gws sends the agent's placeholder as its bearer token: {seen:?}; it said {:?}",
         fake.with(|w| reply(w, &turn))
     );
+}
+
+/// Hermes' own reading of `profile`'s Bot Desktop lease, as its
+/// computer_use reads it before every action: `{holder, viewer_id, epoch,
+/// refused}`, `refused` being what `assert_agent_may_act` raised (its
+/// `human_has_control`), or null.
+fn hermes_lease(c: &Container, profile: &str) -> serde_json::Value {
+    const SCRIPT: &str = r#"import json, os, sys
+os.chdir('/opt/hermes'); sys.path.insert(0, '/opt/hermes')
+from tools.bot_desktop import lease
+home = sys.argv[1]
+l = lease.get(home)
+try:
+    lease.assert_agent_may_act(home); refused = None
+except lease.HumanHasControl as e:
+    refused = str(e)
+print(json.dumps({"holder": l.holder, "viewer_id": l.viewer_id, "epoch": l.epoch, "refused": refused}))
+"#;
+    let home = format!("/data/hermes/profiles/{profile}");
+    let out = c.exec_out(&["env", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", SCRIPT, &home]);
+    serde_json::from_str(out.trim().lines().last().unwrap_or("null")).unwrap_or(serde_json::Value::Null)
+}
+
+/// Whether `profile`'s desktop is up: its launcher's published environment.
+fn desktop_up(c: &Container, profile: &str) -> bool {
+    c.exec(&["test", "-e", &format!("/data/hermes/profiles/{profile}/bot-desktop/env")])
+}
+
+/// Goal: two agents on one computer, two desktops (Hermes gives each
+/// profile its own), each its own screen: a socket naming juniper is
+/// juniper's desktop and one naming fred is fred's, each started for its
+/// own first viewer; an agent not on the computer, or no name, refused.
+/// Take over of juniper's screen is juniper's Bot Desktop lease, as Hermes
+/// reads it (`human`, the viewer, `human_has_control`), and juniper's
+/// computer_use refuses while it holds, fred's working on its own desktop;
+/// Give back is juniper's again, and its computer_use works. A desktop no
+/// one watches or uses stops after the idle bound (here 30 s), one watched
+/// does not, and the next viewer starts it again, the browser's profile
+/// (in the agent's work) kept. As Containers runs the image.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn two_agents_two_desktops() {
+    use fragment_bridge::net::Base;
+    use support::rfb::{Control, Viewer};
+    let tag = hermes_tag();
+    build(&repo_dir(), "images/hermes/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["juniper", "fred"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let (jchat, fchat) = (fake.chat("juniper-desk", &["juniper"]), fake.chat("fred-desk", &["fred"]));
+    let c = Container::run_on(Runtime::Hosted, &tag, fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SCREEN_IDLE_MS", "30000")]);
+    fake.until(180_000, "Hermes' bridge to follow both agents' chats", |w| w.live_sockets() >= 4).await;
+    let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let screens: serde_json::Value = serde_json::from_str(&c.exec_out(&["cat", "/var/lib/fragment-run/screens.json"])).unwrap_or_default();
+    eprintln!("two desktops: the screens file {screens}");
+    assert!(!c.exec(&["test", "-e", "/var/lib/fragment-run/screen.sock"]), "no one screen for every agent");
+
+    // each agent's own screen, refusals included
+    let mut jc = Control::open(&base, "watcher", "juniper.paul").await.unwrap();
+    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }));
+    let mut fc = Control::open(&base, "watcher", "fred.paul").await.unwrap();
+    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred.paul", "name": "fred", "holder": null }));
+    let nobody = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=nobody.paul", &[]).await.err().unwrap_or_default();
+    assert!(nobody.contains("404"), "an agent not on this computer: {nobody}");
+    let unnamed = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=../fred-paul", &[]).await.err().unwrap_or_default();
+    assert!(unnamed.contains("400"), "no agent's name: {unnamed}");
+    let t = Instant::now();
+    let jv = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen: {e}\n{}", c.logs()));
+    let mut fv = Viewer::open(&base, "watcher", "fred.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("fred's screen: {e}\n{}", c.logs()));
+    eprintln!("two desktops: both up for their viewers in {} ms; the container holds {} MiB", t.elapsed().as_millis(), anon_mib(&c));
+    assert_eq!((jv.name.as_str(), fv.name.as_str()), ("hermes:juniper-paul", "hermes:fred-paul"), "each socket shows its own agent's desktop");
+    let xvnc = c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]);
+    assert_eq!(xvnc.trim(), "2", "two desktops, two X servers");
+
+    // Take over of juniper's screen is juniper's lease
+    let mut driving = Control::open(&base, "driver", "juniper.paul").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+    let mut driver = Viewer::open(&base, "driver", "juniper.paul", Duration::from_secs(30)).await.unwrap();
+    driving.say("take").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], "driver");
+    assert_eq!(jc.next().await.unwrap()["holder"], "driver", "juniper's watcher hears it");
+    let (jl, fl) = (hermes_lease(&c, "juniper-paul"), hermes_lease(&c, "fred-paul"));
+    eprintln!("two desktops: juniper's lease as Hermes reads it {jl}; fred's {fl}");
+    assert!(jl["holder"] == "human" && jl["viewer_id"] == "driver" && jl["refused"].is_string(), "juniper's lease is the person's, and Hermes refuses juniper's screen actions: {jl}");
+    assert!(fl["holder"] == "agent" && fl["refused"].is_null(), "fred's is fred's: {fl}");
+    driver.pointer(101, 57, 0).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the person drives juniper's desktop");
+    assert_ne!(desk(&c, "fred-paul")["pointer"], json!([101, 57]), "and not fred's");
+
+    // each agent's computer_use, as the lease has it
+    let look = |chat: &str, agent: &str| {
+        let said = fake.say(chat, &person("paul"), json!({ "text": "look at your screen" }));
+        fragment_bridge::records::turn_id(agent, chat, "chat", said["seq"].as_u64().unwrap())
+    };
+    let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
+    let jturn = look(&jchat, "juniper.paul");
+    within(&fake, &jchat, &c, 240_000, "juniper's look while a person holds its screen", |w| reply(w, &jchat, &jturn).is_some()).await;
+    let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
+    eprintln!("two desktops: juniper, held: {}", jsaid.chars().take(400).collect::<String>());
+    assert!(jsaid.contains("human_has_control"), "juniper's computer_use refuses while a person holds its screen: {jsaid}");
+    let fturn = look(&fchat, "fred.paul");
+    within(&fake, &fchat, &c, 240_000, "fred's look", |w| reply(w, &fchat, &fturn).is_some()).await;
+    let fsaid = fake.with(|w| reply(w, &fchat, &fturn)).unwrap_or_default();
+    eprintln!("two desktops: fred, meanwhile: {}", fsaid.chars().take(400).collect::<String>());
+    assert!(!fsaid.contains("human_has_control") && !fsaid.contains("no computer_use"), "fred's computer_use works on its own desktop: {fsaid}");
+    let fred_looked = model.calls.lock().unwrap().iter().any(|m| m.agent.as_deref() == Some("fred.paul") && m.body["messages"].to_string().contains("\"image_url\""));
+    assert!(fred_looked, "fred's capture went to the vision model, as fred");
+
+    // Give back: juniper's lease again, and its computer_use works
+    driving.say("give").await.unwrap();
+    assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
+    let jl = hermes_lease(&c, "juniper-paul");
+    assert!(jl["holder"] == "agent" && jl["refused"].is_null() && jl["epoch"].as_u64() >= Some(2), "given back: {jl}");
+    let jturn = look(&jchat, "juniper.paul");
+    within(&fake, &jchat, &c, 240_000, "juniper's look, given back", |w| reply(w, &jchat, &jturn).is_some()).await;
+    let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
+    assert!(!jsaid.contains("human_has_control"), "given back, juniper's computer_use works: {jsaid}");
+
+    // idle: juniper's desktop, unwatched and unused, stops; fred's, watched, does not
+    let marker = "/data/work/juniper-paul/browser-profile/fragment-marker";
+    assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo kept > {marker}")]));
+    drop((jc, driving, jv, driver));
+    let t = Instant::now();
+    // bounded: the 30 s bound, a look every 7.5 s, and Hermes' own stop
+    while desktop_up(&c, "juniper-paul") && t.elapsed() < Duration::from_secs(120) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let _ = fv.frame().await;
+    }
+    eprintln!("two desktops: juniper's stopped {} ms after its last viewer left", t.elapsed().as_millis());
+    assert!(!desktop_up(&c, "juniper-paul"), "an unwatched, unused desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
+    assert!(desktop_up(&c, "fred-paul"), "one watched does not");
+    let stopped = c.logs().lines().filter(|l| l.contains("\"screen.idle_stopped\"") && l.contains("juniper.paul")).map(str::to_string).collect::<Vec<_>>();
+    assert!(!stopped.is_empty() && stopped.iter().all(|l| l.contains("\"code\":0")), "Hermes' own stop: {stopped:?}");
+    assert_eq!(c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]).trim(), "1", "its X server gone");
+    drop((fc, fv));
+    let t = Instant::now();
+    while desktop_up(&c, "fred-paul") && t.elapsed() < Duration::from_secs(120) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert!(!desktop_up(&c, "fred-paul"), "fred's too, once no one watches it");
+
+    // and starts again on demand, its browser's profile kept
+    let back = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen again: {e}\n{}", c.logs()));
+    assert_eq!(back.name, "hermes:juniper-paul");
+    assert_eq!(c.exec_out(&["cat", marker]).trim(), "kept", "its browser's profile, in its work, kept");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile");
 }
 
 // ---- what Hermes would decide by guessing it runs in a container (its
