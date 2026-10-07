@@ -45,7 +45,6 @@
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
-//!   POST   /card/report                   the delivery consumer, for a card's shot (card.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
@@ -898,14 +897,6 @@ impl FragmentCell {
             let report = body_json(&mut req).await?;
             return json_response(&self.delivery_report(&report)?);
         }
-        if path == "/card/report" {
-            // Only the delivery consumer sets the header; the router never passes it.
-            if req.headers().get(crate::deliveries::REPORT_HEADER)?.is_none() {
-                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
-            }
-            let report = body_json(&mut req).await?;
-            return json_response(&self.card_report(report).await?);
-        }
         if let Some(route) = path.strip_prefix("/computer/") {
             // Only a computer's routes and egress set the header; the router never passes it.
             if req.headers().get(crate::computer::INTERNAL_HEADER)?.is_none() {
@@ -1289,7 +1280,9 @@ impl FragmentCell {
     /// delivery outboxes, due schedules, queued runs, and the pass: the
     /// poll backstop, which also checks
     /// running runs. The next pass is a day away, or within the poll
-    /// interval while the fragment is busy (`arm`). Then it re-arms.
+    /// interval while the fragment is busy (`arm`). Last, a preview card
+    /// due is shot (card.rs): the seconds a browser takes hold up only the
+    /// work that comes due meanwhile. Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1305,9 +1298,6 @@ impl FragmentCell {
             self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;
-        if let Err(e) = self.drain_card().await {
-            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
-        }
         if let Err(e) = self.flush_meters(false).await {
             self.event("meter.flush-failed", &e.message, json!({ "code": e.code }));
         }
@@ -1333,6 +1323,9 @@ impl FragmentCell {
             self.launch_queued().await;
             let quiet = crate::plane::QUIET_PASS_MS.max(self.cfg.poll_interval_ms);
             self.set_meta(MetaKey::PollAt, &(js::now_ms() + quiet).to_string())?;
+        }
+        if let Err(e) = self.drain_card().await {
+            self.event("card.drain-failed", &e.message, json!({ "code": e.code }));
         }
         self.schedule().await
     }

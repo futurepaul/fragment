@@ -12,8 +12,7 @@
 //! 410 has dropped the subscription, so the fragment drops it too; a 429,
 //! 5xx, or network failure is retried with a delay that grows with the
 //! message's age; one that runs out of retries lands on the dead-letter
-//! queue and in the fragment's event log. A preview card's shot rides the
-//! same queue (card.rs): the consumer takes it with the browser binding.
+//! queue and in the fragment's event log.
 
 use std::time::Duration;
 
@@ -80,9 +79,6 @@ pub enum DeliveryKind {
     Record,
     Push,
     Notify,
-    /// A shot of the fragment's page for its preview card (card.rs): no
-    /// POST, and never in the outbox (the fragment's card schedule sends it).
-    Card,
 }
 
 impl DeliveryKind {
@@ -91,7 +87,6 @@ impl DeliveryKind {
             DeliveryKind::Record => "record",
             DeliveryKind::Push => "push",
             DeliveryKind::Notify => "notify",
-            DeliveryKind::Card => "card",
         }
     }
 }
@@ -105,7 +100,6 @@ fn decode(row: &Value) -> Pending {
         DeliveryKind::Record => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
         DeliveryKind::Push => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
         DeliveryKind::Notify => Pending::Notify { url: text("url"), frame: text("body") },
-        DeliveryKind::Card => panic!("a card's shot is never in the delivery outbox: {row}"),
     }
 }
 
@@ -122,9 +116,6 @@ pub struct Delivery {
     /// The push or channel subscription it goes to (dropped on 404 or 410).
     #[serde(default)]
     pub sub: Option<i64>,
-    /// A card's shot (kind `card`): taken, not POSTed (card.rs).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub card: Option<crate::card::CardShot>,
 }
 
 impl Delivery {
@@ -132,7 +123,7 @@ impl Delivery {
     pub(crate) fn json(fragment: &str, incarnation: &str, kind: DeliveryKind, url: String, body: &str, sub: Option<i64>) -> Delivery {
         let (fragment, incarnation) = (fragment.to_string(), incarnation.to_string());
         let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, body);
-        Delivery { fragment, incarnation, kind, url, headers: vec![("content-type".into(), "application/json".into())], body, sub, card: None }
+        Delivery { fragment, incarnation, kind, url, headers: vec![("content-type".into(), "application/json".into())], body, sub }
     }
 }
 
@@ -284,8 +275,6 @@ impl FragmentCell {
                     DeliveryKind::Push => ("push_subs", "push.gone"),
                     // a notify URL is no subscription; `send` never reports one gone
                     DeliveryKind::Notify => return Err(CellError::invalid("a notifyUrls delivery has no subscription to drop")),
-                    // a card's shot reports on its own route (card.rs)
-                    DeliveryKind::Card => return Err(CellError::invalid("a card's shot reports to card/report")),
                 };
                 let sub = report.sub.ok_or_else(|| CellError::invalid(format!("a {kind} delivery reported gone names its subscription")))?;
                 self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;
@@ -386,21 +375,7 @@ pub async fn consume(batch: MessageBatch<Value>, env: Env) -> Result<()> {
     let dead = batch.queue().starts_with(DEAD_QUEUE);
     let messages: Vec<Message<Delivery>> = batch.raw_iter().map(Message::try_from).collect::<Result<_>>()?;
     assert!(messages.len() <= CONSUME_BATCH_MAX, "a delivery batch holds at most {CONSUME_BATCH_MAX} messages, not {}", messages.len());
-    // a card's shot holds a browser for seconds: a batch's shots go one at
-    // a time beside its other deliveries, so a batch holds one browser
-    let (cards, sends): (Vec<_>, Vec<_>) = messages.into_iter().partition(|m| m.body().card.is_some());
-    let shots = async {
-        for message in cards {
-            let d = message.body();
-            let shot = d.card.as_ref().expect("partitioned on its card");
-            if !dead {
-                crate::card::consume(&env, d, shot).await;
-            }
-            // a lost report is a lost shot, which the fragment's lease tries again
-            message.ack();
-        }
-    };
-    futures_util::future::join(futures_util::future::join_all(sends.into_iter().map(|message| consume_one(message, &env, cfg, dead))), shots).await;
+    futures_util::future::join_all(messages.into_iter().map(|message| consume_one(message, &env, cfg, dead))).await;
     Ok(())
 }
 

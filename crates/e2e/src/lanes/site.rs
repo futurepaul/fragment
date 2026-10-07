@@ -15,9 +15,9 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, Call, Reply};
 use crate::Suite;
 
-/// How long a card may take after its deploy: the alarm sends the shot,
-/// the delivery queue's consumer takes it (a browser started, the page
-/// loaded and let settle), then reports it.
+/// How long a card may take after its deploy: the fragment's alarm takes
+/// the shot (a browser started, the page loaded and let settle) and keeps
+/// it.
 pub(super) const CARD_WAIT: Duration = Duration::from_secs(60);
 
 /// A fragment's preview card once it shows `live` (the commit live moved
@@ -338,7 +338,7 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let failed = event_kinds(api, owner, &name).iter().filter(|k| *k == "card.failed").count();
     s.ok(
         "a shot that keeps failing gives up after five tries: one card.failed event, no card, and no more tries",
-        ended && failed == 1 && r.status == 404 && kept["cards"]["wanted"].is_null() && kept["cards"]["flight"].is_null() && kept["failCardsLeft"] == 4,
+        ended && failed == 1 && r.status == 404 && kept["cards"]["wanted"].is_null() && kept["failCardsLeft"] == 4,
         json!({ "card": r.status, "cards": kept, "failed": failed }),
     );
     let site = api.page(&name, &format!("?view={view}"), None)?;
