@@ -27,19 +27,14 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
-   the isolation findings;
    `docs/durable-computers.md` — how a computer's state survives a
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
-   (its connector went at the cut);
-   `docs/operate.md` — the operator runbook (the `celld` branch's).
-3. `docs/finite-next-lessons.md` — what to port from finite-next and the
-   gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
-4. `docs/published-fragments.md` — primitives that must stay expressible.
+   (its connector went at the cut).
+3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
-5. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
-6. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
+4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
+5. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
    engineering-style.md` (hard cuts, limits, assertions on in release,
    typed errors, valid/invalid/replay/restart tests, Rust for tooling).
 

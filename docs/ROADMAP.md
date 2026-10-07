@@ -108,7 +108,7 @@ rollback), members and invites, call (operations), and read and follow
    Cloudflare host path is deleted (celld only). *Amended 2026-09-26:*
    celld v0.6.0 plus our fork (`futurepaul/celld` branch
    `hardening-v0.6.0`): the `KEYS` seam and the hardening settings
-   (docs/hardening.md). v0.6.0 shipped the alarm fix upstream (#228), so
+   (docs/hardening.md at the tag). v0.6.0 shipped the alarm fix upstream (#228), so
    the fork no longer carries it.
 9. fragment.club's published fragments are not migrated; every primitive
    they used stays expressible and proven (`docs/published-fragments.md`).
@@ -278,7 +278,7 @@ cut: a fragment's old host redirects to its new one (a write there is
 records and certificates stay at least a year. The fragments are one
 site with each other until the Public Suffix List lists
 `fragment.boats`, which waits for thousands of people
-(docs/fragment-boats.md; the fleet: docs/operate.md).
+(docs/fragment-boats.md; the fleet: docs/operate.md on the `celld` branch).
 
 ### 24. Chat → agent: the brain in the cell, the hands on a computer (Paul, 2026-09-27)
 
@@ -363,7 +363,7 @@ designed).
 | Identities ↔ keys, designated owners | the registry cell (BANKS's shape; BANKS itself later, `docs/finite-integration.md`) | sessions and caches name an identity and never outlive a revocation |
 | Browser sessions | platform session cookie (platform origin only) | maps to one identity key; re-checked against grants per request |
 | Agent conversations and turns | the agent's cell (goose's conversation in SQL) | effects dedupe at their owners by tool-call id |
-| Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`, `docs/hardening.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
+| Secrets (personal, fragment, host, OpenRouter, code.storage) | the owning cell, encrypted by the node's `KEYS` for that cell alone; fleet secrets in the node's environment, used only by `KEYS` (`docs/secrets.md`) | never in a repo, a bucket in plaintext, a log, or a command line |
 | Compute/audit trail | the `events` channel | webhook deliveries recorded as events, deduped by delivery key |
 
 Hard rule kept: **no file bytes persist in cell SQLite.** File bytes live

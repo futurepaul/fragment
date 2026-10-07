@@ -321,7 +321,7 @@ cell, `fragment computer serve`, builder workspaces) went at the cut
    step loop (see Agents); Workflows stay for app jobs.
 4. **celld v0.5.1** — adopted, with an alarm regression fixed in our
    fork; celld v0.6.0 (2026-09-26) fixed it upstream (#228), and the
-   fork now carries only our own additions (docs/hardening.md).
+   fork now carries only our own additions.
 
 ## Answered (2026-09-23)
 

@@ -655,13 +655,18 @@ none: followed, it came back into the app at its `Location`).
 The app's database holds at most 16 MiB: a mutation that would leave it
 larger rolls back and answers 507 `storage_full`; the app still reads,
 and deleting rows makes room. A write from anywhere else (a query, the
-app's `fetch`) meets the node's own stop, 4 MiB above. The app runs
-without code generation from strings (`eval`, `new Function`) and
-without `Atomics.wait`, and a turn whose heap grows past twice the
-isolate's limit (128 MiB) ends with "Worker exceeded its memory limit"
-(422). When the app's facet is at its concurrency limit (the Workers
+app's `fetch`) is not capped: it grows the database, which the storage
+meter bills to its owner (docs/ledger.md). Before the author's
+constructor runs, the platform takes away the app's alarm (it would
+wedge the facet), its async transactions and KV writes (they would
+bypass a mutation's transaction and its cap), and facets of its own
+(`cell/platform.mjs`); a call to one throws, saying why. The Workers
+runtime refuses code generation from strings (`eval`, `new Function`)
+and `Atomics.wait`, and holds the app to its CPU and memory limits: a
+call past one fails as the app's (422; local workerd enforces
+neither). When the app's facet is at its concurrency limit (the
 runtime's), calls into it answer 503 `node_full` and the rest of the
-fragment works (docs/hardening.md).
+fragment works.
 
 ### Files
 

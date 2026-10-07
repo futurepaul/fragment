@@ -235,16 +235,18 @@ Test levers), which exist only where a test secret is.
 
 ## How code uses a secret
 
-- **App code** (the facet) has no network and no keys. It asks the
-  platform through a capability ("draw an image", "fetch this API with
-  secret X"), and the platform adds the credential on the way out
-  (`globalOutbound` is `null`; the capability is the only way out).
-  Built in slice D: a job's `job.fetch` names a secret as `{{NAME}}` in a
-  header, and the supervisor opens it only as the request leaves
-  (`step_fetch` in `cell/src/jobs.rs`). That one function is the egress
-  point a native egress in the celld fork would take over. `job.ai.*`
-  steps need no key: text and images go through the Worker's AI binding
-  (cell/src/ai.rs, models.rs).
+- **App code** (the facet) has no network and no keys. It runs in an
+  isolate of its own from the Worker Loader, with an env the platform
+  builds that holds only `FILES` and `globalOutbound: null`
+  (`cell/src/js.rs`), so no author code names a deployment secret (the
+  e2e's `keys` section deploys an app that looks through its env and its
+  global scope for one). It asks the platform through a capability
+  ("draw an image", "fetch this API with secret X"), and the platform
+  adds the credential on the way out: a job's `job.fetch` names a secret
+  as `{{NAME}}` in a header, and the supervisor opens it only as the
+  request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
+  point). `job.ai.*` steps need no key: text and images go through the
+  Worker's AI binding (cell/src/ai.rs, models.rs).
 - **Agents in cells** call models through the platform's model route
   (cell/src/models.rs), which holds no key either: the Worker's AI
   binding is pre-authenticated, and the payer's ledger meters each call.

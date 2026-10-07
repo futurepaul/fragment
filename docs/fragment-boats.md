@@ -530,7 +530,7 @@ Docs each slice updates:
   `__frame`. Its "one site with the platform" passages go.
 - `docs/platform.md`: a `__frame` row; the framing note now says the
   platform is cross-site.
-- `docs/operate.md`: DNS, certificates, the fleet variables.
+- `docs/operate.md` (the `celld` branch's): DNS, certificates, the fleet variables.
 - `docs/ROADMAP.md`: a decision (23, as built) amending decision 16,
   whose "every fragment shares the platform's domain" no longer holds.
 - `docs/finite-integration.md`: the browser-sessions row (the
