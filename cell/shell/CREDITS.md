@@ -6,7 +6,8 @@
   1080×1620. The shell's settings credit him (shell.js, "Wallpaper").
 - `agent.png`: every agent's image, a CRT monitor tinted to the agent's
   colour (agent-identity.css), from Paul (2026-10-03), trimmed to its
-  edges and resized to 240 wide. The chat and agent templates carry the
-  same file (`templates/*/site/agent.png`).
+  edges and resized to 240 wide. It is the agent template's
+  (`templates/agent/site/agent.png`); this one and the chat template's are
+  symlinks to it, and crates/templates embeds the two templates' once.
 - `vendor/split-grid.js` (`vendor/split-grid.LICENSE.txt`) and
   `lucide-icons.js` (`vendor/lucide-LICENSE`): their own licenses.
