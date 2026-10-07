@@ -914,21 +914,17 @@ impl FragmentCell {
         }
         let req = Request::new_with_init(url.as_str(), &init).map_err(|e| permanent(e.to_string()))?;
         let host = url.host_str().unwrap_or("").to_string();
-        let mut resp = crate::cs::fetch(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS)).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.0)))?;
-        let status = resp.status_code();
+        let max = limits::FETCH_RESPONSE_MAX_BYTES;
+        let answer = crate::cs::fetch_all(req, Duration::from_millis(limits::FETCH_TIMEOUT_MS), max).await.map_err(|e| StepFail::Retry(format!("{host}: {}", e.message)))?;
+        let status = answer.status;
         if status == 429 || status >= 500 {
             return Err(StepFail::Retry(format!("{host} answered {status}")));
         }
-        let declared: usize = resp.headers().get("content-length").ok().flatten().and_then(|l| l.parse().ok()).unwrap_or(0);
-        if declared > limits::FETCH_RESPONSE_MAX_BYTES {
-            return Err(permanent(format!("{host} answered {declared} bytes; a fetch reads at most {}", limits::FETCH_RESPONSE_MAX_BYTES)));
+        if answer.cut {
+            return Err(permanent(format!("{host} answered more than {max} bytes; a fetch reads at most that")));
         }
-        let bytes = resp.bytes().await.map_err(|e| StepFail::Retry(format!("{host}: {e}")))?;
-        if bytes.len() > limits::FETCH_RESPONSE_MAX_BYTES {
-            return Err(permanent(format!("{host} answered {} bytes; a fetch reads at most {}", bytes.len(), limits::FETCH_RESPONSE_MAX_BYTES)));
-        }
-        let out_headers: Map<String, Value> = resp.headers().entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
-        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&bytes) }))
+        let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(v))).collect();
+        Ok(json!({ "status": status, "headers": out_headers, "body": String::from_utf8_lossy(&answer.body) }))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
