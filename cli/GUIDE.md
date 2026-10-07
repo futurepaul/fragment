@@ -175,7 +175,6 @@ fragment sync my-thing --dir . --watch      # continuous: OS events + the change
 fragment sync my-thing --dir . --mode pull  # read-only copy (never deletes; --prune to apply)
 fragment sync my-thing --dir . --mode push  # local → repo only
 fragment sync my-thing --dir . --live       # what is live, not main: repo → folder, deletions included
-fragment sync my-thing --dir . --install    # keep syncing after logout (LaunchAgent / systemd unit)
 fragment verify my-thing --dir .            # full-content audit
 ```
 
@@ -555,7 +554,7 @@ fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
 fragment manifest <name>                 fragment invite create|list|revoke ...
 fragment manifest-set <name> FILE        fragment join <name> <token>
-fragment sync <name> [--dir D] [--watch] [--mode M | --live] [--install | --uninstall]
+fragment sync <name> [--dir D] [--watch] [--mode M | --live]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--preview] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
