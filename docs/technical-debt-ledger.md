@@ -614,23 +614,20 @@ fragment.club until cutover (decisions 34–35).
 
 ## The Hermes image patches Hermes' own boot
 
-- **Observed:** phase 4 (`images/hermes/Dockerfile`, `preload.py`).
-  Spike S3b's cuts need upstream changes Hermes v0.21.5 does not have,
-  so the image makes them: a `sed` gates stage2's config migration and
-  skills sync on `hermes-boot stamped` (the build fails unless both
-  lines patch), `02-reconcile-profiles` is replaced with a no-op (the
-  preloaded gateway is the main program), and `preload.py` replaces
-  `tools.skills_sync.sync_skills` and `_sync_bundled_skills_quietly`
-  when the skills stamp matches.
-- **Risk:** a Hermes release moves those lines or names: the build
-  fails on the stage2 patch (loudly), but the preload's replacement
-  stops applying (silently, about 0.5 s slower), or applies to a changed
-  function.
+- **Observed:** phase 4 (`images/hermes/Dockerfile`). The preloaded
+  gateway is hermes-boot's main program (spike S3b), so the image removes
+  upstream's `/etc/cont-init.d/02-reconcile-profiles`, whose
+  `hermes_cli.container_boot` would start an s6-supervised gateway beside
+  it from a restored `gateway_state.json`. The build fails if that script
+  is not there to remove, or another cont-init script names
+  `container_boot`.
+- **Risk:** a Hermes release that starts a gateway at boot some other
+  way: two gateways serve one home.
 - **First proof:** the first Hermes upgrade after v0.21.5.
-- **Delete when:** upstream keys its setup and bundled-skills syncs on
-  the image revision and ships a preloadable, unsupervised gateway main
-  program (S3b's "Upstream Hermes" list), proven by the real-Hermes lane
-  on an unpatched image at the same READY time.
+- **Delete when:** upstream lets a container whose main program is the
+  gateway skip its reconciler (or ships a preloadable, unsupervised
+  gateway main program: S3b's "Upstream Hermes" list), proven by the
+  real-Hermes lane on an image without the removal.
 
 ## A Hermes turn's end is read from its reactions
 
