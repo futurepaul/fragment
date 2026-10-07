@@ -29,15 +29,17 @@ use fragment_bridge::ev;
 use fragment_bridge::records::hex;
 use fragment_bridge::runtime::Agent;
 
-/// A synced file is at most this large (the files route commits at most
-/// 256 KiB at once); one past it is left as it is.
+/// A synced file is at most this large; one past it is left as it is. The
+/// files route (`POST /api/f/{name}/files`, cell/src/publish.rs) commits 16
+/// files and 1 MiB of content at once, in a body of at most 2 MiB.
 pub const FILE_MAX_BYTES: usize = 192 * 1024;
 /// Files one agent's sync takes, at most, on each side; past it, none.
 pub const FILES_MAX: usize = 500;
 /// What was agreed at the last sync, in the profile.
 pub const MANIFEST: &str = ".fragment-sync.json";
-/// One commit carries at most this many files and bytes (the route's 16
-/// files and 256 KiB, with room for base64).
+/// One commit carries at most this many files (the route's 16), and is cut
+/// before its text and base64 pass this many bytes unless it carries a
+/// single file (at most 256 KiB as base64): well within the route's 1 MiB.
 pub const COMMIT_FILES_MAX: usize = 16;
 pub const COMMIT_BYTES_MAX: usize = 180 * 1024;
 
