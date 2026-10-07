@@ -465,12 +465,7 @@ export class App extends AuthorApp {
     const sql = ctx.storage.sql;
     sql.exec(`CREATE TABLE IF NOT EXISTS ${LEDGER} (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, input_sha TEXT NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL,
-      effects TEXT NOT NULL DEFAULT '[]', run INTEGER)`);
-    // a ledger made before effects (phase 2 slice B), or before the
-    // supervisor numbered runs (older rows have none, and are never applied again)
-    const cols = sql.exec(`PRAGMA table_info(${LEDGER})`).toArray();
-    if (!cols.some((c) => c.name === "effects")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN effects TEXT NOT NULL DEFAULT '[]'`);
-    if (!cols.some((c) => c.name === "run")) sql.exec(`ALTER TABLE ${LEDGER} ADD COLUMN run INTEGER`);
+      effects TEXT NOT NULL, run INTEGER NOT NULL)`);
   }
 
   // Reads at `main` through the FILES capability.
@@ -514,7 +509,7 @@ export class App extends AuthorApp {
       if (prior && prior.at >= now - meta.ledgerMs) {
         if (prior.input_sha !== inputSha) return JSON.stringify({ error: "conflicting_body" });
         // the stored texts as they are: the supervisor checks them
-        return mutated(true, prior.run ?? null, prior.effects, prior.result);
+        return mutated(true, prior.run, prior.effects, prior.result);
       }
       // Older than the window, the id runs again: a new run, keyed anew.
       if (prior) sql.exec(`DELETE FROM ${LEDGER} WHERE id = ?`, id);
@@ -593,7 +588,7 @@ export class App extends AuthorApp {
     } catch {
       effects = null;
     }
-    return JSON.stringify({ result: { run: row.run ?? null, effects } });
+    return JSON.stringify({ result: { run: row.run, effects } });
   }
 
   // Custom routes: the author's fetch, when there is one.
