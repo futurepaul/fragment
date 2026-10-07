@@ -30,8 +30,8 @@ pub struct Response {
     pub body: Vec<u8>,
     /// Close the connection without writing an answer.
     pub unanswered: bool,
-    /// After its head, the connection is this one's: a WebSocket's (a
-    /// `101`), or a body's written as it goes (`endless`).
+    /// After its head, the connection is this one's: a body's written as
+    /// it goes (`endless`).
     pub upgrade: Option<Upgrade>,
 }
 
@@ -51,19 +51,6 @@ impl Response {
 
     pub fn bytes(status: u16, content_type: &str, body: Vec<u8>) -> Response {
         Response { status, headers: vec![("content-type".into(), content_type.into())], body, unanswered: false, upgrade: None }
-    }
-
-    /// Accepts a WebSocket (`key`, the client's `Sec-WebSocket-Key`),
-    /// choosing `protocol`; `run` then holds the connection.
-    pub fn websocket(key: &str, protocol: Option<&str>, run: impl FnOnce(TcpStream) + Send + 'static) -> Response {
-        use base64::Engine;
-        use sha1::Digest;
-        let accept = base64::engine::general_purpose::STANDARD.encode(sha1::Sha1::digest(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
-        let mut headers = vec![("upgrade".into(), "websocket".into()), ("connection".into(), "Upgrade".into()), ("sec-websocket-accept".into(), accept)];
-        if let Some(p) = protocol {
-            headers.push(("sec-websocket-protocol".into(), p.into()));
-        }
-        Response { status: 101, headers, body: Vec::new(), unanswered: false, upgrade: Some(Box::new(run)) }
     }
 
     /// A 200 whose chunked body never ends: written until its reader stops
@@ -148,12 +135,10 @@ fn serve_one(mut stream: TcpStream, handler: &Handler) {
     }
     let mut out = format!("HTTP/1.1 {} {}\r\n", resp.status, reason(resp.status));
     for (k, v) in &resp.headers {
-        if !k.eq_ignore_ascii_case("content-length") {
-            out.push_str(&format!("{k}: {v}\r\n"));
-        }
+        out.push_str(&format!("{k}: {v}\r\n"));
     }
-    let declared = resp.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.clone());
-    out.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", declared.unwrap_or_else(|| resp.body.len().to_string())));
+    // a HEAD's answer declares the length its GET's body has
+    out.push_str(&format!("content-length: {}\r\nconnection: close\r\n\r\n", resp.body.len()));
     let _ = stream.write_all(out.as_bytes());
     if !head {
         let _ = stream.write_all(&resp.body);
