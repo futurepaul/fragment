@@ -2,9 +2,9 @@
 
 A **fragment** is one small place on the web: a folder of files in git,
 an app of named operations over its own SQLite, channels that pages
-follow live, members with roles, and URLs. Fragments live on a celld
-host, fragment.club (invite-only for now), and sleep when idle; a
-request, a trigger, or an inbox delivery wakes them.
+follow live, members with roles, and URLs. Fragments live on
+fragment.club (invite-only for now), on Cloudflare, and sleep when idle;
+a request, a trigger, or an inbox delivery wakes them.
 
 ## Install and pair
 

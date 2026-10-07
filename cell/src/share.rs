@@ -1,4 +1,4 @@
-//! Sharing, on the platform's origin (phase 7, decision 4): the share sheet
+//! Sharing, on the platform's origin (docs/api.md, Sharing): the share sheet
 //! and accepting an invite. Both are the platform's pages, signed in by its
 //! session cookie, and each acts through the fragment's own handlers
 //! (members.rs) as the signed-in person: the fragment decides who may do
@@ -165,7 +165,7 @@ pub(crate) fn sheet_page(status: u16, title: &str, body: &str, forms_here: bool)
 /// The share sheet itself: a sharing page only the platform's own pages
 /// may frame (the shell shows it in a dialog: cell/shell/shell.js
 /// `share`). `'self'` is the platform's origin alone; every fragment is on
-/// another (docs/platform.md).
+/// another (docs/api.md, Sign-in).
 fn sheet_framable(status: u16, title: &str, body: &str) -> CellResult<Response> {
     let mut resp = sheet_page(status, title, body, true)?;
     let h = resp.headers_mut();

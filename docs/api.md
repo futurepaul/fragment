@@ -1,13 +1,13 @@
 # fragment wire contract
 
-The cell (`cell/`, Rust on Cloudflare Workers) answers everything below; the CLI and
-the browser library are its clients. Errors are `{"error": "<code>",
-"message": "..."}` (codes in `crates/proto`). `cargo xtask e2e` proves
-every route. The TypeScript runtime this replaced was deleted in phase 2
-slice G (its contract is in git history, last at `35f5e18`). Hermes,
-computers, the desktop, and the personal agent's chat went at the cut
-(docs/cloudflare-v1.md, decision 33); their contract is at the tag
-`celld-final`.
+The cell (`cell/`, Rust on Cloudflare Workers) answers everything below;
+the CLI and the browser library are its clients. Errors are `{"error":
+"<code>", "message": "..."}` (codes in `crates/proto`). `cargo xtask e2e`
+proves every route. The TypeScript runtime this replaced was deleted
+(its contract is in git history, last at `35f5e18`). The desktop and the
+personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
+33; their contract is at the tag `celld-final`); computers came back
+(Computers, below), with Hermes as our image's agent runtime.
 
 ## Configuration
 
@@ -211,7 +211,7 @@ invites, visibility, and tokens; a member may leave. Each identity's
 list of fragments is kept in its `Principal` cell, fed from each
 fragment's outbox.
 
-## Identities (phase 4 slice A)
+## Identities
 
 The registry (`cell/src/registry.rs`; finite.computer's BANKS stands
 behind the same routes later) holds identities, the public keys each has
@@ -248,7 +248,7 @@ puts it under the creator's username; creating under someone else's is
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
 unsigned (an inbox, a site) names it in full.
 
-## Sign-in (phase 4 slice B)
+## Sign-in
 
 A person is keyed by their verified `(issuer, subject)`: the issuer is
 `workos:<client id>` (the environment), the subject WorkOS's user id. The
@@ -446,7 +446,7 @@ only while someone starts more than 100000 in ten minutes, about 166 a
 second, sustained. Expired sign-ins, redemptions, and sessions are
 deleted in batches on the registry's alarm, never on a request.
 
-## Sharing (phase 7, decision 4)
+## Sharing
 
 The share sheet and accepting invites are the platform's pages, never a
 fragment's: a fragment's page is its author's code (or an agent's), and
@@ -508,7 +508,7 @@ and styles only inline and images only from the platform
 | `DELETE /api/f/{name}/secrets/{KEY}` | editor | → `{ok, removed}` |
 | `GET /api/f/{name}/storage-token` | editor | → `{token, repo, api, expiresAt}`: ES256, this repo, `git:read`+`git:write`, 15 minutes |
 | `POST /api/f/{name}/refresh` | editor | → `{ok, refs: {main: {pin, moved} \| {absent}, live: ...}}`, once a live that moved is installed and the agent it declares has joined (`fragment deploy` asks it). A writer to the repo asks this after its push (the CLI does), and the platform follows its own moves itself: code.storage's push webhooks are not taken. A fragment reads the branches it has no pin for once, on its first request (a name made again keeps its repo); after that a move arrives by this or the poll backstop, and a site with nothing deployed answers 404 without asking code.storage |
-| `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files and 256 KiB; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
+| `POST /api/f/{name}/files` | editor | `{files: [{path, text \| base64} \| {path, delete: true}], message?, key?}` → `{commit}`: one commit to main, as a sync makes (at most 16 files, 400 past that, and 1 MiB of their decoded bytes in a body of at most 2 MiB, 413 past either; paths relative, no `.` or `..`). The same `key` from the same person answers the first commit again. A write of what main holds already commits nothing (code.storage makes no empty commit: its 412) and answers main's tip. Main's pin moves at once; live does not |
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip; `fragment deploy` asks it after its sync, so every deploy is this one (a first deploy makes the branch; later ones fast-forward it, and after a rollback take main's files whole: a restore commit, or one of their merge base and then the merge, since code.storage merges three ways), guarded against a live that moved meanwhile and made under the fragment's plane lock, so neither step's push pins the files live holds between them; the app installs from it, and the agent its `agent` block declares joins, at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, release?}]}` at main; a pointer's `size` is its bytes'. A fragment on a blessed template lists that template's data from the release beneath its own files (`release: true`, `lastCommitSha` `release:<hash of its bytes>`: templates/skills/README.md) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); a pointer's come from the blob store; with none of its own at `path`, a blessed template's data file from the release |
@@ -648,14 +648,17 @@ The app's database holds at most 16 MiB: a mutation that would leave it
 larger rolls back and answers 507 `storage_full`; the app still reads,
 and deleting rows makes room. A write from anywhere else (a query, the
 app's `fetch`) is not stopped: every check on the app's database runs in
-the app's own code, a courtesy to it, not a wall (the debt ledger). The
-app runs
-without code generation from strings (`eval`, `new Function`) and
-without `Atomics.wait`, and a turn whose heap grows past twice the
-isolate's limit (128 MiB) ends with "Worker exceeded its memory limit"
-(422). When the app's facet is at its concurrency limit (the Workers
+the app's own code, a courtesy to it, not a wall (the debt ledger).
+Before the author's constructor runs, the platform takes away the app's
+alarm (it would wedge the facet), its async transactions and KV writes
+(they would bypass a mutation's transaction and its cap), and facets of
+its own (`cell/platform.mjs`); a call to one throws, saying why. The
+Workers runtime refuses code generation from strings (`eval`, `new
+Function`) and `Atomics.wait`, and holds the app to its CPU and memory
+limits: a call past one fails as the app's (422; local workerd enforces
+neither). When the app's facet is at its concurrency limit (the Workers
 runtime's), calls into it answer 503 `node_full` and the rest of the
-fragment works (docs/hardening.md).
+fragment works.
 
 ### Files
 
@@ -1210,7 +1213,7 @@ platform is elsewhere (`Cache-Control: no-store`, so the platform can
 still move); any other name under the suffix, 404; anything else, the
 platform.
 
-## Agents (`agent/`, phase 5; co-hosted since phase 6)
+## Agents (`agent/`)
 
 A second script in the platform's fleet, with no ingress of its own: the
 router authenticates `/api/agents` and `/api/a/*` like any signed
@@ -1553,7 +1556,7 @@ computer, or an agent its owner narrowed from that provider), 403
 it again, or has given no own key), 402 or 403 the ledger's (an operator
 key's call its owner's ledger refuses).
 
-### A chat's records (phase 7, slice C)
+### A chat's records
 
 docs/chat-records.md extends this for computers' agents (phase 4: turns,
 drafts, prompts, attachments, Stop, hand-offs, routines) and wins where

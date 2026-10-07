@@ -1,4 +1,4 @@
-//! One-click fragments (docs/phase-6.md, step 2): a create from one of the
+//! One-click fragments (docs/api.md, Control API): a create from one of the
 //! platform's templates, the server-side commit and deploy routes (an
 //! agent's tools use them too), and the shell's list and its "new" app.
 

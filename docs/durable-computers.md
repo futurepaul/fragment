@@ -135,9 +135,9 @@ Hermes v0.21.5 (tag v2026.9.24): `website/docs/user-guide/docker.md`
 
 The shape finite-next's goose agent already had: the loop and its
 journal in a durable cell that checkpointed only at idle, the work in
-Sprite workspaces that paused warm (docs/finite-next-lessons.md). Five
-steps, each its own pull request with its tests, each leaving master
-whole:
+Sprite workspaces that paused warm (docs/finite-next-lessons.md, at the
+tag `celld-final`). Five steps, each its own pull request with its
+tests, each leaving master whole:
 
 1. **A+ (P2, reframed).** *Built (#147, #148; Litestream cut in
    #150), with two refinements: the copy is SQLite's online backup from
