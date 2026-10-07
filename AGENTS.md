@@ -100,7 +100,7 @@ prebuilt bundle is in the debt ledger).
   and runs our Hermes image (3.8 GB), so it runs only by name
   (`--only hermes`) and is a skip otherwise. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
-  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, and
+  `skip`, printed and counted: the hosted lane's. The share, isolation, browser, mcp (its settings check), and
   notes sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section;
   frames, and computers' frame checks, start one of their own that
