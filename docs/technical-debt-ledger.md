@@ -45,6 +45,23 @@ fragment.club until cutover (decisions 34–35).
   (and a lost answer to a refresh, which looks the same, asks its person
   to connect again).
 
+## A connected client's calls share `events` with the platform's own records
+
+- **Observed:** 2026-10-07, a fragment's MCP server (docs/api.md). Each
+  mutation or job a connected client runs appends `client.called` to
+  `events`, which keeps its newest 10 000 records (`limits::AUDIT_KEPT`)
+  for 90 days, beside the platform's own (deploys, refused code, runs
+  held, members changed).
+- **Risk:** a client calling a fragment's mutations thousands of times a
+  day pushes its deploys and refusals out of `events` within the day, so
+  `fragment events` and an agent reading it no longer see why its code
+  was refused.
+- **First proof:** a fragment whose `events` page holds only
+  `client.called` records, its last `code.installed` gone.
+- **Delete when:** a call's client is named where the call is already
+  recorded (its `ops` record and its run, beside their principal), and
+  `events` keeps only what no other record says.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
