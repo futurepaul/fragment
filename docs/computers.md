@@ -96,7 +96,6 @@ What every image may rely on, and must do.
 | `FRAGMENT_COMPUTER` | its id, `computer:<hex>` |
 | `FRAGMENT_API` | `http://api.fragment.internal` |
 | `FRAGMENT_MODEL` | `http://model.fragment.internal` |
-| `FRAGMENT_STORAGE` | `http://storage.fragment.internal` (S3; any access key) |
 | `FRAGMENT_IMAGE` | the pinned image's name and digest |
 | `RESTORE_PENDING` | `1` when `/data` is being restored |
 
@@ -184,11 +183,13 @@ that names a PID from before a sleep can name a live process after it.
 - **The restore's check** (optional): an image may carry an executable
   `/usr/local/bin/computer-check`. The DO runs it, as root, after it
   restores `/data` and before it opens the gate, so nothing reads `/data`
-  meanwhile (at most 2 minutes). It may put what it copied under the hold
-  back in place, and check what it restored. Exit 0: whole. Exit 3: the
-  save is unusable, and the DO marks it so and starts again from the save
-  before it. Any other exit: the check itself failed, a failed start like
-  any (tried again, on the same save). Our Hermes image's puts its
+  meanwhile (at most 2 minutes: past them it is killed, SIGKILL, as any
+  exec of the DO's is past its bound, and the start fails). It may put
+  what it copied under the hold back in place, and check what it
+  restored. Exit 0: whole. Exit 3: the save is unusable, and the DO
+  marks it so and starts again from the save before it. Any other exit:
+  the check itself failed, a failed start like any (tried again, on the
+  same save). Our Hermes image's puts its
   databases' copies back and runs `PRAGMA quick_check` on each.
 - The hold (above, `/run/computer/hold`) is read the same way: our
   bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
@@ -206,7 +207,11 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   computer's first, one more for each after), when it was taken, the
   start it was of, and whether its guest answered the hold (`held`). It
   keeps the newest three and deletes each older one's archive as a new
-  one is kept. The view lists them (`saves`), newest first.
+  one is kept (and what a save that failed had taken), keeping each
+  record until its delete worked, so a delete that failed is tried again
+  at the next save (at most 16 records wait; past that the oldest's
+  archive stays in R2, logged). The view lists them (`saves`), newest
+  first.
 - **When.** A save is asked for when the computer's work ends (its
   guest's last keepalive closes, and 30 s pass with none opened again, so
   turns back to back save once), every 15 minutes while a keepalive stays
@@ -386,17 +391,6 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
 
-### Storage
-
-`http://storage.fragment.internal` is an S3 endpoint over the
-computer's own R2 prefix: any bucket name and key, scoped by the
-intercept. It is the image's, for whatever it keeps of its own outside
-`/data`. Ours keeps nothing there: its Litestream replicas went with
-step 1 of docs/durable-computers.md (P4 of
-docs/explorations/pi-durable.md: they were never read, and a restore of
-them would have put a `state.db` of seconds ago into a `/data` of the
-last save).
-
 ### Connections and operator keys
 
 Paul, 2026-10-04 (decisions 22, 37 and 44): every credential a guest uses
@@ -449,8 +443,8 @@ the provider's own hosts.
   env, placeholder, hosts}]`, those it may use now:
   - a connection its owner has connected (Pipes says `connected`: the
     connected account's state, read with no token minted, believed for a
-    minute; the owner's own read of their connections, and a swap Pipes
-    refused, tell the computer at once);
+    minute; the owner's own read of their connections, and each swap's
+    answer from Pipes, tell the computer at once);
   - an operator key the deployment holds;
   - an own key its owner gave (`PUT /api/connections/{provider}/key`,
     sealed by the computer);
@@ -481,21 +475,30 @@ the provider's own hosts.
   - is a connection its owner has not connected, or must authorize again:
     403 `not_connected`; an own key its owner has not given: 403
     `not_connected`;
-  - is an operator key's whose owner's ledger refuses a paid call: 402 or
-    403, the ledger's reason.
+  - is an operator key's, and its owner's ledger refuses to hold the
+    call's price: 402 or 403, with the ledger's reason. A ledger that does
+    not answer refuses it too (5xx), since a key is the operator's money.
 
   Otherwise each placeholder's place gets its credential: a header is its
   format around it (`Bearer sk-…`, whatever scheme word the guest wrote), a
   query parameter the credential (percent-encoded), a half of basic auth
   the credential (the other half as it came). No `x-fragment-agent` is read
   or needed (a hard cut), and no `x-fragment-…` header goes to a provider.
-  A connection's token is held until a minute before it expires, at most
-  ten minutes. A request to such a host with no placeholder goes on as it
+  A connection's token is asked of Pipes for each request, never held:
+  Pipes holds and refreshes it, so a connection disconnected or revoked
+  stops at the next request, and the state the guest's view lists follows
+  Pipes' answer. The owner's WorkOS user, which Pipes asks for, is the
+  registry's once and then kept by the computer: the first subject a
+  person signed in as with an issuer never changes. A request to such a
+  host with no placeholder goes on as it
   came; a body is sent as it came, read whole (at most 32 MiB); a redirect
   is never followed (the guest follows it, without the credential).
-- **After the provider answers** (anything under 500), each operator key's
-  call is metered to the agent's owner (`key:<computer>:…`, at the price
-  book's price and the margin), and every call is counted as the agent's
+- **An operator key's call is held first**, as a model call is
+  (docs/ledger.md): its price (the price book's and the margin) is reserved
+  on the agent's owner's ledger (`key:<computer>:…`) before the request
+  goes on. Once the provider answers (anything under 500), the call
+  settles at that price; one it did not answer is released. Then every
+  call is counted as the agent's
   in the computer's `uses`: by month, provider and agent, its calls and
   what they were charged (a connection's and an own key's are counted,
   never charged). Its owner reads them (`GET /api/computers/{id}/uses`,
@@ -587,7 +590,11 @@ settings and state):
   "Skills and the CLI in our Hermes image". An agent fragment's optional
   `agent.json`
   (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
-  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23).
+  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23). One the
+  platform does not answer for (no 200, 403 or 404) is said
+  (`profile.tier_unread`), and the profile's config stays as the last boot
+  wrote it, its tier with it; a profile with none yet takes the medium
+  tier.
 
   Its work (the seam, above): each agent's is `/data/work/<profile>`.
   Its profile's config makes it the terminal's working directory
@@ -732,11 +739,13 @@ and how a runtime finds them, is the image's.
   in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
   synced both ways: an agent's own skills are versioned in its fragment).
   Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. Hermes' bundled skills
-  are the default profile's only; an agent's profile has its own, the
-  managed set, which is what the shell's Skills section lists, and the
-  platform skill. A managed skill a session has not yet seen appears at its
-  next session.
+  managed one, and either over the platform skill. An agent's profile has
+  its own, the managed set, which is what the shell's Skills section
+  lists, and the platform skill. The image carries none of Hermes' bundled
+  skills: Hermes copies them only into the home its sync runs in, the
+  gateway's default profile, which runs no turns (and stage2 and the
+  gateway then sync nothing at a boot). A managed skill a session has not
+  yet seen appears at its next session.
 - **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
   from `cli/` with the image: the Hermes image's build context is the
   repo's root). Each profile's `.env` names its agent and its owner
@@ -820,9 +829,10 @@ persisted)".
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
   charged.
 - Model calls bill the agent's owner, through the platform's model
-  route. Each operator key's call the provider answered is metered to
-  the agent's owner at the key's price and the margin (`key:<computer>:…`;
-  decision 37); a catalog's operator key always has a price (its own or
+  route. Each operator key's call is held on the agent's owner's ledger
+  before it is made, and settled once the provider answered, at the key's
+  price and the margin (`key:<computer>:…`; decision 37); a catalog's
+  operator key always has a price (its own or
   the price book's list price). A connection's call and an own key's are
   counted, never charged; every call is in the computer's `uses`.
 - At zero credit, or with agents stopped, no wake starts (decision 27):

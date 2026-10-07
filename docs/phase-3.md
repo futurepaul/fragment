@@ -134,7 +134,10 @@ Nothing needs it yet: the CLI refreshes a fragment after every sync and
 deploy, the cell learns of its own commits, and the five-minute poll
 catches the rest. The first writer outside those is a computer pushing
 with git (phase 8), which brings the route and Paul's dashboard
-subscription.
+subscription. *2026-10-06 (#156):* no such writer came (a computer's
+agents use the CLI), so the per-fragment webhook route, which only the
+fake ever called, went; the poll runs only while a storage token is
+fresh or a follow failed (cell/src/plane.rs).
 
 **E. Egress by address.** A job's fetch must not reach the fleet's
 private network even through a public name that resolves to a private

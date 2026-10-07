@@ -319,12 +319,6 @@ impl Browser {
             .collect())
     }
 
-    /// Closes a page `pages` listed.
-    pub fn close_target(&mut self, target: &str) -> Result<()> {
-        self.send("Target.closeTarget", json!({ "targetId": target }), None)?;
-        Ok(())
-    }
-
     /// Evaluates `expr` in the page (awaiting a promise) and returns its value.
     pub fn eval(&mut self, page: &Page, expr: &str) -> Result<Value> {
         let r = self.send("Runtime.evaluate", json!({ "expression": expr, "awaitPromise": true, "returnByValue": true }), Some(&page.session))?;
@@ -514,20 +508,6 @@ impl Browser {
         )?;
         let (Some(x), Some(y)) = (at[0].as_f64(), at[1].as_f64()) else { bail!("nothing on the page matches {selector}") };
         self.click_at(page, (x, y))
-    }
-
-    /// A mouse drag from one point to another, in steps, as a hand makes it.
-    pub fn drag(&mut self, page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<()> {
-        let mouse = |kind: &str, (x, y): (f64, f64), buttons: u8| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 });
-        self.send("Input.dispatchMouseEvent", mouse("mouseMoved", from, 0), Some(&page.session))?;
-        self.send("Input.dispatchMouseEvent", mouse("mousePressed", from, 1), Some(&page.session))?;
-        for i in 1..=10 {
-            let t = i as f64 / 10.0;
-            let at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-            self.send("Input.dispatchMouseEvent", mouse("mouseMoved", at, 1), Some(&page.session))?;
-        }
-        self.send("Input.dispatchMouseEvent", mouse("mouseReleased", to, 0), Some(&page.session))?;
-        Ok(())
     }
 }
 

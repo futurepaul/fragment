@@ -61,9 +61,7 @@ const SWEEP_AGAIN_MS: i64 = 1000;
 const _: () = assert!(limits::SIGNINS_PENDING_MAX_DEFAULT >= 1 && limits::SITE_SESSIONS_PER_FRAGMENT_MAX >= 1 && limits::REDEMPTIONS_PER_SESSION_MAX >= 1);
 
 /// The expiry columns are indexed for the sweep, and a site session's
-/// `(parent, fragment, created_at)` for its bound (that index replaced the
-/// parent-only one the fleet made first). `embedder` is a frame's
-/// (`migrate` adds it to tables from before frames).
+/// `(parent, fragment, created_at)` for its bound. `embedder` is a frame's.
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS logins (
   state TEXT PRIMARY KEY, return_to TEXT NOT NULL, link_to TEXT, created_at INTEGER NOT NULL);
@@ -71,7 +69,6 @@ CREATE INDEX IF NOT EXISTS logins_created ON logins (created_at);
 CREATE TABLE IF NOT EXISTS sessions (
   hash TEXT PRIMARY KEY, identity TEXT NOT NULL, fragment TEXT, parent TEXT, workos_sid TEXT,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, embedder TEXT);
-DROP INDEX IF EXISTS sessions_parent;
 CREATE INDEX IF NOT EXISTS sessions_parent_fragment ON sessions (parent, fragment, created_at) WHERE parent IS NOT NULL;
 CREATE INDEX IF NOT EXISTS sessions_expires ON sessions (expires_at);
 CREATE TABLE IF NOT EXISTS redemptions (
@@ -85,17 +82,6 @@ CREATE INDEX IF NOT EXISTS consents_at ON consents (identity, at);
 CREATE TABLE IF NOT EXISTS e2e_days (
   day INTEGER PRIMARY KEY, people INTEGER NOT NULL, paid_calls INTEGER NOT NULL);
 ";
-
-/// Sign-in tables from before frames gain their `embedder` (every row
-/// made before is a top-level one).
-pub(super) fn migrate(sql: &SqlStorage) {
-    for table in ["sessions", "redemptions"] {
-        let cols: Vec<serde_json::Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a sign-in table's columns read");
-        if !cols.iter().any(|c| c["name"] == "embedder") {
-            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN embedder TEXT"), None).expect("a sign-in table migrates");
-        }
-    }
-}
 
 pub(super) fn sha(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))

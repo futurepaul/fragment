@@ -31,7 +31,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{ensure, Context, Result};
-use fragment_devstack::node::Node;
+use fragment_devstack::node::{Node, NODE_VERSION};
 
 /// Built or vendored JavaScript, each prefix with where it is recorded:
 /// never edited here, so never checked.
@@ -150,7 +150,7 @@ pub fn check(node: &Node, cache: &Path, root: &Path, files: &[(String, InputType
         failed.extend(report?);
     }
     failed.sort();
-    ensure!(failed.is_empty(), "JavaScript that does not parse (node --check on Node {}), {} file(s):\n\n{}", node.release, failed.len(), failed.join("\n\n"));
+    ensure!(failed.is_empty(), "JavaScript that does not parse (node --check on Node v{NODE_VERSION}), {} file(s):\n\n{}", failed.len(), failed.join("\n\n"));
     Ok(())
 }
 
@@ -311,7 +311,7 @@ mod tests {
         check(&node, &cache, &dir, &list(&good)).expect("the good files parse, each as its kind");
         let all = [list(&good), list(&broken)].concat();
         let err = check(&node, &cache, &dir, &all).expect_err("the broken files fail").to_string();
-        assert!(err.starts_with(&format!("JavaScript that does not parse (node --check on Node {}), 4 file(s):", node.release)), "{err}");
+        assert!(err.starts_with(&format!("JavaScript that does not parse (node --check on Node v{NODE_VERSION}), 4 file(s):")), "{err}");
         for (at, message) in [
             ("site/shell.js:3\nconst a = 2;", "SyntaxError: Identifier 'a' has already been declared"),
             ("lib/broken.mjs:2", "SyntaxError: Export 'nope' is not defined in module"),
