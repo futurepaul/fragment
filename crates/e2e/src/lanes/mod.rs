@@ -112,13 +112,12 @@ const LANES: &[Lane] = &[
 /// The suite split for CI (`--shard k/n`): each shard runs on a runner of
 /// its own, with its own build and node, the sections it lists in the
 /// lanes' order. Every section is in exactly one shard (a test below), so
-/// the shards together run what one whole run does; CI's `e2e` job checks
-/// that from their summaries (`cargo xtask e2e-summary`). `hermes` runs
-/// only by name, and `agent-smoke` only on a preview, so their shard
-/// reports each as the whole run does: one skip.
+/// the shards together run what one whole run does. `hermes` runs only by
+/// name, and `agent-smoke` only on a preview, so their shard reports each
+/// as the whole run does: one skip.
 ///
-/// Balanced by measured time (each summary's `ms`, as `cargo xtask
-/// e2e-summary` prints it, on CI's runners): each shard about a quarter of
+/// Balanced by measured time (each section's, as its shard's log prints
+/// it, on CI's runners): each shard about a quarter of
 /// the suite's ~12.5 minutes there (run 37171847969, less the two waits
 /// removed since: about 3 minutes each). The slow ones vary from run
 /// to run: `computers` waits up to a minute for its routine's cron minute,
@@ -146,16 +145,15 @@ pub fn shard_runs(k: u32, name: &str) -> bool {
 /// reports every failure at once.
 pub fn run(s: &mut Suite) {
     for lane in LANES {
-        counted(s, *lane);
+        run_one(s, *lane);
     }
 }
 
-/// Runs one lane, its checks counted to the section it ran (or skipped
-/// whole), or outside any section when it asked for none that ran.
-pub fn counted(s: &mut Suite, lane: impl FnOnce(&mut Suite, &Api) -> Result<()>) {
+/// Runs one lane, and prints how long its section took (what a rebalance
+/// of `SHARDS` reads).
+pub fn run_one(s: &mut Suite, lane: impl FnOnce(&mut Suite, &Api) -> Result<()>) {
     let api = s.api();
     let before = s.ran.len();
-    let (accounted, counts) = (s.accounted.len(), s.counts());
     let t0 = Instant::now();
     let stopped = match panic::catch_unwind(AssertUnwindSafe(|| lane(s, &api))) {
         Ok(Ok(())) => None,
@@ -170,16 +168,6 @@ pub fn counted(s: &mut Suite, lane: impl FnOnce(&mut Suite, &Api) -> Result<()>)
     }
     if s.ran.len() == before + 1 {
         println!("      ({} in {:.1?})", s.ran[before], t0.elapsed());
-    }
-    let made = s.counts().since(counts);
-    match s.accounted.len() - accounted {
-        0 => s.outside = s.outside + made,
-        1 => {
-            let section = s.accounted.last_mut().expect("a section was accounted for");
-            section.counts = made;
-            section.ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-        }
-        more => panic!("a lane accounts for one section at most, not {more}"),
     }
 }
 

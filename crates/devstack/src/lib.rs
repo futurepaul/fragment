@@ -22,7 +22,6 @@ pub mod node;
 mod node_release;
 pub mod signals;
 pub mod store;
-pub mod summary;
 
 /// A node must announce "ready" within this: wrangler builds the computer
 /// images first (a cold build of the stub compiles its bridge in Docker).
