@@ -372,7 +372,7 @@ random bytes, the registry keeps their SHA-256).
 
 | method & path (platform origin) | what |
 | --- | --- |
-| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/settings` it opens its settings |
+| `GET /`, `GET /settings` | the shell's page, for anyone (The shell, below): signed out it asks them to sign in, without a username it asks for one; at `/` it opens their mind, at `/?apps` their chats and apps, at `/settings` its settings |
 | `GET /auth/login?return=&login_hint=` | → WorkOS's authorize URL (`provider=authkit`, `redirect_uri` `<platform>/auth/callback`, a state); the state is bound to the browser by `fragment_login` (HttpOnly, SameSite=Lax, `Path=/`, ten minutes) |
 | `GET /auth/link?return=` | the same from a signed-in browser: the sign-in that comes back joins this person (409 when it is someone else's) |
 | `GET /auth/callback?code=&state=` | the state must match the browser's cookie (400 otherwise); the code is exchanged server-side; → `fragment_session` (HttpOnly, SameSite=Lax, `Path=/`) and back to `return`; a WorkOS `error` is shown (400); a sign-in already finished or past its ten minutes, or a code WorkOS refuses (a callback sent again), is 400 `invalid_request` |
@@ -1387,8 +1387,12 @@ the computer's swap, each with a placeholder of its own
 
 The platform's one page is `/`, and `/settings` (cell/shell/, its files at
 `/__shell/<file>`): its script reads the path, opening its settings at
-`/settings` and the person's chats at `/`, and puts the view it shows in
-the address, so a reload stays put. Its settings hold the person's
+`/settings` and the person's chats and apps at `/?apps`, and puts the view
+it shows in the address, so a reload stays put. At `/` it opens the
+person's mind (kind `mind`, docs/optchat.md) full-screen on its own origin
+(`/auth/fragment`); a person with none gets their first run there: their
+default agent on their computer, their mind (`members`, the agent an
+editor), then the mind. Its settings hold the person's
 account (username, sign-ins, identity id, picture, `/auth/link` to add
 another sign-in, a POST to `/auth/logout`), their credit and what their
 standing stops, their computer and agents, their skills (decision 17: the
