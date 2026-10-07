@@ -1,4 +1,5 @@
-//! A web push service, and a receiver for `notifyUrls` (phase 2 slice F).
+//! A web push service, and a receiver at `/notify` for the records a
+//! channel subscription delivers (phase 2 slice F).
 //! Subscriptions are made here as a browser would make them (a P-256 key
 //! and an auth secret per endpoint); a push is accepted only with a valid
 //! VAPID token for this service's origin, naming a contact a push service

@@ -550,7 +550,7 @@ run in the same facet, under the release's identity (`blessed:<template>@
 changes the template installs again at each such fragment's next request,
 a fresh worker as a new commit is: what runs is the release, which its
 commit does not name, and the `code.installed` event says when it changed. Its repo holds only its face and data: a live
-commit that declares operations, channels, triggers, `notifyUrls` or an
+commit that declares operations, channels, triggers or an
 agent, or that carries `app.mjs` or `applib/` code of its own, keeps the
 last good code and says to fork it in `status.code.error`. Forking makes
 the code the fragment's own.
@@ -771,7 +771,7 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
 
-### Deliveries: web push and notifyUrls
+### Deliveries: web push
 
 A page subscribes with `await fragment.push.register(who)` (from a click:
 it registers `./__sw.js`, reads the fragment's VAPID key from
@@ -789,10 +789,6 @@ all of them with `*`, once per mutation or step. A relative `url` is the
 fragment's own (`./` is its page): a click focuses a page of it already
 there, or opens one. `fragment.notify.{supported, permission, ask,
 show}` wrap the Notification API.
-
-`fragment.json`'s `notifyUrls` (at most 3) receive `{type: "changed",
-fragment, sha, paths}` (JSON POST, unsigned, as before) on each move of
-`main`.
 
 Every delivery is first written to the fragment's delivery outbox with
 what caused it (a record's deliveries in the same turn as the record, a
