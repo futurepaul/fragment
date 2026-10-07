@@ -62,6 +62,7 @@ impl Upstream {
                 "/flaky" if flaky.fetch_add(1, Ordering::SeqCst) < 2 => Response::json(503, &json!({ "error": "busy" })),
                 "/flaky" => Response::json(200, &json!({ "items": ["gamma"] })),
                 "/down" => Response::json(503, &json!({ "error": "down" })),
+                "/endless" => Response::endless(),
                 "/page" => Response::bytes(200, "text/html", b"<html><head><title> A page to title </title></head></html>".to_vec()),
                 "/moved" => Response::json(302, &json!({})).with_header("location", "http://127.0.0.1:1/private"),
                 _ => Response::json(404, &json!({ "error": "no" })),
@@ -240,6 +241,13 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         "a refused fetch fails its step at once, and the job may catch it",
         refused["output"]["caught"] == true && refused["output"]["name"] == "StepError" && refused["output"]["message"].as_str().is_some_and(|m| m.contains("http and https")),
         &refused,
+    );
+    let r = api.op(&owner, &name, "careful", "c3", json!({ "url": upstream.url("/endless") }))?;
+    let endless = settle(api, &owner, &name, started(&r), &["succeeded", "held"], long);
+    s.ok(
+        "a body that never ends is read to the fetch's limit, no further, and fails its step for good",
+        endless["output"]["caught"] == true && endless["output"]["message"].as_str().is_some_and(|m| m.contains(&format!("more than {} bytes", limits::FETCH_RESPONSE_MAX_BYTES))),
+        &endless,
     );
 
     let r = api.op(&owner, &name, "probe", "probe-1", json!({ "url": upstream.url("/moved") }))?;
