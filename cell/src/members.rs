@@ -159,6 +159,11 @@ impl FragmentCell {
             return Ok(());
         }
         self.set_meta(MetaKey::Face, &face)?;
+        self.reindex()
+    }
+
+    /// Every list's row is sent again: its owner's and each member's.
+    pub(crate) fn reindex(&self) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
         self.index_change(&owner, Some(Role::Owner))?;
         for r in self.rows("SELECT principal, role FROM members", vec![])? {
@@ -207,6 +212,13 @@ impl FragmentCell {
                 console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
             }
         }
+        if let Err(e) = self.search_fence() {
+            console_error!("{name}: its search was not fenced to the channels searched now ({:?}): {}", e.code, e.message);
+        }
+        let searched = match self.searched_channels() {
+            Ok(searched) => searched,
+            Err(e) => return console_error!("{name}: its searched channels did not read ({:?}): {}", e.code, e.message),
+        };
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ? ORDER BY version DESC LIMIT ?",
@@ -224,8 +236,10 @@ impl FragmentCell {
                 "incarnation": incarnation.parse::<i64>().unwrap_or(0),
                 "version": version,
             });
-            // every row a role names: the fragment's face, as it is now
+            // every row a role names: the channels searched and the
+            // fragment's face, as they are now
             if row["role"].is_string() {
+                body["searched"] = json!(searched);
                 if let Ok(Some(face)) = self.meta(MetaKey::Face) {
                     body["face"] = serde_json::from_str(&face).unwrap_or(Value::Null);
                 }

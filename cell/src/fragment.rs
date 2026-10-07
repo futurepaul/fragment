@@ -28,7 +28,7 @@
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
 //!   POST   /api/webhook                   code.storage (HMAC)
-//!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
+//!   GET    /api/files  /api/file?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
 //!   GET    /api/events?since=|tail=       viewer
@@ -40,7 +40,7 @@
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
 //!   POST   /api/inbox                     the inbox token (no signature)
-//!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
+//!   *      /serve/<path>                  the site, `__files`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
@@ -72,7 +72,7 @@ use crate::config::Config;
 use crate::cs::Cs;
 use crate::error::{CellError, CellResult};
 use crate::js;
-use crate::routed::{Credential, Mode, Routed, Signed};
+use crate::routed::{Credential, Routed, Signed};
 
 /// How long a create in progress holds its name.
 pub(crate) const CLAIM_TTL_MS: i64 = 120_000;
@@ -122,7 +122,8 @@ CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL,
   role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL,
-  attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER);
+  attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER,
+  code TEXT);
 CREATE UNIQUE INDEX IF NOT EXISTS runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS runs_status ON runs (status, op);
 CREATE TABLE IF NOT EXISTS steps (
@@ -312,8 +313,8 @@ pub struct Caller {
     /// The URL the request arrived on: canonical URLs, cookies, and the
     /// query string derive from it.
     pub url: url::Url,
-    /// How a site request addressed the fragment (`None` off the site).
-    pub mode: Option<Mode>,
+    /// A site request (`/serve/…`): its page's, not the API's.
+    pub site: bool,
 }
 
 impl Caller {
@@ -369,11 +370,11 @@ pub(crate) enum MetaKey {
     /// The owner's row in their list has been sent this fragment's sharing
     /// (members.rs); a fragment from before sends it once.
     SharingSent,
-    /// When the poll backstop runs next (a day after the last pass, or
-    /// within the poll interval while the fragment is busy: plane.rs `busy`).
+    /// When the next pass runs (a day after the last, or within the poll
+    /// interval while the fragment is busy: plane.rs `busy`).
     PollAt,
-    /// When something outside the platform last may have written the repo:
-    /// a storage token was minted for it, or a webhook arrived (plane.rs).
+    /// When the pins last may have fallen behind the repo: a storage token
+    /// was minted for it, or a move failed to follow (plane.rs `may_lag`).
     OutsideAt,
     /// A template still to commit (publish.rs).
     TemplatePending,
@@ -408,6 +409,9 @@ pub(crate) enum MetaKey {
     Blessed,
     /// What its members' lists show of it (`{kind, title}`), as last sent.
     Face,
+    /// The channels its people's search holds, as the rows last named
+    /// them (search.rs `search_fence`): a JSON array of names.
+    Searched,
     /// Why live's code was not installed.
     CodeError,
     /// When the blob collection runs next.
@@ -488,6 +492,7 @@ impl MetaKey {
             MetaKey::MetaLive => "meta_live",
             MetaKey::Blessed => "blessed",
             MetaKey::Face => "face",
+            MetaKey::Searched => "searched",
             MetaKey::CodeError => "code_error",
             MetaKey::BlobsGcAt => "blobs_gc_at",
             MetaKey::Vapid => "vapid",
@@ -829,7 +834,7 @@ impl FragmentCell {
     pub(crate) async fn identified<'a>(&self, caller: &'a Caller, name: &str) -> CellResult<Cow<'a, Caller>> {
         let Some(credential) = &caller.unresolved else { return Ok(Cow::Borrowed(caller)) };
         let signed = credential.clone().resolve(&self.env, name).await?;
-        Ok(Cow::Owned(Caller { signed, unresolved: None, url: caller.url.clone(), mode: caller.mode }))
+        Ok(Cow::Owned(Caller { signed, unresolved: None, url: caller.url.clone(), site: caller.site }))
     }
 
     /// The caller of a read that answers alike for everyone who may see
@@ -940,8 +945,8 @@ impl FragmentCell {
             return self.cap_files(&op, &body).await;
         }
         // Every route below is the router's: decoded once, from headers only it sets.
-        let Routed { name: routed_name, url, mode, signed, credential } = Routed::from_headers(req.headers())?;
-        let caller = Caller { signed, unresolved: credential, url, mode };
+        let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;
+        let caller = Caller { signed, unresolved: credential, url, site: path.starts_with("/serve/") };
         // every request the router hands a fragment is its owner's to pay for
         self.count_request();
         self.meter_soon().await;
@@ -1034,7 +1039,6 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "card"]) => self.card_api(&caller, &req).await,
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
-            (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
@@ -1223,9 +1227,9 @@ impl FragmentCell {
     }
 
     pub(crate) fn code_status(&self) -> CellResult<CodeStatus> {
-        let rows = self.rows("SELECT sha FROM code WHERE id = 1", vec![])?;
-        let sha = rows.first().map(|r| r["sha"].as_str().expect("code.sha is TEXT").to_string());
-        Ok(CodeStatus { sha, operations: self.operations()?, error: self.meta(MetaKey::CodeError)? })
+        let rows = self.rows("SELECT sha, loader_id FROM code WHERE id = 1", vec![])?;
+        let text = |col: &str| rows.first().map(|r| r[col].as_str().expect("code's columns are TEXT").to_string());
+        Ok(CodeStatus { sha: text("sha"), id: text("loader_id"), operations: self.operations()?, error: self.meta(MetaKey::CodeError)? })
     }
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {
@@ -1287,9 +1291,10 @@ impl FragmentCell {
     /// The alarm runs an ended life's cleanup (ended.rs) whether or not a
     /// life was made since; then the life's index, search, joined and
     /// delivery outboxes, due schedules, queued runs, and the pass: the
-    /// poll backstop, which also checks
-    /// running runs. The next pass is a day away, or within the poll
-    /// interval while the fragment is busy (`arm`). Then it re-arms.
+    /// trims, the poll backstop (while the pins may lag), the blob
+    /// collection, running runs checked, and the storage sample. The next
+    /// pass is a day away, or within the poll interval while the fragment
+    /// is busy (`arm`). Then it re-arms.
     async fn on_alarm(&self) -> CellResult<()> {
         self.drain_ended().await;
         if self.meta(MetaKey::CreatedAt)?.is_none() {
@@ -1321,13 +1326,15 @@ impl FragmentCell {
             self.trim_audit()?;
             self.trim_runs()?;
             self.trim_writes()?;
-            self.poll().await;
+            if self.pins_may_lag()? {
+                self.poll().await;
+            }
             if let Err(e) = self.collect_blobs().await {
                 self.event("blobs.collect-failed", &e.message, json!({ "code": e.code }));
             }
             self.reconcile_runs().await;
             self.release_ended_holds().await;
-            if let Err(e) = self.sample_storage(false).await {
+            if let Err(e) = self.sample_storage(false) {
                 self.event("meter.sample-failed", &e.message, json!({ "code": e.code }));
             }
             self.launch_queued().await;

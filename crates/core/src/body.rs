@@ -4,7 +4,9 @@
 //! body without one (chunked) at the chunk that crosses the limit, so an
 //! upload never fills a router's memory before it is measured. Each router
 //! feeds this its runtime's stream a chunk at a time and maps the refusal
-//! to its own error; the limit's logic lives here once.
+//! to its own error; the limit's logic lives here once. The cell reads an
+//! answer from a vendor or a job's upstream the same way (cs.rs
+//! `read_answer`), keeping what came before the refusal as a cut answer.
 
 /// A body past its limit: `bytes` is what was known when it was refused
 /// (the declared length, or what arrived through the crossing chunk).

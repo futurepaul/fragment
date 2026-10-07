@@ -384,8 +384,8 @@ that a pointer in git names.
 - Fragment identity: the npub secret is generated client-side at create,
   crosses the wire once, and is stored wrapped.
 - Webhooks: validate → persist (dedupe) → interpret; a poll backstop,
-  every 5 minutes while something outside the platform may be writing
-  (a storage token or a webhook in the last day), else daily.
+  every 5 minutes, only while the pins may lag the repo (a storage token
+  minted, or a move that failed to follow, in the last day).
 
 ## Phases
 
@@ -568,8 +568,8 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   holds a Sprites Task while a turn runs. Credentials arrive through
   Sprites connectors (`docs/secrets.md`). The personal computer adds
   Sprite services (Chrome, display, control).
-- **Acceptance:** a builder takes a task to `deploy --preview` and then
-  live; Stop cancels the running command and leaves nothing published;
+- **Acceptance:** a builder takes a task to main and then live; Stop
+  cancels the running command and leaves nothing published;
   a platform kill mid-tool runs the tool once; a computer restart
   resumes the turn from the cell's conversation; no credential is on the
   Sprite's disk.
