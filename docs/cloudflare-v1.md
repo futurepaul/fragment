@@ -195,7 +195,9 @@ speaking Cloudflare's APIs) returns once this product works.
       managed or own `fragment` wins (docs/computers.md). The shell makes
       a skills fragment, once, for a person with an agent and none (set up
       before 2026-10-03), and an awake computer looks for one every minute
-      while its owner has none.
+      while its owner has none. (That backfill was cut since: such a person
+      adds one from settings, "Add the managed skills", which shell-ui
+      drives.)
     - Evidence: hermes-boot's tests (the platform skill with no skills
       fragment, a managed one shadowing it); shell-ui (the backfill); the
       real-Hermes lane (with no skills fragment Hermes lists `fragment` in

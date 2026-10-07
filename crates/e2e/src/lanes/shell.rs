@@ -668,7 +668,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let credit = "document.querySelector(\"#settings-page a[href='https://www.pexels.com/@teobadini/'][target=_blank][rel=noopener]\")";
     let credited = b.eval(&page, &format!("{credit}?.textContent === 'Teo Badini' && {credit}.parentElement.textContent === 'Photo by Teo Badini on Pexels'"))?;
     s.ok("and the wallpaper's photographer, credited with a link", credited == true, &credited);
-    backfill_ui(s, api, &mut b, &page, &session)?;
+    add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
     b.color_scheme(&page, "dark")?;
@@ -895,12 +895,12 @@ fn own_skills(api: &Api, session: &str) -> Result<Vec<String>> {
     Ok(list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == "skills" && f["role"] == "owner").filter_map(|f| f["name"].as_str().map(str::to_string)).collect())
 }
 
-/// The skills fragment backfilled (decision 17): a person whose agents were
-/// made before setup made one (2026-10-03) has an agent and no skills
-/// fragment. Valid: the shell makes one as it loads, from the blessed
-/// template, before settings reads it. Replay: loaded again, it makes no
-/// second. Method: the person's own is deleted, then the shell reloaded.
-fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
+/// The managed skills added from settings (decision 17): a person with an
+/// agent and no skills fragment (theirs deleted here; people set up before
+/// 2026-10-03 have none). Valid: their settings offer the managed skills,
+/// and the button makes the fragment from the blessed template and lists
+/// it. Replay: loaded again, there is no second. Loading makes none unasked.
+fn add_skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let before = own_skills(api, session)?;
     let Some(old) = before.first().cloned() else {
@@ -908,9 +908,12 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
         return Ok(());
     };
     let r = shell(api, session, "DELETE", &format!("/api/f/{old}"), None, &[])?;
-    let gone = own_skills(api, session)?.is_empty();
-    s.ok("with it deleted, the person has an agent and no skills fragment, as people set up before 2026-10-03 do", r.status == 200 && gone, &r);
     b.reload(page)?;
+    let add = "[...document.querySelectorAll('#settings-skills button')].find((b) => b.textContent === 'Add the managed skills')";
+    let offered = b.until(page, &format!("!!{add}"), wait);
+    let none = own_skills(api, session)?;
+    s.ok("with it deleted, their settings offer the managed skills, and loading made none", r.status == 200 && offered && none.is_empty(), json!({ "deleted": r.status, "skills": none }));
+    b.eval(page, &format!("({add}.click(), true)"))?;
     let made = s.eventually(wait, || own_skills(api, session).is_ok_and(|l| l.len() == 1));
     let now = own_skills(api, session)?;
     let name = now.first().cloned().unwrap_or_default();
@@ -920,14 +923,14 @@ fn backfill_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: 
     let manifest = manifest_of()?;
     let listed = b.until(page, &format!("document.getElementById('settings-skills')?.dataset.fragment === {}", js(&name)), wait);
     s.ok(
-        "the shell, loaded, makes them one from the blessed template, silently, and their settings list it",
+        "the button makes them one from the blessed template, and their settings list it",
         made && manifest.body["template"] == "skills" && listed,
         json!({ "skills": now, "manifest": manifest.body, "settings": b.eval(page, "document.getElementById('settings-skills')?.innerText.slice(0, 200)")? }),
     );
     b.reload(page)?;
     b.until(page, "!!document.getElementById('settings-skills')", wait);
     let again = own_skills(api, session)?;
-    s.ok("loaded again, it makes no second", again == now, json!(again));
+    s.ok("loaded again, there is no second", again == now, json!(again));
     Ok(())
 }
 
