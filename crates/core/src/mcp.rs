@@ -10,6 +10,8 @@
 
 use base64::Engine;
 use fragment_proto::{limits, OpDecl, OpKind};
+
+pub mod verbs;
 use serde_json::{json, Value};
 
 /// The modern revision.

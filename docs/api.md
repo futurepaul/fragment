@@ -686,7 +686,68 @@ its notifications are 202. The methods: `tools/list` and `tools/call`.
 - **What it does names the client**: each mutation or job a connected
   client runs (not its replays) appends `client.called` to `events`,
   `{op, id, principal, client, connection}`, "add a1 by id:… through
-  Claude". Its records, runs and ledger name the person, as theirs.
+  Claude". Its records, runs and ledger name the person, as theirs. Any
+  other write a client's request makes on a fragment (the platform's
+  tools, below) appends `client.acted`, `{method, route, principal,
+  client, connection}`, "POST /api/deploy by id:… through Claude".
+
+### The platform's MCP server
+
+The platform's verbs as tools at `<platform>/mcp`, for a client
+connected to it (resource `<platform>/mcp`; its metadata at
+`/.well-known/oauth-protected-resource/mcp` and
+`/.well-known/oauth-protected-resource`): the CLI's daily loop, each tool
+one route of the API above, asked as the person (cell/src/mcp.rs; the
+tools and their routes `fragment_core::mcp::verbs`). Its envelope, its
+eras, its refusals and its 401s are a fragment's server's (above).
+
+| tool | arguments | the API's route |
+| --- | --- | --- |
+| `list` | | `GET /api/fragments` |
+| `create` | `label`, `template?` (`blank`, `todo`, `inbox`, `calories`), `visibility?` | `POST /api/fragments` |
+| `status` | `name` | `GET /api/f/{name}/status` |
+| `files` | `name` | `GET /api/f/{name}/files` |
+| `read` | `name`, `path` | `GET /api/f/{name}/file?path=` → `{path, text}`: text only, at most 1 MiB (anything else is refused, to be read with the CLI) |
+| `write` | `name`, `files` (`[{path, text} \| {path, delete: true}]`), `key`, `message?` | `POST /api/f/{name}/files` (once by its `key`) |
+| `deploy` | `name`, `note?` | `POST /api/f/{name}/deploy` |
+| `members` | `name` | `GET /api/f/{name}/members` |
+| `share` | `name`, `member` (a username or an identity), `role` (`viewer`, `editor`, `remove`) | `PUT` or `DELETE /api/f/{name}/members/{id}` |
+| `visibility` | `name`, `visibility` | `PUT /api/f/{name}/visibility` |
+| `call` | `name`, `op`, `id?`, `input?` | `POST /api/f/{name}/ops/{op}` (no `id`: a fresh one) |
+| `events` | `name`, `tail?` (1 to 500, 30) | `GET /api/f/{name}/events?tail=` |
+
+A `name` is `<label>.<username>`, or a bare label for one of the
+person's own. A route's answer is the tool's `structuredContent`; its
+refusal the tool's `isError` result, as a fragment's server answers one.
+
+### Inline views (MCP Apps): not yet
+
+MCP Apps (the `io.modelcontextprotocol/ui` extension) would show a
+fragment's page in the chat: a tool names a `ui://` resource, an HTML
+document the host renders in a sandboxed frame of its own origin, whose
+calls go to the host over `postMessage` and reach the server as tool
+calls. A fragment's page does not fit that frame as the frames model
+stands (Frame sessions, above), so none is offered yet. What it needs:
+
+- **Its calls through the host.** The view has no cookie of the
+  fragment's origin and no frame session (`/auth/frame` mints for the
+  platform's own page alone); the host holds the connection's token. The
+  browser library (`__fragment.js`) needs a mode in which `call` and
+  `post` are `tools/call` over the host's bridge, as the person, through
+  this server.
+- **Its assets.** The document is served as a resource, not from the
+  fragment's origin: its relative URLs, `__fragment.js` included, resolve
+  nowhere. Either the platform inlines the page's scripts and styles into
+  the resource, or the view loads them from the fragment's origin (its
+  `resourceDomains`), which serves a `members` fragment's site to its
+  members' sessions only.
+- **Its live views.** `__live` takes a socket only from the fragment's
+  own page, with its own cookies (Serving, above): the view has neither.
+  Either `live` re-runs its queries by polling over tool calls (no
+  channels, no presence), or the socket takes a credential minted for
+  one view (the host's `connectDomains` and a stable view origin,
+  `_meta.ui.domain`), a new way into the frames model to decide first.
+
 
 ## Control API
 
