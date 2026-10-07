@@ -387,14 +387,27 @@ One screen at a time, and calm. Dark, warm, generous type.
 ### The goose fork
 
 `futurepaul/goose`:
-- `main` follows upstream `aaif-goose/goose` (fast-forward).
-- `fragment/optmem` is upstream's v1.53.0 plus surgery:
-  - **A byte-stable system prompt.** Nothing volatile (the date and
-    time) sits above the conversation, so the view's prefix caches.
-  - **Fresh-per-turn friendliness.** No auto-compaction or context
-    strategy fires inside a hand-off turn, and the system prompt has a
-    place for the runtime's framing (an ACP `session/new` `_meta`, or a
-    file goose reads).
+- `main` follows upstream `aaif-goose/goose`. It was fast-forwarded to
+  `9560429f` on 2026-10-07.
+- `fragment/optmem` is `4cfb2d7d`: upstream's v1.53.0 plus two
+  switches. It is built with `cargo build --release -p goose-cli --bin
+  goose --no-default-features --features portable-default` on
+  `rust:1-trixie`, which takes about 150 s and makes a 126 MB binary.
+  - `GOOSE_NO_COMPACTION=1`: a session never compacts or summarizes
+    itself. When the model reports an overflow, the turn ends and says
+    why, instead of rewriting the hand-off goose was given.
+  - `GOOSE_STABLE_SYSTEM_PROMPT=1`: the system prompt never changes
+    within a session. Without it, the hints of a subdirectory a tool
+    touches (`AGENTS.md`, `.goosehints`) join the prompt mid-turn and
+    break the cache.
+- **What upstream already had:**
+  - per-session instructions, through ACP
+    `_goose/unstable/session/system-prompt/set` (`mode: append`);
+  - the model route's header, through `OPENAI_CUSTOM_HEADERS`, which
+    goose reads only when `OPENAI_API_KEY` is set, even to empty;
+  - a system prompt with no date in it.
+- **`EXTENSIONS={}`** limits goose to `developer` and the session's
+  ACP `mcpServers`.
 
 ## The MCP server (`fragment mcp`)
 
