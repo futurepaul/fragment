@@ -303,9 +303,11 @@ export function topicScreen(id) {
     });
     head.style.setProperty("--h", hue(t.name));
     head.replaceChildren(
-      h("div.topic-hero", null, h("span.topic-mark.big", null, icon("hash")), h("h1", { text: t.name })),
-      t.description ? h("p", { text: t.description }) : null,
-      h("div.row", null, h("span.quiet", { text: plural(t.count ?? 0, "chat") }), h("span.grow"), remove),
+      ...[
+        h("div.topic-hero", null, h("span.topic-mark.big", null, icon("hash")), h("h1", { text: t.name })),
+        t.description ? h("p", { text: t.description }) : null,
+        h("div.row", null, h("span.quiet", { text: plural(t.count ?? 0, "chat") }), h("span.grow"), remove),
+      ].filter(Boolean),
     );
     if (countChanged) page(true);
   }
@@ -414,13 +416,14 @@ export function memoryScreen() {
     const pct = Math.min(100, Math.round((bytes / VIEW_BYTES) * 100));
     // lines whose summary keeps failing (`status.failing`): said, not hidden
     const failing = Array.isArray(S.status?.failing) ? S.status.failing : [];
-    stats.replaceChildren(
+    const list2 = [
       h("div.stat", null, h("b", { text: T.toLocaleString() }), h("span", { text: "messages" })),
       h("div.stat", null, h("b", { text: (parts.length + cut).toLocaleString() }), h("span", { text: "lines" })),
       h("div.stat.gauge", null, h("b", { text: kb(bytes) }), h("span", { text: `of ${kb(VIEW_BYTES)}` }), h("span.bar", { "aria-hidden": "true" }, h("i", { style: `width:${pct}%` }))),
       unbuilt ? h("div.stat.live", null, icon("loader", "spin"), h("span", { text: `summarizing ${plural(unbuilt, "new message")}` })) : h("div.stat.settled", null, icon("check"), h("span", { text: "all summarized" })),
       failing.length ? h("div.stat.failing", { title: failing.map((f) => `${f.id}+${f.n}: ${f.error} (${f.tries} tries)`).join("\n") }, icon("alert"), h("span", { text: `${plural(failing.length, "line")} won't summarize yet` })) : null,
-    );
+    ];
+    stats.replaceChildren(...list2.filter(Boolean));
     painted = true;
   }
 

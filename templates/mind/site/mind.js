@@ -242,7 +242,8 @@ export function mount(root, fragment) {
     const text = S.closed ?? S.error;
     toast.hidden = !text;
     if (!text) return;
-    toast.replaceChildren(icon("alert"), h("span", { text }), S.closed ? null : iconButton("x", "Dismiss", () => ((S.error = null), changed())));
+    toast.replaceChildren(icon("alert"), h("span", { text }));
+    if (!S.closed) toast.append(iconButton("x", "Dismiss", () => ((S.error = null), changed())));
   }
 
   // ---- screens ----
