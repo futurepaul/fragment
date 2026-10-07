@@ -1110,7 +1110,7 @@ through workers-rs's `SecretStore`), cached a minute per isolate.
   binds each by name (`cargo xtask deploy`), and `wrangler dev` binds the
   same names in its local store, which devstack seeds
   (`devstack::Secrets::Store`).
-- **celld:** has no Secrets Store, upstream (v0.6.1) or on the fork: its
+- **celld:** has no Secrets Store, upstream (v0.6.2) or on the fork: its
   deploy refuses `secrets_store_secrets` as an unknown key (celld's
   `SUPPORTED_KEYS`), and `celld dev` hands a Worker variables alone
   (`.dev.vars`, as plain text). So the cell gives itself stand-ins of the
@@ -1477,7 +1477,8 @@ These are listed as found. Each names where it bites and what to do.
       process exited on one that dials in. Plain fetches (the start, the
       intercepts) went through, so only a start with a backup to restore,
       which execs first, failed. workerd keeps an object's I/O for the
-      object, not the request.
+      object, not the request. Paul posted it upstream as denoland/celld#254;
+      v0.6.2 does not fix it (its repro fails there as on v0.6.1).
     - Fixed: every report (an exit, a tab's socket) comes back in through
       the object's namespace, a request of its own. The placement section
       now kills each computer's container under it while it is awake (on
@@ -1657,6 +1658,30 @@ These are listed as found. Each names where it bites and what to do.
       compare-and-swap. codestore and templates on celld against it: 64
       passed, 0 failed (templates 42 and 0).
     - **Open:** add it to the codestore section's probe.
+34. **`celld dev` reads its whole bucket for every listing** (the whole
+    suite on celld, 2026-10-07; v0.6.1 and v0.6.2 alike). `celld dev`
+    keeps its bucket in one SQLite table (`objects.sqlite3`), and
+    `LocalStore`'s `list`, `list_with_delimiter` and `list_paginated` read
+    every row and filter by prefix in Rust; `list_with_delimiter` does it
+    on a runtime thread. By the agents section the table holds about
+    28,900 objects (200 MB; 25,800 are L0 LTX, as these cells rarely reach
+    the 256-transaction compaction). After a crash about 95 cells restore
+    at once, each listing its epochs. The node then read 130 GB in 45 s,
+    every one of its 32 runtime threads busy, and each restore's lookup
+    took 17 to 33 s.
+    - The crash checks after that time out: the agents section's three
+      (the watchdog's replay, a kill between steps, a kill after the
+      answer), and whichever of a job's sleep through a crash or
+      pathmode's first create (`DurabilityUnproven`) the starvation hits.
+      The whole suite, at 9bce7c85: v0.6.1 1335 passed and 4 failed,
+      v0.6.2 1330 and 4.
+    - A range over the key (`key >= prefix AND key < prefix || U+10FFFF`,
+      a scratch commit on the fork, not pushed), on a copy of the same
+      state: ready in 2 s, not 36; 842 MiB read in 45 s, not 130 GB; 7
+      CPU-seconds, not 623; lookups 17 ms. The whole suite with it: 1339
+      passed, 0 failed.
+    - **celld:** an upstream issue for Paul to post. Only `celld dev` has
+      it: a fleet's bucket lists by prefix itself.
 
 ## The spike, on this box
 
@@ -1696,6 +1721,49 @@ This box has an AMD Ryzen 9 9950X3D (16 cores), 60 GB of RAM, an RTX
 - **S7. The uplink.** The node dials out. Exit: S2's checks with the
   node behind NAT and no inbound port, then against a Cloudflare preview
   (the first real blend; deploying a preview is Paul's call).
+
+### celld v0.6.2, 2026-10-07
+
+The fork's `main` is v0.6.2. Its `selfhost-v0.6.2` is upstream v0.6.2
+plus 12 commits, where `selfhost` is v0.6.1 plus 16, and
+`krun-engine-v0.6.2` is the same less the last (`CELLD_EXTRA_CA_FILE`).
+They replace `selfhost` and `krun-engine` when Paul moves them; the
+backups are the tags `pre-v0.6.2/*`.
+
+- **Dropped:** the native seam's three commits and the one that removed
+  it, which together changed nothing (found 5).
+- **Kept, as v0.6.2 still needs them:** the fork's three parity fixes.
+  Their tests, run on stock v0.6.2, fail as they did on v0.6.1:
+  - `facets` assigned, not defined (found 6): v0.6.2's harness still
+    assigns it;
+  - an answer held behind a socket's close (found 17): 30 s, the
+    handler's leftover timer;
+  - a returned socket's close lost (found 18): `error`, then 1006.
+- **Kept on this branch, each checked on v0.6.2's release binary:**
+  - the reports that come in through the object's namespace (found 21):
+    celld#254's repro fails in all four of its ways, as on v0.6.1;
+  - `NodeContainer`'s `#waited` (found 22): `CELLD_FETCH_TIMEOUT_S`
+    still defaults to 120;
+  - the 413 skip (found 31): ten 6 MiB uploads to a Worker that answers
+    413 from the declared length all broke before the upload ended. A
+    client that reads after the broken write gets the 413;
+  - the secrets shim (seam 12): `secrets_store_secrets` is still not in
+    `SUPPORTED_KEYS`;
+  - the shim's class named `Fetcher` (What this shows about master,
+    11): a service binding's class still reads as `Object`.
+- **Fixed upstream with nothing here to remove:** `self` in every
+  isolate (#247), `getDurableObjectClass()` of a plain class (#248),
+  WebSockets in facets (#252), a deploy that deadlocked a handler (#255),
+  a loaded Worker's fetch honoring its `AbortSignal` (#257), and
+  `.env` read when there is no `.dev.vars` (#243). The cell had no
+  workaround for any of them.
+- **Evidence** (this branch at 9bce7c85, `selfhost-v0.6.2`):
+  - the fork's own tests, 25 of 25, on v0.6.2;
+  - the whole suite on celld: 1330 passed, 4 failed, 11 skipped. The 4
+    are found 34's, and v0.6.1 fails the same way (1335 and 4). With
+    found 34's range query: 1339 passed, 0 failed;
+  - two nodes (computers, chat, shell-ui, placement, pairing, restart;
+    sandcastle's `node`): 342 passed, 0 failed, as on v0.6.1.
 
 ### Rebased onto master, 2026-10-06
 
