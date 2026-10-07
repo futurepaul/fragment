@@ -28,7 +28,7 @@
 //!   GET    /api/storage-token             editor
 //!   POST   /api/refresh                   editor
 //!   POST   /api/webhook                   code.storage (HMAC)
-//!   GET    /api/files  /api/file?path=  /api/file/stat?path=   viewer
+//!   GET    /api/files  /api/file?path=   viewer
 //!   PUT    /api/blobs/<sha256>            editor (the body, streamed and hashed)
 //!   GET|HEAD /api/blobs/<sha256>          viewer
 //!   GET    /api/events?since=|tail=       viewer
@@ -40,7 +40,7 @@
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
 //!   POST   /api/inbox                     the inbox token (no signature)
-//!   *      /serve/<path>                  the site, `__tree`, `__file`, `__op`, `__watch`
+//!   *      /serve/<path>                  the site, `__files`, `__file`, `__op`, `__watch`
 //!   POST   /job/advance|effect|finish     a run's Workflow (jobs.rs); never routed from outside
 //!   PUT    /api/cap                       owner: the fragment's monthly cap on the owner's ledger (meter.rs)
 //!   POST   /cap/files/read|list|stat      the app facet's `Files` capability (files.rs); never routed from outside
@@ -1034,7 +1034,6 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "card"]) => self.card_api(&caller, &req).await,
             (Method::Get, ["api", "file"]) => self.file(&caller, &query("path").unwrap_or_default()).await,
-            (Method::Get, ["api", "file", "stat"]) => self.stat(&caller, &query("path").unwrap_or_default()).await,
             (Method::Get, ["api", "events"]) => self.events(&caller, query("since").and_then(|s| s.parse().ok()).unwrap_or(0), query("tail")),
             (Method::Get, ["api", "channels"]) => self.channels(&caller),
             (Method::Get, ["api", "channels", channel]) => {
