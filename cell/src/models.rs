@@ -29,7 +29,7 @@
 //! is the call itself. The payer is the agent's owner (decision 36).
 //! A call names a tier, or `vision`: the deployment's vision model
 //! (`FRAGMENT_VISION_MODEL`, config.rs), for a runtime's calls about an
-//! image (Hermes' screenshots), metered the same way.
+//! image (its computer's screenshots), metered the same way.
 //! A fragment someone else owns is asked whether it is still open under its
 //! cap first (decision 26).
 
@@ -50,8 +50,8 @@ use crate::error::{CellError, CellResult};
 use crate::ledger::{self, FragmentOpen};
 use crate::{js, read_body, routed};
 
-/// A call's request (`fragment_core::models`): Hermes' shrunk screenshot
-/// and its prompt fit.
+/// A call's request (`fragment_core::models`): the largest image and its
+/// prompt fit.
 pub use fragment_core::models::MODEL_BODY_MAX_BYTES;
 /// An unstreamed answer, or a refusal, read whole: at most `MAX_TOKENS`
 /// of text and its JSON.

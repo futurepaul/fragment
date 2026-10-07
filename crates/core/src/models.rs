@@ -5,8 +5,8 @@
 //! A call names a tier, never a model: the tier picks the model and caps
 //! what one call may write. The route takes one name besides the tiers,
 //! `vision` (`Named`): the deployment's vision model (`vision_model`), for
-//! an agent runtime's calls about an image (Hermes' auxiliary vision, which
-//! reads its `computer_use` screenshots). It is no tier: an agent, a job's
+//! an agent runtime's calls about an image (a screenshot of its computer's
+//! screen). It is no tier: an agent, a job's
 //! step or a manifest names none but the tiers. What the platform sends is the client's
 //! OpenAI-shaped chat completion with only these changes (`bound`): no
 //! `model` (the tier's is the call's), `max_tokens` at most the tier's cap,
@@ -47,18 +47,15 @@ pub const VISION: &str = "vision";
 /// DeepSeek's own API: Workers AI's DeepSeek-V4-Flash-0731 has no vision,
 /// and reaching DeepSeek's would take our own key (decision 23: no BYOK).
 pub const VISION_MODEL_DEFAULT: &str = CHEAP_MODEL;
-/// The largest image Hermes sends for its vision call after a size
-/// refusal: it shrinks one to this many bytes of base64 data URL and tries
-/// again once (its `tools/vision_tools.py`, `_RESIZE_TARGET_BYTES`, which
-/// its config does not set).
+/// The largest image a call carries: 5 MiB of base64 `data:` URL, a
+/// screenshot of a computer's screen to spare.
 pub const IMAGE_DATA_URL_MAX_BYTES: usize = 5 * 1024 * 1024;
 /// A call's request: an image of `IMAGE_DATA_URL_MAX_BYTES` and a MiB for
-/// the rest of it (Hermes' prompt about a screenshot carries the screen's
-/// element list), so the call Hermes retries after a 413 fits. GLM's
+/// the rest of it (a prompt about a screen may list its elements). GLM's
 /// million-token window is about 4 MB of text; an agent's window sends a
 /// few hundred KiB.
 pub const MODEL_BODY_MAX_BYTES: usize = IMAGE_DATA_URL_MAX_BYTES + 1024 * 1024;
-const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits Hermes' shrunk image, and stays near it");
+const _: () = assert!(MODEL_BODY_MAX_BYTES > IMAGE_DATA_URL_MAX_BYTES && MODEL_BODY_MAX_BYTES < 8 * 1024 * 1024, "the cap fits the largest image, and stays near it");
 /// The most one call may write, reasoning included: a job's text step may
 /// ask for up to this.
 /// It bounds the worst case each call reserves: GLM-5.3's is $0.11 of
@@ -600,12 +597,11 @@ mod tests {
         assert!(vision_model(None, &other).is_err(), "the default too, were it unpriced");
     }
 
-    /// Goal: Hermes' vision call fits the route at the size Hermes shrinks
-    /// an image to after a 413 (its `_RESIZE_TARGET_BYTES`), so its one
-    /// retry is answered. Method: the body of such a call, with a long
-    /// prompt about a screen, against the cap.
+    /// Goal: a vision call with the largest image fits the route. Method:
+    /// the body of such a call, with a long prompt about a screen, against
+    /// the cap.
     #[test]
-    fn hermes_shrunk_image_fits_a_call() {
+    fn the_largest_image_fits_a_call() {
         let url = format!("data:image/jpeg;base64,{}", "A".repeat(IMAGE_DATA_URL_MAX_BYTES - "data:image/jpeg;base64,".len()));
         assert_eq!(url.len(), IMAGE_DATA_URL_MAX_BYTES);
         let prompt = "  [12] AXButton 'Save' (100, 200, 80, 24)\n".repeat(2_000);
