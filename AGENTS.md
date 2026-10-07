@@ -85,7 +85,7 @@ prebuilt bundle is in the debt ledger).
   builds `cell/` and the CLI, then runs `crates/e2e` against
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
-  auth, create, lockdown, keys, members, identities, signin, levers, secrets,
+  auth, create, lockdown, keys, members, identities, signin, drafts, levers, secrets,
   delegation, files, deploy, templates, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
@@ -94,7 +94,8 @@ prebuilt bundle is in the debt ledger).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
   file `--operator-key-file <file>` names (its npub in the config's
-  `operators`; a skip without one).
+  `operators`; a skip without one). `drafts` sends its own client
+  addresses (`CF-Connecting-IP`), so it runs on a local node only.
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a

@@ -11,7 +11,7 @@ live (multiplayer is built in), and members with roles. Use one when the
 person wants something on the web that keeps its state or that others
 open with them: a shared list, a tracker, notes, a webhook inbox, a chat,
 a small site. fragment.club is invite-only: the person must have been
-invited.
+invited to keep one (a first one can be made before: a draft, below).
 
 ## Install
 
@@ -46,6 +46,12 @@ terminal show the same ending). With no browser at hand, `fragment login
 --no-wait` prints the link: give it to the person, and run `fragment
 login` again once they have approved it. A new person also chooses a
 username once, on that page or with `fragment username <name>`.
+
+No account yet? `fragment create --draft --template todo` makes a first
+fragment with no login: a draft, named by the platform, with tight
+limits (no secrets, no `job.fetch`, no AI steps), deleted a day later
+unless claimed. Give the person the page and the claim link it prints:
+claiming makes it theirs, and this machine's key theirs too.
 
 ## Your fragments
 

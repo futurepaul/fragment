@@ -84,7 +84,7 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their fragments of one run (`e2e-<run>-…`), or with `--sweep-all` every `e2e-…` one at least an hour old (crates/e2e/src/hosted/sweep.rs) |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
-| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
+| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `expire-draft` makes an unclaimed draft's end now (`{until}`: its alarm ends it; Drafts, below), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
 | `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (1 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
 
@@ -128,7 +128,9 @@ cannot answer changes it. An operation, a socket, an invite, push, the
 owner's fragments, an app route, and any read the anonymous standing may
 not see ask it, live, and are refused as the control API is (401, or 503
 when the registry cannot answer). A fragment's own key is the principal
-of its triggered runs and is not registered.
+of its triggered runs and is not registered. A draft's maker (Drafts,
+below) is the one key no one holds that a fragment admits: its own
+draft's, until it is claimed.
 
 NIP-98 (`crates/nip98`): `Authorization: Nostr <base64 of the event>`, an
 event of kind 27235 with empty content and the tags `["u", <the absolute
@@ -256,7 +258,9 @@ A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
 403. In a signed request's path, a bare label names the signer's own
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
-unsigned (an inbox, a site) names it in full.
+unsigned (an inbox, a site) names it in full. A draft's name is
+`<label>.draft` (Drafts, below): `draft` is reserved, and names no one;
+a claimed draft keeps it, and is named in full.
 
 ## Operators: wiping a person
 
@@ -595,11 +599,12 @@ platform, so the fragment decides who may do what.
 | `GET /join/<name>?token=` | what the invite grants (the fragment, the role, who invites), and a Join button; signed out: → sign in first, and back. An invite for someone else: a 403 page naming them; used, revoked, or expired: 404; the person is in already (at that role or above): a link to open it |
 | `POST /join/<name>` | the page's form (`form`, `token`): joins as the signed-in person, then → `/auth/fragment?name=<name>&return=/` (signed in on its origin, and there) |
 
-Neither page can be driven by a fragment's page. Every POST's `Origin`
+Neither page (nor a draft's claim page: Drafts, below) can be driven by
+a fragment's page. Every POST's `Origin`
 must be the platform's (403 otherwise), and every POST carries `form`,
 the token its page was made with: an HMAC, keyed by the session's own
 token (the HttpOnly cookie, which no page's script reads), of what the
-form does (`share:<name>`, `join:<name>`) and when its page was made
+form does (`share:<name>`, `join:<name>`, `claim:<name>`) and when its page was made
 (`fragment_core::form`). A form without it, another session's, one for
 another fragment or page, one sent sooner than 800 ms after its page was
 made, or one older than 12 hours is 403. Their buttons come disabled and
@@ -755,18 +760,79 @@ stands (Frame sessions, above), so none is offered yet. What it needs:
   `_meta.ui.domain`), a new way into the frames model to decide first.
 
 
+## Drafts
+
+A **draft** is a fragment made before anyone has an account (issue
+#232): a key no one holds makes it, it spends nothing, so it bills no
+one, and it ends a day after it was made unless a person claims it. Its
+claim is the login flow: the person signs in, gives its claim code, and
+approves the key that made it, and in that step it becomes theirs. The
+rules are `fragment_core::drafts`; the cell's half is cell/src/drafts.rs.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/drafts` | a key no one holds (NIP-98) | `{template?}` (`blank`, `todo`, `inbox` or `calories`; any other 400) → `Created` with `draft: {expiresAt, claim}`: the draft its key names, `<label>.draft` (12 characters of a digest of the key), at `link` visibility, owned by its maker (`id:` and 32 hex of a digest of the key: an identity the registry never holds), `claim` its claim page with its code (`<platform>/claim/<name>?code=XXXX-XXXX`). The same key again answers the same draft (one key, one draft; one that ended is made again, a new life), and with another template is 409 `conflicting_body`; a key someone holds, or held, is 409; past its address's day or the deployment's (below), 429 |
+| `GET /claim/<name>?code=` | a person, signed in (signed out: → sign in first, as the deployment has it, and back) | what claiming does, the ending of the key that made it, and its code asked for (filled in from the link); claimed by them, it says so; by someone else, 409; ended, 404 |
+| `POST /claim/<name>` | that page's form (`form`, `code`) | a claim is a create: the person's ledger is asked first (a guest's is 403, past the overdraft 402); then, in one turn of the draft, they are its owner, its maker no member, it is on their list, and every limit below lifts (`draft.claimed` in `events`); then the key that made it joins them, as `/cli/approve` adds one → `/auth/fragment?name=<name>&return=/` (303). Another code is 403; claimed by someone else, 409; theirs already, the same again (the key approved again); a key someone else holds stays theirs (the page says to run `fragment login` where it was made) |
+
+- **Its maker.** On a draft's routes (`/api/f/<label>.draft/…`, blobs
+  aside) a request signed by a key no one holds is its maker, which the
+  draft admits only if the key made it and no one has claimed it (401
+  otherwise); every other route takes it as a key no one holds (401), and
+  so does its site, where its share link opens it to anyone (`__op`,
+  sockets).
+- **What it takes** (`drafts::takes`): its status, manifest, members, card,
+  events and triggers; its files (read, `POST files`) and deploys, and
+  `refresh`; operations; channels (reads, posts, drafts); runs (replay,
+  pause); the inbox; and its delete. Every other route of its control API
+  is 403 until it is claimed: secrets, the storage token (so `fragment
+  sync` and `deploy --dir`), blobs, subscriptions, members, invites,
+  visibility, rotation, and its cap.
+- **What it spends: nothing.** A job's `job.fetch` and AI steps fail for
+  good, saying why (a replay after its claim runs them); a page takes no
+  push subscription (`__push-sub` 403), so `call.push` reaches no one; its
+  deploys get no card (`card.skipped`, `owner_pays`); no ledger is asked
+  (its caps stand for its standing); no agent joins it, so no computer runs
+  for it. Its meter rows (requests, storage) wait in its outbox, and go to
+  its claimer's ledger with the rest.
+- **Its caps** (`limits::DRAFT_*`): 60 writes a minute (operations that
+  write, posts, file writes, deploys, inbox deliveries, replays; 429),
+  2 MiB of files at `main` in all (413), and 16 MiB of its supervisor's
+  database (records, runs, events; 507), beside its app's 16 MiB as any
+  app's. An address (an IPv4 address, or an IPv6 /64, as Cloudflare's
+  `CF-Connecting-IP` names it) starts 10 drafts in a day and the
+  deployment 10 000 (429; a key's own counts once): the registry keeps each
+  start a day.
+- **Its page** says it is a draft: every HTML page of its site carries a
+  bar (`#fragment-draft`) saying when it ends, with its claim page's link
+  (without the code: the page asks for it), and `Cache-Control: no-store`.
+  The bar is the page's own markup, so its scripts could take it away, and
+  an app's own answers (`App.fetch`) and its other files (an SVG,
+  `__file`) carry none: it tells an honest draft's visitors what it is.
+  What bounds an abuse of one is the rest: its day, its caps, its link
+  visibility, and a name no one chooses.
+- **Its end.** At `expiresAt` its alarm ends it as a delete ends it (its
+  repo stays, as a delete's does: the debt ledger); from then it is 404,
+  and its key may make it again. `status` answers `draft` while it is one
+  (`claim` with its code for its maker).
+
+A claimed draft is an ordinary fragment of its owner's, under its own
+name: its links stay, and its owner names it in full (a bare label names
+one under their username).
+
 ## Control API
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
  | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
+| `POST /api/drafts` | a key no one holds | a draft: Drafts, above |
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried until done), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page, draft?}` (`draft`: an unclaimed draft's, Drafts above); `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|contributor\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
@@ -1061,8 +1127,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   to its owner at Browser Rendering's browser-hour price
   (docs/ledger.md). Before each shot the owner's ledger is asked as a
   create is: a guest pays for nothing and a read-only owner makes nothing
-  new, so neither's deploys are shot (`card.skipped`); a ledger that does
-  not answer refuses none.
+  new, so neither's deploys are shot (`card.skipped`), nor an unclaimed
+  draft's, whose maker has no ledger; a ledger that does not answer
+  refuses none.
 - **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
   (`{live, why: not_an_app | members_only | owner_pays}`),
   `card.failed` (`{failures}`), and `page.errors` (the report, when it
@@ -1267,9 +1334,10 @@ credit first. What happened is always charged, past zero.
   `blocked`, its `error` the reason, and once the owner has credit they
   start runs again (a blocked run may be replayed). The person makes no
   new fragment meanwhile.
-- **Guests** make no fragments (`POST /api/fragments` is 403): a guest
-  pays for nothing. They edit the fragments shared with them, whose
-  owners pay (Paul, 2026-10-03). A fragment asks its
+- **Guests** make no fragments (`POST /api/fragments` is 403), and claim
+  no draft (Drafts, above): a guest pays for nothing. They edit the
+  fragments shared with them, whose owners pay (Paul, 2026-10-03). An
+  unclaimed draft has no ledger to ask: it spends nothing. A fragment asks its
   owner's ledger at most once a minute (`STANDING_CACHE_MS`), so a
   change reaches it within a minute; a ledger that does not answer
   refuses no write.
@@ -1404,7 +1472,7 @@ API answers on the platform's host):
 
 | path | |
 | --- | --- |
-| `/`, `/<page>` | `site/` in the live commit (`index.html` for directories); Open Graph tags from `fragment.json`'s `meta` |
+| `/`, `/<page>` | `site/` in the live commit (`index.html` for directories); Open Graph tags from `fragment.json`'s `meta`; an unclaimed draft's page with its bar (Drafts, above) |
 | `__file?path=` | a content file from live, else main |
 | `__preview.svg` | the placeholder preview image |
 | `__blob/{sha256}` | one of this fragment's blobs (Blobs, above), `GET` or `HEAD`, viewers and up (on a `public` fragment too: whoever holds only `public` is refused): its bytes as the type its upload declared (ranges answer 206), `Cache-Control: private, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, and an `ETag` of the hash; another fragment's hash is 404. `PUT` uploads one from the fragment's own page, as `PUT /api/f/{name}/blobs/{sha256}` does (editors; the body streamed and hashed on the way, bytes that are not what the hash says 400; a declared `content-length`, at most 256 MiB, else 400 or 413) → `{ok, sha, size, stored}` (`stored: false`: it was there); its `content-type` is the type it is served as. As for any write on this host, only the page's own cookies count (`fetched`): another fragment's page uploads as no one (401) |
