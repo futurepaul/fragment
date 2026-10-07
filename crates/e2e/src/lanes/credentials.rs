@@ -6,7 +6,8 @@
 //! fake. Each placement (a header, a query parameter, basic auth), each
 //! kind (a connection through the WorkOS fake, the operator's keys, an own
 //! key), and each refusal (a forged tag, another computer's, the wrong
-//! host, the wrong place), then the meters and the counts.
+//! host, the wrong place), then the holds and the counts, and a key's call
+//! its owner's ledger will not hold.
 
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use anyhow::Result;
 use base64::Engine;
 use serde_json::{json, Value};
 
-use super::ledger::entries;
+use super::ledger::{end_of, entries};
 use crate::api::Api;
 use crate::{Suite, SWAP_CONNECTION, SWAP_CONNECTION_ENV, SWAP_CONNECTION_HOST, SWAP_KEYS, SWAP_OWN, SWAP_OWN_ENV, SWAP_OWN_HOST};
 
@@ -47,10 +48,11 @@ pub(super) const SWAP_CHECKS: &[&str] = &[
     "an own key: its owner gives it, sealed by the computer, and it is the guest's at once",
     "basic auth: the own key in its password's place, its user as it came",
     "a key that is no printable token is refused; taken away, the guest is given it no more",
-    "each operator key's call is metered to the agent's owner, as the agent, at its list price and the margin",
+    "each operator key's call is held on the agent's owner's ledger, as the agent, and settled at its list price and the margin",
     "this month's uses: each call by agent, a connection's and an own key's counted, never charged, an operator key's at its charge",
     "no one else reads them, and a month is YYYY-MM",
     "a request with no placeholder goes on as it came",
+    "an operator key's call its owner's ledger will not hold is refused, and reaches no provider",
 ];
 
 /// What one call of each key is charged: its list price (fragment_core::
@@ -179,13 +181,15 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
         json!({ "bad": bad.status, "notOwn": not_own.status, "gone": gone.status, "given": given }),
     );
 
-    // the meters: each operator key's call, at its price; and the month's counts
+    // the holds: each operator key's call, settled at its price; and the month's counts
     let keyed = ["perplexity", "elevenlabs", "google-places"];
-    let metered = s.eventually(Duration::from_secs(20), || entries(api, &owner_id, &format!("key:{}:", w.id)).len() == keyed.len());
-    let rows = entries(api, &owner_id, &format!("key:{}:", w.id));
-    let priced = keyed.iter().all(|k| {
-        rows.iter().any(|r| r["entry"]["row"]["usage"] == json!({ "kind": "key", "key": k, "units": 1 }) && r["entry"]["row"]["agent"] == w.identity && r["entry"]["charge"] == charge_of(k))
-    });
+    let held = || entries(api, &owner_id, &format!("key:{}:", w.id));
+    let metered = s.eventually(Duration::from_secs(20), || held().iter().filter(|e| end_of(e) == "settled").count() == keyed.len());
+    let rows = held();
+    let priced = rows.len() == keyed.len()
+        && keyed.iter().all(|k| {
+            rows.iter().any(|r| r["entry"]["reserve"]["worst"] == json!({ "kind": "key", "key": k, "units": 1 }) && r["entry"]["reserve"]["agent"] == w.identity && r["entry"]["end"]["charge"] == charge_of(k))
+        });
     s.ok(SWAP_CHECKS[17], metered && priced, json!(rows));
     let expect = [(SWAP_CONNECTION, 2, 0), ("perplexity", 1, charge_of("perplexity")), ("elevenlabs", 1, charge_of("elevenlabs")), ("google-places", 1, charge_of("google-places")), (SWAP_OWN, 1, 0)];
     let uses = || api.signed(w.owner, "GET", &format!("/api/computers/{}/uses", w.id), None).map(|r| r.body).unwrap_or(Value::Null);
@@ -202,5 +206,19 @@ pub(super) fn swap_checks(s: &mut Suite, api: &Api, w: &Swapping, fetched: &dyn 
     let said = say(s, 117, "fetch http://api.perplexity.ai/plain with nothing-swapped")?;
     let seen = s.upstream.seen().last().cloned().unwrap_or_default();
     s.ok(SWAP_CHECKS[20], said.starts_with("fetched 200") && seen["auth"]["authorization"] == "Bearer nothing-swapped", &seen);
+
+    // a key is the operator's money: with the owner's paid calls capped at
+    // none (a refusal that is no typed one, as a ledger that does not answer
+    // gives), the call is not made
+    let cap = |max: u64| api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": owner_id, "op": "paid-calls", "max": max })));
+    let capped = cap(0)?;
+    let seen_before = s.upstream.seen().len();
+    let refused = say(s, 118, "fetch http://api.perplexity.ai/search with $PERPLEXITY_API_KEY")?;
+    let uncapped = cap(u64::from(u32::MAX))?;
+    s.ok(
+        SWAP_CHECKS[21],
+        capped.status == 200 && uncapped.status == 200 && refused.starts_with("fetched 402") && refused.contains("perplexity's call is not made") && s.upstream.seen().len() == seen_before && held().len() == keyed.len(),
+        json!({ "refused": refused, "capped": capped.body }),
+    );
     Ok(turns)
 }

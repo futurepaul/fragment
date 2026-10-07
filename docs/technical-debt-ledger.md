@@ -758,20 +758,20 @@ fragment.club until cutover (decisions 34–35).
 ## An operator key is metered per call, not per what its vendor counts
 
 - **Observed:** Paul, 2026-10-04 (`fragment_core::price::DEFAULT_KEYS`).
-  The swap meters one `key` unit a call the provider answered. Perplexity's
-  Sonar Pro briefs also bill tokens and a request fee ($0.02 to $0.04 a
-  brief at list), priced as a $0.005 search; xAI's X Search bills posts and
+  The swap holds and settles one `key` unit a call the provider
+  answered. Perplexity's Sonar Pro briefs also bill tokens and a request
+  fee ($0.02 to $0.04 a brief at list), priced as a $0.005 search; xAI's X Search bills posts and
   profiles fetched, priced as a 20-post call ($0.12); ElevenLabs bills
   minutes of music (and characters of speech), priced as a minute ($0.15).
 - **Risk:** a brief or a long composition costs the operator more than
   it charges; a short jingle or a speech call charges the person more than
   it cost.
-- **First proof:** a month's vendor invoice against the ledger's `key`
-  rows for that key.
+- **First proof:** a month's vendor invoice against the ledger's `key:`
+  settlements for that key.
 - **Delete when:** the swap reads each answer's usage (a header or the
-  body, as the model route reads tokens) and meters the vendor's own
-  units, each catalog row naming how, proven by a lane whose upstream fake
-  answers usage and is charged by it.
+  body, as the model route reads tokens) and settles the vendor's own
+  units against a hold of its worst case, each catalog row naming how,
+  proven by a lane whose upstream fake answers usage and is charged by it.
 
 ## Hermes keeps its providers' variable names from its terminal
 

@@ -733,7 +733,8 @@ impl From<worker::Error> for LedgerError {
 
 /// Asks `payer`'s ledger one of its routes (from a fragment, the router,
 /// or the queue's consumer). Not reaching it is `ledger_unavailable`'s
-/// stand-in, a host failure (5xx), which callers treat as passing.
+/// stand-in, a host failure (5xx), which a gate may treat as passing (a
+/// write, a wake); a paid call never does (`retried`, then refused).
 pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
     assert!(fragment_core::npub::is_identity(payer), "a ledger is a person's, named by their identity");
     let headers = Headers::new();
@@ -759,5 +760,38 @@ pub async fn ask<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Ans
     match serde_json::from_slice::<Refusal>(&bytes) {
         Ok(r) => Err(LedgerError { code: r.error, message: r.message, refused: r.refused }),
         Err(_) => Err(CellError::host(format!("the ledger answered {status}")).into()),
+    }
+}
+
+/// A ledger call is asked this many times while the ledger does not
+/// answer, before a paid call is given up (a reservation) or left held,
+/// for the sweep to charge at its worst case (a settle, a release).
+const TRIES: usize = 3;
+
+/// `ask`, asked again while the ledger does not answer (a host failure);
+/// a refusal answers at once.
+pub async fn retried<R: Route>(env: &Env, payer: &str, request: &R) -> Result<R::Answer, LedgerError> {
+    let mut tries = 0;
+    // bounded: TRIES asks, then the last answer stands
+    loop {
+        tries += 1;
+        match ask(env, payer, request).await {
+            Err(e) if e.refused.is_none() && e.code == ErrorCode::HostFailed && tries < TRIES => continue,
+            answered => return answered,
+        }
+    }
+}
+
+/// Holds a paid call's worst case on `payer`'s ledger before the call is
+/// made (docs/ledger.md): its amount. A refusal, or a ledger that does not
+/// answer, holds nothing, and the call is not made. The call then settles
+/// what it used, or is released having used nothing; a settle or release
+/// that does not land leaves it held, and the ledger's sweep charges its
+/// worst case: the money path fails closed.
+pub async fn hold(env: &Env, payer: &str, reserve: &core::Reserve) -> Result<i64, LedgerError> {
+    match retried(env, payer, reserve).await? {
+        core::Reserved::Held { amount } => Ok(amount),
+        // a reference of the call's own was never reserved before
+        other => Err(CellError::host(format!("a fresh call's reservation {} answered {other:?}", reserve.reference)).into()),
     }
 }
