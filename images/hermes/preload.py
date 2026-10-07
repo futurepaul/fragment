@@ -6,7 +6,6 @@
 #
 # This file is the image's, not the repo's tooling: it runs inside Hermes'
 # own Python, which only it can preload.
-import hashlib
 import os
 import sys
 import time
@@ -46,20 +45,6 @@ os.environ.update(HOME=home, HERMES_HOME=home)
 os.chdir(home)
 
 import hermes_cli.main  # noqa: E402
-
-# The gateway hashes every bundled skill twice more at start (S3b, cut h2);
-# when stage2's stamp says this image already synced them into this home,
-# those walks are skipped. Any surprise keeps Hermes' own behavior.
-try:
-    rev = open("/opt/fragment/image-rev").read().strip()
-    manifest = hashlib.sha256(open(os.path.join(home, "skills/.bundled_manifest"), "rb").read()).hexdigest()[:16]
-    if open(os.path.join(home, ".fragment-stamps/skills")).read().strip() == f"{rev}:{manifest}":
-        import tools.skills_sync
-
-        tools.skills_sync.sync_skills = lambda quiet=False: {"copied": [], "updated": [], "skipped": 0, "user_modified": [], "cleaned": [], "suppressed": [], "total_bundled": 0, "optional_provenance_backfilled": []}
-        hermes_cli.main._sync_bundled_skills_quietly = lambda: None
-except (OSError, AttributeError):
-    pass
 
 sys.argv = ["hermes", "gateway", "run"]
 sys.exit(hermes_cli.main.main())

@@ -235,6 +235,37 @@ mod tests {
         assert_eq!(code("todo"), Ok(None), "and its code is no release's");
     }
 
+    /// Goal: the notes viewer's bundle (the brain's too) carries no chunk
+    /// it never loads (templates/notes/src/viewer.mjs, its recipe). Method:
+    /// from viewer.js, every `"./…"` a file names, statically imported or
+    /// not, is followed; every chunk is reached.
+    #[test]
+    fn the_viewer_carries_no_chunk_it_never_loads() {
+        let files: std::collections::BTreeMap<&str, &[u8]> = crate::NOTES.iter().filter_map(|(p, b)| Some((p.strip_prefix("site/assets/")?, *b))).collect();
+        let (mut reached, mut queue) = (std::collections::BTreeSet::from(["viewer.js"]), vec!["viewer.js"]);
+        // bounded: each file is queued once
+        while let Some(f) = queue.pop() {
+            let dir = f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/"));
+            for named in std::str::from_utf8(files[f]).expect("JavaScript is UTF-8").split("\"./").skip(1).filter_map(|s| s.split_once('"')).map(|(n, _)| format!("{dir}{n}")) {
+                if let Some((&path, _)) = files.get_key_value(named.as_str()) {
+                    if reached.insert(path) {
+                        queue.push(path);
+                    }
+                }
+            }
+        }
+        let unread: Vec<&&str> = files.keys().filter(|p| p.starts_with("chunks/") && !reached.contains(*p)).collect();
+        assert!(unread.is_empty(), "chunks nothing imports: {unread:?}");
+    }
+
+    /// Goal: every agent's image is one file (cell/shell/CREDITS.md).
+    /// Method: the chat's is the agent's, one copy in the binary.
+    #[test]
+    fn the_agent_image_is_one_file() {
+        let (chat, agent) = (site_file("chat", "site/agent.png").expect("the chat's"), site_file("agent", "site/agent.png").expect("the agent's"));
+        assert!(std::ptr::eq(chat.as_ptr(), agent.as_ptr()), "embedded once");
+    }
+
     /// Goal: a brain (decision 30) is the notes viewer and the brain's own
     /// code, all of it the template's. Method: its page loads the viewer and
     /// its search; the viewer's files are the notes template's very bytes
@@ -310,7 +341,8 @@ mod tests {
     /// Method: every skill is `skills/<category>/<name>/SKILL.md` with a
     /// frontmatter naming it and saying what it is for; names are unique; the
     /// rewritten skills are there and what they replace is not; nothing
-    /// Finite-only or generated rides along; and it fits a listing.
+    /// Finite-only, generated, or ours not to redistribute rides along; and
+    /// it fits a listing.
     #[test]
     fn the_skills_template_is_the_managed_set() {
         let files = data("skills");
@@ -325,6 +357,8 @@ mod tests {
             assert!(!f.path.contains("__pycache__") && !f.path.ends_with(".pyc") && !f.path.ends_with(".DS_Store"), "generated: {}", f.path);
             assert_eq!(data_file("skills", f.path), Some(f));
             if let Ok(text) = std::str::from_utf8(f.bytes) {
+                // the repo is MIT, and the release hands this to every person
+                assert!(!text.contains("All rights reserved"), "{} is not ours to redistribute", f.path);
                 for finite_only in ["/profile-assets/", "~/.finite/", "FINITECHAT_HOME", "/home/node/", ".hermes/.env", ".hermes/venv", "git.finite.chat"] {
                     assert!(!text.contains(finite_only), "{} names {finite_only}", f.path);
                 }
@@ -344,10 +378,10 @@ mod tests {
         for rewritten in ["apps-finite", "git-finite", "brain-finite", "google-workspace-finite", "image-generation-finite"] {
             assert!(names.contains(rewritten), "{rewritten}");
         }
-        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite"] {
+        for gone in ["shared-skills-finite", "finite-sites-publishing-finite", "publish-web-apps-finite", "website-building-finite", "finitebrain", "llm-wiki-finite", "fal-image-editing-finite", "ml-paper-writing-finite", "powerpoint-finite"] {
             assert!(!names.contains(gone), "{gone} is replaced");
         }
-        assert_eq!(names.len(), 42, "finite-skills' 47, less shared-skills, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
+        assert_eq!(names.len(), 41, "finite-skills' 47, less shared-skills and powerpoint, with sites, publishing and website building one skill, brain and llm-wiki one, and the two paper-writing skills one");
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }
 

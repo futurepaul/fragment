@@ -1,8 +1,8 @@
 # fragment-next
 
 Fragment is the product: stateful, multiplayer web apps published from
-the CLI. Agents are optional add-ons a fragment declares; computers come
-back on Cloudflare (docs/cloudflare-v1.md, phase 4).
+the CLI. Agents are optional add-ons a fragment declares; computers came
+back on Cloudflare (docs/computers.md).
 Built on fragment (this repo carries fragment's full history; its
 TypeScript runtime was cut in phase 2; this repo is
 github.com/futurepaul/fragment's `master`, the Cloudflare line since the
@@ -11,7 +11,8 @@ cutover, decision 35). The cell runs on Cloudflare Workers (workerd under
 `wrangler dev` locally) since phase 2 of that plan. The cut (decision 33)
 took Hermes, computers, the desktop, the personal agent's chat,
 sandcastle, and the fleet's deploy path off master; they live at the tag
-`celld-final`.
+`celld-final`. Computers came back in its phase 4, Hermes as their
+image's agent runtime.
 
 ## Read first
 
@@ -23,30 +24,26 @@ sandcastle, and the fleet's deploy path off master; they live at the tag
 1. The decisions are cloudflare-v1.md's: its own, and the ROADMAP's that
    still hold, as R4 to R18. The truth map every change is checked
    against is MODEL.md's ("Where each fact lives").
-2. `docs/MODEL.md` — the core model on celld primitives and the spikes.
+2. `docs/MODEL.md` — the core model, in Cloudflare's primitives.
    `docs/api.md` — the wire contract the cell answers.
+   `docs/computers.md` — the platform's contract with a computer's image;
+   `docs/bridge.md` — the bridge, the one process an image runs between
+   its agent runtime and the fragment API;
+   `docs/chat-records.md` — a chat's records, which the bridge writes
+   and the chat template reads;
+   `docs/durable-computers.md` — how a computer's state survives a
+   sleep, a crash or a rolled-back disk: the design of record;
+   `docs/ledger.md` — the usage ledger: what is metered, at what price,
+   and who pays;
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
-   `docs/phase-6.md` — usernames and flat hosts, templates, your agent
-   making apps (its desktop and computers went at the cut);
-   `docs/phase-4.md` — sign-in, identities, budgets (live);
-   `docs/hardening.md` — the hardening pass (H1–H3 live): native keys,
-   the isolation findings;
-   `docs/phase-5.md` — agents (choices for review);
-   `docs/durable-computers.md` — how a computer's state survives a
-   sleep, a crash or a rolled-back disk: the design of record;
    `docs/hermes-relay.md` — Hermes' Relay contract, read from its code
-   (its connector went at the cut);
-   `docs/phase-3.md` — hosting on fragment.club;
-   `docs/phase-2.md` — the record of the core cut (slices A–G);
-   `docs/operate.md` — the operator runbook (the `celld` branch's).
-3. `docs/finite-next-lessons.md` — what to port from finite-next and the
-   gotchas (celld, libfx, fx over ACP, Sprites), prices, resources.
-4. `docs/published-fragments.md` — primitives that must stay expressible.
+   (its connector went at the cut).
+3. `docs/published-fragments.md` — primitives that must stay expressible.
    `docs/secrets.md` — where secrets live and how code reaches them.
-5. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
-6. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
+4. `docs/technical-debt-ledger.md` — the only place shortcuts may live.
+5. The engineering style: `/Users/futurepaul/dev/finite/engineering-style/
    engineering-style.md` (hard cuts, limits, assertions on in release,
    typed errors, valid/invalid/replay/restart tests, Rust for tooling).
 
@@ -71,10 +68,7 @@ prebuilt bundle is in the debt ledger).
   from another package.json, package-lock.json or Node. Every JavaScript
   process (npm, wrangler as `<node> node_modules/wrangler/bin/wrangler.js`,
   and whatever they start) runs on it, with it first on PATH; no `node`
-  from PATH is ever used. `FRAGMENT_NODE=/abs/path/to/node` runs another
-  node instead, refused unless it is a release of Node 22 or 24 with its
-  own npm beside it; `WRANGLER_BIN` names another wrangler entry script (a
-  `bin/wrangler.js`), run on the same Node. Their caches are the repo's:
+  from PATH is ever used, and no other Node. Their caches are the repo's:
   `XDG_CACHE_HOME=target/cache` (miniflare keeps the Chrome for Testing
   that preview cards' local Browser Rendering downloads, 126, about 145
   MB, in `target/cache/.wrangler/chrome`), `WRANGLER_CACHE_DIR=
@@ -96,7 +90,7 @@ prebuilt bundle is in the debt ledger).
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, agents, addon, shell, computers, chat, shell-ui,
-  hermes, agent-smoke, sync, restart, pathmode; `crates/e2e/src/lanes/mod.rs`).
+  hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `computers`, `chat` and `shell-ui` run the stub image (`images/stub`)
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome; `hermes`, the real-Hermes lane, builds
   and runs our Hermes image (3.8 GB), so it runs only by name
@@ -137,16 +131,13 @@ prebuilt bundle is in the debt ledger).
   died. The run's client never reuses a connection idle 4 s: workerd
   closes one idle 5 s, and a request written onto it as it closes is
   lost (`POOL_IDLE`, `crates/e2e/src/api.rs`).
-- `cargo xtask e2e --shard <k>/4 [--summary <file>]`: one of the four
-  shards CI runs, each on its own runner with its own build and node
-  (`SHARDS` in `crates/e2e/src/lanes/mod.rs`: every section in exactly
-  one, a host test checks; rebalance it from the summaries' `ms`).
-  `--summary` writes the run's summary (any local run takes it), and
-  `cargo xtask e2e-summary <dir>` (CI's `e2e` job) checks a set of them:
-  every section ran exactly once across the shards, the counts add up,
-  and every check passed, printed as one run. CI splits each shard's run
-  in two, `--build-only` then `--no-build`, so the cache saves between
-  (the build also builds the computer images ahead of the node, beside
+- `cargo xtask e2e --shard <k>/4`: one of the four shards CI runs, each
+  on its own runner with its own build and node (`SHARDS` in
+  `crates/e2e/src/lanes/mod.rs`: every section in exactly one, a host
+  test checks; rebalance it from the time each shard's log prints for
+  each section). CI's `e2e` job is green when every shard is. CI splits
+  each shard's run in two, `--build-only` then `--no-build`, so the
+  cache saves between (the build also builds the computer images ahead of the node, beside
   the Rust; the cell and the agent build in parallel once worker-build
   has its tools: `xtask/src/build.rs`).
 - `cargo xtask e2e --hosted --config <deploy config> --branch <b> [--only
@@ -236,12 +227,10 @@ prebuilt bundle is in the debt ledger).
   included. The e2e's computer sections run the stub image under
   `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
-  shard k/4`), and `e2e`, which needs them all and checks their
-  summaries, on Linux; a manual run (workflow_dispatch) adds the suite
-  whole in one job (`e2e-whole`), to compare counts. Its caches restore
-  on every run and save only from master's pushes (each key's contents
-  are named in the workflow). `release.yml` builds the CLI for macOS and
-  Linux.
+  shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
+  restore on every run and save only from master's pushes (each key's
+  contents are named in the workflow). `release.yml` builds the CLI for
+  macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
   zone `finite.place` in Paul's account, and production only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`

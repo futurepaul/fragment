@@ -19,8 +19,8 @@
 //!
 //! An agent is an identity in the platform's registry, owned by the person
 //! who made it (docs/finite-integration.md). This script is co-hosted in
-//! the platform's fleet and has no ingress of its own (docs/phase-6.md,
-//! step 4): the platform's router authenticates each request, as it does
+//! the platform's fleet and has no ingress of its own (docs/api.md,
+//! Agents): the platform's router authenticates each request, as it does
 //! its own, and names the caller's identity in `x-agent-principal`, which
 //! is all this script trusts. Making an agent makes its key here; the
 //! router then registers it as its maker's in the same request. An agent's

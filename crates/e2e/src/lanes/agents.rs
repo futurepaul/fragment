@@ -123,7 +123,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a membership gives it that fragment's operations as tools", tools.contains(&add) && tools.contains(&fragment_core::tools::tool_name(&todo, "list").expect("a tool name")), &r);
     s.ok("and nothing of a fragment it is not in", !tools.iter().any(|t| t.starts_with(&format!("{}__", other.replace('.', "--")))), &r);
 
-    // decision 17 at the platform: an agent acts for whoever asked, capped.
+    // decision R17 at the platform: an agent acts for whoever asked, capped.
     // A key the owner registered as an agent of theirs signs `for` itself
     // here (the agent above signs in its cell; its turns are checked below).
     let hand = Keys::generate();
@@ -172,7 +172,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&c);
     api.signed(&owner, "PUT", &format!("/api/f/{room}/members/{stranger_id}"), Some(&json!({ "role": "viewer" })))?;
     let post = |who: &str, id: &str| api.signed(&hand, "POST", &format!("/api/f/{room}/channels/notes?{}", acting(who)), Some(&json!({ "id": id, "body": { "text": "a note" } })));
-    // the deploy lands by the webhook: posted again (the same id) until it has
+    // the deploy lands: posted again (the same id) until it has
     s.eventually(wait, || post(&owner_id, "n1").is_ok_and(|r| r.status == 200));
     let for_owner = post(&owner_id, "n1")?;
     let for_viewer = post(&stranger_id, "n2")?;
@@ -400,7 +400,7 @@ pub fn agents(s: &mut Suite, api: &Api) -> Result<()> {
         s.deploy(&c);
         let r = api.signed(&owner, "PUT", &format!("/api/f/{room}/members/{agent_npub}"), Some(&json!({ "role": "editor" })))?;
         anyhow::ensure!(r.status == 200, "the agent joins {room}: {r}");
-        // the deploy lands by the webhook: the same listen, again, until its channel is there
+        // the deploy lands: the same listen, again, until its channel is there
         let listen = || agents.signed(&owner, "POST", &format!("/api/a/{name}/listen"), Some(&json!({ "fragment": room }))).is_ok_and(|r| r.status == 200);
         Ok(s.eventually(wait, listen))
     };
@@ -457,7 +457,7 @@ fn reply_operation(s: &mut Suite, api: &Api, owner: &Keys, name: &str, agent_npu
     let r = listen(json!({ "fragment": chat, "reply": "say it" }))?;
     let v = view(&agents, owner, name);
     s.ok("a listen whose reply names no operation is refused (400), and follows nothing", r.status == 400 && v["listens"]["count"] == count_before && !follows(&v), &r);
-    // the deploy lands by the webhook: the same listen, again, until its channel is there
+    // the deploy lands: the same listen, again, until its channel is there
     s.eventually(wait, || listen(json!({ "fragment": chat })).is_ok_and(|r| r.status == 200));
     let r = listen(json!({ "fragment": chat }))?;
     let sub = r.body["subscription"].clone();

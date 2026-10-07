@@ -31,7 +31,7 @@ the old one still open, and come back resealed, which the cell stores.
 | The deployment's host secret, the code.storage org key, WorkOS's client id and API key, the operator's keys a computer's swap sends (decision 37) | the account's Cloudflare Secrets Store, each bound to the Workers by name (below), never a Worker variable, a Worker secret, a file, or an app's env. Models and images need none: the Worker's AI binding is pre-authenticated (spike S4) |
 | A preview's test secret (`FRAGMENT_TEST_SECRET`, below) | a file on the deploying machine, uploaded as a Worker secret of a branch's platform Worker |
 | A fragment's own nostr key, an agent's nostr key | made in their cell and kept sealed for it; opened only to sign (an agent's NIP-98 headers) |
-| A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks for a short-lived token per call and holds it in memory at most ten minutes (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
+| A person's connections (Google, …) | WorkOS Pipes holds and refreshes them; a computer's swap asks Pipes for its short-lived token on each call and holds none (decision 22). A computer's guest holds only placeholders (docs/computers.md) |
 | The key computers' placeholders are tagged with | derived from the host secret (HKDF-SHA256, its own salt), never stored or provisioned apart: in the platform Worker alone, never in a container. Rotating the host secret rotates every placeholder (guests read theirs again within seconds; tags under `HOST_SECRET_PREVIOUS` still verify during a rotation) |
 | A browser's sessions (the platform's, and one per fragment origin) | the registry cell, as SHA-256 hashes of random tokens; the tokens live only in HttpOnly cookies |
 
@@ -132,43 +132,6 @@ store secrets:
   it is a file, uploaded as the Worker secret `FRAGMENT_TEST_SECRET` on a
   branch deploy.
 
-### Migration (2026-10-05): the files into the store
-
-A config naming a `*_file` field for a store secret is refused (a hard
-cut: `host_secret_file`, `codestorage.private_key_file`,
-`workos.client_id_file`, `workos.api_key_file`, a provider's `key_file`),
-the message naming its replacement. Move each file in once, with any
-config of the account (both of Paul's finite.place configs share it), its
-store name `fragment-` and the file's name (less `.pem`):
-
-```
-C=~/.config/finite-next/fragment-finite-place.jsonc
-S=~/.config/finite-next/secrets
-cargo xtask secret set fragment-finite-place-host-secret --config $C --from-file $S/finite-place-host-secret
-cargo xtask secret set fragment-codestorage-private-key --config $C --from-file $S/codestorage-private-key.pem
-cargo xtask secret set fragment-workos-staging-client-id --config $C --from-file $S/fragment-workos-staging-client-id
-cargo xtask secret set fragment-workos-staging-api-key --config $C --from-file $S/fragment-workos-staging-api-key
-cargo xtask secret set fragment-perplexity-api-key --config $C       # the operator keys have no files: each prompts
-cargo xtask secret set fragment-google-places-api-key --config $C
-cargo xtask secret set fragment-xai-api-key --config $C
-cargo xtask secret set fragment-elevenlabs-api-key --config $C
-cargo xtask secret list --config $C
-```
-
-The first makes the account's store. Then each config names them:
-`"host_secret": "fragment-finite-place-host-secret"`, `"codestorage":
-{"org": …, "private_key": "fragment-codestorage-private-key"}`,
-`"workos": {"client_id": "fragment-workos-staging-client-id", "api_key":
-"fragment-workos-staging-api-key"}`, and each operator row's `"key":
-"fragment-<name>-api-key"` in place of its `key_file`; `dns_token_file`
-and `test_secret_file` stay. The bindings' names are new, so the Worker
-secrets earlier deploys uploaded (`FRAGMENT_HOST_SECRET`,
-`CODESTORAGE_PRIVATE_KEY`, `WORKOS_API_KEY`, `FRAGMENT_KEY_<NAME>`) stay
-on each Worker, unread, until Paul deletes them (`wrangler secret delete
-<name> --name fragment-<branch>`, and `--name fragment-agent-<branch>`
-for `FRAGMENT_HOST_SECRET`); the files, once moved, are Paul's to delete
-too.
-
 ## Placeholders and the operator's keys (Paul, 2026-10-04)
 
 A computer's guest is given each credential its agent may use as a
@@ -235,16 +198,18 @@ Test levers), which exist only where a test secret is.
 
 ## How code uses a secret
 
-- **App code** (the facet) has no network and no keys. It asks the
-  platform through a capability ("draw an image", "fetch this API with
-  secret X"), and the platform adds the credential on the way out
-  (`globalOutbound` is `null`; the capability is the only way out).
-  Built in slice D: a job's `job.fetch` names a secret as `{{NAME}}` in a
-  header, and the supervisor opens it only as the request leaves
-  (`step_fetch` in `cell/src/jobs.rs`). That one function is the egress
-  point a native egress in the celld fork would take over. `job.ai.*`
-  steps need no key: text and images go through the Worker's AI binding
-  (cell/src/ai.rs, models.rs).
+- **App code** (the facet) has no network and no keys. It runs in an
+  isolate of its own from the Worker Loader, with an env the platform
+  builds that holds only `FILES` and `globalOutbound: null`
+  (`cell/src/js.rs`), so no author code names a deployment secret (the
+  e2e's `keys` section deploys an app that looks through its env and its
+  global scope for one). It asks the platform through a capability
+  ("draw an image", "fetch this API with secret X"), and the platform
+  adds the credential on the way out: a job's `job.fetch` names a secret
+  as `{{NAME}}` in a header, and the supervisor opens it only as the
+  request leaves (`step_fetch` in `cell/src/jobs.rs`, the one egress
+  point). `job.ai.*` steps need no key: text and images go through the
+  Worker's AI binding (cell/src/ai.rs, models.rs).
 - **Agents in cells** call models through the platform's model route
   (cell/src/models.rs), which holds no key either: the Worker's AI
   binding is pre-authenticated, and the payer's ledger meters each call.

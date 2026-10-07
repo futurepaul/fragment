@@ -24,7 +24,7 @@
 //!   decisions 22 and 37), which this cell resolves: for the agent the tag
 //!   names, among those that run here now (any of its owner's providers,
 //!   unless its owner narrowed them: decision 44); a connection's token
-//!   from WorkOS Pipes, held until shortly before it expires; an operator
+//!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
 //!   provider answered is counted by agent and month (`uses`).
 //! - **Its agents' new fragments** (`computer/joined`, from a fragment an
@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
 use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
-use fragment_core::ledger::{Meter, MeterRow, Month, Spend};
+use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_proto::computer::{valid_computer_id, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, ProviderState, ProviderUse, RestoreSource};
@@ -97,8 +97,8 @@ const USES_ROWS_MAX: u64 = 4 * (catalog::PROVIDERS_MAX as u64) * AGENTS_MAX;
 /// How long a connection's state, as Pipes said it, is believed: the
 /// guest reads its credentials every few seconds, and asking WorkOS that
 /// often is not ours to do. The person's own read of their connections
-/// tells it at once (`computer/own-keys`), and so does a swap Pipes
-/// refused.
+/// tells it at once (`computer/own-keys`), and so does each swap (what
+/// Pipes answered for its token).
 const STATES_TTL_MS: i64 = 60_000;
 /// After WorkOS did not answer, its states are asked again no sooner.
 const STATES_RETRY_MS: i64 = 10_000;
@@ -163,13 +163,6 @@ const MARK_EXEC_MS: i64 = 30_000;
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
-/// A connection's token is used until this long before it expires, and
-/// for at most `TOKEN_HOLD_MAX_MS` (WorkOS refreshes it; asking again is
-/// cheap, so a revoked connection stops within minutes).
-const TOKEN_MARGIN_MS: i64 = 60_000;
-const TOKEN_HOLD_MAX_MS: i64 = 10 * 60_000;
-/// Tokens held at once (all go when it is full: there are few owners).
-const TOKENS_MAX: usize = 64;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -184,7 +177,8 @@ enum MetaKey {
     /// the newest saves of `/data` with their `DirectoryBackup` records
     /// (the authority on what a wake restores, handed back to restore and
     /// to delete them), the snapshot that caches the current one, what each
-    /// start restored, and its rollbacks. The one save kept before several
+    /// start restored, its rollbacks, and the records let go of until their
+    /// deletes worked. The one save kept before several
     /// were (the old `backup` key) is not read: a hard cut.
     Saves,
     /// Why the last wake was refused.
@@ -194,6 +188,9 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
+    /// The owner's WorkOS user, once the registry named it
+    /// (`workos_user`): `{owner, issuer, subject}`.
+    WorkosUser,
 }
 
 impl MetaKey {
@@ -208,6 +205,7 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
+            MetaKey::WorkosUser => "workos_user",
         }
     }
 }
@@ -245,11 +243,9 @@ pub struct ComputerCell {
     /// Whether this isolate has looked for a container an earlier one left
     /// running (lesson 6: `adopt`).
     adopted: std::cell::Cell<bool>,
-    /// Connections' tokens by (owner, provider): the token and until when
-    /// it is used. In memory only: a new isolate asks WorkOS again.
-    tokens: RefCell<BTreeMap<(String, String), (String, i64)>>,
     /// The owner's connections' states as Pipes last said them, and until
-    /// when they are believed (`STATES_TTL_MS`). In memory only.
+    /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
+    /// the guest's view lists: a token is asked of Pipes for each swap.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
 }
 
@@ -259,7 +255,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -663,7 +659,7 @@ impl ComputerCell {
             .filter(|(from, to)| to > from)
             .map(|(from, to)| MeterRow {
                 reference: format!("awake:{id}:{from}"),
-                usage: Usage::Awake { instance: self.cfg.computer_instance.clone(), ms: (to - from) as u64 },
+                usage: Usage::Awake { instance: fragment_core::price::INSTANCE.into(), ms: (to - from) as u64 },
                 fragment: None,
                 agent: None,
                 computer: Some(id.clone()),
@@ -692,7 +688,6 @@ impl ComputerCell {
             "FRAGMENT_COMPUTER": id,
             "FRAGMENT_API": "http://api.fragment.internal",
             "FRAGMENT_MODEL": "http://model.fragment.internal",
-            "FRAGMENT_STORAGE": "http://storage.fragment.internal",
             "FRAGMENT_IMAGE": image,
         });
         if restoring {
@@ -784,7 +779,7 @@ impl ComputerCell {
             Restore::Backup | Restore::Nothing => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
-        let size = fragment_core::price::instance_size(&self.cfg.computer_instance).map_err(CellError::host)?;
+        let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
         let size = serde_json::to_value(&size).map_err(|e| CellError::host(format!("an instance size: {e}")))?;
         self.call("start", &[g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size)]).await?;
         let armed = self.call("arm", &[g.clone(), id.as_str().into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), self.swap_hosts()]).await?;
@@ -910,9 +905,9 @@ impl ComputerCell {
 
     /// Saves `/data` as save `seq` of start `generation` (`held`: its guest
     /// answered the hold), and keeps it: the newest of the saves kept, the
-    /// oldest past `SAVES_KEPT` deleted. Any record of it already taken
-    /// when a later one fails is deleted too. The test lever's failed saves
-    /// (`fail-saves`) fail here first.
+    /// oldest past `SAVES_KEPT` let go of (`forget`). Any record of it
+    /// already taken when a later one fails is let go of too. The test
+    /// lever's failed saves (`fail-saves`) fail here first.
     async fn save(&self, generation: u64, held: bool, seq: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
@@ -939,10 +934,11 @@ impl ComputerCell {
             match self.call("backup", &[g.clone(), dir.into(), exclude]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => records.push(record),
                 Err(e) => {
-                    for taken in &records {
-                        let _ = self.call("forget", &[js::to_js(taken)]).await;
-                    }
                     console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": e.message, "ms": js::now_ms() - t0 }));
+                    match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
+                        Ok(lost) => self.forget(lost).await,
+                        Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+                    }
                     return Event::SaveFailed { generation, seq, why: e.message };
                 }
             }
@@ -988,21 +984,38 @@ impl ComputerCell {
     }
 
     /// A save worked: it is the newest save, and the ones it pushed out of
-    /// the newest `SAVES_KEPT` are deleted. Answers it.
+    /// the newest `SAVES_KEPT` are let go of (`forget`). Answers it.
     async fn keep_save(&self, generation: u64, records: Vec<Value>, held: bool) -> CellResult<Save> {
         let at = js::now_ms();
-        let dropped = self.update_saves(|s| s.saved(generation, records, at, held))?;
+        let lost = self.update_saves(|s| s.saved(generation, records, at, held))?;
         let saves = self.saves()?;
         let save = saves.all().first().cloned().ok_or_else(|| CellError::host("no save after one was kept"))?;
         assert_eq!((save.generation, save.at_ms), (generation, at), "the save kept is the one just taken");
-        for old in dropped {
-            for record in &old.records {
-                if let Err(e) = self.call("forget", &[js::to_js(record)]).await {
-                    console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "forget": old.number, "error": e.message }));
-                }
+        self.forget(lost).await;
+        Ok(save)
+    }
+
+    /// Deletes each record let go of (`Saves::forgetting`), and forgets it
+    /// once its delete worked: one that failed stays, for the next save's
+    /// pass (a delete of what is gone already works). `lost`: records
+    /// pushed out unforgotten, whose archives stay in R2, logged.
+    async fn forget(&self, lost: Vec<Value>) {
+        let id = self.meta(MetaKey::Id).ok().flatten();
+        for record in &lost {
+            console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
+        }
+        let pending = self.saves().map(|s| s.forgetting().to_vec()).unwrap_or_default();
+        // bounded: at most FORGETTING_MAX
+        for record in pending {
+            let rid = record["id"].as_str().unwrap_or_default().to_string();
+            let done = match self.call("forget", &[js::to_js(&record)]).await {
+                Ok(_) => self.update_saves(|s| s.forgot(&rid)),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = done {
+                console_error!("{}", json!({ "computer": id, "forget": rid, "error": e.message }));
             }
         }
-        Ok(save)
     }
 
     /// Lets go of the guest's hold: an awake save's end, or a sleep that
@@ -1139,7 +1152,7 @@ impl ComputerCell {
                 return states.clone();
             }
         }
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, owner).await {
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner)).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
@@ -1150,7 +1163,25 @@ impl ComputerCell {
         states
     }
 
-    /// One connection's state, as a swap just learned it.
+    /// The WorkOS user the owner signed in as, whose connections Pipes
+    /// keeps: asked of the registry until it names one, then kept here for
+    /// that issuer. A fact, not a cache: the first subject a person signed
+    /// in as with an issuer is theirs for good, since the registry never
+    /// relinks or forgets a sign-in (registry/signin.rs `person_for`).
+    async fn workos_user(&self, owner: &str) -> CellResult<Option<String>> {
+        let issuer = crate::keys::workos(&self.env, self.cfg).await?.issuer();
+        let kept: Option<Value> = self.meta(MetaKey::WorkosUser)?.and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(subject) = kept.as_ref().filter(|k| k["owner"] == owner && k["issuer"] == issuer.as_str()).and_then(|k| k["subject"].as_str()) {
+            return Ok(Some(subject.to_string()));
+        }
+        let subject = crate::ask_registry(&self.env, &crate::registry::calls::SubjectOf { identity: owner.into(), issuer: issuer.clone() }).await?.subject;
+        if let Some(s) = &subject {
+            self.set_meta(MetaKey::WorkosUser, &json!({ "owner": owner, "issuer": issuer, "subject": s }).to_string())?;
+        }
+        Ok(subject)
+    }
+
+    /// One connection's state, as a swap just learned it from Pipes.
     fn note_state(&self, provider: &str, state: ProviderState) {
         if let Some((states, _)) = self.states.borrow_mut().as_mut() {
             states.insert(provider.to_string(), state);
@@ -1231,7 +1262,7 @@ impl ComputerCell {
             Phase::Sleeping { .. } => (ComputerPhase::Sleeping, None),
             Phase::Failed { why } => (ComputerPhase::WontWake, Some(why.clone())),
         };
-        let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host("a computer's origin needs FRAGMENT_HOST_SUFFIX"))?;
+        let origin = self.cfg.computer_origin(&id).ok_or_else(|| CellError::host(format!("{id} is no computer's id")))?;
         let saves = self.saves()?;
         // why it won't wake; else what its saves' failures say (a sleep that
         // kept its container, or slept unsaved); else why a wake was refused
@@ -1509,8 +1540,8 @@ impl ComputerCell {
     /// The secrets to swap in for a request's placeholders (`b`, a request
     /// to `b.host`), when their tags name one agent that runs here now and
     /// that agent may use each provider: `{agent, identity, owner, secrets:
-    /// [{provider, tag, secret}]}`, so the egress meters a key's call to the
-    /// agent's owner and counts each call as the agent's. A tag that names
+    /// [{provider, tag, secret}]}`, so the egress holds a key's call on the
+    /// agent's owner's ledger and counts each call as the agent's. A tag that names
     /// no agent of this computer (forged, another computer's, or an agent
     /// removed since) is refused. An agent may use every provider its owner
     /// has unless its owner narrowed it to a list (decision 44: a person's
@@ -1562,17 +1593,8 @@ impl ComputerCell {
             }
             let secret = match provider.kind {
                 Kind::Connection => self.connection_token(&owner, &provider.name).await?,
-                Kind::Operator => {
-                    // a paid call its owner's ledger would refuse is never made (decision 27)
-                    let may = crate::ledger::MaySpend { spend: Spend::AgentTurn, fragment: None, by_owner: true };
-                    if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
-                        if e.refused.is_some() {
-                            return Err(CellError::new(e.code, e.message));
-                        }
-                        console_error!("{}", json!({ "computer": "key", "ledger": e.message }));
-                    }
-                    crate::keys::operator_key(&self.env, &provider.name).await?
-                }
+                // its call is held on its owner's ledger before it is made (`hold_keys`)
+                Kind::Operator => crate::keys::operator_key(&self.env, &provider.name).await?,
                 Kind::Own => self.own_key(&provider.name).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("give your own {} key first (PUT /api/connections/{}/key)", provider.name, provider.name)))?,
             };
             if secret.is_empty() || !secret.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
@@ -1603,23 +1625,14 @@ impl ComputerCell {
         Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
-    /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
-    /// the WorkOS user `owner` signed in as.
+    /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
+    /// `owner` signed in as, asked for each swap (Pipes holds and refreshes
+    /// it), so a connection disconnected or revoked stops at the next
+    /// request. What Pipes answers is the connection's state too, as the
+    /// guest's view lists it (`note_state`).
     async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
-        let now = js::now_ms();
-        let held = (owner.to_string(), provider.to_string());
-        if let Some((token, until)) = self.tokens.borrow().get(&held) {
-            if *until > now {
-                return Ok(token.clone());
-            }
-        }
-        let workos = crate::keys::workos(&self.env, self.cfg).await?;
-        let call = crate::registry::calls::SubjectOf { identity: owner.into(), issuer: workos.issuer() };
-        let user = crate::ask_registry(&self.env, &call)
-            .await?
-            .subject
-            .ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, workos.api, provider, &user).await?;
+        let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
@@ -1634,13 +1647,7 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
         let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
-        let expires = answer["access_token"]["expires_at"].as_str().map(js_sys::Date::parse).filter(|t| t.is_finite()).map(|t| t as i64);
-        let until = expires.map_or(now + TOKEN_HOLD_MAX_MS, |e| (e - TOKEN_MARGIN_MS).min(now + TOKEN_HOLD_MAX_MS));
-        let mut tokens = self.tokens.borrow_mut();
-        if tokens.len() >= TOKENS_MAX {
-            tokens.clear();
-        }
-        tokens.insert(held, (token.to_string(), until));
+        self.note_state(provider, ProviderState::Connected);
         Ok(token.to_string())
     }
 
@@ -1821,7 +1828,7 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
 /// the platform's page alone (the shell's tab onto a port: decisions 11
 /// and 41), never by a fragment's, which is one site with this origin.
 pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
-    let platform = Config::from_env(env).platform(url);
+    let platform = Config::from_env(env).platform();
     let answered = match host_answer(req, env, url, id, signer).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
@@ -1985,7 +1992,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     if !fragment_proto::valid_fragment_name(&agent) {
         return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>.<username>)"));
     }
-    let platform = cfg.platform_url.clone().ok_or_else(|| CellError::host("a computer's egress needs FRAGMENT_PLATFORM_URL"))?;
+    let platform = cfg.platform();
     let arrived = Url::parse(&platform).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
     let query = url.query().map(|q| format!("?{q}")).unwrap_or_default();
     let target = match path.strip_prefix("/f/") {
@@ -2093,15 +2100,24 @@ const HOP_HEADERS: [&str; 9] = ["connection", "keep-alive", "proxy-authorization
 /// row names, for the agent its tag names, and the request goes on over
 /// HTTPS. A request with no placeholder goes on as it is (decision 43).
 /// A body is sent as it came. The platform's own headers (`x-fragment-…`)
-/// go to no provider. Each call the provider answered is counted as the
-/// agent's (`computer/used`), and an operator key's is metered to its
-/// owner first.
+/// go to no provider. An operator key's call is held on the agent's
+/// owner's ledger before it is made (`hold_keys`, awaited: no hold, no
+/// call). After the answer is handed back, the hold is settled if the
+/// provider answered, or released (`end_holds`), and each call it answered
+/// is counted as the agent's (`computer/used`). Both run in `wait_until`:
+/// a hold that never ends is charged by the ledger's sweep, so deferring
+/// the settle loses nothing.
 async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
     let headers_in: Vec<(String, String)> = req.headers().entries().filter(|(name, _)| !HOP_HEADERS.contains(&name.as_str()) && !name.starts_with("x-fragment-")).collect();
     let plan = Plan::of(&headers_in, url.query(), url.path(), &cfg.providers, &host).map_err(|e| CellError::new(e.code(), e.to_string()))?;
+    let method = req.method();
+    let body = match method {
+        Method::Get | Method::Head => vec![],
+        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
+    };
     let mut secrets = BTreeMap::new();
     // whose ledger a key's call goes on, and as which agent
     let mut payer: Option<(String, String, String)> = None;
@@ -2125,11 +2141,6 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     for (name, value) in &out_parts.headers {
         headers.set(name, value)?;
     }
-    let method = req.method();
-    let body = match method {
-        Method::Get | Method::Head => vec![],
-        _ => crate::read_body(&mut req, EGRESS_BODY_MAX_BYTES).await?,
-    };
     if !body.is_empty() {
         headers.set("content-length", &body.len().to_string())?;
     }
@@ -2148,32 +2159,27 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     if !body.is_empty() {
         init.with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     }
-    let out = Fetch::Request(Request::new_with_init(&target, &init)?)
-        .send()
-        .await
-        .map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")))?;
-    // each call the provider answered is the agent's (decision 37), after
-    // the answer: an operator key's metered to its owner, then every one
-    // counted; a failure is logged, never retried into the guest's call
-    if let Some((agent, owner, identity)) = payer.filter(|_| out.status_code() < 500) {
-        let keyed: Vec<(String, bool)> = plan.wanted.iter().map(|p| (p.provider.clone(), cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator))).collect();
+    let out = Request::new_with_init(&target, &init)?;
+    // held last, so every hold reaches `end_holds`
+    let holds = match &payer {
+        Some((_, owner, identity)) => hold_keys(env, cfg, computer, owner, identity, &plan).await?,
+        None => vec![],
+    };
+    let sent = Fetch::Request(out).send().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("{host} did not answer: {e}")));
+    let status = sent.as_ref().ok().map(Response::status_code);
+    let answered = status.is_some_and(|s| s < 500);
+    // after the answer, never in its way: a hold that does not end is the
+    // ledger's to charge (its sweep), so nothing here goes unaccounted
+    if let Some((agent, owner, _)) = payer {
+        // each call the provider answered is the agent's (decision 37), a key's at its price
+        let uses: Vec<Value> = plan.wanted.iter().map(|p| json!({ "provider": p.provider, "micros": holds.iter().find(|h| h.provider == p.provider).map_or(0, |h| h.amount) })).collect();
         let (env, computer) = (env.clone(), computer.to_string());
         ctx.wait_until(async move {
-            let at = js::now_ms();
-            let mut uses = vec![];
-            for (provider, operator) in keyed {
-                let mut micros = 0;
-                if operator {
-                    let reference = format!("key:{computer}:{}", js::random_hex::<12>());
-                    let row = MeterRow { reference: reference.clone(), usage: Usage::Key { key: provider.clone(), units: 1 }, fragment: None, agent: Some(identity.clone()), computer: Some(computer.clone()), at_ms: at };
-                    match crate::ledger::ask(&env, &owner, &Meter { batch: reference, rows: vec![row] }).await {
-                        Ok(m) => micros = m.charged,
-                        Err(e) => console_error!("{}", json!({ "egress": "swap", "meter": e.message })),
-                    }
-                }
-                uses.push(json!({ "provider": provider, "micros": micros }));
+            end_holds(&env, &owner, &holds, answered).await;
+            if !answered {
+                return;
             }
-            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": at, "uses": uses })).await {
+            if let Err(e) = ask(&env, &computer, "computer/used", &json!({ "agent": agent, "at": js::now_ms(), "uses": uses })).await {
                 console_error!("{}", json!({ "egress": "swap", "used": e.message }));
             }
         });
@@ -2181,9 +2187,61 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
     // one line per swap (lesson 14), naming the providers, never a tag or a value
     if !plan.is_empty() {
         let names: Vec<String> = plan.wanted.iter().map(Placeholder::named).collect();
-        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": out.status_code() }));
+        console_log!("{}", json!({ "egress": "swap", "computer": computer, "host": host, "method": method.as_ref(), "credentials": names, "status": status }));
     }
-    Ok(out)
+    sent
+}
+
+/// An operator key's call held on its owner's ledger (`hold_keys`).
+struct KeyHold {
+    provider: String,
+    reference: String,
+    amount: i64,
+}
+
+/// Holds each operator key's call in `plan` on `owner`'s ledger before it
+/// is made, as the agent `identity`: one call at its price, under
+/// `key:<computer>:<12 hex>`, as a model call holds its worst case
+/// (docs/ledger.md). A key is the operator's money: a ledger that refuses,
+/// or does not answer, refuses the call, and what it held already goes
+/// back.
+async fn hold_keys(env: &Env, cfg: &Config, computer: &str, owner: &str, identity: &str, plan: &Plan) -> CellResult<Vec<KeyHold>> {
+    let mut holds: Vec<KeyHold> = vec![];
+    // bounded: at most swap::PLACEHOLDERS_MAX
+    for p in plan.wanted.iter().filter(|p| cfg.providers.get(&p.provider).is_some_and(|row| row.kind == Kind::Operator)) {
+        let reserve = Reserve {
+            reference: format!("key:{computer}:{}", js::random_hex::<12>()),
+            spend: Spend::AgentTurn,
+            worst: Usage::Key { key: p.provider.clone(), units: 1 },
+            fragment: None,
+            agent: Some(identity.to_string()),
+            capped: false,
+        };
+        match crate::ledger::hold(env, owner, &reserve).await {
+            Ok(amount) => holds.push(KeyHold { provider: p.provider.clone(), reference: reserve.reference, amount }),
+            Err(e) => {
+                end_holds(env, owner, &holds, false).await;
+                return Err(CellError::new(e.code, format!("{}'s call is not made: {}", p.provider, e.message)));
+            }
+        }
+    }
+    Ok(holds)
+}
+
+/// Ends each hold: settled at its one call when its provider answered
+/// (under 500), else released (the call was not made, or not answered).
+/// One that does not land stays held, which the ledger's sweep charges at
+/// its amount.
+async fn end_holds(env: &Env, owner: &str, holds: &[KeyHold], answered: bool) {
+    for h in holds {
+        let ended = match answered {
+            true => crate::ledger::retried(env, owner, &Settle { reference: h.reference.clone(), usage: Some(Usage::Key { key: h.provider.clone(), units: 1 }) }).await.map(|_| ()),
+            false => crate::ledger::retried(env, owner, &Release { reference: h.reference.clone() }).await.map(|_| ()),
+        };
+        if let Err(e) = ended {
+            console_error!("{}", json!({ "egress": "swap", "hold": h.reference, "answered": answered, "error": e.message }));
+        }
+    }
 }
 
 /// The fragment a guest's `/f/<fragment>/…` or `/api/f/<fragment>/…` path names.

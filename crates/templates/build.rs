@@ -3,8 +3,8 @@
 // bundles) and `ALL`. Each distinct file is embedded once, as a static of
 // its own that every template holding it names: a template may hold
 // another's files through a symlink (the brain's viewer is the notes
-// template's, `templates/brain/site/assets`), and its bytes are in a
-// binary once. A symlink that leaves templates/ fails the build.
+// template's, `templates/brain/site/assets`; the chat's agent.png is the
+// agent's), and its bytes are in a binary once. A symlink that leaves templates/ fails the build.
 use std::collections::BTreeMap;
 use std::{env, fs, path::Path, path::PathBuf};
 

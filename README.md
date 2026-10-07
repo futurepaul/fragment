@@ -2,7 +2,7 @@
 
 Fragment publishes stateful, multiplayer web apps from the CLI. Sign up
 (invite-only for now), pair the `fragment` CLI, and publish. fragment.club
-lists your fragments, and serves them until they move to fragment.boats.
+lists your fragments, and fragment.boats serves them.
 Hosting, permissions, sharing, crons, jobs, and channels are built in.
 
 A fragment is a folder of files in git, an app of named operations over
@@ -11,8 +11,8 @@ An **agent** is an optional add-on, and a fragment that declares none
 carries nothing of it: goose, so a calorie tracker can take "2 eggs and
 toast". Fragments run on Cloudflare: each is a Durable Object that
 sleeps when idle, its app in a Worker of its own
-([docs/cloudflare-v1.md](docs/cloudflare-v1.md)); computers come back
-there.
+([docs/cloudflare-v1.md](docs/cloudflare-v1.md)), and so do computers
+([docs/computers.md](docs/computers.md)).
 
 This repo holds:
 
@@ -77,10 +77,8 @@ alias pointed at the dev stack. Fragments are served at
 ```
 cargo xtask check          # node --check on our JavaScript, host tests, clippy on host and wasm, warnings denied
 cargo xtask e2e            # the full suite against a fresh wrangler dev node (--only a,b | --except a,b)
-cargo xtask e2e --shard 2/4 --summary target/e2e-summary/2.json
+cargo xtask e2e --shard 2/4
                            # one of CI's four shards (crates/e2e/src/lanes/mod.rs, SHARDS)
-cargo xtask e2e-summary target/e2e-summary
-                           # CI's `e2e` check: the shards ran every section once, and all passed
 ```
 
 The e2e stages its own copy of the cell, so it runs alongside
@@ -98,9 +96,8 @@ hash differs), run its own npm's `npm ci` when node_modules is missing
 or stale, and start every JavaScript process on it, first on PATH, with
 its caches under `target/cache/` (Browser Rendering's Chrome included).
 `check` fetches it too, and runs `node --check` on it (no `npm ci`).
-A `node` on PATH is never used. `FRAGMENT_NODE=/abs/path/to/node` runs
-another, if it is a release of Node 22 or 24 with its npm beside it;
-`WRANGLER_BIN` names another wrangler's `bin/wrangler.js`.
+A `node` on PATH is never used, and there is no other: a machine the
+pin has no tarball for runs nothing.
 
 To move the pin:
 
@@ -112,7 +109,7 @@ To move the pin:
    SHASUMS256.txt`).
 3. Set `NODE_VERSION`, and each `TARBALLS` hash to its
    `node-v<version>-<platform>.tar.gz` line (darwin-arm64, darwin-x64,
-   linux-arm64, linux-x64). A new major goes in `OVERRIDE_MAJORS` too.
+   linux-arm64, linux-x64).
 4. `cargo xtask check`, then `cargo xtask e2e`: the first run fetches
    the new Node and runs `npm ci` with it. CI's cache of `target/tools`
    keys on that file, so it fetches afresh too.

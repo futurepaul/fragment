@@ -15,9 +15,9 @@ use serde_json::{json, Value};
 use crate::api::{self, Api, Call, Reply};
 use crate::Suite;
 
-/// How long a card may take after its deploy: the alarm sends the shot,
-/// the delivery queue's consumer takes it (a browser started, the page
-/// loaded and let settle), then reports it.
+/// How long a card may take after its deploy: the fragment's alarm takes
+/// the shot (a browser started, the page loaded and let settle) and keeps
+/// it.
 pub(super) const CARD_WAIT: Duration = Duration::from_secs(60);
 
 /// A fragment's preview card once it shows `live` (the commit live moved
@@ -190,8 +190,8 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
             (r, std::time::Instant::now())
         });
         std::thread::sleep(std::time::Duration::from_millis(300));
-        // the deploy's webhook is sent now; when its answer comes back is
-        // the cell's business (the fake waits for it), not the race's
+        // the deploy is made now; when its refresh answers is the
+        // cell's business, not the race's
         let sent = std::time::Instant::now();
         s.deploy(&c);
         (read.join().expect("the read's thread"), sent)
@@ -210,16 +210,10 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the machine-read plane
-    let r = api.page(&name, "__tree", Some(&cookie))?;
-    let paths: Vec<&str> = r.body["files"].as_array().map(|a| a.iter().filter_map(|f| f["path"].as_str()).collect()).unwrap_or_default();
-    s.ok("__tree lists the live content", r.status == 200 && paths.contains(&"notes/a.md"), &r);
-    s.ok("__tree hides the fragment's machinery", !paths.iter().any(|p| p.starts_with("workflows/") || *p == "fragment.json"), &r);
     let r = api.page(&name, "__file?path=notes/a.md", Some(&cookie))?;
     s.ok("__file returns content", r.status == 200 && r.text == "alpha", &r);
     let r = api.page(&name, "__file?path=workflows/w.mjs", Some(&cookie))?;
     s.ok("__file refuses machinery", r.status == 400, &r);
-    let r = api.page(&name, "__tree", None)?;
-    s.ok("__tree is gated like the site", r.status == 401, &r);
     s.commit(&c, &[("data/new.json", Some(b"{}"))]);
     let r = api.page(&name, "__file?path=data/new.json", Some(&cookie))?;
     s.ok("__file reads a file only main has yet", r.status == 200 && r.text == "{}", &r);
@@ -269,8 +263,8 @@ pub fn site(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "public" })))?;
     let r = api.page(&name, "", None)?;
     s.ok("a public fragment serves anyone", r.status == 200 && r.header("cache-control") == "public, max-age=60", &r);
-    let r = api.page(&name, "__tree", None)?;
-    s.ok("a public fragment's tree is public", r.status == 200, &r);
+    let r = api.call(Call { method: "GET", url: api.site_url(&name, "__files"), extra: vec![("accept", "application/json".into())], ..Call::default() })?;
+    s.ok("a public fragment's file list is public", r.status == 200 && r.body["files"].is_array(), &r);
 
     // /f/<name>/ on a fleet with hostnames
     let r = api.call(Call { method: "GET", url: format!("{}/f/{name}/docs/?x=1", api.base), ..Call::default() })?;
@@ -338,7 +332,7 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     let failed = event_kinds(api, owner, &name).iter().filter(|k| *k == "card.failed").count();
     s.ok(
         "a shot that keeps failing gives up after five tries: one card.failed event, no card, and no more tries",
-        ended && failed == 1 && r.status == 404 && kept["cards"]["wanted"].is_null() && kept["cards"]["flight"].is_null() && kept["failCardsLeft"] == 4,
+        ended && failed == 1 && r.status == 404 && kept["cards"]["wanted"].is_null() && kept["failCardsLeft"] == 4,
         json!({ "card": r.status, "cards": kept, "failed": failed }),
     );
     let site = api.page(&name, &format!("?view={view}"), None)?;

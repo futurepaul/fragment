@@ -60,8 +60,6 @@ pub mod limits {
     pub const STORAGE_TOKEN_TTL_S: i64 = 900;
     /// A file path in the repo.
     pub const PATH_MAX_BYTES: usize = 300;
-    /// A code.storage webhook's timestamp may differ from the cell's clock by this much.
-    pub const WEBHOOK_WINDOW_S: i64 = 300;
     /// Events per page of `GET events`.
     pub const EVENTS_PAGE: usize = 500;
     /// Records `events` and `ops` each keep (the oldest go first).
@@ -112,6 +110,11 @@ pub mod limits {
     /// /api/fragments/watch`: their shell's tabs, and any CLI), each told
     /// of every change to it; past this one more is refused (429).
     pub const LIST_WATCHERS_MAX: usize = 16;
+    /// A fragment's agents its row in a person's list names, the first
+    /// added first (a page that needs every one reads its members).
+    pub const LISTED_AGENTS_MAX: usize = 16;
+    /// A chat's preview in a person's list: its newest message's first line.
+    pub const LISTED_PREVIEW_MAX_BYTES: usize = 160;
     /// Modules an app may load besides `app.mjs` (`applib/`), and their total size.
     pub const APPLIB_FILES_MAX: usize = 64;
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -161,8 +164,6 @@ pub mod limits {
     /// A push's `who`, the tag a page subscribed with, in characters
     /// (Unicode scalar values: `chars()` here, `[...who]` in JavaScript).
     pub const PUSH_WHO_MAX_CHARS: usize = 64;
-    /// URLs `fragment.json`'s `notifyUrls` may name.
-    pub const NOTIFY_URLS_MAX: usize = 3;
     /// The largest blob an upload may carry (files of 1 MiB or more are blobs).
     pub const BLOB_MAX_BYTES: u64 = 256 * 1024 * 1024;
     /// Finished runs are kept this long, and at most this many.
@@ -260,7 +261,7 @@ pub fn valid_username(username: &str) -> bool {
         && !RESERVED_USERNAMES.contains(&username)
 }
 
-/// A fragment's name: `<label>.<username>` (decision 16), served at
+/// A fragment's name: `<label>.<username>` (decision R16), served at
 /// `<label>--<username>.<suffix>` ([`flat_name`]).
 pub fn valid_fragment_name(name: &str) -> bool {
     split_fragment_name(name).is_some()
@@ -375,9 +376,6 @@ pub enum ErrorCode {
     /// 503: the computer won't wake (its starts kept failing); its owner
     /// can wake it to try again.
     WontWake,
-    /// 410: the fragment moved to another host; the message names its URL
-    /// there (a write or a socket to its old host: docs/api.md, Moved hosts).
-    Moved,
     /// 403: a computer's swap found no account to swap in: the agent's
     /// owner has not connected that provider, or must connect it again.
     NotConnected,
@@ -400,7 +398,6 @@ impl ErrorCode {
             ErrorCode::BudgetUsedUp => 402,
             ErrorCode::StorageFull => 507,
             ErrorCode::NodeFull | ErrorCode::WontWake => 503,
-            ErrorCode::Moved => 410,
             ErrorCode::NotConnected => 403,
         }
     }
@@ -536,8 +533,7 @@ pub struct CreateFragment {
     pub title: Option<String>,
 }
 
-/// The answer to a create: the only time the webhook secret is shown
-/// besides a rotation.
+/// The answer to a create.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Created {
@@ -547,7 +543,6 @@ pub struct Created {
     pub visibility: Visibility,
     pub view_token: String,
     pub inbox_token: String,
-    pub webhook_secret: String,
     pub repo: String,
     pub canonical: String,
 }
@@ -569,8 +564,12 @@ pub struct Counts {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeStatus {
-    /// The live commit the code was read from; `None` when live has no `app.mjs`.
+    /// The live commit the code was installed from; `None` without app code.
     pub sha: Option<String>,
+    /// What runs: `app:<hash>` (the live commit's `app.mjs` and `applib/`),
+    /// or `blessed:<template>@<release>` (the platform release's code, which
+    /// a fragment on a blessed template runs whatever its commit: decision 40).
+    pub id: Option<String>,
     pub operations: std::collections::BTreeMap<String, OpDecl>,
     /// Why the latest live commit's code was not installed, if it was not.
     pub error: Option<String>,
@@ -622,8 +621,16 @@ pub struct ListedFragment {
     pub kind: FragmentKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Its agent members, the first added (a chat's lead) first, at most
+    /// `limits::LISTED_AGENTS_MAX`, as the fragment last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    /// A chat's newest message, its first line, as the signer's search
+    /// holds it (none when it holds none: docs/api.md, Search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
-    /// (`None` until it has: a fragment from before sends it once).
+    /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
@@ -808,14 +815,12 @@ pub mod routed {
     pub const NAME: &str = "x-fragment-name";
     /// The URL the request arrived on.
     pub const URL: &str = "x-fragment-url";
-    /// How the site was addressed: `host` (its own origin) or `path` (`/f/<name>/`).
-    pub const MODE: &str = "x-fragment-mode";
     /// Who is asking (JSON: the identity and the key it signed with).
     pub const SIGNED: &str = "x-fragment-signed";
     /// Who is asking a site request, not yet resolved (JSON: the key a
     /// signature was verified for, or the origin's session token).
     pub const CREDENTIAL: &str = "x-fragment-credential";
-    pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
+    pub const ALL: [&str; 4] = [NAME, URL, SIGNED, CREDENTIAL];
     /// The caller's identity on a request the router hands the agents'
     /// script (`agent/`), which trusts nothing else.
     pub const AGENT_PRINCIPAL: &str = "x-agent-principal";
@@ -858,7 +863,7 @@ pub struct IdentityView {
     /// An agent's owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
-    /// A person's username (decision 16): their fragments are
+    /// A person's username (decision R16): their fragments are
     /// `<label>.<username>`. An agent's fragments go under its owner's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
@@ -937,18 +942,13 @@ pub struct Join {
 }
 
 /// The answer to `POST /api/f/<name>/rotate` (owner): the tokens as they
-/// are now, and which of them this rotation renewed. The webhook secret is
-/// shown only here and in `Created`.
+/// are now, and which of them this rotation renewed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rotated {
     pub inbox_token: String,
     pub view_token: String,
-    /// The owner's alone: an agent sharing for its owner rotates the links,
-    /// never the webhook secret, and is never told it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub webhook_secret: Option<String>,
-    /// The scopes renewed: `inbox`, `view`, `webhook`.
+    /// The scopes renewed: `inbox`, `view`.
     pub rotated: Vec<String>,
 }
 
@@ -1588,17 +1588,17 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, sharing: None, archived: false }] };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes.ann".into(), role: Role::Owner, kind: FragmentKind::App, title: None, agents: vec![], preview: None, sharing: None, archived: false }] };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes.ann", "role": "owner", "kind": "app" }] }));
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1 };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), sharing: Some(sharing), archived: true }],
+            fragments: vec![ListedFragment { name: "todo.ann".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), agents: vec!["id:0123456789abcdef0123456789abcdef".into()], preview: Some("hi".into()), sharing: Some(sharing), archived: true }],
         };
         assert_eq!(
             value(&listed),
-            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
+            serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "agents": ["id:0123456789abcdef0123456789abcdef"], "preview": "hi", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
-        // a list from before archiving reads as nothing archived
+        // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
         assert!(!read.archived);
         let found = SearchAnswer {
@@ -1622,8 +1622,8 @@ mod tests {
     /// A rotation answers in the contract's camelCase, like every answer.
     #[test]
     fn a_rotation_answers_in_camel_case() {
-        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), webhook_secret: Some("w".into()), rotated: vec!["view".into()] };
-        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "webhookSecret": "w", "rotated": ["view"] }));
+        let r = Rotated { inbox_token: "i".into(), view_token: "v".into(), rotated: vec!["view".into()] };
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({ "inboxToken": "i", "viewToken": "v", "rotated": ["view"] }));
     }
 
     #[test]

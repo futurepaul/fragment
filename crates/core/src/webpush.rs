@@ -277,11 +277,11 @@ mod tests {
     #[test]
     fn vapid_tokens_verify() {
         let vapid = Vapid::from_bytes([11u8; 32]).unwrap();
-        let mut tokens = Tokens::new(&vapid, "mailto:ops@fragment.invalid", 1_790_000_000);
+        let mut tokens = Tokens::new(&vapid, "https://fragment.club", 1_790_000_000);
         let claims = verified_claims(&vapid, tokens.authorization("https://fcm.googleapis.com/fcm/send/xyz").unwrap());
         assert_eq!(claims["aud"], "https://fcm.googleapis.com");
         assert_eq!(claims["exp"], 1_790_000_000 + 12 * 3600);
-        assert_eq!(claims["sub"], "mailto:ops@fragment.invalid");
+        assert_eq!(claims["sub"], "https://fragment.club");
         assert!(tokens.authorization("not a url").is_err());
         assert_eq!(Vapid::from_bytes(vapid.to_bytes()).unwrap().public_key(), vapid.public_key());
     }
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn one_push_signs_once_per_push_service() {
         let vapid = Vapid::from_bytes([11u8; 32]).unwrap();
-        let mut tokens = Tokens::new(&vapid, "mailto:ops@fragment.invalid", 1_790_000_000);
+        let mut tokens = Tokens::new(&vapid, "https://fragment.club", 1_790_000_000);
         let endpoints = [
             ("https://fcm.googleapis.com/fcm/send/a", "https://fcm.googleapis.com"),
             ("https://updates.push.services.mozilla.com/wpush/v2/b", "https://updates.push.services.mozilla.com"),

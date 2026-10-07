@@ -3,9 +3,11 @@
 //! lists). The fragments are the authority; each delivers its changes here
 //! from an outbox, versioned so a late delivery never undoes a newer one.
 //! A fragment's row in its owner's list also carries its sharing (who may
-//! open it, its members and guests), sent with each change to them, so the
-//! platform's page reads this one cell and wakes no fragment.
-//! Which keys an identity holds is the registry's (registry.rs).
+//! open it, its members and guests), sent with each change to them, and
+//! every row its agents (a chat's lead first), sent with each change to
+//! them; a chat's row shows its newest message from this person's search
+//! (below). So the platform's page reads this one cell and wakes no
+//! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
 //! Three things here are the person's own, not a fragment's:
 //!
@@ -18,22 +20,28 @@
 //!   fragment and its place in that fragment's log (`n`), so a delivery sent
 //!   twice, or late, adds nothing twice. Entries are fenced by the row: a
 //!   delivery is taken only while the row names a role, at the incarnation
-//!   it was sent from, and the row's removal (or a new incarnation) drops
-//!   them all; a search reads only entries of rows that name a role. At most
+//!   it was sent from, and only the messages of the channels the row names
+//!   as searched; the row's removal (or a new incarnation) drops them all,
+//!   and a row that names other channels drops the rest; a search reads
+//!   only entries of rows that name a role. At most
 //!   `SEARCH_ENTRIES_PER_FRAGMENT_MAX` a fragment and `SEARCH_ENTRIES_MAX` in
-//!   all are kept, the oldest going first.
+//!   all are kept, the oldest going first. A chat's newest entry is its
+//!   row's `preview`; a chat with none here (no message every member may
+//!   read, or its entries gone past the total) shows none.
 //! - **Watching** (`GET /api/fragments/watch`; Paul on p5, 2026-10-05: an
 //!   app his agent made did not show in his sidebar until he reloaded):
 //!   the person's open shells, and any CLI, hold a socket here, hibernated
 //!   (the router decided whose list it is). Each change this list applies
 //!   (a row's, newer than the one it holds: a fragment made, shared with
-//!   them, changed, left or deleted; or their archiving) is told to every
+//!   them, changed, left or deleted; their archiving; or a chat's message
+//!   new here, its preview) is told to every
 //!   one as `{type: "changed"}`, naming nothing: each page reads the list
 //!   again with its own credential, so a socket that outlives its session
 //!   learns only that something changed. A socket closed or lost misses
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 
+use fragment_core::npub;
 use fragment_core::search::{self, Query};
 use fragment_proto::{limits, valid_channel_name, Archived, ErrorCode, FragmentKind, FragmentList, ListedFragment, MessageHit, Role, SearchAnswer, Sharing};
 use serde::{Deserialize, Serialize};
@@ -44,7 +52,8 @@ use crate::error::{CellError, CellResult};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS memberships (
-  fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL);
+  fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL,
+  sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT);
 CREATE TABLE IF NOT EXISTS search_entries (
   id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL,
   at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n));
@@ -66,8 +75,12 @@ const HELLO: &str = r#"{"type":"hello"}"#;
 /// What a watching socket is told of a change: no more.
 const CHANGED: &str = r#"{"type":"changed"}"#;
 
-/// The columns `/list` and a search read of a row.
-const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived FROM memberships WHERE role IS NOT NULL ORDER BY fragment";
+/// The columns `/list` and a search read of a row, and a chat's newest
+/// search entry (`said`), read by its place in its fragment's log.
+const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived,
+  CASE WHEN json_extract(face, '$.kind') = 'chat'
+    THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said
+  FROM memberships m WHERE role IS NOT NULL ORDER BY fragment";
 
 #[durable_object]
 pub struct PrincipalCell {
@@ -89,6 +102,10 @@ struct IndexChange {
     /// What it is and its title, on every row a role names.
     #[serde(default)]
     face: Option<Face>,
+    /// The channels its search holds (those every member may read), on
+    /// every row a role names.
+    #[serde(default)]
+    searched: Option<Vec<String>>,
 }
 
 /// What a person's list shows of a fragment.
@@ -98,6 +115,9 @@ struct Face {
     kind: FragmentKind,
     #[serde(default)]
     title: Option<String>,
+    /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    agents: Vec<String>,
 }
 
 /// A `memberships` row as `/list` reads it.
@@ -108,6 +128,7 @@ struct Listed {
     sharing: Option<String>,
     face: Option<String>,
     archived: i64,
+    said: Option<String>,
 }
 
 /// `PUT /archived`: the router's, for the signer (`SetArchived`, named).
@@ -160,14 +181,6 @@ impl DurableObject for PrincipalCell {
     fn new(state: State, _env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
-        // a list from before rows carried a fragment's sharing, its face, or
-        // the person's archiving
-        let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None).and_then(|c| c.to_array()).unwrap_or_default();
-        for (col, ty) in [("sharing", "TEXT"), ("face", "TEXT"), ("archived", "INTEGER NOT NULL DEFAULT 0")] {
-            if !cols.iter().any(|c| c["name"] == col) {
-                sql.exec(&format!("ALTER TABLE memberships ADD COLUMN {col} {ty}"), None).expect("the memberships table migrates");
-            }
-        }
         PrincipalCell { state }
     }
 
@@ -228,7 +241,7 @@ impl PrincipalCell {
             (Method::Get, "/list") => {
                 // `GET /api/fragments`'s answer, whole: the router passes it through
                 let rows: Vec<Listed> = self.typed(LISTED, vec![])?;
-                let fragments = rows.into_iter().filter_map(|r| listed(r).transpose()).collect::<CellResult<Vec<_>>>()?;
+                let fragments = rows.into_iter().map(listed).collect::<CellResult<Vec<_>>>()?;
                 Ok(Response::from_json(&FragmentList { fragments })?)
             }
             (Method::Put, "/archived") => {
@@ -282,8 +295,15 @@ impl PrincipalCell {
     /// Applies a fragment's change to its row, when it is newer than the
     /// row's. A change that removes the person, or comes from a new
     /// incarnation, drops what the row held for them: their archiving and
-    /// their search entries.
+    /// their search entries; one that names the channels searched drops
+    /// the entries of any other.
     fn index(&self, c: IndexChange) -> CellResult<bool> {
+        if c.searched.as_ref().is_some_and(|s| s.len() > limits::CHANNELS_MAX || !s.iter().all(|ch| valid_channel_name(ch))) {
+            return Err(CellError::invalid(format!("{}'s searched channels are more than a fragment declares, or not channels' names", c.fragment)));
+        }
+        if c.face.as_ref().is_some_and(|f| f.agents.len() > limits::LISTED_AGENTS_MAX || !f.agents.iter().all(|a| npub::is_identity(a))) {
+            return Err(CellError::invalid(format!("{}'s agents are more than a row names, or not identities", c.fragment)));
+        }
         let stored = self.rows("SELECT incarnation, version FROM memberships WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
         let (newer, reborn) = match stored.first() {
             None => (true, false),
@@ -304,14 +324,18 @@ impl PrincipalCell {
             Some(f) => serde_json::to_string(f).map_err(|e| CellError::host(format!("face: {e}")))?.into(),
             None => SqlStorageValue::Null,
         };
+        let searched = match &c.searched {
+            Some(s) => serde_json::to_string(s).map_err(|e| CellError::host(format!("searched: {e}")))?.into(),
+            None => SqlStorageValue::Null,
+        };
         let gone = c.role.is_none() || reborn;
         // a change that carries no face (a fragment from before faces)
         // keeps the one the row has; no change touches the person's archiving
         // but the one that ends what it was about
         self.rows(
-            "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face, archived) VALUES (?, ?, ?, ?, ?, ?, 0)
+            "INSERT INTO memberships (fragment, role, incarnation, version, sharing, face, archived, searched) VALUES (?, ?, ?, ?, ?, ?, 0, ?)
              ON CONFLICT (fragment) DO UPDATE SET role = excluded.role, incarnation = excluded.incarnation, version = excluded.version,
-               sharing = excluded.sharing, face = COALESCE(excluded.face, memberships.face),
+               sharing = excluded.sharing, face = COALESCE(excluded.face, memberships.face), searched = excluded.searched,
                archived = CASE WHEN ? THEN 0 ELSE memberships.archived END",
             vec![
                 c.fragment.as_str().into(),
@@ -320,11 +344,17 @@ impl PrincipalCell {
                 SqlStorageValue::Integer(c.version),
                 sharing,
                 face,
+                searched.clone(),
                 SqlStorageValue::Integer(i64::from(gone)),
             ],
         )?;
         if gone {
             self.rows("DELETE FROM search_entries WHERE fragment = ?", vec![c.fragment.as_str().into()])?;
+        } else if c.searched.is_some() {
+            self.rows(
+                "DELETE FROM search_entries WHERE fragment = ? AND channel NOT IN (SELECT value FROM json_each(?))",
+                vec![c.fragment.as_str().into(), searched],
+            )?;
         }
         Ok(true)
     }
@@ -349,9 +379,13 @@ impl PrincipalCell {
     }
 
     /// A fragment's messages, taken while this person holds a role on it
-    /// at the incarnation they come from; each entry once. Then the
-    /// fragment's entries past its limit, and everyone's past the total,
-    /// go, the oldest first.
+    /// at the incarnation they come from, and only those of the channels
+    /// the row names as searched (a late batch's of a channel tightened
+    /// since are not); each entry once. A row that names none yet (one
+    /// from before rows did) takes nothing yet. Then the fragment's
+    /// entries past its limit, and everyone's past the total, go, the
+    /// oldest first. A chat's new message is its row's preview: the
+    /// list's watchers are told.
     fn take_entries(&self, b: SearchBatch) -> CellResult<SearchApplied> {
         if !fragment_proto::valid_fragment_name(&b.fragment) {
             return Err(CellError::invalid(format!("{:?} is not a fragment's name", b.fragment)));
@@ -366,14 +400,17 @@ impl PrincipalCell {
             }
         }
         let fenced = self.rows(
-            "SELECT 1 AS ok FROM memberships WHERE fragment = ? AND role IS NOT NULL AND incarnation = ?",
+            "SELECT searched, json_extract(face, '$.kind') = 'chat' AS chat FROM memberships WHERE fragment = ? AND role IS NOT NULL AND incarnation = ? AND searched IS NOT NULL",
             vec![b.fragment.as_str().into(), SqlStorageValue::Integer(b.incarnation)],
         )?;
-        if fenced.is_empty() {
+        let Some(row) = fenced.first() else {
             return Ok(SearchApplied { member: false, applied: 0 });
-        }
+        };
+        let searched = row["searched"].as_str().expect("a fenced row names its searched channels");
+        let searched: Vec<String> = serde_json::from_str(searched).map_err(|e| CellError::host(format!("{}'s stored searched channels: {e}", b.fragment)))?;
+        let chat = row["chat"].as_i64() == Some(1);
         let mut applied = 0u64;
-        for e in &b.entries {
+        for e in b.entries.iter().filter(|e| searched.contains(&e.channel)) {
             let added = self.rows(
                 "INSERT INTO search_entries (fragment, n, channel, seq, at, text) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (fragment, n) DO NOTHING RETURNING id",
                 vec![
@@ -399,6 +436,9 @@ impl PrincipalCell {
             assert!(over <= limits::SEARCH_BATCH_MAX as i64, "the total is kept after each delivery");
             self.rows("DELETE FROM search_entries WHERE id IN (SELECT id FROM search_entries ORDER BY at, id LIMIT ?)", vec![SqlStorageValue::Integer(over)])?;
         }
+        if chat && applied > 0 {
+            self.tell();
+        }
         Ok(SearchApplied { member: true, applied })
     }
 
@@ -417,7 +457,7 @@ impl PrincipalCell {
             if fragments.len() == limits::SEARCH_FRAGMENTS_MAX {
                 break;
             }
-            let Some(f) = listed(row)? else { continue };
+            let f = listed(row)?;
             if query.names(&f.name, f.title.as_deref()) {
                 fragments.push(f);
             }
@@ -451,18 +491,15 @@ impl PrincipalCell {
     }
 }
 
-/// A row as a list shows it; `None` for a fragment from before usernames
-/// (decision R16's hard cut: served nowhere, so never listed).
-fn listed(r: Listed) -> CellResult<Option<ListedFragment>> {
-    if !fragment_proto::valid_fragment_name(&r.name) {
-        return Ok(None);
-    }
+/// A row as a list shows it.
+fn listed(r: Listed) -> CellResult<ListedFragment> {
     let sharing = match r.sharing.as_deref().map(serde_json::from_str::<Sharing>) {
         Some(Ok(s)) => Some(s),
         Some(Err(e)) => return Err(CellError::host(format!("{}'s stored sharing: {e}", r.name))),
         None => None,
     };
     let face = r.face.as_deref().and_then(|f| serde_json::from_str::<Face>(f).ok());
-    let (kind, title) = face.map_or((FragmentKind::App, None), |f| (f.kind, f.title));
-    Ok(Some(ListedFragment { name: r.name, role: r.role, kind, title, sharing, archived: r.archived != 0 }))
+    let (kind, title, agents) = face.map_or((FragmentKind::App, None, Vec::new()), |f| (f.kind, f.title, f.agents));
+    let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, agents, preview, sharing, archived: r.archived != 0 })
 }

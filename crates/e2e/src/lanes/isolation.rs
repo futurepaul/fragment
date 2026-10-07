@@ -1,13 +1,13 @@
-//! Isolation between fragments, and the move (docs/api.md, Which cookies
-//! count; Moved hosts). Which of a browser's cookies count on a fragment's
-//! origin follows the Fetch Metadata the browser sends, so another
+//! Isolation between fragments (docs/api.md, Which cookies count). Which
+//! of a browser's cookies count on a fragment's origin follows the Fetch
+//! Metadata the browser sends, so another
 //! fragment's page (one site with it) reaches it only as a stranger would;
 //! a frame of a fragment signs in only through the platform's mint, for a
 //! frame of the platform's own page (the frames section), so another
 //! fragment's page signs no frame in, by the mint or without it;
 //! signing in and out cannot be set off from another page; and a fragment
 //! that is not yours, nor shared with you, asks before it learns who you
-//! are. A fragment's old host sends a browser on to its new one.
+//! are.
 //!
 //! `isolation` runs as fragment.club is shaped (the platform cross-site
 //! from the fragments, which are one site with each other), in Chrome where
@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use super::signin::{consent, signout, unframed, with_session};
 use super::templates::person;
-use crate::api::{url_enc, Api, Call, Reply, Socket};
+use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
 
@@ -104,51 +104,27 @@ pub fn isolation(s: &mut Suite, _: &Api) -> Result<()> {
     let api = s.start_as_browsers_see_it()?;
     let result = attacks(s, &api);
     let opened = by_url(s, &api);
-    let hosts = moved(s, &api);
+    let hosts = hosts(s, &api);
     let result = result.and(opened).and(hosts);
     drop(api);
     s.stop()?;
-    s.start(false, true)?;
+    s.start(false)?;
     result
 }
 
-/// The move (docs/api.md, Moved hosts): a fragment's old host, under
-/// the platform's own domain as fragment.club's are, sends a browser on to
-/// its new one, the path and query kept, and refuses a write or a socket;
-/// the fragments' suffix's own name is the platform's; any other name under
-/// either is no one's.
-fn moved(s: &mut Suite, api: &Api) -> Result<()> {
-    let owner = api.person()?;
-    let name = made(api, &owner, &s.name("imoved"), "blank", json!([{ "path": "site/index.html", "text": "<p>moved in</p>" }]), "public")?;
-    let old_origin = format!("http://{}.{}:{}", fragment_proto::flat_name(&name).unwrap_or_default(), crate::SUFFIX, api.port);
-    let get = |method: &str, url: String| api.call(Call { method, url, ..Call::default() });
-    for method in ["GET", "HEAD"] {
-        let r = get(method, format!("{old_origin}/page?x=1"))?;
-        let to = r.header("location");
-        s.ok(
-            &format!("a {method} on a fragment's old host answers 308 to its new one, the path and query kept, cached nowhere"),
-            r.status == 308 && to == api.site_url(&name, "page?x=1") && r.header("cache-control") == "no-store",
-            format!("{r} → {to}"),
-        );
-    }
-    let r = get("GET", format!("{old_origin}/?x=1"))?;
-    let r = get("GET", r.header("location"))?;
-    s.ok("the fragment serves where it sends the browser", r.status == 200 && r.text.contains("moved in"), &r);
-    let body = Some(br#"{"id":"m","input":{}}"#.to_vec());
-    let r = api.call(Call { method: "POST", url: format!("{old_origin}/__op/add"), body, content_type: Some("application/json"), ..Call::default() })?;
-    s.ok("a write on the old host is 410, naming the new one", r.status == 410 && r.error() == "moved" && r.message().contains(&api.site_url(&name, "__op/add")), &r);
-    let socket = match Socket::connect(api, &format!("{old_origin}/__live?v=2"), None, None, Some(&old_origin)) {
-        Ok(_) => "opened".to_string(),
-        Err(e) => format!("{e:#}"),
-    };
-    s.ok("and so is a socket", socket.contains("410"), &socket);
-    let r = get("GET", format!("http://{}:{}/cli?key=x", crate::BOATS, api.port))?;
+/// The fragments' suffix's own name, with the platform elsewhere, is the
+/// platform's, cached nowhere; any other name under it is no one's.
+fn hosts(s: &mut Suite, api: &Api) -> Result<()> {
+    let get = |url: String| api.call(Call { method: "GET", url, ..Call::default() });
+    let r = get(format!("http://{}:{}/cli?key=x", crate::BOATS, api.port))?;
     let to = r.header("location");
-    s.ok("the fragments' suffix's own name answers 308 to the platform", r.status == 308 && to == format!("{}/cli?key=x", api.base), format!("{r} → {to}"));
-    for suffix in [crate::SUFFIX, crate::BOATS] {
-        let r = get("GET", format!("http://a.{suffix}:{}/", api.port))?;
-        s.ok(&format!("another name under {suffix} is no one's (404)"), r.status == 404 && r.message().contains("no fragment here"), &r);
-    }
+    s.ok(
+        "the fragments' suffix's own name answers 308 to the platform, cached nowhere",
+        r.status == 308 && to == format!("{}/cli?key=x", api.base) && r.header("cache-control") == "no-store",
+        format!("{r} → {to}"),
+    );
+    let r = get(format!("http://a.{}:{}/", crate::BOATS, api.port))?;
+    s.ok("another name under it is no one's (404)", r.status == 404 && r.message().contains("no fragment here"), &r);
     Ok(())
 }
 
