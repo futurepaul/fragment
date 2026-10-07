@@ -27,6 +27,12 @@
   },
   "ai_gateway": "fragment-dev",
   "default_plan": "seat",
+  // The operators (npubs): they grant credit, set plans, release
+  // usernames, and wipe a person (docs/api.md, Operators). The hosted e2e's
+  // `wipe` section wipes the people it signs in as the operator whose key
+  // is in the file `cargo xtask e2e --hosted … --operator-key-file <file>`
+  // names (a key no person holds: `fragment operator key <file>` makes one,
+  // and prints the npub to list here); without one it is a skip.
   "operators": [],
   "computers": {
     "default_image": "hermes",

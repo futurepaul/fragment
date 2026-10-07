@@ -27,6 +27,9 @@ runtime. A change that would have to is a design bug (the rule).
   starts and stops it, saves and restores `/data`, runs the egress
   intercepts below, proxies its ports, and wakes it. It never reads what
   the image runs.
+- A computer is deleted only with its owner, by an operator's wipe of them
+  (docs/api.md, Operators; below, "Deleted with its owner"). A new
+  identity is a new computer: its id is its owner's.
 
 ## Lifecycle
 
@@ -263,6 +266,35 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   back to a save older than that life's newest, so what that life did
   since some save is in none. A start from the save its life's sleep took
   is none. Nothing's correctness depends on the guest reading either.
+
+### Deleted with its owner
+
+An operator's wipe of its owner (docs/api.md, Operators) asks the Computer
+DO to wipe itself (`computer/wipe`, an internal route), until it says
+nothing is left:
+
+- it is **marked wiped first**, in its storage: from the mark on no write
+  of its lands (a save, a start's report, a meter under way when the wipe
+  began fails at its next write), its alarm is gone, and every route
+  answers as a computer never made (404), so nothing wakes or starts it
+  again;
+- its **container is destroyed**, whichever start runs it, and waited
+  out;
+- **every save goes from R2**: each record its saves name (kept, and let
+  go of and not yet deleted), through the same `DirectoryBackup` delete a
+  save's own `forget` makes, then whatever else is under its saves'
+  prefix (`computers/<object id>/backups/`: an upload its destroy cut
+  short), ten pages a call;
+- once none is left, **its record is emptied** (its tables dropped and
+  made again empty, its mark kept): its saves, lifecycle, agents, uses,
+  own keys, tickets and sessions, and the **snapshot's** id.
+
+Cloudflare deletes no container snapshot: the Worker's container binding
+takes one (`snapshotContainer`) and starts from one, and has no delete,
+and Cloudflare keeps one for 30 days after it was last restored. A wiped
+computer's snapshot is forgotten, so nothing ever restores it, and it
+expires within 30 days. The container application is the deployment's
+(every computer on an image shares it), so a wipe leaves it.
 
 ### The fragment API
 
@@ -915,6 +947,12 @@ for a host) and finds the same `HOME`, `~` and modes.
   (`fail-saves`), and so is an always-on plan (`always-on`). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
   computer's `uses`), never records, which a second run replays.
+- The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
+  whose `/data` holds a file its agent wrote and a save, wiped with its
+  owner (its first step alone, then across a node's crash): no computer
+  from that step, its saves gone, its owner's next identity's computer a
+  new one that restores nothing and reads no such file; hosted, the same
+  on the deployment's own image.
 - The real-Hermes lane: `images/hermes/` with a scripted model (phase
   4's exit list), a second agent assigned to the awake computer while the
   first's turn runs included, and an install as root (a `.deb` through

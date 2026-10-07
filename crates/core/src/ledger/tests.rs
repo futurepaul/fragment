@@ -954,6 +954,10 @@ fn money_refusals_are_402_with_a_reason_people_can_read() {
     assert_eq!(Refused::GuestPayer.code(), ErrorCode::Forbidden);
     assert_eq!(Refused::GuestCreates.code(), ErrorCode::Forbidden);
     assert_eq!(serde_json::to_value(Refused::GuestCreates).unwrap(), serde_json::json!({ "refused": "guest_creates" }));
+    // a wiped person's ledger refuses as one that is not there, and says why
+    assert_eq!(Refused::Wiped.code(), ErrorCode::NotFound);
+    assert_eq!(serde_json::to_value(Refused::Wiped).unwrap(), serde_json::json!({ "refused": "wiped" }));
+    assert!(Refused::Wiped.message().contains("wiped"));
     assert_eq!(Refused::TooManyHolds.code(), ErrorCode::RateLimited);
     assert_eq!(Refused::TooLarge.code(), ErrorCode::TooLarge);
     assert_eq!(Refused::Invalid { what: Invalid::Rows }.code(), ErrorCode::InvalidRequest);
