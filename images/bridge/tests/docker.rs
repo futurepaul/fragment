@@ -1103,9 +1103,11 @@ fn held_event(c: &Container) -> Option<serde_json::Value> {
 /// agent runs from its terminal with its default profile, the full one as
 /// its desktop runs it, keeps that profile in its home, in its work, so a
 /// hold while it runs keeps none of its databases hot (`locked` empty), and
-/// none is under Hermes' home for a restore's check to find. Before, on
-/// Containers, it was `/data/hermes/.config/…`, held locked (the debt
-/// ledger's "A running browser's databases under Hermes' home").
+/// none is under Hermes' home for a restore's check to find. Before, it was
+/// under Hermes' home (on Containers `/data/hermes/.config/…`; with the home
+/// pinned, the profile's `home/.config/…`), and its
+/// `declarative_performance_observer.db` was held locked.
+/// The agent starts it as Hermes' background process (`start:`).
 #[tokio::test]
 #[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
