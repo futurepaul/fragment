@@ -35,6 +35,7 @@
 //!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
 //!   PUT    /api/channels/<channel>/draft  the channel's post role ({turn, text}: shown live, never stored)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
+//!   GET    /mcp/tools                     the operations the caller may call, as MCP tools (the router's, for `__mcp`)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
@@ -112,7 +113,7 @@ CREATE TABLE IF NOT EXISTS code (
   id INTEGER PRIMARY KEY CHECK (id = 1), sha TEXT NOT NULL, loader_id TEXT NOT NULL, source TEXT NOT NULL,
   cpu_ms INTEGER NOT NULL, installed_at INTEGER NOT NULL,
   modules TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0, description TEXT);
 CREATE TABLE IF NOT EXISTS code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT);
 CREATE INDEX IF NOT EXISTS code_triggers_on ON code_triggers (kind, target);
@@ -1019,6 +1020,8 @@ impl FragmentCell {
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
             }
+            // the router's own, for a connected client (cell/src/mcp.rs): never routed from outside
+            (Method::Get, ["mcp", "tools"]) => self.mcp_tools(&caller),
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
                 self.put_blob(&caller, &sha, &req).await

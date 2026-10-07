@@ -258,6 +258,11 @@ fragment verify my-thing --dir .            # full-content audit
 - `input` is a JSON Schema (types, enums, lengths, ranges, `properties`,
   `required`, `additionalProperties`, `items`). A call that does not fit
   is refused before your code runs, naming the field.
+- `description` says what it does and what it answers, for a model:
+  every operation is a tool of the fragment's MCP server (`<its
+  origin>/__mcp`, which Claude, ChatGPT or any MCP client connects to as
+  its person), named by its operation and described by this. Write one
+  for each, at most 1024 characters.
 - `"ephemeral": true` on a mutation you call often with a "latest value":
   its calls keep no ledger row (a mutation's id is
   otherwise kept a week in your app's 16 MiB database), so the same id
@@ -401,6 +406,15 @@ fragment call my-thing add --input @input.json                 # or - for stdin:
 fragment channel my-thing                                      # list channels
 fragment channel my-thing activity --follow                     # the backlog a page at a time, then new records, as JSON lines
 ```
+
+From a chat client (Claude, ChatGPT) or any MCP client, a fragment is an
+MCP server at `https://<label>--<username>.<its domain>/__mcp`: added
+as a custom connector, it asks its person to sign in and allow it, then
+lists the operations they may call as tools. A tool's arguments are a
+call's, `{id, input}`: the input under `input`, and, for a mutation or a
+job, an id the client chooses (the same id again is a replay). What it
+does names the client in `fragment events`; its person ends it in their
+settings, under Connected clients.
 
 ## People
 

@@ -209,6 +209,25 @@ impl FragmentCell {
         json_response(&result)
     }
 
+    /// `GET /mcp/tools`, the router's for a connected client (cell/src/mcp.rs):
+    /// the operations the caller may call, as MCP tools, by name. One it may
+    /// not call is left out; a fragment it may not see is refused.
+    pub(crate) fn mcp_tools(&self, caller: &Caller) -> CellResult<Response> {
+        let facts = self.facts()?;
+        let standing = self.standing(caller, false)?;
+        decide(facts.visibility, standing, Purpose::Read, Role::Public)?;
+        let tools: Vec<Value> = self
+            .operations()?
+            .iter()
+            .filter(|(_, d)| {
+                let purpose = if d.kind == OpKind::Query { Purpose::Read } else { Purpose::Act };
+                decide(facts.visibility, standing, purpose, d.role).is_ok()
+            })
+            .map(|(name, d)| fragment_core::mcp::tool(name, d))
+            .collect();
+        json_response(&json!({ "tools": tools }))
+    }
+
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link. The caller's standing is read once and
@@ -246,8 +265,15 @@ impl FragmentCell {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
+        let acts = decl.kind != OpKind::Query;
+        let id = body.id.clone();
         let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
+        // what a connected client does names it (docs/api.md, Connected clients)
+        if let (Some(through), true, false) = (caller.signed.as_ref().and_then(|s| s.through.as_ref()), acts, result.replayed) {
+            let summary = format!("{op} {id} by {} through {}", npub::display(principal), through.client);
+            self.event("client.called", &summary, json!({ "op": op, "id": id, "principal": npub::display(principal), "client": through.client, "connection": through.connection }));
+        }
         self.launch_queued().await;
         Ok(result)
     }
