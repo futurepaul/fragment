@@ -1176,27 +1176,14 @@ function skillsIn(paths) {
 }
 const skillsFragmentOf = () => state.fragments.find((f) => f.kind === "skills" && own(f));
 // The person's skills fragment, made from the blessed template when they
-// have none (at setup, as their default agent is).
+// have none: at setup, as their default agent is, or from settings' Skills
+// for a person without one (deleted, or set up before 2026-10-03).
 async function skillsFragment() {
   const have = skillsFragmentOf();
   if (have) return have.name;
   const made = await api("POST", "/api/fragments", { name: freeLabel("skills"), template: "skills" });
   await load();
   return made.name;
-}
-// A person whose agents were made before setup made a skills fragment
-// (2026-10-03) has none: it is made once, as setup makes it, as the shell
-// loads. Their agents' computers install it at their next skills read (each
-// looks every minute while its owner has none). Silent: a failure is tried
-// again at the next load, and the shell waits on it BACKFILL_WAIT_MS at most;
-// made later than that, open settings are drawn again to list it.
-const BACKFILL_WAIT_MS = 5_000;
-async function backfillSkills() {
-  if (skillsFragmentOf() || !state.fragments.some((f) => f.kind === "agent" && own(f))) return;
-  const made = skillsFragment().then(() => true, () => false);
-  const inTime = await Promise.race([made, new Promise((r) => setTimeout(() => r(null), BACKFILL_WAIT_MS))]);
-  // made past the wait: the settings that rendered without it list it now
-  if (inTime === null) made.then((ok) => { if (ok && location.pathname === SETTINGS) openSettings(false); });
 }
 function skillNames(list) {
   const value = el("span", "settings-value");
@@ -1515,8 +1502,6 @@ async function start(open) {
   // the first agent is asked for at home; settings open as asked, chats or not
   const settings = !open && location.pathname === SETTINGS;
   if (!chats().length && !open && !settings) return creatingAgent();
-  // before settings reads it: their Skills list the made one
-  await backfillSkills();
   $("first-run").hidden = true;
   $("layout").hidden = false;
   const pick = open ?? (byName(state.current) ? state.current : (shown(chats())[0] ?? chats()[0])?.name);

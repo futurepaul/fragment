@@ -195,8 +195,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         ],
     );
     s.deploy(&agent);
-    // its owner has no skills fragment yet (one is made below, as the shell
-    // backfills it): the agent still knows its platform
+    // its owner has no skills fragment yet (one is made below, as settings'
+    // "Add the managed skills" makes it): the agent still knows its platform
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
     s.ok("its owner assigns the agent to it", r.status == 200 && identity.starts_with("id:"), &r);
@@ -430,8 +430,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let asked = turn_for(&r);
     s.eventually(TURN, || ended(&asked).is_some());
     s.ok("its config names the platform skill, which is in the image, named `fragment`", reply_of(&asked).is_some_and(|t| t.contains("platform-name: fragment")), json!(reply_of(&asked)));
-    // the owner's skills fragment appears (decision 17; the shell makes it for
-    // a person who lacks one): its computer, awake, installs its managed set
+    // the owner's skills fragment appears (decision 17; a person who lacks
+    // one adds it from settings): its computer, awake, installs its managed set
     // within a minute, as it looks for one that often while there is none
     let skills_label = s.name("skills");
     let r = api.create_with(&owner, json!({ "name": skills_label, "template": "skills" }))?;
