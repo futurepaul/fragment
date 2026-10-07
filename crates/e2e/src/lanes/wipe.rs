@@ -78,7 +78,8 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let scripted = !s.hosted();
     let wake = if scripted { WAKE } else { HOSTED_WAKE };
 
-    // ---- a person, everything of theirs, and someone else
+    // ---- a person, everything of theirs, and someone else (lent no paid
+    // call: the run's spend reads no ledger of theirs once they are wiped)
     let paul = api.person()?;
     let email = Api::email_of(&paul);
     let (paul_id, username) = (api.identity(&paul)?, api.username(&paul)?);
@@ -217,6 +218,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     };
 
     // ---- the wipe, from the CLI, with an operator key no one holds
+    api.wiped(&paul_id);
     let wiped = cli_wipe(s, api, &file, &[&username, "--yes"]);
     let w = wiped.as_ref().map(Value::clone).unwrap_or(Value::Null);
     // locally the outage holds one repo's delete back a call or more: the

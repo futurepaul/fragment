@@ -333,7 +333,11 @@ pub fn plan(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted) -> 
 pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> String {
     let o = offers(hosted);
     let offered: Vec<&str> =
-        [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome")].iter().filter(|(on, _)| *on).map(|(_, n)| *n).collect();
+        [(o.levers, "levers"), (o.computers, "computers"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, n)| *n)
+            .collect();
     let needs = |n: &[Need]| match n.is_empty() {
         true => "nothing local".to_string(),
         false => n.iter().map(|n| n.name()).collect::<Vec<_>>().join(", "),
@@ -346,6 +350,9 @@ pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> Strin
         Some(file) => format!("  sign-in      e2e people (<name>@e2e.test) through the levers, the test secret read from {} when the run starts\n", file.display()),
         None => "  sign-in      none: no --secret-file, so no one can sign in and nothing needing the levers runs\n".to_string(),
     };
+    if let Some(file) = &hosted.operator_key_file {
+        out += &format!("  operator     the key in {} (read when the run starts), among the config's operators\n", file.display());
+    }
     out += &format!("  offers       {}\n", if offered.is_empty() { "nothing".to_string() } else { offered.join(", ") });
     out += &format!("  paid calls   at most {} in all, lent to a person as they sign in (--max-paid-calls); each refused past its lending\n", hosted.max_paid_calls);
     let (runs, skips): (Vec<&Planned>, Vec<&Planned>) = planned.iter().partition(|p| p.skip.is_none());
@@ -435,9 +442,11 @@ fn sections(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> R
 pub fn spent(s: &mut Suite) {
     let api = s.api();
     let people = s.shared.people();
+    // a person a lane wiped has no ledger left to read (it refuses: wiped)
+    let wiped = s.shared.wiped();
     let (mut models, mut steps, mut charged, mut unread) = (0usize, 0usize, 0i64, 0usize);
     // bounded: the people this run signed in
-    for identity in &people {
+    for identity in people.iter().filter(|p| !wiped.contains(p)) {
         let ask = |body: Value| api.unsigned("POST", "/api/test/ledger", Some(&body)).ok().filter(|r| r.status == 200).map(|r| r.body);
         let counted = |prefix: &str| ask(json!({ "identity": identity, "op": "entries", "prefix": prefix })).and_then(|b| b["entries"].as_array().map(Vec::len));
         match (ask(json!({ "identity": identity, "op": "totals" })), counted("aig:"), counted("step:")) {
@@ -451,10 +460,11 @@ pub fn spent(s: &mut Suite) {
     }
     let lent = s.shared.paid_calls_lent();
     println!(
-        "      (spent by the run's {} people, from their ledgers: {models} model calls, {steps} AI steps, ${:.4} charged in all; {lent} paid calls lent of {}{})",
+        "      (spent by the run's {} people, from their ledgers: {models} model calls, {steps} AI steps, ${:.4} charged in all; {lent} paid calls lent of {}{}{})",
         people.len(),
         charged as f64 / fragment_core::price::USD as f64,
         lent + s.shared.paid_calls_left(),
+        if wiped.is_empty() { String::new() } else { format!("; {} wiped, lent nothing, their ledgers gone with them", wiped.len()) },
         if unread > 0 { format!("; {unread} ledgers did not answer") } else { String::new() },
     );
     let paid = (models + steps) as u64;
