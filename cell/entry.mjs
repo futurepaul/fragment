@@ -1,15 +1,13 @@
 // The platform's hand-written JavaScript (besides platform.mjs, which runs
-// inside the app facet, and storage.mjs, a computer's S3 endpoint).
-// Everything else is Rust. The runtime gives RPC only to a class that
-// extends DurableObject, and workers-rs classes do not, so these classes do
-// and forward each handler. workers-rs 0.8.5 has no Workflows and no
-// Containers, so the job driver and a computer's container calls are here
-// too; they only call and call back: every decision is Rust's (jobs.rs,
-// computer.rs).
+// inside the app facet). Everything else is Rust. The runtime gives RPC
+// only to a class that extends DurableObject, and workers-rs classes do
+// not, so these classes do and forward each handler. workers-rs 0.8.5 has
+// no Workflows and no Containers, so the job driver and a computer's
+// container calls are here too; they only call and call back: every
+// decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, SandboxBackupError } from "@cloudflare/sandbox";
 import * as rs from "./build/index.js";
-import { handleS3 } from "./storage.mjs";
 
 export { DirectoryBackupGateway } from "@cloudflare/sandbox";
 
@@ -227,7 +225,6 @@ class ContainerHost {
     const egress = (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
     await this.#settled(() => c.interceptOutboundHttp("api.fragment.internal", egress("api")));
     await this.#settled(() => c.interceptOutboundHttp("model.fragment.internal", egress("model")));
-    await this.#settled(() => c.interceptOutboundHttp("storage.fragment.internal", egress("storage")));
     for (const host of swapHosts) {
       await this.#settled(() => c.interceptOutboundHttp(host, egress("swap")));
       await this.#settled(() => c.interceptOutboundHttps(host, egress("swap")));
@@ -424,14 +421,11 @@ export class Computer extends DurableObject {
 
 // Every intercepted request a computer's guest makes (docs/computers.md):
 // `props.route` is the host it asked for, and `props.computer` the
-// computer, both set by the Computer DO, never by the guest. Storage is
-// answered here; the rest is Rust's (`ComputerEgress.handle`).
+// computer, both set by the Computer DO, never by the guest. Rust answers
+// it (`ComputerEgress.handle`).
 export class ComputerEgress extends WorkerEntrypoint {
   fetch(request) {
     const { computer, route } = this.ctx.props;
-    if (route === "storage") {
-      return handleS3(request, this.env.BLOBS, `computers/${computer}/storage/`).then(([resp]) => resp);
-    }
     return rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
   }
 }
