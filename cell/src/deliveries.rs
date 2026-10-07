@@ -1,6 +1,6 @@
 //! Deliveries (phase 2 slice F): HTTP requests the platform sends on a
 //! fragment's behalf, outside any request: records to channel
-//! subscribers, web push, and `notifyUrls`. Each is first written to the
+//! subscribers, and web push. Each is first written to the
 //! fragment's delivery outbox (`delivery_outbox`), in the same turn as
 //! what caused it: the record, or the push effect as it is accepted. The
 //! outbox is drained right away and again from the alarm: each delivery is
@@ -57,8 +57,6 @@ enum Pending {
     /// Record `seq` of `channel`, to the channel subscription `sub`.
     Record { sub: i64, channel: String, seq: i64 },
     Push(PendingPush),
-    /// A `changed` frame to one of `notifyUrls`.
-    Notify { url: String, frame: String },
 }
 
 /// A push to the subscriptions tagged `who` (`*`: all) with ids in
@@ -70,15 +68,14 @@ struct PendingPush {
     upto: i64,
 }
 
-/// What a delivery carries: a record to a channel subscriber, a web push,
-/// or a `changed` frame to one of `notifyUrls`. The outbox's `kind` column,
-/// a queued delivery, and the consumer's report all name it this way.
+/// What a delivery carries: a record to a channel subscriber, or a web
+/// push. The outbox's `kind` column, a queued delivery, and the consumer's
+/// report all name it this way.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryKind {
     Record,
     Push,
-    Notify,
 }
 
 impl DeliveryKind {
@@ -86,7 +83,6 @@ impl DeliveryKind {
         match self {
             DeliveryKind::Record => "record",
             DeliveryKind::Push => "push",
-            DeliveryKind::Notify => "notify",
         }
     }
 }
@@ -99,7 +95,6 @@ fn decode(row: &Value) -> Pending {
     match DeliveryKind::deserialize(&row["kind"]).unwrap_or_else(|_| panic!("a delivery_outbox row of kind {}", row["kind"])) {
         DeliveryKind::Record => Pending::Record { sub: int("sub"), channel: text("channel"), seq: int("seq") },
         DeliveryKind::Push => Pending::Push(PendingPush { who: text("who"), payload: text("body"), after: int("after_sub"), upto: int("upto_sub") }),
-        DeliveryKind::Notify => Pending::Notify { url: text("url"), frame: text("body") },
     }
 }
 
@@ -165,7 +160,7 @@ impl FragmentCell {
         rows.sort_by_key(|r| r["id"].as_i64());
         let (Ok(fragment), Ok(incarnation)) = (self.must(MetaKey::Name), self.must(MetaKey::CreatedAt)) else { return };
         let mut failed = false;
-        // records and frames go a queue batch at a time; each push goes on its own
+        // records go a queue batch at a time; each push goes on its own
         let mut singles: Vec<(i64, i64, Delivery)> = vec![];
         for row in &rows {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
@@ -175,7 +170,6 @@ impl FragmentCell {
                     Ok(None) => self.outbox_done(id),
                     Err(e) => self.outbox_failed(&mut failed, id, attempts, &e.message),
                 },
-                Pending::Notify { url, frame } => singles.push((id, attempts, Delivery::json(&fragment, &incarnation, DeliveryKind::Notify, url, &frame, None))),
                 Pending::Push(push) => self.drain_push(&mut failed, id, attempts, push, &fragment, &incarnation).await,
             }
         }
@@ -273,8 +267,6 @@ impl FragmentCell {
                 let (table, event) = match report.kind {
                     DeliveryKind::Record => ("subs", "subscription.gone"),
                     DeliveryKind::Push => ("push_subs", "push.gone"),
-                    // a notify URL is no subscription; `send` never reports one gone
-                    DeliveryKind::Notify => return Err(CellError::invalid("a notifyUrls delivery has no subscription to drop")),
                 };
                 let sub = report.sub.ok_or_else(|| CellError::invalid(format!("a {kind} delivery reported gone names its subscription")))?;
                 self.exec(&format!("DELETE FROM {table} WHERE id = ?"), vec![SqlStorageValue::Integer(sub)])?;

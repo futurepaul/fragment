@@ -166,35 +166,4 @@ impl FragmentCell {
         }
         deliveries
     }
-
-    /// `notifyUrls`: a `changed` frame per move of `main`, as the old
-    /// runtime sent, through the delivery outbox.
-    pub(crate) async fn notify_urls(&self, sha: Option<&str>, paths: &[String]) -> CellResult<()> {
-        let urls = self.notify_list()?;
-        if urls.is_empty() {
-            return Ok(());
-        }
-        let frame = json!({ "type": "changed", "fragment": self.must(MetaKey::Name)?, "sha": sha, "paths": paths.iter().take(50).collect::<Vec<_>>() });
-        let mut queued = 0;
-        for url in urls {
-            if egress::check(&url, self.cfg.egress_local).is_err() {
-                self.event("notify.refused", &format!("{url}: not a public address"), Value::Null);
-                continue;
-            }
-            self.exec(
-                "INSERT INTO delivery_outbox (kind, url, body, next_at) VALUES ('notify', ?, ?, ?)",
-                vec![url.into(), frame.to_string().into(), SqlStorageValue::Integer(js::now_ms())],
-            )?;
-            queued += 1;
-        }
-        if queued > 0 {
-            self.drain_deliveries().await;
-        }
-        Ok(())
-    }
-
-    fn notify_list(&self) -> CellResult<Vec<String>> {
-        let rows = self.rows("SELECT notify FROM code WHERE id = 1", vec![])?;
-        Ok(rows.first().and_then(|r| r["notify"].as_str()).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default())
-    }
 }
