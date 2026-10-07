@@ -927,3 +927,34 @@ fragment.club until cutover (decisions 34–35).
   work (`/data/work/<profile>`, as the desktop's browser already does: the
   seam's rule, docs/computers.md), so nothing under Hermes' home is held
   locked by one, and `locked` is empty on the real-Hermes lanes.
+
+## Preview cards drive Browser Rendering over a CDP client of our own
+
+- **Observed:** 2026-10-06 (issue #156, head scratcher 4). A card's shot
+  (cell/src/card.rs, `take`) acquires a Browser Rendering session, drives
+  it over a CDP client of ours, and closes it. The same binding now has
+  `quickAction("screenshot", {url, viewport, screenshotOptions,
+  gotoOptions, waitForTimeout})`: one call, the image back, its browser
+  time in `X-Browser-Ms-Used`, billed by the browser hour alone (no
+  concurrent browsers). It is not used because `wrangler dev`'s local
+  binding (wrangler 4.145.0, miniflare 5.20260930.0-alpha) answers only
+  the session routes (Cloudflare: "not yet supported in local development
+  mode"; it throws "The RPC receiver does not implement the method
+  'quickAction'"), so dev and the e2e would lose their local shot; and it
+  needs a compatibility date of 2026-03-24 or later, where the cell's is
+  2026-01-01 (moving it brings ~25 flags, `delete_all_deletes_alarm` and
+  `websocket_close_reason_byte_limit` among them).
+- **Risk:** the CDP client is ours to keep speaking Browser Rendering's
+  session routes as `@cloudflare/puppeteer` does; a change there fails
+  every try (`card.failed`) while the pages serve on. The deployment pays
+  the concurrent-browser charge quick actions do not have (docs/ledger.md,
+  Assumptions).
+- **First proof:** `card.failed` events on a preview whose message is a
+  CDP or session error.
+- **Delete when:** `wrangler dev` answers `quickAction` locally (or a fake
+  at the vendor boundary stands in for it there, `FRAGMENT_BROWSER_URL`
+  as `FRAGMENT_AI_URL` does for the model route) and the cell's
+  compatibility date reaches 2026-03-24: `take` becomes one
+  `quickAction("screenshot", …)` billed from `X-Browser-Ms-Used`, and the
+  session's acquire and release, `Cdp`, `billed_ms`'s keep-alive and the
+  concurrent-browser assumption go.
