@@ -787,8 +787,7 @@ answering `{queued}`) push `payload` (`{title, body, tag, url}`, at most
 3800 bytes) to the subscriptions tagged `who` (at most 64 characters), or
 all of them with `*`, once per mutation or step. A relative `url` is the
 fragment's own (`./` is its page): a click focuses a page of it already
-there, or opens one. `fragment.notify.{supported, permission, ask,
-show}` wrap the Notification API.
+there, or opens one.
 
 Every delivery is first written to the fragment's delivery outbox with
 what caused it (a record's deliveries in the same turn as the record, a
