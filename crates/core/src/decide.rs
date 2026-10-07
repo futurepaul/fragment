@@ -159,10 +159,11 @@ impl DecideCall {
         Usage::Tokens { model: self.model.to_string(), input: (body_bytes as u64).min(CONTEXT_TOKENS), cached_input: 0, cache_write: 0, output: 0 }
     }
 
-    /// What the call cost, from its answer's `usage` (`None` when it does
-    /// not read: the ledger charges the reservation).
+    /// What the call cost, from its answer's `usage` (raw, or inside
+    /// `result`; `None` when it does not read: the ledger charges the
+    /// reservation).
     pub fn usage(&self, answer: &Value) -> Option<Usage> {
-        let u = &answer["usage"];
+        let u = answer.get("usage").or_else(|| answer["result"].get("usage"))?;
         Some(Usage::Tokens { model: self.model.to_string(), input: u["input_tokens"].as_u64()?, cached_input: 0, cache_write: 0, output: u["output_tokens"].as_u64()? })
     }
 }

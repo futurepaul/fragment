@@ -19,7 +19,9 @@
 //! `FRAGMENT_AI_URL` instead, and the same input is POSTed to
 //! `<url>/run/<model>`, its answer read the same way: a lower-rung fake at
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
-//! A job's image step calls its model on the same transport (`run`).
+//! A job's image and decision steps call their models on the same
+//! transport (`run`), and its text step with a draft reads its answer as
+//! it streams (`call_streamed`).
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
@@ -247,9 +249,24 @@ pub(crate) async fn call(env: &Env, bounded: &Bounded, payer: &str, agent: Optio
     run(env, bounded.model, &bounded.input, payer, agent).await
 }
 
+/// `call`, streamed (a job's text step with a draft): its status, the
+/// gateway's log id, and its answer's bytes as they come; a refusal's
+/// body is read whole.
+pub(crate) async fn call_streamed(env: &Env, bounded: &Bounded, payer: &str, agent: Option<&str>) -> CellResult<(u16, std::result::Result<ByteStream, Vec<u8>>, Option<String>)> {
+    assert!(bounded.stream, "a streamed call asks for a stream");
+    let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
+    let mut resp = transport(env, Config::from_env(env), bounded.model, &bounded.input, &meta).await?;
+    let status = resp.status_code();
+    let log_id = resp.headers().get("cf-aig-log-id")?;
+    if status != 200 {
+        return Ok((status, Err(read_whole(&mut resp).await?), log_id));
+    }
+    Ok((status, Ok(resp.stream()?), log_id))
+}
+
 /// One call of a catalog model with its input, on the same transport,
-/// unmetered and read whole (`call`; a job's image step: ai.rs, whose
-/// caller bounds the input and meters it).
+/// unmetered and read whole (`call`; a job's image and decision steps:
+/// ai.rs, whose caller bounds the input and meters it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata { user_id: opaque(payer), agent_id: agent.map(opaque) };
     let mut resp = transport(env, Config::from_env(env), model, input, &meta).await?;

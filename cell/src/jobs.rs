@@ -842,7 +842,7 @@ impl FragmentCell {
                 self.step_write(run, index, &w.path, Some(bytes), w.expect).await
             }
             Step::FilesRemove { path, expect } => self.step_write(run, index, &path, None, expect).await,
-            ai @ (Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) => {
+            ai @ (Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) => {
                 self.step_ai(run, index, &ai).await
             }
             // what the fragment's own page reads, read for its code: who is
