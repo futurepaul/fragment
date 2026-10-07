@@ -353,7 +353,6 @@ impl FragmentCell {
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::Blessed)?;
             self.del_meta(MetaKey::CodeError)?;
-            self.set_agent_live(None)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live is gone")?;
             return Ok(());
         };
@@ -390,14 +389,6 @@ impl FragmentCell {
             }
             None => self.tree_row("live", "app.mjs")?.map(|_| Code::Live),
         };
-        // its agent's instructions are read here, so one that cannot be is refused with the rest
-        let agent = match &manifest.agent {
-            None => None,
-            Some(decl) => match self.agent_at_live(&repo, sha, decl).await? {
-                Ok(agent) => Some(agent),
-                Err(why) => return self.code_refused(sha, &why),
-            },
-        };
         // the code's modules and identity, read before anything is written
         let (source, modules, loader_id) = match code {
             None => (None, BTreeMap::new(), String::new()),
@@ -411,7 +402,6 @@ impl FragmentCell {
             Some(meta) => self.set_meta(MetaKey::MetaLive, &serde_json::to_string(meta).expect("meta serializes"))?,
             None => self.del_meta(MetaKey::MetaLive)?,
         }
-        self.set_agent_live(agent.as_ref())?;
         match &blessed {
             Some(t) => self.set_meta(MetaKey::Blessed, &format!("{t}@{}", blessed::release(t).expect("a template blessed::manifest found")))?,
             None => self.del_meta(MetaKey::Blessed)?,
@@ -553,14 +543,10 @@ impl FragmentCell {
     }
 
     /// Refreshes pins; a move of main notifies the change feed and starts
-    /// the runs its file triggers name, and the agent a new live declares
-    /// joins with its deploy (the alarm retries one that fails). A move of
-    /// live wants its preview card, shot later from the alarm (card.rs).
+    /// the runs its file triggers name. A move of live wants its preview
+    /// card, shot later from the alarm (card.rs).
     pub(crate) async fn interpret(&self, refs: &[&str]) -> CellResult<Vec<(String, PinMove)>> {
         let out = self.interpret_locked(refs).await?;
-        if let Err(e) = self.sync_agent().await {
-            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
-        }
         // the file triggers' runs, the notifyUrls, and the alarm for newly installed schedules
         self.launch_queued().await;
         for (which, moved) in &out {
@@ -648,8 +634,7 @@ impl FragmentCell {
     /// written its repo in the last day (a storage token was minted for it,
     /// or a webhook arrived), a run is in flight (each pass checks it
     /// against its Workflow) or ended with a reservation to give back, or a
-    /// template or a declared agent is still to land (each pass tries
-    /// again). The rest of the alarm's work has due times of its own.
+    /// template is still to land (each pass tries again). The rest of the alarm's work has due times of its own.
     /// A fragment nothing touches (a chat, from its second day) is woken
     /// once a day, and asks code.storage twice.
     pub(crate) fn busy(&self) -> CellResult<bool> {
@@ -662,10 +647,10 @@ impl FragmentCell {
         }
         let rows: Vec<Busy> = self.typed(
             "SELECT (SELECT value FROM meta WHERE key = ?) AS outside_at,
-               EXISTS (SELECT 1 FROM meta WHERE key IN (?, ?)) AS pending,
+               EXISTS (SELECT 1 FROM meta WHERE key = ?) AS pending,
                EXISTS (SELECT 1 FROM runs WHERE status = 'running') AS running,
                EXISTS (SELECT 1 FROM charges WHERE held = 1 AND run NOT IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))) AS holds",
-            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into(), MetaKey::AgentPending.key().into()],
+            vec![MetaKey::OutsideAt.key().into(), MetaKey::TemplatePending.key().into()],
         )?;
         let b = rows.into_iter().next().expect("a SELECT without FROM answers one row");
         let outside = b.outside_at.and_then(|at| at.parse::<i64>().ok()).is_some_and(|at| js::now_ms() - at < OUTSIDE_WRITES_MS);

@@ -419,15 +419,6 @@ pub async fn queue_send(env: &JsValue, binding: &str, bodies: &[serde_json::Valu
     Ok(())
 }
 
-/// Hands a request, as it came (method, URL, headers, body), to a service
-/// binding: the agents' script, co-hosted in this fleet.
-pub async fn service_fetch(env: &JsValue, binding: &str, req: worker::Request) -> CellResult<worker::Response> {
-    let service = self::binding(env, binding, "services")?;
-    let out = await_js(call(&service, "fetch", &[JsValue::from(req.inner())]), binding).await?;
-    let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host(format!("{binding} answered no Response")))?;
-    Ok(worker::Response::from(resp))
-}
-
 /// A request to the Browser Rendering binding (`BROWSER`, wrangler.jsonc
 /// `browser`), through its `fetch`: the routes `@cloudflare/puppeteer`
 /// speaks to it, a WebSocket upgrade among them (card.rs).

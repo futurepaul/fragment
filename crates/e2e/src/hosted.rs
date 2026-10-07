@@ -261,7 +261,6 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         cli,
         scratch,
         project: PathBuf::new(),
-        agents_project: PathBuf::new(),
         shape: Shape::Plain,
         containers_removed: false,
     }

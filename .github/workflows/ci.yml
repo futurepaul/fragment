@@ -1,9 +1,9 @@
 # fragment CI on Linux: `cargo xtask check` (every first-party JavaScript
 # file through `node --check` on the pinned Node, host tests and clippy on
-# host and wasm, warnings denied), and `cargo xtask e2e`: the cell and the
-# agents' Worker under `wrangler dev` (workerd), with fakes only at the
-# vendor boundaries (docs/cloudflare-v1.md, phase 2). The celld e2e on
-# macOS is at tag celld-final.
+# host and wasm, warnings denied), and `cargo xtask e2e`: the cell under
+# `wrangler dev` (workerd), with fakes only at the vendor boundaries
+# (docs/cloudflare-v1.md, phase 2). The celld e2e on macOS is at tag
+# celld-final.
 #
 # The e2e runs in four shards (crates/e2e/src/lanes/mod.rs, SHARDS), each
 # on a runner of its own with its own build and node; the `e2e` job checks
@@ -36,7 +36,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: clippy
-      # the registry and the debug, test and clippy builds of the three
+      # the registry and the debug, test and clippy builds of the two
       # workspaces; a new rustc or lockfile is a new key
       - id: cache
         uses: actions/cache/restore@v4
@@ -48,8 +48,7 @@ jobs:
             target
             !target/tools
             cell/target
-            agent/target
-          key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          key: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock') }}
           restore-keys: check-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       # the pinned Node `node --check` runs on, unpacked: the e2e's key,
       # which its first shard saves from master
@@ -69,7 +68,6 @@ jobs:
             target
             !target/tools
             cell/target
-            agent/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   e2e-shard:
@@ -87,7 +85,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       # the registry, and what the e2e's build compiles: the CLI and the
-      # suite (target/release), xtask (target/debug), and the two Workers'
+      # suite (target/release), xtask (target/debug), and the cell's
       # wasm32 builds; a new rustc or lockfile is a new key
       - id: cargo
         uses: actions/cache/restore@v4
@@ -99,18 +97,17 @@ jobs:
             target/release
             target/debug
             cell/target
-            agent/target
-          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock') }}
           restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       # worker-build itself, and the tools it fetches (wasm-bindgen at the
-      # lockfiles' version, wasm-opt, esbuild)
+      # lockfile's version, wasm-opt, esbuild)
       - id: worker-build
         uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/worker-build
             ~/.cache/worker-build
-          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock', 'agent/Cargo.lock') }}
+          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock') }}
           restore-keys: worker-build-0.8.5-${{ runner.os }}-
       # no setup-node: xtask fetches the pinned Node into target/tools
       # (crates/devstack/src/node_release.rs, checked by its SHA-256) and
@@ -130,7 +127,7 @@ jobs:
           path: target/cache
           key: js-cache-${{ runner.os }}-${{ hashFiles('crates/devstack/src/node_release.rs', 'package-lock.json') }}
       - run: worker-build --version | grep -q 0.8.5 || cargo install worker-build --version 0.8.5 --locked
-      # the Workers, the CLI and the suite, and the computer images the
+      # the cell, the CLI and the suite, and the computer images the
       # node's boot builds (xtask/src/build.rs), all at once
       - run: cargo xtask e2e --build-only
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.cargo.outputs.cache-hit != 'true'
@@ -143,7 +140,6 @@ jobs:
             target/release
             target/debug
             cell/target
-            agent/target
           key: ${{ steps.cargo.outputs.cache-primary-key }}
       - if: matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.worker-build.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -235,15 +231,14 @@ jobs:
             target/release
             target/debug
             cell/target
-            agent/target
-          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock', 'agent/Cargo.lock') }}
+          key: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock', 'cell/Cargo.lock') }}
           restore-keys: e2e-cargo-${{ runner.os }}-${{ steps.toolchain.outputs.cachekey }}-
       - uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/bin/worker-build
             ~/.cache/worker-build
-          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock', 'agent/Cargo.lock') }}
+          key: worker-build-0.8.5-${{ runner.os }}-${{ hashFiles('cell/Cargo.lock') }}
           restore-keys: worker-build-0.8.5-${{ runner.os }}-
       - uses: actions/cache/restore@v4
         with:

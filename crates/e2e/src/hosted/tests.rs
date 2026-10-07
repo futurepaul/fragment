@@ -29,8 +29,8 @@ fn hosted(args: &[&str]) -> Hosted {
 #[test]
 fn a_local_run_reads_as_before() {
     assert_eq!(parse(&[]).unwrap(), Args { only: None, except: vec![], hosted: None, rehearse: None, shard: None, summary: None });
-    let only = parse(&strings(&["--only", "agents,addon"])).unwrap();
-    assert_eq!((only.only, only.hosted), (Some(strings(&["agents", "addon"])), None));
+    let only = parse(&strings(&["--only", "ledger,ai"])).unwrap();
+    assert_eq!((only.only, only.hosted), (Some(strings(&["ledger", "ai"])), None));
     assert_eq!(parse(&strings(&["--except", "hermes"])).unwrap().except, strings(&["hermes"]));
     assert_eq!(parse(&strings(&["--rehearse"])).unwrap().rehearse, Some(MAX_PAID_CALLS_DEFAULT));
     assert_eq!(parse(&strings(&["--rehearse", "--max-paid-calls", "3", "--only", "computers"])).unwrap().rehearse, Some(3));
@@ -125,7 +125,7 @@ fn the_plan_follows_what_each_section_needs() {
     for section in ["computers", "templates", "members", "delegation", "secrets", "auth", "cli", "deploy", "keys", "watch", "routes", "public"] {
         assert!(runs(section), "{section} runs on a preview: {}", why(section));
     }
-    for (section, need) in [("ops", "fakes"), ("agents", "fakes"), ("restart", "node"), ("identities", "deployment"), ("lockdown", "node"), ("frames", "two-sites"), ("chat", "fakes")] {
+    for (section, need) in [("ops", "fakes"), ("ai", "fakes"), ("restart", "node"), ("identities", "deployment"), ("lockdown", "node"), ("frames", "two-sites"), ("chat", "fakes")] {
         assert!(!runs(section) && why(section).contains(need), "{section} is skipped for {need}: {}", why(section));
     }
     assert!(why("hermes").contains("fakes"), "the real-Hermes lane scripts its model: {}", why("hermes"));

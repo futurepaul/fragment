@@ -58,7 +58,7 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 
     let none = s.name("tnone");
     let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
-    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories"), &r);
+    s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
 
@@ -145,6 +145,12 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
 /// so its seed and the alarm's meet as they do there.
 const CODE_STORAGE_LATENCY_MS: u64 = 100;
 
+/// How many of the fragment's newest 200 events are of `kind`.
+fn events(api: &Api, owner: &Keys, name: &str, kind: &str) -> usize {
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None);
+    r.map_or(0, |r| r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == kind).count())
+}
+
 /// The managed skills (decision 17): a fragment on the blessed `skills`
 /// template lists and reads the release's managed set as its files
 /// (decision 40: no copy to drift), beneath files of its own at the same
@@ -185,7 +191,7 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     // side by side, the second commit changes nothing and is refused (412
     // on code.storage), and when it was the create's, the create answered
     // before its template was live, listing none of the release
-    let (landed, failed) = (super::addon::events(api, owner, &name, "template"), super::addon::events(api, owner, &name, "template.failed"));
+    let (landed, failed) = (events(api, owner, &name, "template"), events(api, owner, &name, "template.failed"));
     s.ok(
         "its template lands once, in the create: no second seed beside it, none that failed",
         landed == 1 && failed == 0,

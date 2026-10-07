@@ -1,8 +1,6 @@
 //! The sections, in the order they run.
 
-mod addon;
 mod agent_smoke;
-mod agents;
 mod app;
 mod appfiles;
 mod blobs;
@@ -96,8 +94,6 @@ const LANES: &[Lane] = &[
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
-    agents::agents,
-    addon::addon,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -118,16 +114,16 @@ const LANES: &[Lane] = &[
 /// reports each as the whole run does: one skip.
 ///
 /// Balanced by measured time (each summary's `ms`, as `cargo xtask
-/// e2e-summary` prints it, on CI's runners): each shard about a quarter of
-/// the suite's ~12.5 minutes there (run 37171847969, less the two waits
-/// removed since: about 3 minutes each). The slow ones vary from run
-/// to run: `computers` waits up to a minute for its routine's cron minute,
-/// and `channels` fills 10 000 records. Shard 3 holds `triggers` and the
+/// e2e-summary` prints it, on CI's runners; run 37534339123): `computers`
+/// alone is about 4 minutes, so its shard holds little else, and the
+/// others are about 3 minutes each. The slow ones vary from run to run:
+/// `computers` waits up to a minute for its routine's cron minute, and
+/// `channels` fills 10 000 records. Shard 3 holds `triggers` and the
 /// sections from the cron fragment's deploy (after `effects`) up to it, so
 /// its first cron minute passes while they run, as in a whole run.
 pub const SHARDS: [&[&str]; 4] = [
-    &["shell", "computers", "chat", "hermes", "agent-smoke", "sync", "restart", "pathmode"],
-    &["agents", "addon", "shell-ui"],
+    &["shell", "computers", "hermes", "agent-smoke"],
+    &["chat", "shell-ui", "sync", "restart", "pathmode"],
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",

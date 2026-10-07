@@ -168,11 +168,6 @@ pub mod limits {
     /// Finished runs are kept this long, and at most this many.
     pub const RUN_RETENTION_MS: i64 = 30 * 24 * 3600 * 1000;
     pub const RUNS_KEPT: i64 = 10_000;
-    /// How long `GET /api/a/{name}/state?wait_ms=` may wait in the agent's
-    /// cell for its turn to end (inside a client's 30 s request timeout).
-    pub const AGENT_STATE_WAIT_MS_MAX: u64 = 25_000;
-    /// An agent's instructions.
-    pub const AGENT_INSTRUCTIONS_MAX_BYTES: usize = 8 * 1024;
     /// Search (docs/api.md, Search): the text of one record a fragment
     /// sends its people's lists. A longer message is searched by its
     /// first 4 KiB (its record keeps all of it).
@@ -801,8 +796,8 @@ pub struct Subject {
 }
 
 /// Headers only the router sets on a request it hands a fragment's
-/// supervisor (the cell's `routed.rs` writes and reads them) or the
-/// agents' script; the router drops any a client sends.
+/// supervisor (the cell's `routed.rs` writes and reads them); the router
+/// drops any a client sends.
 pub mod routed {
     /// The fragment's full name.
     pub const NAME: &str = "x-fragment-name";
@@ -816,9 +811,6 @@ pub mod routed {
     /// signature was verified for, or the origin's session token).
     pub const CREDENTIAL: &str = "x-fragment-credential";
     pub const ALL: [&str; 5] = [NAME, URL, MODE, SIGNED, CREDENTIAL];
-    /// The caller's identity on a request the router hands the agents'
-    /// script (`agent/`), which trusts nothing else.
-    pub const AGENT_PRINCIPAL: &str = "x-agent-principal";
 }
 
 /// `POST /api/identities`: register an agent the signer owns, with a key
@@ -1189,54 +1181,6 @@ impl RunStatus {
     }
 }
 
-/// How an agent's latest turn stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnOutcome {
-    Running,
-    /// The model answered.
-    Idle,
-    /// Its owner stopped it.
-    Stopped,
-    /// It handed control back before answering.
-    Yielded,
-    Error,
-}
-
-impl TurnOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TurnOutcome::Running => "running",
-            TurnOutcome::Idle => "idle",
-            TurnOutcome::Stopped => "stopped",
-            TurnOutcome::Yielded => "yielded",
-            TurnOutcome::Error => "error",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<TurnOutcome> {
-        [TurnOutcome::Running, TurnOutcome::Idle, TurnOutcome::Stopped, TurnOutcome::Yielded, TurnOutcome::Error].into_iter().find(|o| o.as_str() == s)
-    }
-}
-
-/// `GET /api/a/{name}/state?wait_ms=`: an agent's turn, without its
-/// conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentState {
-    /// A turn is running (or will run again for a message that came as it ended).
-    pub active: bool,
-    /// A driver works on it in the agent's cell right now.
-    pub driving: bool,
-    /// The latest turn's outcome; none before the first turn.
-    pub outcome: Option<TurnOutcome>,
-    /// Why the latest turn failed, when it did.
-    pub error: Option<String>,
-    /// The newest message, when that is the model's text: a turn's answer
-    /// once it is not active.
-    pub answer: Option<String>,
-}
-
 /// How a run started: someone's call, another run's step, or a trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1556,19 +1500,6 @@ mod tests {
         let mut other = wire.clone();
         other["type"] = serde_json::json!("push");
         assert!(decode(&other).is_err());
-    }
-
-    /// An agent's state answers in camelCase, its outcome in snake_case, and
-    /// every outcome's name parses back.
-    #[test]
-    fn an_agent_state_is_the_documented_shape() {
-        let state = AgentState { active: false, driving: false, outcome: Some(TurnOutcome::Idle), error: None, answer: Some("Added milk.".into()) };
-        assert_eq!(serde_json::to_value(&state).unwrap(), serde_json::json!({ "active": false, "driving": false, "outcome": "idle", "error": null, "answer": "Added milk." }));
-        for outcome in [TurnOutcome::Running, TurnOutcome::Idle, TurnOutcome::Stopped, TurnOutcome::Yielded, TurnOutcome::Error] {
-            assert_eq!(TurnOutcome::parse(outcome.as_str()), Some(outcome));
-            assert_eq!(serde_json::to_value(outcome).unwrap(), serde_json::json!(outcome.as_str()));
-        }
-        assert_eq!(TurnOutcome::parse(""), None);
     }
 
     /// The contract states the step limit with the code's number (it said

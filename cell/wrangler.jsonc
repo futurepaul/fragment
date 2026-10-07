@@ -40,9 +40,6 @@
   // delivery queue's consumer. `wrangler dev` runs it locally, on a Chrome
   // for Testing it downloads into its cache on the first shot.
   "browser": { "binding": "BROWSER" },
-  // AGENTS is the agents' Worker (agent/): it has no route of its own, and
-  // the router hands it /api/agents and /api/a/*.
-  "services": [{ "binding": "AGENTS", "service": "fragment-agent" }],
   // Computers (docs/computers.md): one container per Computer Durable
   // Object, placed beside it (the `durable_object` policy, which snapshots
   // need), from a named image each computer is pinned to. Dev and the e2e

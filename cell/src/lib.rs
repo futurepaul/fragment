@@ -29,7 +29,6 @@
 //! fragment's old host sends a browser to its new one, and the suffix's own
 //! name sends it to the platform.
 
-mod agents;
 mod ai;
 mod auth;
 mod blobs;
@@ -72,8 +71,9 @@ use fragment_core::body::{LimitedBody, TooLarge};
 use fragment_core::frames::{self, Framed};
 use fragment_core::npub;
 use fragment_nip98::Payload;
-use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, IdentityKind, Register};
+use fragment_proto::{limits, valid_fragment_name, CreateFragment, ErrorBody, ErrorCode, FragmentList, IdentityKind, ListedFragment, Register, Role};
 use futures_util::TryStreamExt;
+use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use worker::*;
@@ -569,6 +569,33 @@ fn json_answer<T: serde::Serialize>(v: &T) -> CellResult<Response> {
     Ok(Response::from_json(v)?)
 }
 
+/// An identity's fragments, as its `Principal` cell lists them.
+async fn listed(env: &Env, identity: &str) -> CellResult<FragmentList> {
+    let list = Request::new("https://principal.internal/list", Method::Get)?;
+    Ok(env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(list).await?.json().await?)
+}
+
+/// `GET /api/fragments?for=<asker>`, signed by an agent: the fragments it
+/// reaches for whoever asked (ROADMAP decision 17): the asker's, where the
+/// agent or its owner is in too, each with the role the agent acts with
+/// there (`access::listed_role`). A call decides again, live.
+async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<FragmentList> {
+    let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent without an owner"))?;
+    let (askers, own, owners) = futures_util::future::join3(listed(env, asker), listed(env, &agent.id), listed(env, owner)).await;
+    let roles = |l: FragmentList| -> HashMap<String, Role> { l.fragments.into_iter().map(|f| (f.name, f.role)).collect() };
+    let (own, owners) = (roles(own?), roles(owners?));
+    let fragments = askers?
+        .fragments
+        .into_iter()
+        .filter_map(|f| {
+            // a people-only share is the fragment's to know: a call decides again
+            let cap = access::Cap { agent: own.get(&f.name).copied(), owner: owners.get(&f.name).copied(), people_only: false };
+            access::listed_role(Some(f.role), cap).map(|role| ListedFragment { name: f.name, role, kind: f.kind, title: f.title, sharing: None, archived: false })
+        })
+        .collect();
+    Ok(FragmentList { fragments })
+}
+
 /// Whose ledger a signer reads: a person's own; an agent's owner's.
 fn payer_of(who: &Signed) -> CellResult<String> {
     match who.kind {
@@ -1017,16 +1044,11 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             }
             create_fragment(env, cfg, &url, create, principal).await
         }
-        // the agents' script, co-hosted: authenticated here, like the rest
-        (_, ["api", "agents"]) | (_, ["api", "a", ..]) => {
-            let segs = segments.clone();
-            agents::route(req, env, &url, &segs).await
-        }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,
         (Method::Get, ["api", "fragments"]) => {
             let principal = signer_for(env, &req, &url, &[]).await?;
             if let Some(asker) = &principal.acting_for {
-                return json_answer(&agents::reachable(env, &principal, asker).await?);
+                return json_answer(&reachable(env, &principal, asker).await?);
             }
             let list = Request::new("https://principal.internal/list", Method::Get)?;
             Ok(env.durable_object("PRINCIPAL")?.get_by_name(&principal.id)?.fetch_with_request(list).await?)

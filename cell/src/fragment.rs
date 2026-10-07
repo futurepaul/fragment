@@ -176,8 +176,6 @@ pub struct FragmentCell {
     pub(crate) cfg: &'static Config,
     /// Serializes pin refreshes: two refreshes racing could leave the older head pinned.
     pub(crate) plane: futures_util::lock::Mutex<()>,
-    /// Serializes `sync_agent`: a deploy's and the alarm's would join the same agent twice.
-    pub(crate) joining: futures_util::lock::Mutex<()>,
     /// Serializes `seed`: a create's and the alarm's it arms would both
     /// commit the template, and the second commit, changing nothing, is
     /// refused (publish.rs).
@@ -220,7 +218,6 @@ impl DurableObject for FragmentCell {
             env,
             cfg,
             plane: futures_util::lock::Mutex::new(()),
-            joining: futures_util::lock::Mutex::new(()),
             seeding: futures_util::lock::Mutex::new(()),
             rate: RefCell::new(rate),
             swept: Cell::new(false),
@@ -379,16 +376,6 @@ pub(crate) enum MetaKey {
     TemplatePending,
     /// The title a blessed template's fragment starts with (`TemplatePending`'s).
     TemplateTitle,
-    /// What live's `agent` block declares, still to make so (agents.rs
-    /// `sync_agent`): a new value each time live declares one.
-    AgentPending,
-    /// Live's `agent` block and its instructions' text (agents.rs `AgentLive`).
-    AgentLive,
-    /// The agent the platform last made answer here, and on which channel.
-    AgentJoined,
-    /// Where a newly declared channel's agent starts hearing it, until it
-    /// joins (agents.rs `Floor`).
-    AgentFloor,
     /// The commits the cell pins (plane.rs).
     PinMain,
     PinLive,
@@ -422,8 +409,6 @@ pub(crate) enum MetaKey {
     TestFailOutbox,
     /// Test fleets only: how many more trigger steps fail (`fail-triggers`).
     TestFailTriggers,
-    /// Test fleets only: how many more agent joins fail (`fail-join`).
-    TestFailJoin,
     /// Test fleets only: how many more step answers are lost on their way
     /// back to the Workflow, after the step was performed (`drop-effects`).
     TestDropEffects,
@@ -475,10 +460,6 @@ impl MetaKey {
             MetaKey::OutsideAt => "outside_at",
             MetaKey::TemplatePending => "template_pending",
             MetaKey::TemplateTitle => "template_title",
-            MetaKey::AgentPending => "agent_pending",
-            MetaKey::AgentLive => "agent_live",
-            MetaKey::AgentJoined => "agent_joined",
-            MetaKey::AgentFloor => "agent_floor",
             MetaKey::PinMain => "pin_main",
             MetaKey::PinLive => "pin_live",
             MetaKey::PinsCheckedAt => "pins_checked_at",
@@ -495,7 +476,6 @@ impl MetaKey {
             MetaKey::TestFailDeliveries => "test_fail_deliveries",
             MetaKey::TestFailOutbox => "test_fail_outbox",
             MetaKey::TestFailTriggers => "test_fail_triggers",
-            MetaKey::TestFailJoin => "test_fail_join",
             MetaKey::TestDropEffects => "test_drop_effects",
             MetaKey::TestHoldAdvances => "test_hold_advances",
             MetaKey::TestAdvanceHeld => "test_advance_held",
@@ -773,14 +753,9 @@ impl FragmentCell {
     /// An agent acting for someone (ROADMAP decision 17), in one statement:
     /// the asker's standing (their membership, or an agent of theirs that is
     /// a member), capped by the agent's own membership and its owner's
-    /// (`access::effective_role`). The fragment's own agent (its `agent`
-    /// block) acting here for a signed-in asker gives them what this
-    /// fragment's visibility gives anyone who reached it, its link: their
-    /// post on its channel took that. A membership above it still wins, and
-    /// on a `members` fragment the link gives nothing.
+    /// (`access::effective_role`).
     fn standing_for(&self, agent: &Signed, link: bool) -> CellResult<Standing> {
         let asker = agent.acting_for.as_deref().expect("standing_for is for an agent acting for someone");
-        let link = link || self.own_agent()?.as_deref() == Some(agent.id.as_str());
         let owner = agent.owner.as_deref().ok_or_else(|| CellError::host("an agent acting for someone has no owner"))?;
         #[derive(serde::Deserialize)]
         struct Row {
@@ -1190,9 +1165,7 @@ impl FragmentCell {
         self.index_change(&owner, Some(Role::Owner))?;
         self.event("create", &format!("fragment {} created by {owner} (repo {repo})", body.name), json!({ "repo": repo, "key": caller.key().map(npub::display) }));
         self.flush_index().await;
-        // a template that did not land, or an agent it declares that did
-        // not join (its deploy joins it: plane.rs `interpret`), is retried
-        // by the alarm
+        // a template that did not land is retried by the alarm
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
         }
@@ -1301,8 +1274,6 @@ impl FragmentCell {
         self.flush_joined().await;
         if let Err(e) = self.seed().await {
             self.event("template.failed", &e.message, json!({ "code": e.code }));
-        } else if let Err(e) = self.sync_agent().await {
-            self.event("agent.join-failed", &e.message, json!({ "code": e.code }));
         }
         self.drain_deliveries().await;
         if let Err(e) = self.drain_card().await {

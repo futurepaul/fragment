@@ -1,8 +1,7 @@
 //! The local stack: one `wrangler dev` process serving the platform Worker
-//! (`cell/`) and the agents' Worker (`agent/`) together, each one's
-//! variables rendered into its `.dev.vars` and its secrets seeded into
-//! wrangler's local Secrets Store, bound by name as a deploy binds them
-//! (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
+//! (`cell/`), its variables rendered into its `.dev.vars` and its secrets
+//! seeded into wrangler's local Secrets Store, bound by name as a deploy
+//! binds them (store.rs). `xtask dev` runs it in the foreground; the e2e starts,
 //! crashes, and restarts it.
 
 use std::fs;
@@ -62,11 +61,6 @@ pub fn repo_root() -> PathBuf {
 
 pub fn cell_dir() -> PathBuf {
     repo_root().join("cell")
-}
-
-/// The agents' Worker project (goose's loop; phase 5).
-pub fn agent_dir() -> PathBuf {
-    repo_root().join("agent")
 }
 
 /// `text` (JSONC: JSON with `//` comments) as JSON.
@@ -202,11 +196,6 @@ pub fn clear_state(project: &Path) -> Result<()> {
         fs::remove_dir_all(&state).with_context(|| format!("clear {}", state.display()))?;
     }
     Ok(())
-}
-
-/// A copy of the built agent project at `dir`.
-pub fn stage_agent(dir: &Path) -> Result<PathBuf> {
-    stage(&agent_dir(), dir, &[])
 }
 
 /// A copy of the built cell project at `dir` (its config, shim, and build).
@@ -452,33 +441,6 @@ impl Fleet {
     }
 }
 
-/// What an agent fleet is configured with: the platform it acts on (its
-/// model calls are the platform's model route's). Its host secret is the
-/// platform's, bound to the same secret in the same local store
-/// (`Fleet::bound`), as a deploy binds both Workers to one.
-pub struct AgentFleet {
-    /// The fragment platform's base URL (`FRAGMENT_API`).
-    pub fragment_api: String,
-    /// The agent fleet's own base URL (`AGENT_URL`): the inboxes it gives
-    /// fragments to deliver to.
-    pub agent_url: String,
-    /// The owner's test controls (holds, the watchdog period): dev and e2e only.
-    pub test_hooks: bool,
-}
-
-impl AgentFleet {
-    /// Renders the fleet into the project's `.dev.vars`, and its bindings
-    /// (`bound.agent()`, the platform fleet's names) into its local config.
-    pub fn configure(&self, project: &Path, bound: &store::Bound) -> Result<()> {
-        write_local_config(project, &bound.agent())?;
-        let mut vars = vec![("FRAGMENT_API", self.fragment_api.as_str()), ("AGENT_URL", self.agent_url.as_str())];
-        if self.test_hooks {
-            vars.push(("AGENT_TEST_HOOKS", "allow"));
-        }
-        write_dev_vars(project, &vars)
-    }
-}
-
 /// Random hex from the OS.
 pub fn random_hex(bytes: usize) -> String {
     use std::io::Read;
@@ -509,10 +471,6 @@ pub struct NodeOptions {
     /// (`Fleet::configure`; `clear_state` before that discards the state).
     pub project: PathBuf,
     pub port: u16,
-    /// Projects run beside it for its service bindings (`wrangler dev -c`
-    /// again), each configured first: the agents' Worker
-    /// (`AgentFleet::configure`).
-    pub with: Vec<PathBuf>,
     /// Where each boot's log goes (`node-<port>-<boot>.log`).
     pub log_dir: PathBuf,
     /// wrangler's own debug logs in the log, beside the Workers' output.
@@ -593,16 +551,13 @@ pub struct Node {
 
 impl Node {
     pub fn start(tools: &Tools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-        let configs: Vec<PathBuf> = std::iter::once(&opts.project).chain(&opts.with).map(|p| local_config(p)).collect();
-        if let Some(missing) = configs.iter().find(|c| !c.is_file()) {
-            bail!("{} is not there: configure the fleet first (Fleet::configure, AgentFleet::configure)", missing.display());
+        let config = local_config(&opts.project);
+        if !config.is_file() {
+            bail!("{} is not there: configure the fleet first (Fleet::configure)", config.display());
         }
         let (log, out) = boot_log(&opts.log_dir, opts.port)?;
         let mut cmd = tools.wrangler()?;
-        cmd.arg("dev");
-        for config in &configs {
-            cmd.arg("-c").arg(config);
-        }
+        cmd.arg("dev").arg("-c").arg(&config);
         cmd.args(["--ip", "127.0.0.1", "--port", &opts.port.to_string()]);
         cmd.args(["--inspector-port", &free_port()?.to_string()]);
         cmd.arg("--persist-to").arg(state_dir(&opts.project));

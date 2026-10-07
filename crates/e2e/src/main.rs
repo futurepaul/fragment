@@ -1,6 +1,6 @@
-//! The fragment end-to-end suite: the real cell and agents' Worker under
-//! `wrangler dev` (workerd, from staged copies under `target/e2e/<run>`, so
-//! a running `xtask dev` is never touched), the code.storage fake from
+//! The fragment end-to-end suite: the real cell under `wrangler dev`
+//! (workerd, from a staged copy under `target/e2e/<run>`, so a running
+//! `xtask dev` is never touched), the code.storage fake from
 //! `crates/fakes` (webhooks included), the real CLI, and signed HTTP the
 //! way the CLI and a browser send it. The fakes stand only at vendor
 //! boundaries (code.storage, WorkOS, the model, a push service): this is
@@ -237,8 +237,6 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
-    /// The agents' script (phase 5), co-hosted on the node.
-    agents_project: PathBuf,
     /// The next node's shape (`start_as_browsers_see_it`).
     shape: Shape,
     /// Whether the containers the run's nodes left are removed
@@ -514,15 +512,9 @@ impl Suite {
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
         fleet.configure(tools, &self.project)?;
-        // the agents' Worker runs beside it, as a deployment runs it: the
-        // router hands it /api/agents and /api/a/*, its inboxes included;
-        // it is bound to the platform's host secret
-        devstack::AgentFleet { fragment_api: format!("http://127.0.0.1:{}", self.port), agent_url: format!("http://127.0.0.1:{}", self.port), test_hooks: true }
-            .configure(&self.agents_project, &fleet.bound())?;
         let opts = devstack::NodeOptions {
             project: self.project.clone(),
             port: self.port,
-            with: vec![self.agents_project.clone()],
             // each boot's log, in this run's scratch: a FAIL comes with the
             // node's side of it, the logs of a node a lane killed included
             log_dir: self.scratch.clone(),
@@ -541,19 +533,6 @@ impl Suite {
             Shape::TwoSites => BOATS,
             Shape::Plain => SUFFIX,
         }
-    }
-
-    /// The agents' API: the node's own (the agents' script is co-hosted),
-    /// started again after `crash`. Its state is the node's.
-    pub fn agents(&mut self) -> Result<Api> {
-        if let Some(preview) = &self.preview {
-            // the platform's own: the router hands the agents' Worker /api/a/*
-            return Ok(Api::hosted(preview, &self.shared));
-        }
-        if self.node.is_none() {
-            self.start(false, true)?;
-        }
-        Ok(Api::new(self.port, None, &self.shared))
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -865,7 +844,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
-    let agents_project = devstack::stage_agent(&scratch.join("agent"))?;
     let test_secret = devstack::random_hex(32);
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
@@ -916,7 +894,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cli,
         scratch,
         project,
-        agents_project,
         shape: Shape::Plain,
         containers_removed: false,
     };

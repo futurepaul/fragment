@@ -17,10 +17,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use fragment_core::price::{dollars, USD};
 use fragment_proto::ledger::{LedgerStatus, Standing};
-use fragment_proto::limits::AGENT_STATE_WAIT_MS_MAX;
 use fragment_proto::{
-    AgentState, ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted, Rotated,
-    Run, RunList, TurnOutcome, Visibility,
+    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted, Rotated, Run, RunList,
+    Visibility,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -245,12 +244,6 @@ enum Cmd {
         #[command(subcommand)]
         sub: SecretCmd,
     },
-    /// Agents: make one, talk to it, point it at a chat (on the platform's
-    /// host; FRAGMENT_AGENTS names another)
-    Agent {
-        #[command(subcommand)]
-        sub: AgentCmd,
-    },
     /// A fragment's members: list, add, remove, or leave
     Members {
         #[command(subcommand)]
@@ -348,42 +341,6 @@ enum Cmd {
         /// List available templates
         #[arg(long)]
         list: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum AgentCmd {
-    /// Make an agent you own; prints its npub (add it to fragments as a member)
-    Create {
-        name: String,
-        /// Its model tier: cheap (the default) or medium
-        #[arg(long)]
-        model: Option<String>,
-        #[arg(long)]
-        instructions: Option<String>,
-    },
-    /// Its turn's state and its recent messages
-    Show { name: String },
-    /// Say something: starts a turn (or steers the running one) and waits for the answer
-    Say {
-        name: String,
-        text: String,
-        /// Return once the turn has started
-        #[arg(long)]
-        no_wait: bool,
-    },
-    /// Stop the running turn
-    Stop { name: String },
-    /// The tools its memberships give it (fragment operations)
-    Tools { name: String },
-    /// Follow a fragment's channel: others' messages start turns, answers go back through the reply operation
-    Listen {
-        name: String,
-        fragment: String,
-        #[arg(long, default_value = "chat")]
-        channel: String,
-        #[arg(long, default_value = "say")]
-        reply: String,
     },
 }
 
@@ -499,7 +456,6 @@ struct Config {
     /// optional code.storage server override (backend-swap knob; the
     /// storage-token response is the default source)
     codestorage: Option<String>,
-    agents: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -566,7 +522,7 @@ fn member_named(who: String) -> Result<String> {
 fn load_config() -> Config {
     let v: Value = std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
     let text = |k: &str| v[k].as_str().map(str::to_string);
-    Config { host: text("host"), secret_key: text("secret_key"), codestorage: text("codestorage").map(|u| u.trim_end_matches('/').to_string()), agents: text("agents") }
+    Config { host: text("host"), secret_key: text("secret_key"), codestorage: text("codestorage").map(|u| u.trim_end_matches('/').to_string()) }
 }
 
 /// code.storage server override: FRAGMENT_CODESTORAGE_URL env, then the
@@ -588,19 +544,6 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
         .or_else(|| cfg.host.clone())
         .unwrap_or_else(|| "https://fragment.club".to_string())
 }
-
-/// Where agents answer: FRAGMENT_AGENTS, else the config's `agents`, else
-/// the platform itself (the agents' script is co-hosted in its fleet).
-fn agents_client(verbose: bool) -> Result<api::Client> {
-    let host = std::env::var("FRAGMENT_AGENTS").ok().filter(|h| !h.trim().is_empty()).or_else(|| load_config().agents);
-    require_client(&host, verbose)
-}
-
-/// State reads `fragment agent say` makes at most while a turn runs: each
-/// waits up to `AGENT_STATE_WAIT_MS_MAX`, so about ten minutes in all.
-const SAY_STATE_READS_MAX: u64 = 600_000 / AGENT_STATE_WAIT_MS_MAX + 1;
-// a read that waits the longest still answers inside a request's timeout
-const _: () = assert!(AGENT_STATE_WAIT_MS_MAX + 5_000 <= api::REQUEST_TIMEOUT_BASE.as_millis() as u64);
 
 /// The agent mode, inside a computer (docs/computers.md, cli/GUIDE.md "As an
 /// agent"): `FRAGMENT_AS_AGENT` names the agent fragment the computer's
@@ -1470,88 +1413,6 @@ fn run(cli: Cli) -> Result<()> {
             println!("share link:  {link}");
             println!("webhook URL: {webhook}");
         }
-        Cmd::Agent { sub } => {
-            let a = agents_client(cli.verbose)?;
-            match sub {
-                AgentCmd::Create { name, model, instructions } => {
-                    let mut body = json!({ "name": name });
-                    if let Some(m) = model {
-                        body["model"] = json!(m);
-                    }
-                    if let Some(i) = instructions {
-                        body["instructions"] = json!(i);
-                    }
-                    // made and registered as yours in one request (the platform does both)
-                    let v = a.call(a.post_json("/api/agents", &body)?)?;
-                    json_exit(j, &v);
-                    let id = v["id"].as_str().unwrap_or("");
-                    println!("agent {} ({}): {id}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""));
-                    println!("  npub: {}", v["npub"].as_str().unwrap_or(""));
-                    println!("  you own it: you can read whatever it can read");
-                    println!("give it a fragment: fragment members add <fragment> {id} --role editor");
-                }
-                AgentCmd::Show { name } => {
-                    let v = a.call(a.get(&format!("/api/a/{name}"))?)?;
-                    json_exit(j, &v);
-                    println!("{} ({}) {}: {}", v["name"].as_str().unwrap_or(""), v["model"].as_str().unwrap_or(""), v["npub"].as_str().unwrap_or(""), v["outcome"].as_str().unwrap_or("idle"));
-                    if let Some(e) = v["error"].as_str().filter(|e| !e.is_empty()) {
-                        println!("  error: {e}");
-                    }
-                    let messages = v["messages"].as_array().cloned().unwrap_or_default();
-                    for m in messages.iter().rev().take(10).rev() {
-                        let tools: Vec<&str> = m["tool_requests"].as_array().into_iter().flatten().filter_map(|t| t["name"].as_str()).collect();
-                        let text = m["text"].as_str().unwrap_or("");
-                        if !text.is_empty() {
-                            println!("  {}: {text}", m["role"].as_str().unwrap_or(""));
-                        } else if !tools.is_empty() {
-                            println!("  {} calls {}", m["role"].as_str().unwrap_or(""), tools.join(", "));
-                        }
-                    }
-                }
-                AgentCmd::Say { name, text, no_wait } => {
-                    let v = a.call(a.post_json(&format!("/api/a/{name}/turns"), &json!({ "text": text }))?)?;
-                    if no_wait {
-                        json_exit(j, &v);
-                        println!("{}", if v["steered"] == true { "steered the running turn" } else { "started" });
-                        return Ok(());
-                    }
-                    // a steer is answered by the running turn: wait for it too
-                    let mut ended: Option<AgentState> = None;
-                    for _ in 0..SAY_STATE_READS_MAX {
-                        let state: AgentState = a.call_as(a.get(&format!("/api/a/{name}/state?wait_ms={AGENT_STATE_WAIT_MS_MAX}"))?)?;
-                        if !state.active {
-                            ended = Some(state);
-                            break;
-                        }
-                    }
-                    let state = ended.ok_or_else(|| anyhow!("the turn is still running after 10 minutes (fragment agent show {name})"))?;
-                    let answer = state.answer.clone().unwrap_or_default();
-                    json_exit(j, &json!({ "outcome": state.outcome, "answer": answer, "error": state.error.clone().unwrap_or_default() }));
-                    match state.outcome {
-                        Some(TurnOutcome::Idle) => println!("{answer}"),
-                        Some(other) => println!("({}) {}", other.as_str(), state.error.as_deref().unwrap_or("")),
-                        None => {}
-                    }
-                }
-                AgentCmd::Stop { name } => {
-                    let v = a.call(a.post_json(&format!("/api/a/{name}/stop"), &json!({}))?)?;
-                    json_exit(j, &v);
-                    println!("{}", if v["active"] == true { "stopping" } else { "no turn was running" });
-                }
-                AgentCmd::Tools { name } => {
-                    let v = a.call(a.get(&format!("/api/a/{name}/tools"))?)?;
-                    json_exit(j, &v);
-                    for t in v["tools"].as_array().cloned().unwrap_or_default() {
-                        println!("{}", t.as_str().unwrap_or(""));
-                    }
-                }
-                AgentCmd::Listen { name, fragment, channel, reply } => {
-                    let v = a.call(a.post_json(&format!("/api/a/{name}/listen"), &json!({ "fragment": fragment, "channel": channel, "reply": reply }))?)?;
-                    json_exit(j, &v);
-                    println!("{name} follows {fragment}'s {channel} channel and answers through {reply}");
-                }
-            }
-        }
         Cmd::Members { sub } => match sub {
             MembersCmd::List { name } => {
                 let v: MemberList = c.call_as(c.get(&format!("/api/f/{name}/members"))?)?;
@@ -2117,7 +1978,7 @@ mod tests {
 
     /// Goal: `fragment host <url>` changes the host and keeps the config's
     /// other keys (it rewrote the file with `host` and `secret_key` only,
-    /// so `codestorage` and `agents` were lost). Method: the config lives
+    /// so `codestorage` was lost). Method: the config lives
     /// under HOME, so this test runs the command in a copy of itself with a
     /// HOME of its own, then reads the file.
     #[test]
@@ -2128,7 +1989,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("fragment-host-config-{}", std::process::id()));
         let dir = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
         std::fs::create_dir_all(&dir).unwrap();
-        let config = |host: &str| json!({ "host": host, "secret_key": "07".repeat(32), "codestorage": "http://127.0.0.1:3", "agents": "http://127.0.0.1:4" });
+        let config = |host: &str| json!({ "host": host, "secret_key": "07".repeat(32), "codestorage": "http://127.0.0.1:3" });
         std::fs::write(dir.join("config.json"), config("http://127.0.0.1:1").to_string()).unwrap();
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::host_keeps_the_other_config_keys"])

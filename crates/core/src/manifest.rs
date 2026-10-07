@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_name, valid_repo_path, valid_template_name, ChannelDecl, FragmentKind, IdentityKind, OpDecl, OpKind, Role,
+    limits, valid_channel_name, valid_op_name, valid_template_name, ChannelDecl, FragmentKind, IdentityKind, OpDecl, OpKind, Role,
     TriggerDecl, TriggerOn, BUILTIN_CHANNELS, RESERVED_OP_NAMES,
 };
 use serde_json::Value;
@@ -27,8 +27,6 @@ pub struct Manifest {
     pub triggers: Vec<TriggerDecl>,
     /// Where a `changed` frame goes on each move of `main`.
     pub notify_urls: Vec<String>,
-    /// The agent people talk to through one of its channels (`agent`).
-    pub agent: Option<AgentDecl>,
     /// What it is (`kind`; `None`: an app, or its template's kind).
     pub kind: Option<FragmentKind>,
     /// The blessed template whose code it runs (`template`, decision 40):
@@ -63,7 +61,6 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
         ("notifyUrls", !own.notify_urls.is_empty()),
-        ("agent", own.agent.is_some()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -92,20 +89,6 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         });
     }
     Ok(m)
-}
-
-/// `agent`: the fragment's own agent, with instructions from a file of
-/// its repo (read at live), the operations of this fragment it may call,
-/// and a model. It answers messages posted to `channel`.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
-pub struct AgentDecl {
-    pub channel: String,
-    #[serde(default)]
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default)]
-    pub model: Option<String>,
 }
 
 const ACCESS_KEYS: [&str; 3] = ["visibility", "editors", "viewers"];
@@ -235,48 +218,6 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     Ok(TriggerDecl { on, run, from })
 }
 
-/// `agent`, checked against the channels and operations declared: people
-/// post to its channel, and it calls only this fragment's operations an
-/// agent may (never an owner's: an agent acts as an editor at most).
-fn agent(v: &Value, m: &Manifest) -> Result<AgentDecl, String> {
-    let obj = v.as_object().ok_or("agent must be an object")?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "channel" | "instructions" | "tools" | "model")) {
-        return Err(format!("agent has an unknown key {k:?} (channel, instructions, tools, model)"));
-    }
-    let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("agent.{k} must be a string"))).transpose();
-    let channel = text("channel")?.ok_or("agent needs channel: a channel this fragment.json declares, which people post to")?;
-    match m.channels.get(&channel) {
-        Some(ChannelDecl { post: Some(_), .. }) => {}
-        Some(_) => return Err(format!("agent.channel: {channel} takes no posts (give it a post role)")),
-        None => return Err(format!("agent.channel names no declared channel: {channel:?}")),
-    }
-    let tools: Vec<String> = match obj.get("tools") {
-        None => Vec::new(),
-        Some(Value::Array(list)) => list.iter().map(|t| t.as_str().map(str::to_string).ok_or("agent.tools are operation names")).collect::<Result<_, _>>()?,
-        Some(_) => return Err("agent.tools must be an array of operation names".into()),
-    };
-    let (instructions, model) = (text("instructions")?, text("model")?);
-    let instructions = instructions.ok_or("agent needs instructions (a file of this fragment, such as agent.md)")?;
-    if !valid_repo_path(&instructions) {
-        return Err(format!("agent.instructions must be a relative path in the repo, not {instructions:?}"));
-    }
-    // a tier, never a model id; `high` is refused as the model route refuses it
-    if let Some(name) = model.as_deref() {
-        if let Err(why) = crate::models::tier_named(Some(name)).and_then(crate::models::model_of) {
-            return Err(format!("agent.model: {}", why.message()));
-        }
-    }
-    for (i, tool) in tools.iter().enumerate() {
-        match m.operations.get(tool) {
-            None => return Err(format!("agent.tools: {tool:?} is not an operation this fragment.json declares")),
-            Some(decl) if decl.role > Role::Editor => return Err(format!("agent.tools: {tool} needs the owner role; an agent acts as an editor at most")),
-            Some(_) if tools[..i].contains(tool) => return Err(format!("agent.tools names {tool} twice")),
-            Some(_) => {}
-        }
-    }
-    Ok(AgentDecl { channel, instructions: Some(instructions), tools, model })
-}
-
 pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
     if bytes.len() > limits::MANIFEST_MAX_BYTES {
         return Err(format!("fragment.json is over {} bytes", limits::MANIFEST_MAX_BYTES));
@@ -357,10 +298,6 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
             }
         }
         Some(_) => return Err("triggers must be an array".into()),
-    }
-    match obj.get("agent") {
-        None | Some(Value::Null) => {}
-        Some(decl) => m.agent = Some(agent(decl, &m)?),
     }
     match obj.get("kind") {
         None | Some(Value::Null) => {}
@@ -477,44 +414,6 @@ mod tests {
         ] {
             let why = parse(bad).expect_err(&String::from_utf8_lossy(bad));
             assert!(why.contains(says), "{why}");
-        }
-    }
-
-    /// Goal: the agent block holds only what can work at live. Method: a
-    /// fragment with two operations and two channels, one postable; each
-    /// refusal names what is wrong.
-    #[test]
-    fn agents() {
-        let with = |agent: &str| {
-            let text = format!(
-                r#"{{"operations":{{"log":{{"kind":"mutation","role":"viewer"}},"wipe":{{"kind":"mutation","role":"owner"}},"today":{{"kind":"query"}}}},
-                "channels":{{"ask":{{"post":"viewer"}},"news":{{}}}},"agent":{agent}}}"#
-            );
-            parse(text.as_bytes())
-        };
-        let own = with(r#"{"instructions":"agent.md","tools":["log","today"],"channel":"ask","model":"medium"}"#).unwrap().agent.unwrap();
-        assert_eq!(own, AgentDecl { channel: "ask".into(), instructions: Some("agent.md".into()), tools: vec!["log".into(), "today".into()], model: Some("medium".into()) });
-        assert_eq!(with(r#"{"instructions":"a.md","channel":"ask"}"#).unwrap().agent.unwrap().tools, Vec::<String>::new(), "an agent that only talks");
-        assert_eq!(with("null").unwrap().agent, None, "no agent");
-        for (bad, says) in [
-            (r#"[]"#, "agent must be an object"),
-            (r#"{"instructions":"a.md","channel":"ask","memory":true}"#, "unknown key \"memory\""),
-            (r#"{"instructions":"a.md"}"#, "agent needs channel"),
-            (r#"{"instructions":"a.md","channel":"chat"}"#, "names no declared channel"),
-            (r#"{"instructions":"a.md","channel":"news"}"#, "news takes no posts"),
-            (r#"{"channel":"ask"}"#, "agent needs instructions"),
-            (r#"{"instructions":"../a.md","channel":"ask"}"#, "relative path"),
-            (r#"{"instructions":"a.md","channel":"ask","tools":["fetch"]}"#, "\"fetch\" is not an operation"),
-            (r#"{"instructions":"a.md","channel":"ask","tools":["wipe"]}"#, "wipe needs the owner role"),
-            (r#"{"instructions":"a.md","channel":"ask","tools":["log","log"]}"#, "names log twice"),
-            (r#"{"instructions":"a.md","channel":"ask","tools":"log"}"#, "array of operation names"),
-            (r#"{"instructions":"a.md","channel":"ask","model":""}"#, "agent.model: model names a tier"),
-            (r#"{"instructions":"a.md","channel":"ask","model":"z-ai/glm-5.3-flash"}"#, "agent.model: model names a tier"),
-            (r#"{"instructions":"a.md","channel":"ask","model":"high"}"#, "agent.model: the high tier is off"),
-            (r#"{"personal":true,"channel":"ask"}"#, "unknown key \"personal\""),
-        ] {
-            let why = with(bad).expect_err(bad);
-            assert!(why.contains(says), "{bad}: {why}");
         }
     }
 
