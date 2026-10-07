@@ -66,7 +66,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
 | `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; and a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each |
-| `GET /f/{f}/__live?v=2`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
+| `GET /f/{f}/__live`, WebSocket | `{type: "subscribe", channel, after}`, `{type: "ping"}` | `hello`, `record`, `subscribed {next, more}`; 4003/4004 end the follow |
 | `POST /api/f/{f}/channels/{chat\|work}` | `{id, body}` | `{record, replayed}` (a claim's `record.seq` is where the turn's note is read back from); retried 10 times with jitter on a transport error, 429 or 5xx. A turn's claim (its `turn.start`) is answered back to the engine: posted or replayed, this life runs it; 409, another life claimed it; 403/404, the agent may not post there (it left the chat, or its owner holds it below editor), and the turn is dropped; anything else, no answer. Any other 409 is another life's post of the id, and a 403/404 is no longer the agent's to post in: dropped and logged |
 | `PUT /api/f/{f}/channels/chat/draft` | `{turn, text \| null}` | at most 4 a second a turn; a 429 is ignored |
 | `PUT /api/f/{f}/blobs/{sha256}` | the bytes, `content-type` the file's | a reply's files, before its record |
@@ -99,7 +99,6 @@ Bodies are JSON. `api.rs` has one method for each.
 | `BRIDGE_RELAY_LISTEN` | `127.0.0.1:8650` | where Hermes dials |
 | `BRIDGE_RELAY_SECRET_FILE` | required for `relay` | the per-boot secret (32+ characters) |
 | `GATEWAY_RELAY_ID` | `fragment-computer` | the gateway id both sides name |
-| `BRIDGE_RELAY_SETTLE_MS`, `BRIDGE_RELAY_EMPTY_SETTLE_MS` | 1 500, 20 000 | the end of a Hermes turn (below) |
 | `BRIDGE_SCRIPT_PACE_MS` | 40 | the scripted agent's draft pace |
 | `BRIDGE_SCREEN_LISTEN` | | `0.0.0.0:6080`: serve the screen |
 | `BRIDGE_SCREEN_DIR` | `/opt/fragment/screen` | its page |
@@ -307,7 +306,8 @@ get_chat_info`.
   token.
 - A question to answer in words: an open `clarify` (`❓ …`, the base
   adapter's text prompt), or `✏️ Type your answer:` after "Other" on a
-  clarify's card. It is a `send`: the bridge shows it as a reply part and
+  clarify's card, each read by its glyph (Hermes' translations keep
+  them). It is a `send`: the bridge shows it as a reply part and
   the turn asks (`Asked`). Hermes blocks until the person's next message,
   which its gateway's clarify intercept takes even mid-turn, so the
   asker's next message goes back at once as an inbound in the same chat
@@ -316,11 +316,13 @@ get_chat_info`.
 - Stop is `interrupt_inbound` for the profile's session key. A clarify
   waiting on words never sees it, so a Stop while the turn asks is
   followed by the words "Stop.", which let the wait go.
-- The end: `👀` on, `👀` off, then `✅` or `❌`. Hermes' multiplexed
-  gateway brackets a message twice, an empty dispatch bracket first, so
-  a turn ends at `✅` only once it said something, after
-  `BRIDGE_RELAY_SETTLE_MS` when stopped, and an empty one after
-  `BRIDGE_RELAY_EMPTY_SETTLE_MS` with no new `👀`.
+- The end: `👀` on, `👀` off, then `✅` or `❌`. A turn ends at its `❌`,
+  at its `✅` once it said something, and, stopped, at its `👀` off.
+  Hermes brackets a message it took while its gateway was starting
+  twice, the first empty (docs/hermes-relay.md), and ends no person's
+  turn without saying something, so an empty bracket's `✅` ends
+  nothing. No clock: a turn whose bracket never ends is the idle
+  bound's (`BRIDGE_TURN_IDLE_MS`: "the agent stopped answering").
 
 Of decision 21's list, v0.21.5 has every op, but sends `task_card` only
 for Slack chats (`gateway/run_turn.py`), so steps come from progress
