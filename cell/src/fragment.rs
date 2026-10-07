@@ -1223,9 +1223,9 @@ impl FragmentCell {
     }
 
     pub(crate) fn code_status(&self) -> CellResult<CodeStatus> {
-        let rows = self.rows("SELECT sha FROM code WHERE id = 1", vec![])?;
-        let sha = rows.first().map(|r| r["sha"].as_str().expect("code.sha is TEXT").to_string());
-        Ok(CodeStatus { sha, operations: self.operations()?, error: self.meta(MetaKey::CodeError)? })
+        let rows = self.rows("SELECT sha, loader_id FROM code WHERE id = 1", vec![])?;
+        let text = |col: &str| rows.first().map(|r| r[col].as_str().expect("code's columns are TEXT").to_string());
+        Ok(CodeStatus { sha: text("sha"), id: text("loader_id"), operations: self.operations()?, error: self.meta(MetaKey::CodeError)? })
     }
 
     fn status(&self, caller: &Caller) -> CellResult<Response> {
