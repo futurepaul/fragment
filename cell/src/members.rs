@@ -125,15 +125,6 @@ fn invite_json(r: &Value) -> Invite {
     }
 }
 
-/// An invites table from before invites could name their invitee gains
-/// the column (every invite made before is anyone's who holds its token).
-pub(crate) fn migrate(sql: &SqlStorage) {
-    let cols: Vec<Value> = sql.exec("PRAGMA table_info(invites)", None).and_then(|c| c.to_array()).unwrap_or_default();
-    if !cols.iter().any(|c| c["name"] == "invitee") {
-        sql.exec("ALTER TABLE invites ADD COLUMN invitee TEXT", None).expect("the invites table migrates");
-    }
-}
-
 impl FragmentCell {
     /// Records an index change for `principal` (`None` removes them). Runs
     /// in the caller's turn, beside the membership write it mirrors. Their
@@ -174,8 +165,7 @@ impl FragmentCell {
     /// list is sent again, with the sharing as it is when it goes.
     pub(crate) fn sharing_changed(&self) -> CellResult<()> {
         let owner = self.must(MetaKey::Owner)?;
-        self.index_change(&owner, Some(Role::Owner))?;
-        self.set_meta(MetaKey::SharingSent, "1")
+        self.index_change(&owner, Some(Role::Owner))
     }
 
     /// Sends one index change to `principal`'s list: whether it took it.
@@ -198,15 +188,8 @@ impl FragmentCell {
     /// request that flushes sends its own change and waits one round,
     /// whatever its members; the alarm sends the rest, a batch a pass. A
     /// failure stays in the outbox with a backoff; the alarm retries it.
-    /// A fragment from before the owner's row carried its sharing sends it
-    /// once, here (on its next change, or its alarm).
     pub(crate) async fn flush_index(&self) {
         let (Ok(name), Ok(Some(incarnation)), Ok(owner)) = (self.must(MetaKey::Name), self.meta(MetaKey::CreatedAt), self.must(MetaKey::Owner)) else { return };
-        if matches!(self.meta(MetaKey::SharingSent), Ok(None)) {
-            if let Err(e) = self.sharing_changed() {
-                console_error!("{name}: its sharing was not queued for its owner's list ({:?}): {}", e.code, e.message);
-            }
-        }
         let due = self
             .rows(
                 "SELECT principal, role, version, attempts FROM index_outbox WHERE next_at <= ? ORDER BY version DESC LIMIT ?",

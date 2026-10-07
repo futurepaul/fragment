@@ -86,13 +86,9 @@ pub struct LiveState {
     pub subs: Vec<String>,
     pub presence: Option<Value>,
     /// When the socket's next presence change is due at its steady pace
-    /// (`presence_admit`); 0, as for a socket that connected before the
-    /// pace was kept, lets its first changes through.
-    #[serde(default)]
+    /// (`presence_admit`); 0 lets its first changes through.
     pub presence_at: i64,
-    /// When the registry last said who a signed-in socket is (0, as for a
-    /// socket from before this was kept: its next frame asks again).
-    #[serde(default)]
+    /// When the registry last said who a signed-in socket is.
     pub checked_at: i64,
 }
 

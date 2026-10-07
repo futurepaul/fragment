@@ -623,7 +623,7 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     /// Its owner's row only: who else is in it, as the fragment last said
-    /// (`None` until it has: a fragment from before sends it once).
+    /// (`None` until it has).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharing: Option<Sharing>,
     /// The signer archived it: their own view, not the fragment's (the
@@ -1598,7 +1598,7 @@ mod tests {
             value(&listed),
             serde_json::json!({ "fragments": [{ "name": "todo.ann", "role": "owner", "kind": "chat", "title": "Todo", "sharing": { "visibility": "link", "members": 3, "guests": 1 }, "archived": true }] })
         );
-        // a list from before archiving reads as nothing archived
+        // a row not archived leaves the flag out, and reads back so
         let read: ListedFragment = serde_json::from_value(serde_json::json!({ "name": "notes.ann", "role": "viewer" })).unwrap();
         assert!(!read.archived);
         let found = SearchAnswer {
