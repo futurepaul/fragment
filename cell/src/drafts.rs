@@ -81,7 +81,7 @@ impl FragmentCell {
         }
         if let (Some(_), Some(kept)) = (self.meta(MetaKey::CreatedAt)?, self.kept_draft()?) {
             if kept.claimed_by.is_some() {
-                return Err(CellError::new(ErrorCode::AlreadyExists, format!("{name} was claimed: its key acts as its claimer")));
+                return Err(CellError::new(ErrorCode::AlreadyExists, format!("{name} was claimed: it is its claimer's")));
             }
             if kept.template != body.template {
                 return Err(CellError::new(
@@ -129,6 +129,9 @@ impl FragmentCell {
     pub(crate) fn claim_view(&self) -> CellResult<Value> {
         let name = self.name()?;
         let draft = self.kept_draft()?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("{name} is no draft")))?;
+        if draft.claimed_by.is_none() && draft.until <= js::now_ms() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("{name} ended: no one claimed it in time")));
+        }
         Ok(json!({ "name": name, "key": npub::encode(&draft.key), "expiresAt": draft.until, "claimedBy": draft.claimed_by }))
     }
 
@@ -210,11 +213,11 @@ impl FragmentCell {
     }
 
     /// From the alarm: an unclaimed draft past its end ends as a delete
-    /// ends it (ended.rs). Whether it did.
+    /// ends it (ended.rs), its repo with it (its life's alone). Whether it did.
     pub(crate) async fn end_expired_draft(&self) -> CellResult<bool> {
         let Some(draft) = self.draft()?.filter(|d| d.until <= js::now_ms()) else { return Ok(false) };
         let name = self.name()?;
-        let ended = self.end_life()?;
+        let ended = self.end_life_wiped()?;
         console_log!("{}", json!({ "event": "draft.expired", "fragment": name, "until": draft.until }));
         self.tell_ended(Some(&ended.owner)).await;
         Ok(true)

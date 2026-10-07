@@ -1,6 +1,6 @@
 // A draft's app (the drafts section): a write and a read anyone may call,
-// and the two steps a draft refuses until it is claimed: a fetch out, and
-// an AI step.
+// a tick its cron starts (none while it is a draft), and the two steps a
+// draft refuses until it is claimed: a fetch out, and an AI step.
 import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
@@ -16,6 +16,10 @@ export class App extends DurableObject {
 
   notes() {
     return { notes: this.ctx.storage.sql.exec("SELECT text FROM notes").toArray().map((r) => r.text) };
+  }
+
+  tick() {
+    return { ok: true };
   }
 
   async look({ url }, job) {

@@ -58,8 +58,9 @@ from then on, as after `fragment login`. Until it is claimed, a draft:
   `--dir`), `call`, `post`, `status`, `open`, `events`, `channel` (not
   `--follow`), `runs`, `replay`, `rm`, always naming it in full;
 - spends nothing: no secrets, no `job.fetch` and no AI steps (a run that
-  takes one is held; replay it after the claim), no push, no storage
-  token (`sync`, `deploy --dir`), no sharing beyond its share link;
+  takes one is held; replay it after the claim), no cron runs, no push,
+  no storage token (`sync`, `deploy --dir`), no sharing beyond its share
+  link;
 - takes 60 writes a minute, 2 MiB of files, and 16 MiB of records;
 - says on its page that it is a draft, with its claim link;
 - is deleted a day after it was made (`fragment status` says when).
@@ -67,7 +68,8 @@ from then on, as after `fragment login`. Until it is claimed, a draft:
 Claimed, every limit lifts, and it keeps its name and its links. A
 claim needs an account on the host, made as it allows (fragment.club is
 invite-only), and one that may make fragments: a guest's claim is
-refused, as a guest's create is.
+refused, as a guest's create is. `fragment login` alone claims nothing:
+the draft is claimed at its link.
 
 ## As an agent, on a computer
 

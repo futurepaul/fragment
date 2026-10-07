@@ -318,8 +318,9 @@ once it is whole:
   prefix), and its record emptied, the snapshot's id with it. Cloudflare
   deletes no container snapshot: forgotten, it is never restored, and it
   expires within 30 days (docs/computers.md).
-- `fragments`: each fragment they own (under their username, on their or
-  their agents' lists, and the agent fragments the registry names) ends
+- `fragments`: each fragment they own (under their username, or a draft
+  they claimed, on their or their agents' lists, and the agent fragments
+  the registry names) ends
   as a delete ends it (`DELETE /api/f/{name}`, below), its code.storage
   repo recorded beside its end to delete; one someone else owns is
   skipped and named.
@@ -789,7 +790,9 @@ rules are `fragment_core::drafts`; the cell's half is cell/src/drafts.rs.
   sync` and `deploy --dir`), blobs, subscriptions, members, invites,
   visibility, rotation, and its cap.
 - **What it spends: nothing.** A job's `job.fetch` and AI steps fail for
-  good, saying why (a replay after its claim runs them); a page takes no
+  good, saying why (a replay after its claim runs them); its cron
+  schedules start no runs (a run a minute, all day, is the one start its
+  writes do not bound); a page takes no
   push subscription (`__push-sub` 403), so `call.push` reaches no one; its
   deploys get no card (`card.skipped`, `owner_pays`); no ledger is asked
   (its caps stand for its standing); no agent joins it, so no computer runs
@@ -803,7 +806,8 @@ rules are `fragment_core::drafts`; the cell's half is cell/src/drafts.rs.
   `CF-Connecting-IP` names it) starts 10 drafts in a day and the
   deployment 10 000 (429; a key's own counts once): the registry keeps each
   start a day.
-- **Its page** says it is a draft: every HTML page of its site carries a
+- **Its page** says it is a draft: every HTML page of its site (of at
+  most 1 MiB, as Open Graph tags take) carries a
   bar (`#fragment-draft`) saying when it ends, with its claim page's link
   (without the code: the page asks for it), and `Cache-Control: no-store`.
   The bar is the page's own markup, so its scripts could take it away, and
@@ -811,10 +815,12 @@ rules are `fragment_core::drafts`; the cell's half is cell/src/drafts.rs.
   `__file`) carry none: it tells an honest draft's visitors what it is.
   What bounds an abuse of one is the rest: its day, its caps, its link
   visibility, and a name no one chooses.
-- **Its end.** At `expiresAt` its alarm ends it as a delete ends it (its
-  repo stays, as a delete's does: the debt ledger); from then it is 404,
-  and its key may make it again. `status` answers `draft` while it is one
-  (`claim` with its code for its maker).
+- **Its end.** At `expiresAt` its alarm ends it as a delete ends it, and
+  its repo with it, as a wipe's end does: a draft's repo is its life's
+  alone (named for the fragment's own key, not its maker), and so is it
+  when its maker deletes it. From then it is 404, and its key may make it
+  again, a new life with a new repo. `status` answers `draft` while it is
+  one (`claim` with its code for its maker).
 
 A claimed draft is an ordinary fragment of its owner's, under its own
 name: its links stay, and its owner names it in full (a bare label names

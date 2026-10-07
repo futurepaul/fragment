@@ -740,21 +740,30 @@ async fn claim_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &st
         view => view?,
     };
     let title = format!("Claim {}", label(name));
-    let open = format!("/auth/fragment?name={}&return=/", enc(name));
+    let form = form::issue(&session, &purpose("claim", name), js::now_ms());
+    let key = view["key"].as_str().unwrap_or_default();
+    let tail = esc(&key[key.len().saturating_sub(8)..]);
     match view["claimedBy"].as_str() {
-        Some(by) if by == who.id => return sheet_page(200, &title, &format!("<p>It is yours.</p><p><a href=\"{}\">Open it</a></p>", esc(&open)), true),
+        // its key may not have joined them yet (a claim cut short): the same claim again adds it
+        Some(by) if by == who.id => {
+            let open = format!("/auth/fragment?name={}&return=/", enc(name));
+            let body = format!(
+                "<p>It is yours. <a href=\"{}\">Open it</a></p>\
+                 <form method=\"post\" class=\"quiet\"><input type=\"hidden\" name=\"form\" value=\"{}\"><p class=\"hint\">The key that made it (ending in <code>{tail}</code>) not acting as you yet? <button data-arm disabled>Add it</button></p></form>",
+                esc(&open),
+                esc(&form)
+            );
+            return sheet_page(200, &title, &body, false);
+        }
         Some(_) => return notice(409, "Claimed already", "Someone else claimed this draft."),
         None => {}
     }
-    let key = view["key"].as_str().unwrap_or_default();
-    let form = form::issue(&session, &purpose("claim", name), js::now_ms());
     let body = format!(
         "<p><b>{l}</b> was made without an account, by the key ending in <code>{tail}</code> (an agent's, or a <code>fragment</code> CLI's).</p>\
-         <p>Claiming it makes it yours: you own it, it bills you, and its limits lift. The key that made it becomes yours too: whatever holds it acts as you, as a key you add with <code>fragment login</code> does.</p>\
+         <p>Claiming it makes it yours: you own it, it bills you, and its limits lift. The key that made it becomes yours too: <b>whatever holds it can do anything you can</b>, as a key you add with <code>fragment login</code> can.</p>\
          <form method=\"post\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><p class=\"add\"><input name=\"code\" value=\"{c}\" placeholder=\"Its claim code\" aria-label=\"Its claim code\" autocomplete=\"off\" required><button data-arm disabled>Claim it</button></p></form>\
-         <p class=\"hint\">Its code is in the link its maker gave you. Didn't ask for it? Close this page.</p>",
+         <p class=\"hint\">Claim it only if your own agent, or your own <code>fragment</code>, made it for you: its code is in the link it gave you. Sent this by someone else? Close this page.</p>",
         l = esc(label(name)),
-        tail = esc(&key[key.len().saturating_sub(8)..]),
         f = esc(&form),
         c = esc(&code),
     );
@@ -789,7 +798,11 @@ async fn claim_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         Err(e) if e.code == ErrorCode::AlreadyExists => notice(
             200,
             "Claimed",
-            &format!("{} is yours. The key that made it is someone else's, so it does not act as you: run <code>fragment login</code> where it was made.", esc(label(name))),
+            &format!(
+                "{} is yours. The key that made it is not one you can add ({}), so it does not act as you: run <code>fragment login</code> where it was made.",
+                esc(label(name)),
+                esc(&e.message)
+            ),
         ),
         Err(e) => Err(e),
     }
