@@ -187,6 +187,9 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
+    /// The owner's WorkOS user, once the registry named it
+    /// (`workos_user`): `{owner, issuer, subject}`.
+    WorkosUser,
 }
 
 impl MetaKey {
@@ -201,6 +204,7 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
+            MetaKey::WorkosUser => "workos_user",
         }
     }
 }
@@ -1130,7 +1134,7 @@ impl ComputerCell {
                 return states.clone();
             }
         }
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, owner).await {
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner)).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
@@ -1139,6 +1143,24 @@ impl ComputerCell {
         };
         *self.states.borrow_mut() = Some((states.clone(), until));
         states
+    }
+
+    /// The WorkOS user the owner signed in as, whose connections Pipes
+    /// keeps: asked of the registry until it names one, then kept here for
+    /// that issuer. A fact, not a cache: the first subject a person signed
+    /// in as with an issuer is theirs for good, since the registry never
+    /// relinks or forgets a sign-in (registry/signin.rs `person_for`).
+    async fn workos_user(&self, owner: &str) -> CellResult<Option<String>> {
+        let issuer = crate::keys::workos(&self.env, self.cfg).await?.issuer();
+        let kept: Option<Value> = self.meta(MetaKey::WorkosUser)?.and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(subject) = kept.as_ref().filter(|k| k["owner"] == owner && k["issuer"] == issuer.as_str()).and_then(|k| k["subject"].as_str()) {
+            return Ok(Some(subject.to_string()));
+        }
+        let subject = crate::ask_registry(&self.env, &crate::registry::calls::SubjectOf { identity: owner.into(), issuer: issuer.clone() }).await?.subject;
+        if let Some(s) = &subject {
+            self.set_meta(MetaKey::WorkosUser, &json!({ "owner": owner, "issuer": issuer, "subject": s }).to_string())?;
+        }
+        Ok(subject)
     }
 
     /// One connection's state, as a swap just learned it from Pipes.
@@ -1600,13 +1622,8 @@ impl ComputerCell {
     /// request. What Pipes answers is the connection's state too, as the
     /// guest's view lists it (`note_state`).
     async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
-        let workos = crate::keys::workos(&self.env, self.cfg).await?;
-        let call = crate::registry::calls::SubjectOf { identity: owner.into(), issuer: workos.issuer() };
-        let user = crate::ask_registry(&self.env, &call)
-            .await?
-            .subject
-            .ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, workos.api, provider, &user).await?;
+        let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
