@@ -247,6 +247,56 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let r = api.create(&owner, "Bad_Name")?;
     s.ok("an invalid name is 400", r.status == 400 && r.error() == "invalid_request", &r);
+
+    // a fragment's host label, `<label>--<username>` and a branch's mark,
+    // is one DNS label (docs/api.md, Names): every username leaves 29
+    // bytes for its labels, and a branch's mark shortens the longest
+    let mark = api.host_mark();
+    let max = fragment_proto::username_max(&mark);
+    let hex = Keys::generate().pubkey_hex().to_string();
+    let longest = api.person_without_username()?;
+    let claim = |username: &str| api.signed(&longest, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })));
+    if max < limits::USERNAME_MAX_BYTES {
+        let r = claim(&format!("u{}", &hex[..max]))?;
+        s.ok(
+            "on a branch, a username past the longest its hosts leave room for is refused (400), saying why",
+            r.status == 400 && r.error() == "invalid_request" && r.message().contains("one DNS label") && r.message().contains(&format!("at most {max} bytes")),
+            &r,
+        );
+    }
+    let longest_u = format!("u{}", &hex[..max - 1]);
+    let r = claim(&longest_u)?;
+    s.ok(&format!("the longest username this deployment takes ({max} bytes) is taken"), r.status == 200 && r.body["username"] == longest_u.as_str(), &r);
+    let room = fragment_proto::label_room(&longest_u, &mark);
+    s.ok("and leaves 29 bytes for its labels", room == limits::LABEL_ROOM_MIN_BYTES, room);
+    let base = s.name("edge");
+    let edge = |len: usize| format!("{base}-{}", "x".repeat(len - base.len() - 1));
+    let (fits, over) = (edge(room), edge(room + 1));
+    let r = api.create(&longest, &fits)?;
+    let host = r.body["canonical"].as_str().and_then(|c| reqwest::Url::parse(c).ok()).and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
+    let host_label = host.split('.').next().unwrap_or_default();
+    s.ok(
+        "a label whose host label is exactly 63 bytes is made",
+        r.status == 200 && host_label.len() == 63 && host_label == format!("{fits}--{longest_u}{mark}"),
+        format!("{host_label} ({} bytes): {r}", host_label.len()),
+    );
+    let made = fragment_proto::fragment_name(&fits, &longest_u);
+    let view = r.body["viewToken"].as_str().unwrap_or_default().to_string();
+    let r = api.page(&made, &format!("?view={view}"), None)?;
+    s.ok("and its host reaches it (the fragment answers: nothing deployed yet)", r.status == 404 && r.message().contains("deploy first"), &r);
+    let refused = |r: &crate::api::Reply| {
+        r.status == 400
+            && r.error() == "invalid_request"
+            && r.message().contains(&format!("{over}--{longest_u}{mark}"))
+            && r.message().contains("at most 63 bytes")
+            && r.message().contains(&format!("at most {room} bytes"))
+    };
+    let r = api.create(&longest, &over)?;
+    s.ok("one byte longer is refused (400), saying why: never cut to fit", refused(&r), &r);
+    let unmade = fragment_proto::fragment_name(&over, &longest_u);
+    let status = api.status(&longest, &unmade)?;
+    let again = api.create(&longest, &unmade)?;
+    s.ok("nothing is made, and asked again (in full) it is refused the same", status.status == 404 && refused(&again), format!("{status} {again}"));
     // the fragment's own key is made by the node's KEYS; no client sends one
     let r = api.create_with(&owner, json!({ "name": s.name("oldsecret"), "fragmentSecret": Keys::generate().secret_hex() }))?;
     s.ok("a create that sends a fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);

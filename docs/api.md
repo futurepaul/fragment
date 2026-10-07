@@ -20,7 +20,7 @@ the deployment's secrets are Worker secrets (below).
 | `CODESTORAGE_ORG` | the code.storage org (required) |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Hosts, below). Every deployment names one: an isolate without it does not start |
-| `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
+| `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>` (a branch is 1 to 16 of lowercase letters, digits, and single dashes inside, as `cargo xtask deploy` makes them; an isolate with another does not start): its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone, and the mark takes from the room its labels and usernames have (Names, below) |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
 | `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
@@ -223,7 +223,7 @@ the new key and meant it for this signer.
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
 | `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
-| `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
+| `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word; on a branch deployment, at most 32 less its mark's length, so it leaves 29 bytes for its labels: Names, below, 400 saying why); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
@@ -248,7 +248,32 @@ for the new person. A fragment made before 2026-10-07 keeps the repo it
 was made with (`todo--futurepaul`).
 A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
-403. In a signed request's path, a bare label names the signer's own
+403.
+
+A fragment's host label, `<label>--<username>` and a branch
+deployment's mark (`--<branch>`), is one DNS label: at most 63 bytes
+(`limits::HOST_LABEL_MAX_BYTES`). A label alone may be 63 bytes and a
+username 32, so the label a person may use is at most `63 - 2 -
+len(username) - len(mark)` bytes (`fragment_proto::label_room`): 57
+under `paul` on a deployment of its own, 53 on the branch `p5`. A
+create past it is 400 `invalid_request`, naming the address it would
+have had, its length, and how long a label under that username may be
+here, and nothing is made; it is never cut to fit
+(`fragment_core::names`). However it is asked (the CLI's `fragment
+new`, the shell's chats and agents, an agent naming an app, the API),
+the create checks it.
+
+Every username leaves 29 bytes for its labels on every deployment
+(`limits::LABEL_ROOM_MIN_BYTES`: the room the longest username leaves
+where hosts carry no mark), so a label of 29 bytes or fewer fits
+anyone's host. A branch's mark takes from the username instead: there a
+username is at most `32 - len(mark)` bytes (28 on `p5`;
+`fragment_proto::username_max`), and a longer one is refused (400)
+where it is chosen, saying why. The limits were kept, not cut: a label
+is also an agent's name and one DNS label wherever it stands, and a
+username already held must keep naming its fragments' hosts (a shorter
+limit would make some unroutable). Branches are at most 16 bytes, so
+a computer's host label, `<24 hex>--computer--<branch>`, fits too. In a signed request's path, a bare label names the signer's own
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
 unsigned (an inbox, a site) names it in full.
 
@@ -613,7 +638,7 @@ and styles only inline and images only from the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (`<label>--<username>`, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |

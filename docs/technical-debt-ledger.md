@@ -11,6 +11,21 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## `fragment ask` sizes its chats' labels for a deployment without a branch
+
+- **Observed:** 2026-10-07, the host label limit (docs/api.md, Names).
+  The CLI cuts a pair chat's label (`cli/src/ask.rs`, `label_max`) to
+  the room under its owner's username where hosts carry no mark: it does
+  not know a branch deployment's `--<branch>`, which the cell counts.
+- **Risk:** on a branch, two agents whose labels together come within the
+  mark's length of that room are refused their chat (400, saying why),
+  where on production they get one. Never a fragment no host reaches.
+- **First proof:** `fragment ask` on a preview answering "… is too
+  long: a fragment's address …" for a pair of long agent names.
+- **Delete when:** the CLI learns the room its owner's labels have (say
+  from `GET /api/identities/me`) and cuts to the lesser, so production's
+  labels, and the chats they name, stay as they are.
+
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).

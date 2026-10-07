@@ -24,6 +24,7 @@ pub mod live;
 pub mod manifest;
 pub mod media;
 pub mod models;
+pub mod names;
 pub mod npub;
 pub mod price;
 pub mod ratelimit;
