@@ -127,6 +127,19 @@ export class Job extends WorkflowEntrypoint {
   }
 }
 
+// The last `keep` bytes `stream` carries, read to its end, as text: at
+// most those and one chunk are held at once.
+async function tail(stream, keep) {
+  let last = new Uint8Array(0);
+  for await (const chunk of stream) {
+    const both = new Uint8Array(last.length + chunk.length);
+    both.set(last);
+    both.set(chunk, last.length);
+    last = both.slice(-keep);
+  }
+  return new TextDecoder().decode(last);
+}
+
 // A computer's container (docs/computers.md), for the Rust `ComputerCell`
 // (computer.rs), which reaches it as `ctx.computerHost`. Each method is one
 // runtime call and its plumbing. Every call that touches the container
@@ -236,15 +249,7 @@ class ContainerHost {
 
   // Waits until the container takes an exec (it is up), for at most `ms`.
   async execReady(generation, ms) {
-    const t0 = Date.now();
-    while (generation === this.#generation && Date.now() - t0 < ms) {
-      try {
-        const out = await (await this.#c.exec(["true"])).output();
-        if (out.exitCode === 0) return true;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    return false;
+    return (await this.execUntil(generation, ["true"], ms)).ok;
   }
 
   // Runs `argv` until it exits 0 (polling every 100 ms), for at most `ms`:
@@ -269,20 +274,34 @@ class ContainerHost {
     return { ok: false, tries, last };
   }
 
-  // Runs `argv` in the container, answering within `ms` when it is given,
-  // with the last `keep` bytes of its output (4 KiB unless named).
-  async exec(generation, argv, ms, keep) {
+  // Runs `argv` in the container: its exit code and the last `keep` bytes
+  // of its output, stdout and stderr together (4 KiB unless named), all of
+  // it held as it runs. Past `ms` (a wait for a container still starting
+  // included) the call fails and the process is killed (SIGKILL), started
+  // or not; one seen to exit is never signalled (an uncaught error in the
+  // DO, the runtime's docs say).
+  async exec(generation, argv, ms, keep = 4096) {
     if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
-    const run = (async () => (await this.#c.exec(argv, { stderr: "combined" })).output())();
+    if (!(ms > 0)) throw new Error(`${argv.join(" ")}: an exec is bounded`);
+    const kill = new AbortController();
+    let exited = false;
+    const run = (async () => {
+      const proc = await this.#c.exec(argv, { stderr: "combined", signal: kill.signal });
+      proc.exitCode.then(() => (exited = true), () => (exited = true));
+      const output = await tail(proc.stdout, keep);
+      return { exitCode: await proc.exitCode, output };
+    })();
     // a late failure, once the bound answered, is no one's to hear
     run.catch(() => {});
     let timer;
     const late = new Promise((_, reject) => {
-      if (ms) timer = setTimeout(() => reject(new Error(`${argv.join(" ")}: no answer within ${ms} ms`)), ms);
+      timer = setTimeout(() => {
+        if (!exited) kill.abort();
+        reject(new Error(`${argv.join(" ")}: no answer within ${ms} ms`));
+      }, ms);
     });
     try {
-      const out = await (ms ? Promise.race([run, late]) : run);
-      return { exitCode: out.exitCode, output: new TextDecoder().decode(out.stdout).slice(-(keep || 4096)) };
+      return await Promise.race([run, late]);
     } finally {
       clearTimeout(timer);
     }
