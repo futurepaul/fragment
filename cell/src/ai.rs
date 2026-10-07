@@ -256,7 +256,7 @@ impl FragmentCell {
     /// it was kept.
     async fn kept_bytes(&self, sha: &str) -> Result<Vec<u8>, StepFail> {
         let key = self.blob_key(sha).map_err(retry)?;
-        let found = crate::js::blob_get(self.env.as_ref(), &key, None).await.map_err(retry)?;
+        let found = crate::js::blob_get(&self.env, &key, None).await.map_err(retry)?;
         let body = found.ok_or_else(|| permanent(format!("the image this step bought ({sha}) is gone from the blob store: replay the run to make it again")))?;
         let mut resp = Response::from_body(ResponseBody::Stream(body.body)).map_err(|e| retry(e.into()))?;
         resp.bytes().await.map_err(|e| retry(e.into()))

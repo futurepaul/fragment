@@ -33,9 +33,9 @@ pub struct WorkOsConfig {
 
 pub struct Config {
     codestorage: Option<CodeStorageConfig>,
-    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<label>--<username>.<suffix>`.
-    /// Unset (dev without hostnames), they are served from `/f/<name>/`.
-    pub host_suffix: Option<String>,
+    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from
+    /// `<label>--<username>.<suffix>`. Every deployment names one.
+    pub host_suffix: String,
     /// `FRAGMENT_LEGACY_HOST_SUFFIX`: where fragments were served before the
     /// suffix changed (fragment.club, before fragment.boats): a fragment's
     /// host under it sends a browser to its host under the suffix. It counts
@@ -88,8 +88,7 @@ pub struct Config {
     workos: Option<WorkOsConfig>,
     /// `FRAGMENT_PLATFORM_URL`: the platform's own origin, where sign-in
     /// and the platform session live (default: the hostname suffix itself,
-    /// e.g. https://fragment.club; without a suffix, the origin a request
-    /// arrived on).
+    /// e.g. https://fragment.club).
     pub platform_url: Option<String>,
     /// `FRAGMENT_DEFAULT_PLAN`: a new person's plan (docs/ledger.md):
     /// `guest`, the default and production's, or `seat` or
@@ -206,8 +205,8 @@ impl Config {
     fn build(env: &Env) -> Config {
         let delivery_retry_s = var(env, "FRAGMENT_DELIVERY_RETRY_S").and_then(|s| s.parse::<u32>().ok()).filter(|s| *s >= 1).unwrap_or(10);
         let suffix = |name: &str| var(env, name).map(|s| s.trim_start_matches('.').to_ascii_lowercase());
-        let host_suffix = suffix("FRAGMENT_HOST_SUFFIX");
-        let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| host_suffix.as_ref().is_some_and(|s| s != l));
+        let host_suffix = suffix("FRAGMENT_HOST_SUFFIX").expect("FRAGMENT_HOST_SUFFIX names where fragments are served");
+        let legacy_host_suffix = suffix("FRAGMENT_LEGACY_HOST_SUFFIX").filter(|l| *l != host_suffix);
         // a branch deployment's fragments share its zone with other branches'
         let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
         assert!(
@@ -221,10 +220,7 @@ impl Config {
             platform_url.as_deref().is_none_or(fragment_core::frames::is_origin),
             "FRAGMENT_PLATFORM_URL is an origin (scheme://host[:port], lower case, no path)"
         );
-        assert!(
-            host_suffix.as_deref().is_none_or(|s| fragment_core::frames::is_origin(&format!("https://{s}"))),
-            "FRAGMENT_HOST_SUFFIX is a host name"
-        );
+        assert!(fragment_core::frames::is_origin(&format!("https://{host_suffix}")), "FRAGMENT_HOST_SUFFIX is a host name");
         let egress_local = var(env, "FRAGMENT_EGRESS_LOCAL").as_deref() == Some("allow");
         let levers_fleet = levers_fleet(egress_local, host_label_suffix.is_some());
         let test_secret = test_secret(env, levers_fleet);
@@ -312,10 +308,7 @@ impl Config {
             return p.clone();
         }
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        match &self.host_suffix {
-            Some(suffix) => format!("{}://{suffix}{port}", arrived.scheme()),
-            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
-        }
+        format!("{}://{}{port}", arrived.scheme(), self.host_suffix)
     }
 
     /// Whether `host` is the platform's own (`FRAGMENT_PLATFORM_URL`'s, else
@@ -324,7 +317,7 @@ impl Config {
     pub fn is_platform_host(&self, host: &str) -> bool {
         let named = match &self.platform_url {
             Some(u) => url::Url::parse(u).ok().and_then(|u| u.host_str().map(str::to_string)),
-            None => self.host_suffix.clone(),
+            None => Some(self.host_suffix.clone()),
         };
         named.is_some_and(|h| h.eq_ignore_ascii_case(host))
     }
@@ -332,7 +325,7 @@ impl Config {
     /// Whether `host` is the suffix's own name. Past `is_platform_host`, it
     /// is no one's: the platform is elsewhere.
     pub fn is_suffix(&self, host: &str) -> bool {
-        self.host_suffix.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(host))
+        self.host_suffix.eq_ignore_ascii_case(host)
     }
 
     pub fn codestorage(&self) -> CellResult<&CodeStorageConfig> {
@@ -346,7 +339,7 @@ impl Config {
     /// fragment). This is the only way a host becomes a fragment: an exact
     /// single label under the suffix (with a branch's mark, its own).
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
-        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let label = label_under(host, &self.host_suffix)?;
         let flat = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?,
             None => &label,
@@ -357,7 +350,7 @@ impl Config {
     /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
     /// branch's mark before the dot): its own origin, where its ports are.
     pub fn computer_of_host(&self, host: &str) -> Option<String> {
-        let label = label_under(host, self.host_suffix.as_deref()?)?;
+        let label = label_under(host, &self.host_suffix)?;
         let label = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?.to_string(),
             None => label,
@@ -366,9 +359,9 @@ impl Config {
     }
 
     /// A computer's own origin (its ports are served there), on the
-    /// platform's scheme and port.
+    /// platform's scheme and port; `None` for an id that is no computer's.
     pub fn computer_origin(&self, id: &str) -> Option<String> {
-        let suffix = self.host_suffix.as_deref()?;
+        let suffix = &self.host_suffix;
         let label = fragment_proto::computer::computer_label(id)?;
         let platform = self.platform_url.as_deref().and_then(|p| url::Url::parse(p).ok());
         let scheme = platform.as_ref().map(|u| u.scheme().to_string()).unwrap_or_else(|| "https".into());
@@ -386,44 +379,31 @@ impl Config {
     /// `x.<suffix>`), if it is one: such a host is a fragment's or no one's,
     /// never the platform's.
     pub fn subdomain(&self, host: &str) -> Option<String> {
-        [&self.host_suffix, &self.legacy_host_suffix].into_iter().flatten().find_map(|s| label_under(host, s))
+        [Some(&self.host_suffix), self.legacy_host_suffix.as_ref()].into_iter().flatten().find_map(|s| label_under(host, s))
     }
 
     /// Where a fragment is served, given the URL a request arrived on (its
     /// scheme and port carry over).
     pub fn canonical(&self, arrived: &url::Url, name: &str) -> String {
-        let origin = self.origin(arrived, name);
-        match &self.host_suffix {
-            Some(_) => format!("{origin}/"),
-            None => format!("{origin}/f/{name}/"),
-        }
+        format!("{}/", self.origin(arrived, name))
     }
 
     /// A fragment's own origin as a visitor from outside reaches it, with
     /// no request to take a scheme and port from (card.rs: the renderer
     /// opens it): the platform's (`FRAGMENT_PLATFORM_URL`'s), else https.
-    /// `None` without a suffix: fragments served by path have no origin of
-    /// their own.
-    pub fn outside_origin(&self, name: &str) -> Option<String> {
-        self.host_suffix.as_ref()?;
+    pub fn outside_origin(&self, name: &str) -> String {
         let base = self.platform_url.as_deref().unwrap_or("https://platform.invalid");
-        let arrived = url::Url::parse(base).ok()?;
-        Some(self.origin(&arrived, name))
+        let arrived = url::Url::parse(base).expect("FRAGMENT_PLATFORM_URL is an origin (checked as the isolate starts)");
+        self.origin(&arrived, name)
     }
 
     /// A fragment's own origin, as a browser on its page names it in
-    /// `Origin` (`scheme://host[:port]`): its host's, or, without a suffix,
-    /// the one every fragment shares.
+    /// `Origin` (`scheme://host[:port]`).
     pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        match &self.host_suffix {
-            Some(suffix) => {
-                let host = flat_name(name).unwrap_or_else(|| name.to_string());
-                let branch = self.host_label_suffix.as_deref().unwrap_or("");
-                format!("{}://{host}{branch}.{suffix}{port}", arrived.scheme())
-            }
-            None => format!("{}://{}{port}", arrived.scheme(), arrived.host_str().unwrap_or("localhost")),
-        }
+        let host = flat_name(name).unwrap_or_else(|| name.to_string());
+        let branch = self.host_label_suffix.as_deref().unwrap_or("");
+        format!("{}://{host}{branch}.{}{port}", arrived.scheme(), self.host_suffix)
     }
 }
 

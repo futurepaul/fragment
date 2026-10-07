@@ -318,29 +318,15 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     );
     d.close();
 
-    // A page loaded before presence came one change a frame (its library
-    // connects without `?v=2`) hears the whole list, as it did, while a
-    // current page hears the change; and a visitor's socket without a
-    // cookie gets one, as a call does, so its sockets are one principal
-    let (mut old, set) = Socket::open_answered(api, &name, "__live?v=1", None, None)?;
-    old.until("hello", 5)?;
-    let first_list = old.next()?;
-    let mut n = Socket::open(api, &name, "__live", None, None)?;
+    // a page hears its own change, as the others do; and a visitor's
+    // socket without a cookie gets one, as a call does, so its sockets
+    // are one principal
+    let (mut n, set) = Socket::open_answered(api, &name, "__live", None, None)?;
     let n_hello = n.until("hello", 5)?;
     n.send(&json!({ "type": "presence", "data": { "name": "new" } }))?;
     let own = n.until("presence", 5)?;
-    let listed = old.until("presence", 5)?;
-    s.ok(
-        "a page from before the change frames hears the whole list, on connecting and on each change",
-        first_list == json!({ "type": "presence", "list": [] })
-            && listed == json!({ "type": "presence", "list": [{ "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }] }),
-        format!("{first_list} {listed}"),
-    );
-    s.ok("while a current page hears the one change", own == json!({ "type": "presence", "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }), &own);
+    s.ok("a page hears its own change", own == json!({ "type": "presence", "id": n_hello["id"], "principal": n_hello["principal"], "data": { "name": "new" } }), &own);
     n.close();
-    let left = old.until("presence", 5)?;
-    s.ok("and the old page's list drops a socket that left", left == json!({ "type": "presence", "list": [] }), &left);
-    old.close();
     s.ok("a visitor's socket without a cookie gets one, as a call does", set.iter().any(|c| c.starts_with("fragment_anon=") && c.contains("HttpOnly")), format!("{set:?}"));
     // b heard the new page's presence arrive and leave: past those two
     for _ in 0..2 {

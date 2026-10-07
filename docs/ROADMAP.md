@@ -569,8 +569,8 @@ phase 7's chat half and phase 8 fold into D to F and stay as records.
   holds a Sprites Task while a turn runs. Credentials arrive through
   Sprites connectors (`docs/secrets.md`). The personal computer adds
   Sprite services (Chrome, display, control).
-- **Acceptance:** a builder takes a task to `deploy --preview` and then
-  live; Stop cancels the running command and leaves nothing published;
+- **Acceptance:** a builder takes a task to main and then live; Stop
+  cancels the running command and leaves nothing published;
   a platform kill mid-tool runs the tool once; a computer restart
   resumes the turn from the cell's conversation; no credential is on the
   Sprite's disk.

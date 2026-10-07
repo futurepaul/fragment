@@ -45,10 +45,8 @@ use serde_json::{json, Value};
 use sha1::{Digest as _, Sha1};
 
 use crate::http::{Request, Response, Server};
-use fragment_core::codestorage::{Claims, OrgKey};
+use fragment_core::codestorage::{Claims, OrgKey, CHUNK_MAX};
 
-/// The documented cap on one decoded blob chunk.
-pub const CHUNK_MAX: usize = 4 * 1024 * 1024;
 const ZERO: &str = "0000000000000000000000000000000000000000";
 
 pub struct Options {
@@ -98,7 +96,6 @@ struct Repo {
     repo_id: String,
     created_at_ms: i64,
     branches: BTreeMap<String, String>,
-    ephemeral: BTreeSet<String>,
     commits: BTreeMap<String, Commit>,
     #[serde(with = "b64map")]
     blobs: BTreeMap<String, Vec<u8>>,
@@ -136,8 +133,6 @@ struct State {
     commit_packs: u32,
     #[serde(skip)]
     refreshes: u32,
-    #[serde(skip)]
-    race: BTreeMap<String, Vec<OwnedChange>>,
     /// File reads answer 503 while set (an outage).
     #[serde(skip)]
     reads_failing: bool,
@@ -248,7 +243,6 @@ impl Repo {
             repo_id: repo_id.into(),
             created_at_ms: now_ms(),
             branches: BTreeMap::new(),
-            ephemeral: BTreeSet::new(),
             commits: BTreeMap::new(),
             blobs: BTreeMap::new(),
         }
@@ -418,7 +412,7 @@ impl Inner {
         Ok(jwt.repo)
     }
 
-    fn handle(self: &Arc<Self>, req: &Request) -> Response {
+    fn handle(&self, req: &Request) -> Response {
         // served as it arrives at a service that far away
         let latency = self.latency_ms.load(Ordering::Relaxed);
         if latency > 0 {
@@ -436,9 +430,6 @@ impl Inner {
     fn route(&self, st: &mut State, req: &Request) -> Response {
         let path = req.path.as_str();
         let m = req.method.as_str();
-        if path == "/healthz" {
-            return Response::json(200, &json!({ "ok": true }));
-        }
         if self.host_routes {
             if let Some(name) = path.strip_prefix("/api/f/").and_then(|p| p.strip_suffix("/storage-token")) {
                 // an unknown name is a fresh repo with no branches yet
@@ -512,7 +503,7 @@ impl Inner {
                 return r;
             }
             // the service's paging: newest first, 20 a page by default, at
-            // most 100, an opaque cursor; `q` matches the url form
+            // most 100, an opaque cursor
             let limit = req.query.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20usize).clamp(1, 100);
             let start: usize = match req.query.get("cursor") {
                 None => 0,
@@ -521,8 +512,7 @@ impl Inner {
                     None => return problem(400, "invalid cursor"),
                 },
             };
-            let q = req.query.get("q").map(|q| q.trim().to_ascii_lowercase()).unwrap_or_default();
-            let mut all: Vec<&Repo> = st.repos.values().filter(|r| q.is_empty() || r.url.to_ascii_lowercase().contains(&q)).collect();
+            let mut all: Vec<&Repo> = st.repos.values().collect();
             all.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms).then(b.repo_id.cmp(&a.repo_id)));
             let page: Vec<Value> = all
                 .iter()
@@ -600,9 +590,6 @@ impl Inner {
 
     fn commit_pack(&self, st: &mut State, url: &str, req: &Request) -> Response {
         st.commit_packs += 1;
-        if let Some(changes) = st.race.remove(url) {
-            st.commit(url, Write { branch: "main", message: "racing writer", author: "racer", changes: &changes, from: None });
-        }
         if st.sabotage > 0 {
             st.sabotage -= 1;
             let n = st.counter;
@@ -657,8 +644,7 @@ impl Inner {
             }
         }
         let current = st.repos[url].branches.get(branch).cloned().unwrap_or_else(|| ZERO.to_string());
-        let expected = meta["expected_target_sha"].as_str().or_else(|| meta["expected_head_sha"].as_str());
-        if let Some(exp) = expected {
+        if let Some(exp) = meta["expected_target_sha"].as_str() {
             let exp = if exp.is_empty() { ZERO } else { exp };
             if exp != current {
                 return cas_failed(branch, &current);
@@ -716,9 +702,7 @@ fn file(repo: &Repo, req: &Request) -> Response {
         return problem(404, "file not found");
     };
     let bytes = repo.blobs.get(&entry.blob).cloned().unwrap_or_default();
-    let len = bytes.len().to_string();
     Response::bytes(200, "application/octet-stream", bytes)
-        .with_header("content-length", &len)
         .with_header("etag", &format!("\"{}\"", entry.blob))
         .with_header("x-blob-sha", &entry.blob)
         .with_header("x-last-commit-sha", &entry.last_commit)
@@ -752,9 +736,6 @@ fn branch_create(st: &mut State, url: &str, req: &Request) -> Response {
         return problem(409, &format!("branch already exists: {target}"));
     }
     let ephemeral = body["target_is_ephemeral"].as_bool().unwrap_or(false);
-    if ephemeral {
-        st.repos.get_mut(url).expect("known repo").ephemeral.insert(target.to_string());
-    }
     st.move_branch(url, target, &base);
     Response::json(
         201,
@@ -855,7 +836,7 @@ fn merge_preview(repo: &Repo, req: &Request) -> Response {
 fn restore(st: &mut State, url: &str, req: &Request) -> Response {
     let text = String::from_utf8_lossy(&req.body);
     let Some(Ok(first)) = text.lines().find(|l| !l.trim().is_empty()).map(serde_json::from_str::<Value>) else { return problem(400, "a bad metadata line") };
-    let meta = if first["metadata"].is_object() { &first["metadata"] } else { &first };
+    let meta = &first["metadata"];
     let target = meta["target_branch"].as_str().unwrap_or("");
     let Some(old) = st.repos[url].branches.get(target).cloned() else { return problem(404, &format!("branch not found: {target}")) };
     // as the service refuses a restore that cannot move the branch: to its
@@ -1020,14 +1001,6 @@ impl CodeStorage {
         self.with(|st| st.repo_by(repo)?.branches.get(branch).cloned())
     }
 
-    pub fn branches(&self, repo: &str) -> BTreeMap<String, String> {
-        self.with(|st| st.repo_by(repo).map(|r| r.branches.clone()).unwrap_or_default())
-    }
-
-    pub fn is_ephemeral(&self, repo: &str, branch: &str) -> bool {
-        self.with(|st| st.repo_by(repo).is_some_and(|r| r.ephemeral.contains(branch)))
-    }
-
     pub fn file_at(&self, repo: &str, branch: &str, path: &str) -> Option<Vec<u8>> {
         self.with(|st| {
             let r = st.repo_by(repo)?;
@@ -1062,15 +1035,6 @@ impl CodeStorage {
             assert!(st.repos[&url].commits.contains_key(sha), "set_branch to a known commit");
             st.move_branch(&url, branch, sha);
             self.inner.persist(st);
-        });
-    }
-
-    /// The next commit pack for `repo` first lands these changes on main as
-    /// another writer (a writer between the client's head read and its commit).
-    pub fn arm_race(&self, repo: &str, changes: &[Change<'_>]) {
-        self.with(|st| {
-            let url = st.url_of(repo).expect("arm_race on a known repo");
-            st.race.insert(url, changes.iter().map(|(p, b)| (p.to_string(), b.map(<[u8]>::to_vec))).collect());
         });
     }
 

@@ -121,30 +121,6 @@ fn clear_installed(sql: &SqlStorage) -> Result<()> {
     Ok(())
 }
 
-/// Who may post to a channel came after the channel table (phase 7 slice
-/// B1), then whether they must be signed in, and ephemeral mutations after
-/// the operation table: a table from before gains the columns, and its
-/// channels take no posts, from anyone, and its mutations keep ledger rows.
-/// A blob's served type came after the blob table (blobs.rs): one from
-/// before is served untyped. A channel trigger's posters (`from`) came
-/// after the trigger table: one from before fires for every record, as it
-/// was installed to.
-/// Runs in the constructor, before anything reads these tables.
-pub(crate) fn migrate_code(sql: &SqlStorage) {
-    for (table, column, decl) in [
-        ("code_channels", "post", "TEXT"),
-        ("code_channels", "signed_in", "INTEGER NOT NULL DEFAULT 0"),
-        ("code_ops", "ephemeral", "INTEGER NOT NULL DEFAULT 0"),
-        ("blobs", "mime", "TEXT"),
-        ("code_triggers", "from_kind", "TEXT"),
-    ] {
-        let cols: Vec<Value> = sql.exec(&format!("PRAGMA table_info({table})"), None).and_then(|c| c.to_array()).expect("a table's columns read");
-        if !cols.iter().any(|c| c["name"] == column) {
-            sql.exec(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), None).expect("a table migrates");
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct OpRow {
     op: String,
@@ -297,6 +273,7 @@ impl FragmentCell {
             ("main", None) => self.del_meta(MetaKey::ManifestMain)?,
             (_, live) => {
                 self.install_code(live).await?;
+                self.search_fence()?;
             }
         }
         match pin {
@@ -547,6 +524,7 @@ impl FragmentCell {
             }
             let live = self.meta(MetaKey::PinLive)?;
             self.install_code(live.as_deref()).await?;
+            self.search_fence()?;
         }
         // the release's cron triggers, if it declares any, are due from now
         self.schedule().await
@@ -822,24 +800,6 @@ impl FragmentCell {
         let mut resp = self.stream_file(&facts, "main", &row, None).await?;
         resp.headers_mut().set("cache-control", "no-store")?;
         Ok(resp)
-    }
-
-    pub(crate) async fn stat(&self, caller: &Caller, path: &str) -> CellResult<Response> {
-        let mut facts = self.facts()?;
-        self.admit(&facts, caller, false, Role::Viewer)?;
-        if !valid_repo_path(path) {
-            return Err(CellError::invalid("path must be a relative repo path"));
-        }
-        self.ensure_pins(&mut facts).await?;
-        let absent = json!({ "path": path, "size": 0, "blobSha": "", "lastCommitSha": "", "present": false });
-        let stat = match (&facts.pin_main, self.tree_row("main", path)?) {
-            (Some(pin), Some(row)) => match self.cs()?.head(&facts.repo, pin, path).await? {
-                Some(h) => json!({ "path": path, "size": h.size, "blobSha": h.blob_sha, "lastCommitSha": h.last_commit_sha, "present": true }),
-                None => json!({ "path": path, "size": row.size, "blobSha": "", "lastCommitSha": row.last_commit, "present": true }),
-            },
-            _ => absent,
-        };
-        json_response(&json!({ "stat": stat, "ref": facts.pin_main }))
     }
 
     /// The installed operations (from the live commit); none without code.

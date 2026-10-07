@@ -27,9 +27,9 @@
 //! (`describe_image`: its kind and size), so a test sees which image a
 //! model was shown.
 //!
-//! Replies are scripted (text, tool calls, text beside tool calls, nothing,
-//! or reasoning alone) and answered in order before falling back to an echo
-//! of the last message, or, for a real agent runtime (`transcripts`), to
+//! Replies are scripted (text, tool calls, or text beside tool calls) and
+//! answered in order before falling back to an echo of the last message,
+//! or, for a real agent runtime (`transcripts`), to
 //! `transcript_reply`: a pure function of the transcript (lesson 13), which
 //! an agent's own auxiliary calls (titles, its approval guardian) cannot put
 //! out of order; its answer after a tool's result waits `FOLLOW_UP_MS`.
@@ -66,10 +66,6 @@ pub enum Reply {
     /// ("Let me check that." beside a `terminal` call): streamed, the
     /// text's deltas, then the calls'.
     Narrated(String, Vec<(String, Value)>),
-    /// No text and no tool call.
-    Empty,
-    /// Reasoning, and nothing else.
-    Thinking(String),
 }
 
 /// The text a `narrate:` answer says beside its call (`transcript_reply`).
@@ -324,7 +320,6 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
     let id = format!("fake{ids:08x}");
     let mut out = chunk(&id, model, json!({ "role": "assistant", "content": "" }), None, delta_usage(used.prompt, 0));
     let mut parts: Vec<Value> = Vec::new();
-    let mut cut = false;
     // text, in pieces, so a client's draft grows
     let text_parts = |text: &str, parts: &mut Vec<Value>, budget: &mut Option<usize>| -> bool {
         let (text, was_cut) = within(text, budget);
@@ -361,26 +356,14 @@ fn stream(model: &str, reply: &Reply, ids: &mut u64, used: Used, mut budget: Opt
         }
         cut
     };
-    let finish = match reply {
-        Reply::Text(text) => {
-            cut = text_parts(text, &mut parts, &mut budget);
-            "stop"
-        }
-        Reply::Empty => "stop",
-        Reply::Thinking(text) => {
-            parts.push(json!({ "reasoning_content": text }));
-            "stop"
-        }
-        Reply::Tools(calls) => {
-            cut = call_parts(calls, &mut parts, &mut budget, ids, false);
-            "tool_calls"
-        }
+    let (finish, cut) = match reply {
+        Reply::Text(text) => ("stop", text_parts(text, &mut parts, &mut budget)),
+        Reply::Tools(calls) => ("tool_calls", call_parts(calls, &mut parts, &mut budget, ids, false)),
         // the text's deltas first, then the calls', as a model streams a
         // narrated call
         Reply::Narrated(text, calls) => {
-            cut = text_parts(text, &mut parts, &mut budget);
-            cut = call_parts(calls, &mut parts, &mut budget, ids, cut);
-            "tool_calls"
+            let cut = text_parts(text, &mut parts, &mut budget);
+            ("tool_calls", call_parts(calls, &mut parts, &mut budget, ids, cut))
         }
     };
     // the completion's tokens, spread over its chunks as deltas
@@ -481,10 +464,9 @@ fn answer(s: &mut State, req: &Request) -> Response {
         let reply = scripted.unwrap_or_else(|| unscripted(s));
         let called = |calls: &[(String, Value)]| calls.iter().map(|(n, a)| n.len() + a.to_string().len()).sum::<usize>();
         let written = match &reply {
-            Reply::Text(t) | Reply::Thinking(t) => t.chars().count(),
+            Reply::Text(t) => t.chars().count(),
             Reply::Tools(calls) => called(calls),
             Reply::Narrated(t, calls) => t.chars().count() + called(calls),
-            Reply::Empty => 0,
         };
         let budget = body["max_tokens"].as_u64().map(|t| t as usize * CHARS_PER_TOKEN);
         let pieces = if s.transcripts { 3 } else { 1 };
@@ -509,7 +491,6 @@ fn answer(s: &mut State, req: &Request) -> Response {
             let n = text.chars().count();
             (json!({ "role": "assistant", "content": text }), "stop", n)
         }
-        Reply::Empty | Reply::Thinking(_) => (json!({ "role": "assistant", "content": "" }), "stop", 0),
     };
     let used = usage_of(used, &body, written);
     let answer = json!({

@@ -299,7 +299,6 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
                 let v = match *h {
                     routed::NAME => name.clone(),
                     routed::URL => format!("https://{name}.{}/", crate::SUFFIX),
-                    routed::MODE => "host".to_string(),
                     routed::CREDENTIAL => owner_key_unsigned.clone(),
                     _ => claims_owner.clone(),
                 };

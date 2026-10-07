@@ -6,18 +6,23 @@
 use std::cell::RefCell;
 use std::time::Duration;
 
+use fragment_core::body::LimitedBody;
 use fragment_core::codestorage::{self as core_cs, Promotion, TokenCache, TreeEntry};
 use fragment_proto::{limits, ErrorCode, StorageToken};
 use futures_util::future::{select, Either};
+use futures_util::StreamExt;
 use serde_json::Value;
-use worker::{AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response};
+use worker::{AbortController, Delay, Env, Fetch, Headers, Method, Request, RequestInit, Response, ResponseBody};
 
 use crate::config::CodeStorageConfig;
 use crate::error::{CellError, CellResult};
 use crate::{js, keys};
 
-/// A JSON call's deadline, and a streamed read's deadline for headers.
+/// A call's deadline, its answer read whole; a streamed read's for headers.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most of an answer a call reads (a file's read takes its own limit):
+/// the largest, a tree page of 1000 entries, is well under 1 MiB.
+const ANSWER_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Listing pages per tree read (1000 entries each).
 const TREE_PAGES_MAX: usize = 500;
 /// The org's repo list: 100 a page (the service's cap), 10 000 repos at most.
@@ -95,8 +100,10 @@ impl From<FetchFailed> for CellError {
     }
 }
 
-/// A fetch with a deadline. The loser of the race is dropped: a finished
-/// fetch clears its timer, and a timed-out fetch is aborted.
+/// A fetch whose headers arrive within a deadline; its body is the
+/// caller's to stream on (a file passed through) or to drop (a delivery).
+/// The loser of the race is dropped: a finished fetch clears its timer, and
+/// a timed-out fetch is aborted.
 pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchFailed> {
     let ctrl = AbortController::default();
     let signal = ctrl.signal();
@@ -112,6 +119,65 @@ pub async fn fetch(req: Request, deadline: Duration) -> Result<Response, FetchFa
             Err(FetchFailed(format!("no answer within {deadline:?}")))
         }
     }
+}
+
+/// An answer read whole, or as much of its body as its reader takes.
+pub struct Answer {
+    pub status: u16,
+    pub headers: Headers,
+    /// What came before the chunk that crossed `max` (`read_answer`), at most `max` bytes.
+    pub body: Vec<u8>,
+    /// The body went on past `max`, and was not read past it.
+    pub cut: bool,
+}
+
+/// A fetch read whole within one deadline, headers and body together, its
+/// body read up to `max` bytes and no further. Past either the fetch is
+/// aborted: the limits bound the work, not only the answer. The cell reads
+/// every answer from a vendor or a job's upstream so (a binding's answer
+/// with `read_answer`); one it cut is its caller's to refuse, as its status
+/// says (a cut error page is still an error).
+pub async fn fetch_all(req: Request, deadline: Duration, max: usize) -> CellResult<Answer> {
+    let ctrl = AbortController::default();
+    let signal = ctrl.signal();
+    let read = async {
+        let mut resp = Fetch::Request(req).send_with_signal(&signal).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("fetch failed: {e}")))?;
+        let (body, cut) = read_answer(&mut resp, max).await?;
+        Ok(Answer { status: resp.status_code(), headers: resp.headers().clone(), body, cut })
+    };
+    let timer = Delay::from(deadline);
+    futures_util::pin_mut!(read, timer);
+    let answer = match select(read, timer).await {
+        Either::Left((answer, _)) => answer,
+        Either::Right(_) => Err(CellError::new(ErrorCode::UpstreamFailed, format!("no whole answer within {deadline:?}"))),
+    };
+    if !matches!(&answer, Ok(a) if !a.cut) {
+        // what is still coming is read by no one
+        ctrl.abort();
+    }
+    answer
+}
+
+/// An answer's body as it streams, measured as a request's is
+/// (`LimitedBody`): all of it, or what came before the chunk that crossed
+/// `max` (none, when its declared length is over), and whether it was cut
+/// there, where reading stops.
+pub async fn read_answer(resp: &mut Response, max: usize) -> CellResult<(Vec<u8>, bool)> {
+    let failed = |e: worker::Error| CellError::new(ErrorCode::UpstreamFailed, format!("reading the answer: {e}"));
+    let declared = resp.headers().get("content-length").ok().flatten().and_then(|l| l.parse().ok());
+    let Ok(mut body) = LimitedBody::new(max, declared) else { return Ok((Vec::new(), true)) };
+    let mut stream = match resp.body() {
+        ResponseBody::Stream(_) => resp.stream().map_err(failed)?,
+        ResponseBody::Empty => return Ok((body.finish(), false)),
+        ResponseBody::Body(_) => unreachable!("an answer from the network or a binding streams its body"),
+    };
+    // bounded: LimitedBody refuses the chunk that would cross `max`, and the read stops
+    while let Some(chunk) = stream.next().await {
+        if body.push(&chunk.map_err(failed)?).is_err() {
+            return Ok((body.finish(), true));
+        }
+    }
+    Ok((body.finish(), false))
 }
 
 impl<'a> Cs<'a> {
@@ -143,13 +209,12 @@ impl<'a> Cs<'a> {
         Ok(Request::new_with_init(&format!("{}{path}", self.cfg.api), &init)?)
     }
 
-    /// (status, body) of a call; the body is read within the same deadline.
+    /// (status, body) of a call, read whole within its deadline; an answer
+    /// cut at `ANSWER_MAX_BYTES` reads as no JSON.
     async fn call(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<(&str, String)>) -> CellResult<(u16, Vec<u8>)> {
         let req = self.request(method, path, repo, scopes, body).await?;
-        let mut resp = fetch(req, CALL_TIMEOUT).await?;
-        let status = resp.status_code();
-        let bytes = resp.bytes().await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("reading {path}: {e}")))?;
-        Ok((status, bytes))
+        let a = fetch_all(req, CALL_TIMEOUT, ANSWER_MAX_BYTES).await?;
+        Ok((a.status, a.body))
     }
 
     async fn json(&self, method: Method, path: &str, repo: &str, scopes: &[&str], body: Option<Value>) -> CellResult<(u16, Value)> {
@@ -241,25 +306,27 @@ impl<'a> Cs<'a> {
         format!("/api/repos/{}/file?path={}&ref={}", seg(repo), encode_q(path), encode_q(sha))
     }
 
-    /// A file's bytes, refusing anything over `max`; `None` when absent.
+    /// A file's bytes, refusing anything over `max` (read no further than
+    /// that); `None` when absent.
     pub async fn read(&self, repo: &str, sha: &str, path: &str, max: usize) -> CellResult<Option<Vec<u8>>> {
-        let (status, bytes) = self.call(Method::Get, &Cs::file_path(repo, sha, path), repo, &["git:read"], None).await?;
-        match status {
-            200 if bytes.len() > max => Err(CellError::too_large(path, bytes.len(), max)),
-            200 => Ok(Some(bytes)),
+        let req = self.request(Method::Get, &Cs::file_path(repo, sha, path), repo, &["git:read"], None).await?;
+        let a = fetch_all(req, CALL_TIMEOUT, max).await?;
+        match a.status {
+            200 if a.cut => Err(CellError::new(ErrorCode::TooLarge, format!("{path} is over {max} bytes"))),
+            200 => Ok(Some(a.body)),
             404 => Ok(None),
-            _ => Err(upstream("read file", status, &bytes)),
+            _ => Err(upstream("read file", a.status, &a.body)),
         }
     }
 
     /// A file's bytes as an upstream response to stream through.
     pub async fn stream(&self, repo: &str, sha: &str, path: &str) -> CellResult<Response> {
         let req = self.request(Method::Get, &Cs::file_path(repo, sha, path), repo, &["git:read"], None).await?;
-        let mut resp = fetch(req, CALL_TIMEOUT).await?;
+        let resp = fetch(req, CALL_TIMEOUT).await?;
         match resp.status_code() {
             200 => Ok(resp),
             404 => Err(CellError::new(ErrorCode::NotFound, format!("no file {path}"))),
-            s => Err(upstream("stream file", s, &resp.bytes().await.unwrap_or_default())),
+            s => Err(upstream("stream file", s, b"")),
         }
     }
 

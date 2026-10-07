@@ -98,23 +98,19 @@ COPY images/hermes/screen /opt/fragment/screen
 COPY --from=novnc /novnc/core /opt/fragment/screen/novnc/core
 COPY --from=novnc /novnc/vendor /opt/fragment/screen/novnc/vendor
 
-# Hermes' home is under /data, the only directory a computer keeps. Its
-# setup reads $HERMES_HOME; three of its scripts name /opt/data outright.
-RUN sed -i 's#/opt/data#/data/hermes#g' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run \
- && ! grep -q '/opt/data' /opt/hermes/docker/main-wrapper.sh /opt/hermes/docker/hermes-exec-shim.sh /etc/s6-overlay/s6-rc.d/dashboard/run
+# None of Hermes' bundled skills: Hermes copies them only into the home
+# its sync runs in, the gateway's default profile, which runs no turns (an
+# agent's profile has its own, the managed set and the platform skill:
+# docs/computers.md). Without them stage2 runs no sync (it syncs only when
+# `/opt/hermes/skills` is there) and the gateway's two return at once.
+RUN rm -r /opt/hermes/skills
 
-# Setup gated on stamps (S3b, cut d): the config migration and the bundled
-# skills sync run once per (Hermes revision, their input). The build fails
-# if upstream's script no longer reads as patched.
-RUN sed -i \
-      -e 's#^    s6-setuidgid hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/scripts/docker_config_migrate.py" \\$#    /opt/fragment/bin/hermes-boot stamped migrate "$HERMES_HOME/config.yaml" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py" \\#' \
-      -e 's#^    as_hermes "\$INSTALL_DIR/.venv/bin/python" "\$INSTALL_DIR/tools/skills_sync.py" \\$#    /opt/fragment/bin/hermes-boot stamped skills "$HERMES_HOME/skills/.bundled_manifest" -- s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \\#' \
-      /opt/hermes/docker/stage2-hook.sh \
- && test "$(grep -c 'hermes-boot stamped' /opt/hermes/docker/stage2-hook.sh)" = 2
-
-# The gateway is hermes-boot's main program (preloaded): no per-profile s6
-# gateway services, which would start a second gateway (S3b, cut b).
-RUN printf '#!/bin/sh\n# hermes-boot runs the one gateway itself (images/hermes).\nexit 0\n' > /etc/cont-init.d/02-reconcile-profiles
+# The gateway is hermes-boot's main program (preloaded): no s6 gateway
+# service, which upstream's reconciler starts from a restored
+# gateway_state.json, a second gateway (S3b, cut b). The build fails if no
+# script of that name is there to remove, or another still runs it.
+RUN rm /etc/cont-init.d/02-reconcile-profiles \
+ && ! grep -rqs container_boot /etc/cont-init.d
 
 # Hermes' tool progress, each line a step (docs/hermes-relay.md): its
 # sender (gateway/run_turn_runner.py, `send_progress_messages`) waits out
@@ -135,8 +131,8 @@ RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).re
 RUN /opt/hermes/.venv/bin/python -m compileall -q -j0 --invalidation-mode unchecked-hash /opt/hermes > /dev/null || true; \
     test "$(find /opt/hermes -name '*.pyc' | wc -l)" -gt 8000
 
-# What the boot reads instead of finding it each time: the lean plugin list,
-# Hermes' revision; the image's Chromium, /opt/fragment/bin/chromium
+# What the boot reads instead of finding it each time: the lean plugin list;
+# the image's Chromium, /opt/fragment/bin/chromium
 # (Playwright's, always with the flags a container needs, which Hermes adds
 # only where it sees Docker: boot/src/hermes.rs); the platform skill every profile
 # has, from the fragment CLI above (`fragment skill`: boot/src/skills.rs);
@@ -149,7 +145,12 @@ RUN /opt/fragment/bin/hermes-boot build-info \
  && mkdir -p /run/computer /var/lib/fragment-run
 
 # One layer (S3b, cut i: -0.2 s per warm start); the image's settings are
-# restated, without upstream's VOLUME. Two differ from upstream's:
+# restated, without upstream's VOLUME. Three differ from upstream's:
+# - Hermes' home is /data/hermes, under the only directory a computer
+#   keeps, not /opt/data. Hermes and its setup read HERMES_HOME; what still
+#   names /opt/data never runs here (main-wrapper.sh, upstream's main
+#   program; the dashboard's run, which exits first without
+#   HERMES_DASHBOARD) or runs only for root (the `hermes` shim's HOME).
 # - Hermes' file tools (write_file, patch) may write its home, its agents'
 #   work directories (/data/work, the terminal's cwd since the seam) and
 #   /tmp (HERMES_WRITE_SAFE_ROOT, defense in depth: its terminal is not held
