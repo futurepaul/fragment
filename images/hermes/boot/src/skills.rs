@@ -69,7 +69,7 @@ pub const EXTERNAL_DIRS: [&str; 2] = [MANAGED_DIR, PLATFORM_DIR];
 const COMPUTER_PAGE: &str = include_str!("computer.md");
 /// The platform skill's description, which Hermes lists in every turn's
 /// prompt (its skills index): what makes an agent load it.
-const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
+const PLATFORM_DESCRIPTION: &str = "You are an agent on a Fragment computer: what that is, and the `fragment` CLI in your terminal, which acts as you. Load it before you list, read, make, change, deploy or share your owner's fragments (apps, sites, brains, chats), when asked what you can do here, to ask another of your owner's agents (`fragment ask`), and for your owner's connections (Google: GOOGLE_OAUTH_ACCESS_TOKEN) or your desktop.";
 /// The platform skill is a page or two, not a manual.
 pub const PLATFORM_MAX_BYTES: usize = 16 * 1024;
 

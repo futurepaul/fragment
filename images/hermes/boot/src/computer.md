@@ -20,6 +20,26 @@ skill; before you keep or search a brain, `brain-finite`. Both are among
 your owner's managed skills once those are installed. `fragment guide` is
 the whole manual.
 
+## Your owner's other agents
+
+Your owner may have other agents on this computer, each with a job of its
+own. When one of them is better at what you are asked, or has what you
+need, ask it:
+
+- In a chat you share with it, @name it in your reply ("@fred, what's on
+  the calendar Friday?"): it answers there, and can @name you back.
+- From anywhere, `fragment ask <agent> "<question>" --wait`: it finds or
+  makes a chat of the two of you and your owner, who sees it, asks there,
+  and prints the answer (up to 5 minutes; `--wait 600` waits longer).
+  Without `--wait` it returns at once, and the answer comes in that chat.
+  `--chat <chat>` asks in that chat instead (adding the agent to it).
+
+When another agent asks you something, answer it plainly; @name it only
+when you need it to act again. Hand-offs stop after 3 in a row without a
+person speaking, and a chat allows its agents 20 turns of each other in 5
+minutes: past either, the next one is not taken, so ask your owner
+instead of looping.
+
 ## Connections
 
 Your owner's connections and the platform's keys are in your terminal's

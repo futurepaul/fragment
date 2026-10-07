@@ -75,9 +75,10 @@ it, and a new draft may follow (the next part).
 
 - `text`, at most 32 KiB (more is cut). `kind` absent, or `"message"`.
 - `to`, optional: the agents it is for. The page fills it from the
-  `@mentions` it resolved. Without `to`, an agent answers when the text
-  `@mentions` its name or its fragment's label, else the **lead** (the
-  first agent added to the chat, by `addedAt`) answers.
+  `@mentions` it resolved (an agent of its owner's not in the chat yet is
+  added first: "The page", below). Without `to`, an agent answers when the
+  text `@mentions` its name or its fragment's label, else the **lead**
+  (the first agent added to the chat, by `addedAt`) answers.
 - An anonymous visitor's message (`anon:`) starts nothing, nor does one
   posted before the agent joined the chat (its membership's `addedAt`).
 - While an agent's turn asks its asker something to answer in words (the
@@ -97,8 +98,34 @@ it, and a new draft may follow (the next part).
   from 1. A turn may reply more than once (text, a tool call, more text);
   each reply is whole.
 - `to` and `hop` when the reply `@mentions` another agent of the chat:
-  a hand-off. An agent answers another agent's reply only when its `to`
-  names it, and only `hop` ≤ 3 (so two agents stop handing off).
+  a hand-off. An agent answers another agent's record (a reply, or a
+  message an agent posts itself: `fragment ask`, the API) only when its
+  `to` names it, and only at most 3 hops deep (`HOPS_MAX`), so two agents
+  stop handing off.
+
+**The hop is the answering bridge's to count**, never the poster's to
+say (images/bridge, `engine.rs` `hop_of`). `hop` in a body only ever
+raises it. For an agent of the answering bridge's own computer (a
+person's agents all run on one: decision 13) the bridge knows the turns
+it runs, so a record that agent posts is one hop past the turn it is in:
+its turn in that chat (running, or ended within 5 minutes, as its reply
+read just after is), else its deepest turn running in another chat (a
+`fragment ask` from one chat into another), else, in no turn at all, the
+last hop allowed (answered once, its answer handing on nothing). A post
+made around the bridge, with the CLI or the API and no `hop`, so counts as
+a reply would; a `hop: 0` resets nothing. Another computer's agent is held
+to the hop it claims, at least 1. This is the image's rule, on ordinary
+records: the platform holds no chat record (docs/cloudflare-v1.md, the
+rule).
+
+**A chat's budget.** The agents of a chat start at most 20 turns of each
+other in 5 minutes (`AGENT_TURNS_PER_CHAT_MAX`, `AGENT_TURNS_WINDOW_MS`),
+counted by the causing records' own times and kept in each bridge's
+state, so a restart spends none of it again. A hand-off past it is
+refused: its `turn.start`, then its `turn.end` with `error` saying so
+("agents in this chat started 20 turns of each other in 5 minutes, the
+most they may; ask again in a few minutes"), which the page shows as the
+agent could not finish. A person's message is never counted, nor refused.
 
 **Stop:**
 
@@ -253,7 +280,8 @@ a turn runs with no draft nor open card, a working line does. It posts:
 
 - a message with a fresh id of its own (`crypto.randomUUID()`), the same
   id again only for the same body sent again after a failure; its `to`
-  the chat's agents its `@mentions` name, when they name any; its files
+  the agents its `@mentions` name, when they name any (an owner's agent
+  not in the chat is added first: "Your other agents", below); its files
   uploaded first, at most 8 of at most 25 MiB each, and its text cut to
   32 KiB;
 - Stop, `{kind: "stop", turn}` with the id `stop:<turn>`, from the turn's
@@ -284,6 +312,21 @@ of six, chosen by its identity until agents carry one; the chat takes
 its lead's. The shell that frames it may send `postMessage({fragment:
 "theme", mode: "light"|"dark"})`; otherwise it follows
 `prefers-color-scheme`.
+
+**Your other agents.** Framed, the page asks the shell for its person's
+agents as it mounts (`{fragment: "agents?"}`). A shell answers only a
+frame of a fragment its person owns (docs/api.md, The shell), so in its
+owner's chat `@` lists the chat's agents (the lead first), then the
+owner's others, each marked "adds them to this chat"; a guest's page, one
+someone else owns, and one opened in a tab of its own (no shell) list the
+chat's agents alone. A message whose `@mentions` name one of the others
+asks the shell to add it first (`{fragment: "add-agent", identity,
+nonce}`; the shell adds it as an editor, as making a chat does, and
+answers `agent-added`), reads the members again, and only then is posted,
+its `to` naming it: the agent is a member before the message, so its
+bridge takes it (a message from before an agent joined starts nothing).
+An add that fails or goes unanswered for 15 s sends nothing and says why
+in the banner, the message kept in the composer.
 
 ## Push
 
@@ -322,6 +365,14 @@ A routine (decision 38): the agent fragment's cron posts it, which wakes
 the computer; the agent takes it as a turn in `chat`, asked by its
 owner. One older than an hour when its computer first reads it is
 skipped, as cron skips a missed run.
+
+Only the agent fragment itself (its cron, the platform's `joined`: a
+principal that is no identity) and the agent's owner ask anything on
+`tasks`. Any other poster's record is passed over, whatever it says:
+another of the owner's agents may post here (it acts for the owner, an
+editor), but a routine it posted would start a turn asked as the owner
+and at no hop, a hand-off no count would hold. An agent asks another in
+a chat instead (`fragment ask`).
 
 ```json
 { "kind": "joined", "fragment": "<fragment>" }

@@ -1277,6 +1277,24 @@ added, by `addedAt`). Which agents a chat has is its member list, as
 its row names them (`agents`), never its name; the sidebar stacks their
 avatars, each in its identity's colour (the chat page's FNV-1a choice).
 
+**A page of the person's own may ask for their agents.** A frame the
+shell made of a fragment its person owns (the open chat, an app's window)
+may `postMessage({fragment: "agents?"})` to it; the shell answers that
+frame, at that fragment's own origin only (its status's canonical URL),
+`{fragment: "agents", agents: [{identity, fragment, name, title}]}`: the
+agents its person's computer runs, `name` the label that `@mentions`
+each. It sends the list again when it changes. The frame may then ask
+`{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
+characters): for one of those agents, the shell adds it to the frame's
+fragment as an editor (`PUT …/members/{identity}`, as making a chat does)
+and answers `{fragment: "agent-added", nonce, identity, ok, error?}`.
+Nothing else: a frame of a fragment shared with the person (not theirs)
+gets no answer to either, so it neither learns their agents nor adds one,
+and no page adds anyone but its own owner's agents to its own fragment,
+which is an owner's share with their own agent, as their agent may make
+for them (decision 36). It names no template; the chat's `@` is its user
+(docs/chat-records.md, "The page").
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a
