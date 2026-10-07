@@ -378,6 +378,7 @@ mod tests {
     fn a_wipe_cut_anywhere_picks_up_where_it_stopped() {
         let mut p = Progress::new();
         for (i, step) in STEPS.iter().enumerate() {
+            assert_eq!(p.done() as usize, i, "one step done a pass");
             let back = Progress::stored(i64::from(p.done())).unwrap();
             assert_eq!(back, p, "read back as it was stored");
             assert_eq!(back.next(), Some(*step), "it goes on at the step it stopped before");
