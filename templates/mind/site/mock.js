@@ -104,7 +104,7 @@ const THREADS = [
   { d: 2, h: 9, p: "p_mind", t: ["kitchen"], turns: [{ u: "My sourdough keeps spreading flat. 78% hydration, King Arthur bread flour. What's going wrong?", steps: [["search", "sourdough hydration"]], a: "With bread flour, 78% is high for a loaf that holds its shape, and your kitchen has been warm (26°C last week). In order:\n\n1. Drop to **72%** for the next bake.\n2. Shorten the bulk: at 26°C it's likely done in 4 hours, not 6. Look for a 50% rise and domed edges.\n3. Preshape tighter and rest 20 minutes before the final shape.\n\nChange one thing at a time so you know which one fixed it." }, { u: "72% it is. I'll report back.", a: "Good. Note the rise at 3 and 4 hours; that tells us whether bulk was the problem." }] },
   { d: 1, h: 13, p: "p_mind", t: ["lisbon"], turns: [{ u: "For Lisbon, Alfama or Príncipe Real? We want walkable, not too party-ish, and good coffee.", steps: [["search", "Lisbon"]], a: "**Príncipe Real.** Alfama is beautiful but steep, and the fado bars run late right under the windows. Príncipe Real is calm at night, flat by Lisbon standards, and a ten-minute walk to Chiado and Bairro Alto without being in them.\n\nCoffee: *Hello, Kristof* and *Copenhagen Coffee Lab* are both close. You wanted one day in Sintra: the train from Rossio is fifteen minutes' walk away." }] },
   { d: 1, h: 19.5, p: "p_coach", t: ["running"], turns: [{ u: "Long run this morning felt awful. 14k and I was dying by 9.", a: "That sounds rough. Before we look for a reason: how did you sleep the two nights before?" }, { u: "Badly. Maybe 5 hours Friday. And I skipped breakfast.", a: "That's most of it, then: short sleep, and running fasted past an hour. Your easy pace has been about 6:05/km. What pace did today's run start at?" }] },
-  { ago: 9, p: "p_builder", t: ["garden", "fragment"], turns: [{ u: "Can you make me a little web page for the garden log? What I planted where and when, and the watering schedule. Make it a fragment so Sam can see it.", hand: { id: "k_4f2a91", live: true, say: "On it. I've handed this to your computer: it will build the page from what I remember of the beds (the fence bed's tomatoes and basil, the back bed, the drip zones) and publish it as a fragment Sam can open. I'll tell you when it's up.", steps: [["shell", "fragment new garden-log --template blank"], ["mind", "search {\"q\":\"planted\"}"], ["mind", "zoom {\"id\":1024,\"n\":256}"], ["edit", "site/index.html"], ["edit", "site/garden.css"], ["shell", "fragment deploy garden-log"], ["shell", "fragment share garden-log --with sam"], ["browser", "open https://garden-log--paul.fragment.boats/"]], report: "The page is up at https://garden-log--paul.fragment.boats/ and shared with Sam (viewer).\n\n- **Beds**: the fence bed (tomatoes since April 2, basil since May 20) and the back bed (kale, strawberries from runners).\n- **Watering**: drip zone 2 (fence bed) at 6:00 for 15 minutes, zone 1 at 6:20 for 10.\n- It reads from a `log.md` in the fragment, so adding a line there updates the page." } }] },
+  { ago: 9, p: "p_builder", t: ["garden", "fragment"], turns: [{ u: "Can you make me a little web page for the garden log? What I planted where and when, and the watering schedule. Make it a fragment so Sam can see it.", hand: { id: "k_4f2a91", live: true, say: "On it. I've handed this to your computer: it will build the page from what I remember of the beds (the fence bed's tomatoes and basil, the back bed, the drip zones) and publish it as a fragment Sam can open. I'll tell you when it's up.", steps: [["shell", "fragment new garden-log --template blank"], ["mind", "search {\"q\":\"planted\"}"], ["mind", "zoom {\"id\":1024,\"n\":256}"], ["edit", "site/index.html"], ["edit", "site/garden.css"], ["shell", "fragment deploy garden-log"], ["?", "Share garden-log with Sam (sam@okafor.me) as a viewer?"], ["shell", "fragment share garden-log --with sam"], ["browser", "open https://garden-log--paul.fragment.boats/"]], report: "The page is up at https://garden-log--paul.fragment.boats/ and shared with Sam (viewer).\n\n- **Beds**: the fence bed (tomatoes since April 2, basil since May 20) and the back bed (kale, strawberries from runners).\n- **Watering**: drip zone 2 (fence bed) at 6:00 for 15 minutes, zone 1 at 6:20 for 10.\n- It reads from a `log.md` in the fragment, so adding a line there updates the page." } }] },
   { d: 0, h: 9.2, p: "p_mind", t: ["garden"], turns: [{ u: "The tomato leaves are curling up at the edges, mostly the new ones. Too much sun?", steps: [["search", "tomatoes"], ["zoom"], ["search", "drip zone 2"]], a: "Probably heat, not disease. The fence bed gets sun until 6, and you moved zone 2 to one 15-minute run at 6am. Leaf roll on new growth after a hot spell is the plant saving water; it's harmless while the fruit keeps setting.\n\nTwo things to try:\n- A second drip run at 4pm on days over 32°C.\n- 30% shade cloth over the fence bed only.\n\nIf the curl turns yellow or spotty, send me a photo." }, { u: "ok add the 4pm run. remind me what timer we bought?", steps: [["search", "timer"]], a: "The **Orbit B-hyve**, 4 zones, from May; zone 2 is the fence bed. In its app: *Zone 2 → Watering schedule → add a start time*, 4:00 PM, 10 minutes, and turn on *Weather sensitivity* so it skips cool days." }] },
 ];
 
@@ -139,8 +139,8 @@ for (const def of sorted) {
     if (turn.hand) {
       const hd = turn.hand;
       const task = { id: hd.id, thread: id, text: `${turn.u}\n\n(task ${hd.id}, thread ${id})`, state: hd.live ? "running" : "done", steps: [], report: hd.live ? "" : hd.report, started: at, ended: hd.live ? null : at + 6 * MIN };
-      const stepsNow = hd.live ? 3 : hd.steps.length;
-      task.steps = hd.steps.slice(0, stepsNow).map(([tool, args], k) => ({ step: k + 1, tool, args, ok: true }));
+      const stepsNow = hd.live ? 5 : hd.steps.length;
+      task.steps = hd.steps.slice(0, stepsNow).filter(([tool]) => tool !== "?").map(([tool, args], k) => ({ kind: "turn.step", step: k + 1, tool, args, ok: true }));
       tasks.set(hd.id, task);
       task.plan = hd;
       push("tool", `computer ${JSON.stringify({ task: turn.u })}`, (at += 2000), id, def.p, hd.id);
@@ -588,8 +588,18 @@ async function hands(task, every) {
     }
     await sleep(every);
     const [tool, args] = plan.steps[k];
-    task.steps.push({ step: k + 1, tool, args, ok: true });
     k++;
+    if (tool === "?") {
+      // goose asks the person first (a `turn.prompt`), and waits
+      const prompt = `p_${hex(8)}`;
+      const ask = { kind: "turn.prompt", turn, prompt, text: args, options: [{ id: "once", label: "Share it", style: "primary" }, { id: "deny", label: "Not now", style: "danger" }], asks: "id:paul", expiresAt: Date.now() + 10 * MIN };
+      task.steps.push(ask);
+      publish("log", { type: "task", ...publicTask(task) });
+      changed();
+      const option = await new Promise((resolve) => asking.set(prompt, resolve));
+      Object.assign(ask, { outcome: "answered", option, by: "id:paul" });
+      if (option === "deny") k++;
+    } else task.steps.push({ kind: "turn.step", turn, step: k, tool, args, ok: true });
     publish("log", { type: "task", ...publicTask(task) });
     changed();
   }
@@ -603,6 +613,9 @@ async function hands(task, every) {
   queue.push({ thread: task.thread, text: "", persona: th?.persona, report: task });
   runTurn();
 }
+
+// goose's open questions: prompt -> its answer's resolve
+const asking = new Map();
 
 // the hand-off that is running as the page opens
 for (const t of tasks.values()) if (t.state === "running") setTimeout(() => hands(t, 3800), 400);
@@ -622,6 +635,13 @@ export function call(op, input = {}) {
 
 export async function post(channel, body) {
   await sleep(60);
+  if (channel === "chat" && body?.kind === "prompt_response") {
+    // the first answer wins, as on the real channel
+    publish("chat", body, "id:paul");
+    asking.get(body.prompt)?.(body.option);
+    asking.delete(body.prompt);
+    return { seq: channels.chat.length };
+  }
   if (channel !== "say") throw new Error(`cannot post to ${channel}`);
   publish("say", body, "id:paul");
   touch(body.thread, body.text, body.persona);

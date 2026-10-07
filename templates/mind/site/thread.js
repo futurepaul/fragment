@@ -10,6 +10,7 @@
 
 import { avatar, contextView, go, memRow, topicChip } from "./pieces.js";
 import {
+  F,
   PENDING_MS,
   S,
   busy,
@@ -20,6 +21,7 @@ import {
   loadEarlier,
   loadThread,
   persona,
+  problem,
   putThread,
   resend,
   running,
@@ -276,13 +278,50 @@ function taskPhase(task) {
 
 function taskSig(task, fallback) {
   const draft = task ? handDraftOf(task) : null;
-  return JSON.stringify([task?.state, task?.steps?.length, task?.steps?.at(-1)?.ok, task?.report?.length, draft?.length, task?.text ?? fallback, opened.has(`k:${task?.id}`), opened.has(`r:${task?.id}`)]);
+  const asks = (task?.steps ?? []).filter((s) => s.kind === "turn.prompt").map((s) => [s.prompt, s.outcome, answering.get(s.prompt), Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt]);
+  return JSON.stringify([task?.state, task?.steps?.length, task?.steps?.at(-1)?.ok, task?.report?.length, draft?.length, task?.text ?? fallback, opened.has(`k:${task?.id}`), opened.has(`r:${task?.id}`), asks, S.me?.principal]);
+}
+
+// prompts this page answered, while the agent closes them: prompt -> option
+const answering = new Map();
+
+/// An answer to goose's question on a hand-off (docs/chat-records.md,
+/// "A prompt's answer"): on `chat`, as the person, once (`pr:<prompt>`).
+async function answer(prompt, option) {
+  answering.set(prompt, option);
+  changed();
+  try {
+    await F.post("chat", { kind: "prompt_response", prompt, option }, { id: `pr:${prompt}` });
+  } catch (e) {
+    answering.delete(prompt);
+    problem(`Could not answer: ${e.message}`);
+  }
+}
+
+/// goose asking the person (a `turn.prompt` among a hand-off's steps):
+/// its buttons while it is open and theirs to answer, else how it closed.
+function askRow(s, phase) {
+  const options = Array.isArray(s.options) ? s.options.filter((o) => o && typeof o.id === "string") : [];
+  const label = (id) => options.find((o) => o.id === id)?.label || id;
+  const expired = Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt;
+  const mine = !!S.me && s.asks === S.me.principal;
+  const sent = answering.get(s.prompt);
+  let foot;
+  if (typeof s.outcome === "string") foot = h("div.ask-done", { text: s.outcome === "answered" ? `Answered: ${label(s.option)}` : s.outcome === "expired" ? "No answer in time" : "Stopped" });
+  else if (phase !== "running" || expired) foot = h("div.ask-done", { text: "No answer in time" });
+  else if (!mine) foot = h("div.ask-done", { text: "Waiting for its owner's answer" });
+  else
+    foot = h(
+      "div.ask-options",
+      null,
+      options.map((o) => h(`button.ask-opt${o.style === "primary" || o.style === "danger" ? `.${o.style}` : ""}`, { type: "button", disabled: !!sent, onclick: () => answer(s.prompt, o.id) }, sent === o.id ? icon("loader", "spin") : null, o.label || o.id)),
+    );
+  return h("div.task-ask", null, h("div.ask-text", null, icon("hand"), h("span", { text: s.text || "Your computer asks" })), foot);
 }
 
 function taskNode(id, fallback) {
   const task = S.tasks.get(id) ?? null;
   const phase = taskPhase(task);
-  const [label, ic] = TASK_STATE[phase];
   const steps = task?.steps ?? [];
   const showAll = opened.has(`k:${id}`);
   const shown = showAll ? steps : steps.slice(-CARD_STEPS);
@@ -291,7 +330,9 @@ function taskNode(id, fallback) {
   const long = !!task?.report && (task.report.length > 360 || task.report.split("\n").length > 6);
   const reportOpen = !long || opened.has(`r:${id}`);
   const elapsed = task?.started ? duration((task.ended ?? Date.now()) - task.started) : "";
-  const lastOk = steps.length > 0 && steps.at(-1).ok !== undefined;
+  // a question open is what it waits on; else, between steps, it works
+  const asking = phase === "running" && steps.some((s) => s.kind === "turn.prompt" && typeof s.outcome !== "string" && !(Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt));
+  const [label, ic] = asking ? ["Needs you", "hand"] : TASK_STATE[phase];
   const toggle = (k) => () => {
     if (opened.has(k)) opened.delete(k);
     else opened.add(k);
@@ -300,26 +341,27 @@ function taskNode(id, fallback) {
   return h(
     `div.task.task-${phase}`,
     { id: `task-${id}` },
-    h("div.task-head", null, h("span.task-icon", null, icon("monitor")), h("span.task-where", { text: "On your computer" }), h("span.task-state", null, icon(ic, phase === "running" ? "spin" : ""), label), elapsed ? h("span.task-time", { text: elapsed }) : null),
+    h("div.task-head", null, h("span.task-icon", null, icon("monitor")), h("span.task-where", { text: "On your computer" }), h(`span.task-state${asking ? ".asking" : ""}`, null, icon(ic, phase === "running" && !asking ? "spin" : ""), label), elapsed ? h("span.task-time", { text: elapsed }) : null),
     h("div.task-text", { text: text.replace(/\n\n\(task [^)]*\)\s*$/, "") }),
     steps.length
       ? h(
           "div.task-steps",
           null,
           steps.length > shown.length || showAll ? h("button.linkish", { type: "button", onclick: toggle(`k:${id}`) }, showAll ? "Fewer steps" : `${plural(steps.length - shown.length, "earlier step")}`) : null,
-          shown.map((s, k) => {
+          shown.map((s) => {
+            if (s.kind === "turn.prompt") return askRow(s, phase);
+            // a step is posted once its call ends: ok, failed, or unsaid (null)
             const failed = s.ok === false;
-            const wait = phase === "running" && k === shown.length - 1 && s.ok === undefined;
             return h(
-              `div.task-step${failed ? ".failed" : ""}`,
+              `div.task-step${failed ? ".failed" : ""}${s.ok == null ? ".unsaid" : ""}`,
               { title: typeof s.excerpt === "string" ? s.excerpt : "" },
-              wait ? icon("loader", "spin") : failed ? icon("x") : icon("check"),
+              failed ? icon("x") : s.ok === true ? icon("check") : icon("dot"),
               h("span.task-tool", { text: s.tool ?? s.name ?? "step" }),
               h("span.task-args", { text: String(s.args ?? s.title ?? s.text ?? "").replace(/^`|`$/g, "") }),
             );
           }),
-          // between steps, with no words streaming: still going
-          phase === "running" && lastOk && !draft ? h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Working…" })) : null,
+          // between steps, with no words streaming and nothing asked: still going
+          phase === "running" && !asking && !draft ? h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Working…" })) : null,
         )
       : phase === "running"
         ? h("div.task-steps", null, h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Waking your computer…" })))
