@@ -75,7 +75,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let chat_name = s.named(api, &owner, "talk")?;
     let r = api.create_with(&owner, json!({ "name": chat_name, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");
-    s.hook(api, &r.body);
+    s.owned(&r.body, &owner);
     let made = r.body.clone();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     s.ok("the agent joins the chat on the template", r.status == 200, &r);

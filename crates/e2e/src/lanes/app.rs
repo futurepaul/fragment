@@ -105,7 +105,7 @@ pub fn ops(s: &mut Suite, api: &Api) -> Result<()> {
     s.fake.fail_file_reads(true);
     let during = ship(s, &c, v3.as_bytes(), TODO_JSON);
     let r = api.status(&owner, &name)?;
-    s.ok("during an outage live moves but the code stays", r.body["pins"]["live"] == during.as_str() && r.body["code"]["sha"] == live2.as_str(), &r);
+    s.ok("during an outage the last good code stays", r.body["code"]["sha"] == live2.as_str(), &r);
     s.fake.fail_file_reads(false);
     api.signed(&owner, "POST", &format!("/api/f/{name}/refresh"), Some(&json!({})))?;
     let r = api.status(&owner, &name)?;

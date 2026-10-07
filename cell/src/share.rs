@@ -586,8 +586,8 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
             Some(v) => ask(env, url, name, &who, Method::Put, "/api/visibility", Some(json!({ "visibility": v }))).await,
             None => Err(CellError::invalid("choose who can open it")),
         },
-        // the share link only: the inbox's token and the webhook's secret are
-        // integrations', rotated with the CLI
+        // the share link only: the inbox's token is an integration's,
+        // rotated with the CLI
         "rotate" => ask(env, url, name, &who, Method::Post, "/api/rotate", Some(json!({ "scopes": ["view"] }))).await,
         _ => Err(CellError::invalid("no such change")),
     };

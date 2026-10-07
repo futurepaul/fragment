@@ -101,7 +101,7 @@ enum Cmd {
         /// Its title (a blessed template's fragment only)
         #[arg(long, requires = "template")]
         title: Option<String>,
-        /// Show the share link, the webhook URL and the webhook secret (they
+        /// Show the share link and the webhook URL (they
         /// are credentials: `fragment open` shows the links later)
         #[arg(long)]
         show_tokens: bool,
@@ -969,7 +969,7 @@ fn run(cli: Cli) -> Result<()> {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
                 let mut data = serde_json::to_value(&v)?;
                 if !show_tokens {
-                    for token in ["viewToken", "inboxToken", "webhookSecret"] {
+                    for token in ["viewToken", "inboxToken"] {
                         data.as_object_mut().expect("Created is an object").remove(token);
                     }
                 }
@@ -1311,8 +1311,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("run #{run} queued again (attempt {}); follow it with `fragment runs {name} {run}`", v["attempt"]);
         }
         Cmd::Rotate { name, inbox, view } => {
-            // flags narrow the default both-scopes rotation (the webhook
-            // secret is code.storage's to know: rotate it only by asking the cell)
+            // flags narrow the default both-scopes rotation
             let scopes = match (inbox, view) {
                 (true, false) => vec!["inbox"],
                 (false, true) => vec!["view"],
@@ -1320,9 +1319,6 @@ fn run(cli: Cli) -> Result<()> {
             };
             let body = json!({ "scopes": scopes });
             let v: Rotated = c.call_as(c.post_json(&format!("/api/f/{name}/rotate"), &body)?)?;
-            // the whole answer, webhook secret included: the code.storage
-            // push HMAC is only ever visible at create/rotate, and machine
-            // consumers (dev harnesses registering push webhooks) need it
             json_exit(j, &v);
             let st: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
             println!("rotated: {}", v.rotated.join(", "));

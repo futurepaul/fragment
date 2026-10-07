@@ -506,7 +506,7 @@ fragment.club until cutover (decisions 34–35).
   (`cell/src/cs.rs`, `cli/src/sync.rs`), reached only through its REST
   API: repos, repo urls, branches, file metadata and
   reads, commits, commit packs with expected-parent CAS, merges,
-  restore commits, and signed push webhooks, under ES256 JWTs minted with
+  and restore commits, under ES256 JWTs minted with
   the org key. No git smart-HTTP is used. The only other implementation
   is the test fake (`crates/fakes/src/codestorage.rs`), which keeps its
   state in memory or one JSON file.
@@ -548,7 +548,7 @@ fragment.club until cutover (decisions 34–35).
   --hosted`, crates/e2e/src/hosted.rs): it runs on a preview the sections
   whose declared needs a preview meets. The rest are skips there, each
   saying why: those that script a vendor fake (the model: ai, ledger,
-  agents, addon, chat; code.storage's git or webhooks: create, files,
+  agents, addon, chat; code.storage's git: create, files,
   ops, effects, site, sync, blobs, appfiles; a local upstream or push
   service: jobs, triggers, push, channels' posts), the node's (restart,
   lockdown, isolation, share), and the whole deployment's
@@ -863,8 +863,8 @@ fragment.club until cutover (decisions 34–35).
   their merge base, then merges main in, which then takes main's files
   whole (`fragment_core::codestorage::Promotion`). Every deploy is the
   cell's (`go_live`, `POST /api/f/{name}/deploy`; `fragment deploy` asks
-  it), which holds its plane lock across both moves, so a push webhook
-  for the first waits and pins the second: the first is never served.
+  it), which holds its plane lock across both moves, so a refresh or poll
+  between them waits and pins the second: the first is never served.
 - **Risk:** `fragment rollback` without `--to` right after such a deploy
   restores the first move's files (the deploy the earlier rollback
   undid), not the files the rollback served (by first parents, as the
