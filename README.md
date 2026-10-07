@@ -125,7 +125,7 @@ crates/fakes   code.storage, Workers AI, WorkOS, and push-service fakes
 
 crates/devstack  runs wrangler dev and the fakes
 crates/e2e     the end-to-end suite
-templates/     blank, calories, inbox, notes, todo; the blessed agent, brain, chat, skills
+templates/     blank, calories, inbox, notes, todo, watch; the blessed agent, brain, chat, skills
 xtask/         build, dev, try, check, e2e, deploy, teardown
 deploy/        example.jsonc: a deployment's config (yours lives outside the repo)
 docs/          the plan (cloudflare-v1.md), model, contract, the debt ledger
