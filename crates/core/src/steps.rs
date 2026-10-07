@@ -50,6 +50,8 @@ pub enum Step {
     },
     #[serde(rename = "ai.text")]
     AiText(AiText),
+    #[serde(rename = "ai.decide")]
+    AiDecide(AiDecide),
     #[serde(rename = "ai.image")]
     AiImage(AiImage),
     /// `job.ai.video`: refused, whatever it asks, until videos run on
@@ -142,13 +144,138 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 pub struct AiText {
     /// A tier (`fragment_proto::Tier`: `cheap` unless named), never a model id.
     pub model: Option<String>,
-    /// The conversation; without it, `prompt` is one user message.
+    /// The conversation, OpenAI's messages as given (an assistant's
+    /// `tool_calls` and `role: "tool"` results among them); without it,
+    /// `prompt` is one user message.
     pub messages: Option<Vec<Value>>,
     pub prompt: Option<String>,
     /// GLM's reasoning control (`low` or `high`; anything else is `low`:
     /// crate::models).
     pub reasoning_effort: Option<String>,
     pub max_tokens: Option<u64>,
+    /// Functions the model may call (crate::models bounds them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Tool>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<ToolChoice>,
+    /// The call streams, and its text so far is that channel's draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<Draft>,
+}
+
+/// A function the model may call, in OpenAI's shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tool {
+    #[serde(rename = "type")]
+    pub kind: FunctionKind,
+    pub function: Function,
+}
+
+/// The one kind of tool: `"function"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FunctionKind {
+    Function,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Function {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Its arguments' JSON Schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict: Option<bool>,
+}
+
+/// OpenAI's `tool_choice`: a mode, or one function by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolChoice {
+    Mode(ToolMode),
+    Named {
+        #[serde(rename = "type")]
+        kind: FunctionKind,
+        function: Called,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolMode {
+    None,
+    Auto,
+    Required,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Called {
+    pub name: String,
+}
+
+/// Where a text step's draft goes: one of the app's channels, under a turn
+/// (`PUT …/channels/<channel>/draft`'s `{turn, text}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Draft {
+    pub channel: String,
+    pub turn: String,
+}
+
+/// `job.ai.decide`: Clef, Workers AI's decision model (crate::decide), as
+/// its catalog's input: typed questions about a state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiDecide {
+    pub model: Clef,
+    /// What is decided about: text, or JSON (an object or an array).
+    pub state: Value,
+    /// By id, each answered under its id.
+    pub questions: BTreeMap<String, Question>,
+    /// `data:` URLs of PNG, JPEG or WebP images, shown before the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
+}
+
+/// Clef's two sizes, as its input's `model` names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Clef {
+    #[serde(rename = "clef")]
+    Clef,
+    #[serde(rename = "clef-flash")]
+    Flash,
+}
+
+/// A question, as Clef's input types it: yes or no (`noul`), one option of
+/// a set (`choice`), or a level of an ordered rubric (`score`).
+/// `instructions` is the question: text, or JSON holding it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum Question {
+    Noul {
+        instructions: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        criteria: Option<NoulCriteria>,
+    },
+    /// `criteria`: each option's id, and what it means (`null`: nothing to say).
+    Choice { instructions: Value, criteria: BTreeMap<String, Value> },
+    /// `criteria`: the levels, lowest first.
+    Score { instructions: Value, criteria: Vec<Value> },
+}
+
+/// What a yes and a no mean.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoulCriteria {
+    #[serde(rename = "true", default, skip_serializing_if = "Option::is_none")]
+    pub yes: Option<Value>,
+    #[serde(rename = "false", default, skip_serializing_if = "Option::is_none")]
+    pub no: Option<Value>,
 }
 
 /// `job.ai.image`: a JPEG drawn by the one image model (crate::media),
@@ -188,6 +315,7 @@ impl Step {
             Step::FilesWrite(_) => "files.write",
             Step::FilesRemove { .. } => "files.remove",
             Step::AiText(_) => "ai.text",
+            Step::AiDecide(_) => "ai.decide",
             Step::AiImage(_) => "ai.image",
             Step::AiVideo {} => "ai.video",
             Step::Members {} => "members",
@@ -246,6 +374,27 @@ mod tests {
             ("files.write", json!({ "path": "log.txt", "text": "a\n", "expect": null })),
             ("files.remove", json!({ "path": "log.txt" })),
             ("ai.text", json!({ "model": "medium", "prompt": "hi", "reasoning_effort": "low", "max_tokens": 100 })),
+            (
+                "ai.text",
+                json!({
+                    "messages": [{ "role": "user", "content": "hi" }, { "role": "assistant", "content": "", "tool_calls": [{ "id": "c1", "type": "function", "function": { "name": "zoom", "arguments": "{}" } }] }, { "role": "tool", "tool_call_id": "c1", "content": "x" }],
+                    "tools": [{ "type": "function", "function": { "name": "zoom", "description": "d", "parameters": { "type": "object" } } }],
+                    "tool_choice": { "type": "function", "function": { "name": "zoom" } },
+                    "draft": { "channel": "log", "turn": "turn:t_1" },
+                }),
+            ),
+            (
+                "ai.decide",
+                json!({
+                    "model": "clef-flash", "state": { "title": "garden" },
+                    "questions": {
+                        "a": { "type": "noul", "instructions": "Plants?", "criteria": { "true": "about plants" } },
+                        "b": { "type": "choice", "instructions": "Which?", "criteria": { "x": "an x", "y": null } },
+                        "c": { "type": "score", "instructions": "How much?", "criteria": ["none", "some"] },
+                    },
+                    "images": ["data:image/png;base64,iVBORw0KGgo="],
+                }),
+            ),
             ("ai.image", json!({ "prompt": "a cat", "path": "cat.jpg", "steps": 6 })),
             ("ai.video", json!({})),
             ("members", json!({})),
@@ -257,7 +406,7 @@ mod tests {
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 16, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 18, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -301,6 +450,18 @@ mod tests {
         refused("ai.text", json!({ "model": "cheap", "max_tokens": "100" }), "invalid type");
         refused("ai.text", json!({ "model": 7 }), "invalid type");
         refused("ai.text", json!({ "model": "cheap", "reasoning_effort": true }), "invalid type");
+        let tool = |t: Value| json!({ "prompt": "p", "tools": [t] });
+        refused("ai.text", tool(json!({ "type": "retrieval", "function": { "name": "f" } })), "unknown variant `retrieval`");
+        refused("ai.text", tool(json!({ "type": "function" })), "missing field `function`");
+        refused("ai.text", tool(json!({ "type": "function", "function": { "name": "f", "code": "x" } })), "unknown field `code`");
+        refused("ai.text", json!({ "prompt": "p", "tool_choice": "sometimes" }), "did not match any variant");
+        refused("ai.text", json!({ "prompt": "p", "draft": { "channel": "log" } }), "missing field `turn`");
+        refused("ai.decide", json!({ "model": "clef-pro", "state": "s", "questions": {} }), "unknown variant `clef-pro`");
+        refused("ai.decide", json!({ "model": "clef", "questions": {} }), "missing field `state`");
+        refused("ai.decide", json!({ "model": "clef", "state": "s", "questions": { "a": { "type": "rank", "instructions": "?" } } }), "unknown variant `rank`");
+        refused("ai.decide", json!({ "model": "clef", "state": "s", "questions": { "a": { "type": "choice", "instructions": "?" } } }), "missing field `criteria`");
+        refused("ai.decide", json!({ "model": "clef", "state": "s", "questions": { "a": { "type": "score", "instructions": "?", "criteria": {} } } }), "invalid type");
+        refused("ai.decide", json!({ "model": "clef", "state": "s", "questions": {}, "temperature": 0 }), "unknown field `temperature`");
         refused("ai.image", json!({ "prompt": "p" }), "missing field `path`");
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "model": "google/gemini-3.1-flash-lite-image" }), "unknown field `model`");
         refused("ai.image", json!({ "prompt": "p", "path": "a.jpg", "steps": -1 }), "invalid value");
