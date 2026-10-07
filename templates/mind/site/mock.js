@@ -138,12 +138,12 @@ for (const def of sorted) {
     }
     if (turn.hand) {
       const hd = turn.hand;
-      const task = { id: hd.id, thread: id, text: `${turn.u}\n\n(task ${hd.id}, thread ${id})`, state: hd.live ? "running" : "done", steps: [], report: hd.live ? "" : hd.report, started: at, ended: hd.live ? null : at + 6 * MIN };
-      const stepsNow = hd.live ? 5 : hd.steps.length;
-      task.steps = hd.steps.slice(0, stepsNow).filter(([tool]) => tool !== "?").map(([tool, args], k) => ({ kind: "turn.step", step: k + 1, tool, args, ok: true }));
+      const task = { id: hd.id, thread: id, text: `${turn.u}\n\n(task ${hd.id}, thread ${id})`, state: hd.live ? "running" : "done", report: hd.live ? null : hd.report, started: at, ended: hd.live ? null : at + 6 * MIN };
+      // what goose did before the page opened: put on `work` below
+      task.done = hd.steps.slice(0, hd.live ? 5 : hd.steps.length);
       tasks.set(hd.id, task);
       task.plan = hd;
-      push("tool", `computer ${JSON.stringify({ task: turn.u })}`, (at += 2000), id, def.p, hd.id);
+      task.i = push("tool", `computer ${JSON.stringify({ task: turn.u })}`, (at += 2000), id, def.p, hd.id).i;
       push("echo", `[${hd.id}] started`, (at += 800), id, def.p, hd.id);
       push("talk", hd.say, (at += 6000), id, def.p);
       if (!hd.live) {
@@ -304,7 +304,9 @@ const summaryOf = (th) => {
 };
 const publicThread = (th) => ({ id: th.id, title: th.title, persona: th.persona, started: th.started, last: th.last, summary: summaryOf(th), topics: threadTopic.get(th.id) ?? [], count: log.slice(th.first_i, th.last_i + 1).filter((m) => m.thread === th.id).length });
 const publicMsg = ({ i, kind, text, at, thread, persona, task }) => ({ i, kind, text, at, thread, persona, task });
-const publicTask = (t) => ({ id: t.id, thread: t.thread, text: t.text, state: t.state, steps: t.steps, report: t.report, started: t.started, ended: t.ended, turn: t.turn });
+// a task as `log` carries it: goose's steps are `work`'s, and its turn is
+// left out, so the page finds it the exact way (turn.start's cause)
+const publicTask = (t) => ({ id: t.id, thread: t.thread, text: t.text, state: t.state, ...(t.report ? { report: t.report } : {}) });
 let turnNow = null; // {thread, since}
 
 const QUERIES = {
@@ -336,7 +338,7 @@ const QUERIES = {
   zoom: ({ id, n }) => ({ text: n === 1 ? `${id}+0|${log[id].kind}: ${log[id].text}` : QUERIES.node({ id, n }).children.map((c) => `${c.id}+${c.n}|${c.text}`).join("\n") }),
   topics: () => ({ topics: topics.map((t) => ({ id: t.id, name: t.name, description: t.description, count: [...threadTopic.values()].filter((l) => l.some((x) => x.id === t.id && x.p >= 0.6)).length })) }),
   personas: () => ({ personas: personas.map((p) => ({ ...p })), default: defaultPersona }),
-  tasks: ({ thread } = {}) => ({ tasks: [...tasks.values()].filter((t) => !thread || t.thread === thread).map(publicTask) }),
+  tasks: ({ thread } = {}) => ({ tasks: [...tasks.values()].filter((t) => !thread || t.thread === thread).map((t) => ({ ...publicTask(t), i: t.i, steps: [], report: t.report ?? null, started: t.started, ended: t.ended })) }),
   status: () => ({ turn: turnNow ? { running: true, thread: turnNow.thread, since: turnNow.since } : null, queued: queue.length, unbuilt: view.filter((p) => !isBuilt(p.l, p.i)).length, T: log.length, hands: true }),
   settings: () => ({ about }),
 };
@@ -434,8 +436,29 @@ async function runLive(l) {
   }
 }
 
-// seed `log` with the recent history's records, as the backend would have published them
-for (const t of tasks.values()) publish("log", { type: "task", ...publicTask(t) });
+// ---- hand-offs, as chat-records has them ----
+const GOOSE = "id:goose";
+const work = (body) => publish("work", body, GOOSE);
+
+/// The mind hands a task over: its message on `chat`, to goose.
+function handOver(task) {
+  publish("chat", { text: task.text, to: [GOOSE] });
+  task.seq = channels.chat.length;
+  task.turnId = `wt_${hex(24)}`;
+}
+
+// seed the channels with the recent history's records, as they were written
+for (const t of [...tasks.values()].sort((a, b) => a.started - b.started)) {
+  handOver(t);
+  publish("log", { type: "task", ...publicTask(t) });
+  work({ kind: "turn.start", turn: t.turnId, agent: GOOSE, cause: { channel: "chat", seq: t.seq } });
+  t.done.filter(([tool]) => tool !== "?").forEach(([tool, args], k) => work({ kind: "turn.step", turn: t.turnId, step: k + 1, tool, args, ok: true }));
+  t.next = t.done.length;
+  if (t.state !== "running") {
+    work({ kind: "turn.end", turn: t.turnId, outcome: "idle" });
+    publish("chat", { text: t.report, turn: t.turnId }, GOOSE);
+  }
+}
 for (const th of [...threads.values()].sort((a, b) => a.last - b.last).slice(-8)) publish("log", { type: "turn", thread: th.id, state: "done" });
 
 // ---- turns ----
@@ -540,10 +563,11 @@ async function runTurn() {
     if (report) {
       // answered above
     } else if (p.hands && /\b(make|build|set up|create|fix|clean|check|install|deploy)\b/i.test(text) && !turnNow.stop) {
-      const id = `k_${hex(6)}`;
-      logged("tool", `computer ${JSON.stringify({ task: text })}`, thread, p.id, id);
-      const task = { id, thread, text: `${text}\n\n(task ${id}, thread ${thread})`, state: "running", steps: [], report: "", started: Date.now(), ended: null, plan: { id, steps: [["shell", "ls ~/work"], ["edit", "notes/plan.md"], ["shell", "fragment deploy"], ["browser", "check the page"]], report: "Made it and checked it in the browser: it works on a phone too. What I did is written up in `notes/plan.md`.", narration: ["Looking at what's in ~/work first. ", "Writing it down as a plan, then the page itself. ", "Deploying it as a fragment. ", "Opening it in the browser to check it. "] } };
+      const id = `w${hex(8)}-3`;
+      const call = logged("tool", `computer ${JSON.stringify({ task: text })}`, thread, p.id, id);
+      const task = { id, thread, i: call.i, text: `${text}\n\n(task ${id}, thread ${thread})`, state: "running", report: null, started: Date.now(), ended: null, next: 0, plan: { id, steps: [["shell", "ls ~/work"], ["edit", "notes/plan.md"], ["shell", "fragment deploy"], ["browser", "check the page"]], report: "Made it and checked it in the browser: it works on a phone too. What I did is written up in `notes/plan.md`.", narration: ["Looking at what's in ~/work first. ", "Writing it down as a plan, then the page itself. ", "Deploying it as a fragment. ", "Opening it in the browser to check it. "] } };
       tasks.set(id, task);
+      handOver(task);
       publish("log", { type: "task", ...publicTask(task) });
       logged("echo", `[${id}] started`, thread, p.id, id);
       ok = await stream(thread, p.id, `On it. I've handed this to your computer and I'll tell you when it's done.`);
@@ -560,13 +584,12 @@ async function runTurn() {
   turning = false;
 }
 
-/// goose on the computer, pretend: a step at a time, its words streaming as
-/// `chat`'s draft under the bridge's turn, then its report as a message.
+/// goose on the computer, pretend, as the bridge writes a turn: its claim
+/// on `work`, a step at a time there, its words as `chat`'s draft, its
+/// end, and its one reply (the report) on `chat`; then the mind's half.
 async function hands(task, every) {
-  const turn = `wt_${hex(24)}`;
-  // the mind records goose's turn against its task once `turn.start` comes
-  task.turn = turn;
-  publish("log", { type: "task", ...publicTask(task) });
+  const turn = task.turnId;
+  if (task.next === 0) work({ kind: "turn.start", turn, agent: GOOSE, cause: { channel: "chat", seq: task.seq } });
   const plan = task.plan;
   const narration = plan.narration ?? [
     "Starting from what the mind remembers about the beds. ",
@@ -577,13 +600,14 @@ async function hands(task, every) {
     "Checking the page in the browser to make sure it renders on a phone. ",
   ];
   let said = "";
-  let k = task.steps.length;
+  let k = task.next;
+  let step = plan.steps.slice(0, k).filter(([tool]) => tool !== "?").length;
   let n = 0;
   while (k < plan.steps.length) {
     const words = (narration[n++ % narration.length] ?? "").split(/(?<=\s)/);
     for (const w of words) {
       said += w;
-      draft("chat", turn, said, "id:goose");
+      draft("chat", turn, said, GOOSE);
       await sleep(70);
     }
     await sleep(every);
@@ -592,18 +616,19 @@ async function hands(task, every) {
     if (tool === "?") {
       // goose asks the person first (a `turn.prompt`), and waits
       const prompt = `p_${hex(8)}`;
-      const ask = { kind: "turn.prompt", turn, prompt, text: args, options: [{ id: "once", label: "Share it", style: "primary" }, { id: "deny", label: "Not now", style: "danger" }], asks: "id:paul", expiresAt: Date.now() + 10 * MIN };
-      task.steps.push(ask);
-      publish("log", { type: "task", ...publicTask(task) });
+      work({ kind: "turn.prompt", turn, prompt, text: args, options: [{ id: "once", label: "Share it", style: "primary" }, { id: "deny", label: "Not now", style: "danger" }], asks: "id:paul", expiresAt: Date.now() + 10 * MIN });
       changed();
       const option = await new Promise((resolve) => asking.set(prompt, resolve));
-      Object.assign(ask, { outcome: "answered", option, by: "id:paul" });
+      work({ kind: "turn.prompt.closed", turn, prompt, outcome: "answered", option, by: "id:paul" });
       if (option === "deny") k++;
-    } else task.steps.push({ kind: "turn.step", turn, step: k, tool, args, ok: true });
-    publish("log", { type: "task", ...publicTask(task) });
+    } else work({ kind: "turn.step", turn, step: ++step, tool, args, ok: true });
     changed();
   }
   await sleep(every);
+  work({ kind: "turn.end", turn, outcome: "idle" });
+  publish("chat", { text: plan.report, turn }, GOOSE);
+  // the mind's half: the task ends, and its report is a message in the thread
+  await sleep(600);
   task.state = "done";
   task.report = plan.report;
   task.ended = Date.now();

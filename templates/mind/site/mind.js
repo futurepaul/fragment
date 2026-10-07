@@ -18,7 +18,7 @@
 import { memoryScreen, searchScreen, topicScreen, topicsScreen } from "./browse.js";
 import { avatar, go } from "./pieces.js";
 import { personaSheet, platformOrigin, settingsSheet } from "./sheets.js";
-import { S, busy, changed, currentPersona, onChange, persona, running, start } from "./store.js";
+import { S, busy, changed, currentPersona, handOff, handRunning, onChange, persona, start } from "./store.js";
 import { newScreen, threadScreen } from "./thread.js";
 import { ago, cleanSummary, firstLine, h, icon, iconButton, parseTool, plural, reconcile } from "./ui.js";
 
@@ -121,7 +121,7 @@ export function mount(root, fragment) {
         const t = S.threads.get(id);
         const on = current?.name === "thread" && current.id === id;
         const working = busy(id);
-        const hands = [...S.tasks.values()].some((k) => k.thread === id && running(k));
+        const hands = [...S.tasks.values()].some((k) => k.thread === id && handRunning(k));
         // what it came to (its summary), not a subject line
         const sum = cleanSummary(t.summary);
         const line = sum || firstLine(t.title, 90);
@@ -168,10 +168,10 @@ export function mount(root, fragment) {
     const looks = msgs.filter((m) => m.kind === "tool" && parseTool(m.text).name !== "computer").length;
     const tasks = [...S.tasks.values()].filter((k) => k.thread === r.id).sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
     const turn = S.turns.get(r.id);
-    const state = busy(r.id) ? (turn?.state === "settling" ? "Gathering memory" : "Thinking") : tasks.some(running) ? "Waiting on the computer" : "Ready";
+    const state = busy(r.id) ? (turn?.state === "settling" ? "Gathering memory" : "Thinking") : tasks.some(handRunning) ? "Waiting on the computer" : "Ready";
     const st = S.status;
     const topics = (t?.topics ?? []).map((x) => ({ x, t: (S.topics ?? []).find((y) => y.id === x.id) })).filter((o) => o.t);
-    const sig = [r.id, p.id, p.name, p.emoji, p.hands, msgs.length, looks, state, busy(r.id), tasks.map((k) => [k.id, k.state, k.text]), topics.map((o) => [o.x.id, o.x.p, o.t.name]), st?.hands, st?.T, st?.unbuilt];
+    const sig = [r.id, p.id, p.name, p.emoji, p.hands, msgs.length, looks, state, busy(r.id), tasks.map((k) => [k.id, handOff(k).state, k.text]), topics.map((o) => [o.x.id, o.x.p, o.t.name]), st?.hands, st?.T, st?.unbuilt];
     once(panel, sig, () => [
       h("div.panel-head", null, h("span", { text: "What it did here" }), h("span.grow"), iconButton("x", "Close", () => setPanel(false))),
       h("div.panel-persona", null, avatar(p, "xxl"), h("div.panel-name", { text: p.name }), h(`div.panel-state${busy(r.id) ? ".live" : ""}`, null, busy(r.id) ? h("span.pulse-dot") : null, state)),
@@ -191,9 +191,9 @@ export function mount(root, fragment) {
               null,
               tasks.map((k) =>
                 h(
-                  `button.did-row${running(k) ? ".live" : ""}`,
+                  `button.did-row${handRunning(k) ? ".live" : ""}`,
                   { type: "button", onclick: () => (screen?.reveal?.(`k:${k.id}`), narrowClose()) },
-                  running(k) ? icon("loader", "spin") : /^(error|failed|lost|stopped)$/.test(k.state ?? "") ? icon("alert") : icon("check"),
+                  handRunning(k) ? icon("loader", "spin") : /^(error|failed|lost|stopped)$/.test(handOff(k).state) ? icon("alert") : icon("check"),
                   h("span", { text: firstLine(k.text, 70) || "A hand-off" }),
                 ),
               ),
@@ -205,7 +205,7 @@ export function mount(root, fragment) {
         "section.panel-sec",
         null,
         h("h3", { text: "Computer" }),
-        h("div.kv", null, icon("monitor"), h("span", { text: st ? (st.hands ? (tasks.some(running) ? "Working on a hand-off" : "Connected, idle") : "No computer yet") : "…" })),
+        h("div.kv", null, icon("monitor"), h("span", { text: st ? (st.hands ? (tasks.some(handRunning) ? "Working on a hand-off" : "Connected, idle") : "No computer yet") : "…" })),
         p.hands ? null : h("p.quiet", { text: `${p.name} answers itself. Personas with hands can use the computer.` }),
       ),
       h(
@@ -235,6 +235,7 @@ export function mount(root, fragment) {
   document.addEventListener("mind:drawer", () => drawer(!app.classList.contains("drawer-open")));
   document.addEventListener("mind:panel", () => setPanel(!panelOpen));
   document.addEventListener("mind:persona", (e) => personaSheet(e.detail ? persona(e.detail) : null));
+  document.addEventListener("mind:reveal", (e) => screen?.reveal?.(e.detail));
 
   // ---- the toast ----
   function renderToast() {

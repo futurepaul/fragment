@@ -1,8 +1,16 @@
 // What the page knows of the mind, and how it learns it (docs/optchat.md,
 // "Operations" and "Records on `log`"): queries for what is there when it
 // opens, and the `log` channel, followed live, for everything after. The
-// main agent's reply streams as `log`'s draft `turn:<thread>`; goose's, on
-// a hand-off, as `chat`'s draft under the bridge's turn id.
+// main agent's reply streams as `log`'s draft `turn:<thread>`.
+//
+// A hand-off is goose's turn in the chat-records contract (docs/
+// chat-records.md): the page follows `work` (turn.start, steps, prompts,
+// turn.end, each naming its `turn`) and `chat`'s drafts (goose's words as
+// they stream) itself. A turn is its task's by the task's `turn` when the
+// mind records it; else exactly, by turn.start's `cause.seq` and the task's
+// message on `chat` (its text ends `(task <id>, thread <thread>)`); else,
+// as a last resort, in order. Steps a task record carries stand in while
+// no `work` is read.
 //
 // Screens read `S` and call `changed()`; the page renders once a frame.
 
@@ -12,6 +20,10 @@ export let F = null;
 /// The log's last records a page reads as it opens: each thread's latest
 /// turn state and a hand-off's latest steps are among them.
 const LOG_LAST = 300;
+/// `work`'s and `chat`'s last records read as the page opens: the recent
+/// hand-offs' turns, and the task messages that name them.
+const WORK_LAST = 200;
+const CHAT_LAST = 200;
 /// A thread's messages read at once, and again for "earlier".
 export const THREAD_PAGE = 160;
 /// The recent threads the rail shows, and a page of "everything".
@@ -41,7 +53,9 @@ export const S = {
   landed: new Map(), // message i -> the key of what it took the place of (a pending message's; "" for a draft)
   tasks: new Map(), // task id -> { id, thread, text, state, steps, report, started, ended, turn? }
   handDrafts: new Map(), // bridge turn -> { text, at }: goose's words as they stream
-  turnTask: new Map(), // bridge turn -> task id, learned
+  turnTask: new Map(), // bridge turn -> task id, known for sure
+  work: new Map(), // bridge turn -> { turn, start, at, steps: [], end, endAt, seen }: goose's turn as `work` has it
+  chatTask: new Map(), // `chat` seq -> task id: the message that handed the task over
   msgs: new Map(), // thread -> { byI: Map<i, message>, more, loaded, loading }
   pending: new Map(), // thread -> [{ key, text, at, persona, failed? }]: said, not yet in the log
   stopping: new Set(), // threads whose Stop was asked
@@ -218,40 +232,115 @@ function onLogDraft(d) {
   changed();
 }
 
+function workOf(turn) {
+  let w = S.work.get(turn);
+  if (!w) {
+    w = { turn, start: null, at: null, steps: [], end: null, endAt: null, seen: Date.now() };
+    S.work.set(turn, w);
+  }
+  return w;
+}
+
+// A goose draft names its turn; the turn's first word is when it is seen.
 function onChatDraft(d) {
   if (typeof d.turn !== "string") return;
   if (typeof d.text !== "string") S.handDrafts.delete(d.turn);
   else {
-    // a turn is matched to its hand-off when first heard, in order
-    if (!S.handDrafts.has(d.turn)) taskOfTurn(d.turn);
+    workOf(d.turn);
     S.handDrafts.set(d.turn, { text: d.text, at: Date.now() });
   }
   changed();
 }
 
+// The mind's message handing a task over: which `chat` seq is which task.
+function onChat(record) {
+  const b = record.body;
+  const text = typeof b === "string" ? b : b && typeof b.text === "string" ? b.text : "";
+  const m = text.match(/\(task ([A-Za-z0-9_.:-]{1,64}), thread [A-Za-z0-9_-]{1,64}\)\s*$/);
+  if (m && Number.isInteger(record.seq)) {
+    S.chatTask.set(record.seq, m[1]);
+    changed();
+  }
+}
+
+// goose's turn as `work` has it (docs/chat-records.md, "work").
+function onWork(record) {
+  const b = record.body;
+  if (!b || typeof b !== "object" || typeof b.turn !== "string") return;
+  const w = workOf(b.turn);
+  const at = num(record.at) ?? Date.now();
+  if (b.kind === "turn.start") {
+    w.start = b;
+    w.at = at;
+  } else if (b.kind === "turn.step" && Number.isInteger(b.step)) {
+    const k = w.steps.findIndex((s) => s.kind === "turn.step" && s.step === b.step);
+    if (k >= 0) w.steps[k] = b;
+    else w.steps.push(b);
+  } else if (b.kind === "turn.prompt" && typeof b.prompt === "string") {
+    if (!w.steps.some((s) => s.kind === "turn.prompt" && s.prompt === b.prompt)) w.steps.push({ ...b });
+  } else if (b.kind === "turn.prompt.closed" && typeof b.prompt === "string") {
+    const p = w.steps.find((s) => s.kind === "turn.prompt" && s.prompt === b.prompt);
+    if (p) Object.assign(p, { outcome: b.outcome, option: b.option, by: b.by });
+  } else if (b.kind === "turn.end") {
+    w.end = b;
+    w.endAt = at;
+    S.handDrafts.delete(b.turn);
+  } else return;
+  changed();
+}
+
 export const running = (task) => !!task && !/^(done|idle|ended|answered|error|failed|lost|stopped)$/.test(task.state ?? "");
 
-/// The task a bridge turn is: as its record names it (`turn`), else, when
-/// the backend does not say, the oldest running hand-off no turn has
-/// claimed yet: goose takes hand-offs in the order they were opened, so
-/// turns first heard in that order map one to one.
+/// The task a bridge turn is: as the mind records it (`turn`), else as its
+/// turn.start's cause names the task's message on `chat`, else (neither
+/// read) the oldest running hand-off no turn holds, the turns taken in the
+/// order they were first seen: goose takes hand-offs in the order they
+/// were opened.
 export function taskOfTurn(turn) {
   const known = S.turnTask.get(turn);
   if (known) return S.tasks.get(known) ?? null;
-  const claimed = new Set(S.turnTask.values());
-  const open = [...S.tasks.values()].filter((t) => running(t) && !t.turn && !claimed.has(t.id)).sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
-  if (!open.length) return null;
-  S.turnTask.set(turn, open[0].id);
-  return open[0];
+  const seq = S.work.get(turn)?.start?.cause?.seq;
+  const sure = Number.isInteger(seq) ? S.chatTask.get(seq) : null;
+  if (sure) {
+    S.turnTask.set(turn, sure);
+    return S.tasks.get(sure) ?? null;
+  }
+  const held = new Set(S.turnTask.values());
+  for (const t of S.tasks.values()) if (t.turn) held.add(t.id);
+  const open = [...S.tasks.values()].filter((t) => running(t) && !held.has(t.id)).sort((a, b) => (a.started ?? a.i ?? 0) - (b.started ?? b.i ?? 0));
+  const exact = (w) => Number.isInteger(w.start?.cause?.seq) && S.chatTask.has(w.start.cause.seq);
+  const unknown = [...S.work.values()].filter((w) => !S.turnTask.has(w.turn) && !exact(w) && !w.end).sort((a, b) => a.seen - b.seen);
+  const k = unknown.findIndex((w) => w.turn === turn);
+  return k >= 0 ? (open[k] ?? null) : null;
 }
+
+/// The bridge turn running `task`, if the page knows it.
+export function turnOfTask(task) {
+  if (task.turn) return task.turn;
+  for (const turn of S.work.keys()) if (taskOfTurn(turn)?.id === task.id) return turn;
+  return null;
+}
+
+/// A hand-off as the page shows it: its steps (from `work`, else as the
+/// task record carries them), its state (the task's, or its turn's end
+/// before the mind has said), and when it started and ended.
+export function handOff(task) {
+  const turn = turnOfTask(task);
+  const w = turn ? S.work.get(turn) : null;
+  const steps = w && w.steps.length ? w.steps : (task.steps ?? []);
+  let state = task.state ?? "running";
+  if (running(task) && w?.end) state = w.end.outcome === "idle" ? "done" : w.end.outcome === "stopped" ? "stopped" : "error";
+  return { turn, steps, state, started: task.started ?? w?.at ?? null, ended: task.ended ?? w?.endAt ?? null };
+}
+
+/// Whether a hand-off is still going (as far as the page knows).
+export const handRunning = (task) => running({ state: handOff(task).state });
 
 /// goose's words so far on `task`, if it is streaming them.
 export function handDraftOf(task) {
-  for (const [turn, d] of S.handDrafts) {
-    if (Date.now() - d.at > DRAFT_STALE_MS) continue;
-    if (taskOfTurn(turn)?.id === task.id) return d.text;
-  }
-  return null;
+  const turn = turnOfTask(task);
+  const d = turn ? S.handDrafts.get(turn) : null;
+  return d && Date.now() - d.at < DRAFT_STALE_MS ? d.text : null;
 }
 
 /// A turn's lock lapses this long after its last touch (docs/optchat.md).
@@ -414,9 +503,10 @@ export async function stop(thread) {
 export function start(fragment) {
   F = fragment;
   F.subscribe("log", onLog, { last: LOG_LAST, onDraft: onLogDraft });
-  // goose's words on a hand-off stream as `chat`'s drafts; its records
-  // reach the page through the mind's own `task` records on `log`
-  F.subscribe("chat", () => {}, { last: 1, onDraft: onChatDraft });
+  // hand-offs: the task messages and goose's words as they stream (`chat`),
+  // and goose's turns (`work`)
+  F.subscribe("chat", onChat, { last: CHAT_LAST, onDraft: onChatDraft });
+  F.subscribe("work", onWork, { last: WORK_LAST });
   F.live(
     "personas",
     {},

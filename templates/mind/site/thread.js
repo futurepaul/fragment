@@ -18,6 +18,7 @@ import {
   currentPersona,
   draftOf,
   handDraftOf,
+  handOff,
   loadEarlier,
   loadThread,
   persona,
@@ -268,18 +269,21 @@ function duration(ms) {
   return `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 }
 
-function taskPhase(task) {
-  if (!task) return "running";
-  if (running(task)) return "running";
-  if (/^(error|failed|lost)$/.test(task.state ?? "")) return "error";
-  if (task.state === "stopped") return "stopped";
+function phaseOf(state) {
+  if (running({ state })) return "running";
+  if (/^(error|failed|lost)$/.test(state ?? "")) return "error";
+  if (state === "stopped") return "stopped";
   return "done";
 }
 
-function taskSig(task, fallback) {
+const reveal = (key) => document.dispatchEvent(new CustomEvent("mind:reveal", { detail: key }));
+
+function taskSig(id, fallback, report) {
+  const task = S.tasks.get(id);
+  const ho = task ? handOff(task) : null;
   const draft = task ? handDraftOf(task) : null;
-  const asks = (task?.steps ?? []).filter((s) => s.kind === "turn.prompt").map((s) => [s.prompt, s.outcome, answering.get(s.prompt), Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt]);
-  return JSON.stringify([task?.state, task?.steps?.length, task?.steps?.at(-1)?.ok, task?.report?.length, draft?.length, task?.text ?? fallback, opened.has(`k:${task?.id}`), opened.has(`r:${task?.id}`), asks, S.me?.principal]);
+  const asks = (ho?.steps ?? []).filter((s) => s.kind === "turn.prompt").map((s) => [s.prompt, s.outcome, answering.get(s.prompt), Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt]);
+  return JSON.stringify([ho?.state, ho?.steps.length, ho?.steps.at(-1)?.ok, ho?.started, ho?.ended, task?.report?.length, draft?.length, task?.text ?? fallback, report, opened.has(`k:${id}`), opened.has(`r:${id}`), asks, S.me?.principal]);
 }
 
 // prompts this page answered, while the agent closes them: prompt -> option
@@ -319,17 +323,26 @@ function askRow(s, phase) {
   return h("div.task-ask", null, h("div.ask-text", null, icon("hand"), h("span", { text: s.text || "Your computer asks" })), foot);
 }
 
-function taskNode(id, fallback) {
+/// A report long enough to fold.
+const longReport = (text) => text.length > 360 || text.split("\n").length > 6;
+
+/// A hand-off's card: what was asked, goose's steps (and questions) as they
+/// come, its words as they stream, how it ended. Its report is the thread's
+/// `[<task>] …` message (`report`, that item's key) when the thread holds
+/// it, shown where it arrived; else the task's own.
+function taskNode(id, fallback, report) {
   const task = S.tasks.get(id) ?? null;
-  const phase = taskPhase(task);
-  const steps = task?.steps ?? [];
+  const ho = task ? handOff(task) : { steps: [], state: "running", started: null, ended: null };
+  const phase = phaseOf(ho.state);
+  const steps = ho.steps;
   const showAll = opened.has(`k:${id}`);
   const shown = showAll ? steps : steps.slice(-CARD_STEPS);
   const draft = task ? handDraftOf(task) : null;
   const text = task?.text || fallback || "";
-  const long = !!task?.report && (task.report.length > 360 || task.report.split("\n").length > 6);
+  const own = !report && task?.report ? task.report : "";
+  const long = !!own && longReport(own);
   const reportOpen = !long || opened.has(`r:${id}`);
-  const elapsed = task?.started ? duration((task.ended ?? Date.now()) - task.started) : "";
+  const elapsed = ho.started ? duration((ho.ended ?? Date.now()) - ho.started) : "";
   // a question open is what it waits on; else, between steps, it works
   const asking = phase === "running" && steps.some((s) => s.kind === "turn.prompt" && typeof s.outcome !== "string" && !(Number.isFinite(s.expiresAt) && Date.now() > s.expiresAt));
   const [label, ic] = asking ? ["Needs you", "hand"] : TASK_STATE[phase];
@@ -367,16 +380,47 @@ function taskNode(id, fallback) {
         ? h("div.task-steps", null, h("div.task-step.quiet", null, icon("loader", "spin"), h("span.task-args", { text: "Waking your computer…" })))
         : null,
     draft && phase === "running" ? h("div.task-draft", null, md(draft)) : null,
-    task?.report
-      ? h(
-          `div.task-report${reportOpen ? ".open" : ""}`,
-          null,
-          h("div.task-report-label", null, icon("file"), "Report"),
-          md(task.report),
-          long ? h("button.linkish", { type: "button", onclick: toggle(`r:${id}`) }, reportOpen ? "Show less" : "Read the whole report") : null,
-        )
-      : null,
+    report
+      ? h("div.task-foot", null, h("button.linkish", { type: "button", onclick: () => reveal(report) }, icon("file"), "Its report, below"))
+      : own
+        ? h(
+            `div.task-report${reportOpen ? ".open" : ""}`,
+            null,
+            h("div.task-report-label", null, icon("file"), "Report"),
+            md(own),
+            long ? h("button.linkish", { type: "button", onclick: toggle(`r:${id}`) }, reportOpen ? "Show less" : "Read the whole report") : null,
+          )
+        : null,
   );
+}
+
+/// A hand-off's report, where it reached the thread (the mind logs it as a
+/// `user` message `[<task>] …`, which starts its next turn).
+function reportNode(m, rep, key) {
+  const failed = /^ended: /.test(rep.text);
+  const long = longReport(rep.text);
+  const isOpen = !long || opened.has(key);
+  const task = S.tasks.get(rep.task);
+  const node = h(
+    `div.report${failed ? ".failed" : ""}${isOpen ? ".open" : ""}`,
+    null,
+    h(
+      "div.report-head",
+      null,
+      h("span.task-icon", null, icon("monitor")),
+      h("span.report-title", { text: failed ? "Your computer stopped" : "Your computer reported back" }),
+      h("time", { text: clock(m.at), title: when(m.at) }),
+    ),
+    md(failed ? rep.text.replace(/^ended: /, "Ended: ") : rep.text),
+    h(
+      "div.report-foot",
+      null,
+      long ? h("button.linkish", { type: "button", onclick: () => (opened.has(key) ? opened.delete(key) : opened.add(key), changed()) }, isOpen ? "Show less" : "Read the whole report") : null,
+      h("span.grow"),
+      task ? h("button.linkish", { type: "button", onclick: () => reveal(`k:${rep.task}`) }, "What it did", icon("up")) : null,
+    ),
+  );
+  return node;
 }
 
 function byline(p, at) {
@@ -418,6 +462,14 @@ function items(id) {
 
   if (box?.more) out.push({ key: "earlier", sig: String(box.loading), make: () => h("button.earlier", { type: "button", onclick: () => earlier(id) }, box.loading ? icon("loader", "spin") : icon("up"), "Earlier in this chat") });
 
+  // the hand-offs whose report this thread holds: task -> the report's key
+  const isReport = (rep) => rep && (S.tasks.has(rep.task) || /[\d_-]/.test(rep.task));
+  const reports = new Map();
+  for (const m of list) {
+    const rep = m.kind === "user" ? reportOf(m.text) : null;
+    if (isReport(rep)) reports.set(rep.task, `r:${m.i}`);
+  }
+
   for (let k = 0; k < list.length; k++) {
     const m = list[k];
     if (prevAt === null || startOfDay(m.at) !== startOfDay(prevAt) || m.at - prevAt > 3 * 3600_000) {
@@ -439,7 +491,8 @@ function items(id) {
         if (started) k++;
         placed.add(tid);
         const text = typeof call.args?.task === "string" ? call.args.task : "";
-        out.push({ key: `k:${tid}`, sig: taskSig(S.tasks.get(tid), text), make: () => taskNode(tid, text) });
+        const report = reports.get(tid);
+        out.push({ key: `k:${tid}`, sig: taskSig(tid, text, report), make: () => taskNode(tid, text, report) });
         continue;
       }
       if (!steps) agentSide(p, m.at);
@@ -450,10 +503,12 @@ function items(id) {
     flush();
     if (m.kind === "user") {
       const rep = reportOf(m.text);
-      if (rep && (S.tasks.has(rep.task) || /[\d_]/.test(rep.task))) {
+      if (isReport(rep)) {
+        // the hand-off's report, where it came; the mind answers it next
         side = "you";
         you = `r:${m.i}`;
-        out.push({ key: you, sig: "r", make: () => h("div.divider.report-mark", null, h("span", null, icon("monitor"), "Your computer reported back")) });
+        const key = you;
+        out.push({ key, sig: `${m.text}|${opened.has(key)}|${S.tasks.has(rep.task)}`, make: () => reportNode(m, rep, key) });
         continue;
       }
       side = "you";
@@ -470,11 +525,15 @@ function items(id) {
   }
 
   // hand-offs of this thread whose call is not among what is loaded
-  const first = list[0]?.at ?? 0;
+  // (one whose call is on an earlier page stays there)
+  const firstI = list[0]?.i ?? 0;
+  const firstAt = list[0]?.at ?? 0;
   for (const t of S.tasks.values()) {
-    if (t.thread !== id || placed.has(t.id) || (t.started ?? Date.now()) < first) continue;
+    if (t.thread !== id || placed.has(t.id)) continue;
+    if (Number.isInteger(t.i) ? t.i < firstI : (t.started ?? Infinity) < firstAt) continue;
     flush();
-    out.push({ key: `k:${t.id}`, sig: taskSig(t, t.text), make: () => taskNode(t.id, t.text) });
+    const report = reports.get(t.id);
+    out.push({ key: `k:${t.id}`, sig: taskSig(t.id, t.text, report), make: () => taskNode(t.id, t.text, report) });
   }
 
   const on = busy(id);
