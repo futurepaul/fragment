@@ -1109,12 +1109,7 @@ names no `Origin` is no browser's, so its cookies (the session, the share
 link's, the anonymous one) count for nothing: it is its signer's, its
 `?view=` link's, or anonymous. The `__live` protocol is JSON frames tagged by `type`, defined once
 as `LiveIn` (client → server) and `LiveOut` (server → client) in
-`crates/proto/src/live.rs`; the cell and the CLI decode through them. A
-client asks for it as `__live?v=2`. A socket opened without `v=2` is a
-page loaded before presence came one change a frame: it gets
-`{type: "presence", list: [{id, principal, data}]}`, everyone sharing
-presence, once after `hello` and on each change, and no change frames
-(until no such page connects: docs/technical-debt-ledger.md). An
+`crates/proto/src/live.rs`; the cell and the CLI decode through them. An
 unsigned visitor without a cookie gets the anonymous principal cookie on
 the upgrade, as a call does.
 
