@@ -443,8 +443,8 @@ the provider's own hosts.
   env, placeholder, hosts}]`, those it may use now:
   - a connection its owner has connected (Pipes says `connected`: the
     connected account's state, read with no token minted, believed for a
-    minute; the owner's own read of their connections, and a swap Pipes
-    refused, tell the computer at once);
+    minute; the owner's own read of their connections, and each swap's
+    answer from Pipes, tell the computer at once);
   - an operator key the deployment holds;
   - an own key its owner gave (`PUT /api/connections/{provider}/key`,
     sealed by the computer);
@@ -483,8 +483,13 @@ the provider's own hosts.
   query parameter the credential (percent-encoded), a half of basic auth
   the credential (the other half as it came). No `x-fragment-agent` is read
   or needed (a hard cut), and no `x-fragment-…` header goes to a provider.
-  A connection's token is held until a minute before it expires, at most
-  ten minutes. A request to such a host with no placeholder goes on as it
+  A connection's token is asked of Pipes for each request, never held:
+  Pipes holds and refreshes it, so a connection disconnected or revoked
+  stops at the next request, and the state the guest's view lists follows
+  Pipes' answer. The owner's WorkOS user, which Pipes asks for, is the
+  registry's once and then kept by the computer: the first subject a
+  person signed in as with an issuer never changes. A request to such a
+  host with no placeholder goes on as it
   came; a body is sent as it came, read whole (at most 32 MiB); a redirect
   is never followed (the guest follows it, without the credential).
 - **After the provider answers** (anything under 500), each operator key's

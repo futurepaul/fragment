@@ -24,7 +24,7 @@
 //!   decisions 22 and 37), which this cell resolves: for the agent the tag
 //!   names, among those that run here now (any of its owner's providers,
 //!   unless its owner narrowed them: decision 44); a connection's token
-//!   from WorkOS Pipes, held until shortly before it expires; an operator
+//!   from WorkOS Pipes, asked for each request; an operator
 //!   key, metered; an own key its owner gave, sealed here. Each call a
 //!   provider answered is counted by agent and month (`uses`).
 //! - **Its agents' new fragments** (`computer/joined`, from a fragment an
@@ -97,8 +97,8 @@ const USES_ROWS_MAX: u64 = 4 * (catalog::PROVIDERS_MAX as u64) * AGENTS_MAX;
 /// How long a connection's state, as Pipes said it, is believed: the
 /// guest reads its credentials every few seconds, and asking WorkOS that
 /// often is not ours to do. The person's own read of their connections
-/// tells it at once (`computer/own-keys`), and so does a swap Pipes
-/// refused.
+/// tells it at once (`computer/own-keys`), and so does each swap (what
+/// Pipes answered for its token).
 const STATES_TTL_MS: i64 = 60_000;
 /// After WorkOS did not answer, its states are asked again no sooner.
 const STATES_RETRY_MS: i64 = 10_000;
@@ -163,13 +163,6 @@ const MARK_EXEC_MS: i64 = 30_000;
 const EGRESS_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
 /// A port number the platform proxies to.
 const PORT_MAX: u16 = 65_535;
-/// A connection's token is used until this long before it expires, and
-/// for at most `TOKEN_HOLD_MAX_MS` (WorkOS refreshes it; asking again is
-/// cheap, so a revoked connection stops within minutes).
-const TOKEN_MARGIN_MS: i64 = 60_000;
-const TOKEN_HOLD_MAX_MS: i64 = 10 * 60_000;
-/// Tokens held at once (all go when it is full: there are few owners).
-const TOKENS_MAX: usize = 64;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -195,6 +188,9 @@ enum MetaKey {
     SaveNote,
     /// The test lever's saves still to fail (`fail-saves`).
     FailSaves,
+    /// The owner's WorkOS user, once the registry named it
+    /// (`workos_user`): `{owner, issuer, subject}`.
+    WorkosUser,
 }
 
 impl MetaKey {
@@ -209,6 +205,7 @@ impl MetaKey {
             MetaKey::Note => "note",
             MetaKey::SaveNote => "save_note",
             MetaKey::FailSaves => "fail_saves",
+            MetaKey::WorkosUser => "workos_user",
         }
     }
 }
@@ -246,11 +243,9 @@ pub struct ComputerCell {
     /// Whether this isolate has looked for a container an earlier one left
     /// running (lesson 6: `adopt`).
     adopted: std::cell::Cell<bool>,
-    /// Connections' tokens by (owner, provider): the token and until when
-    /// it is used. In memory only: a new isolate asks WorkOS again.
-    tokens: RefCell<BTreeMap<(String, String), (String, i64)>>,
     /// The owner's connections' states as Pipes last said them, and until
-    /// when they are believed (`STATES_TTL_MS`). In memory only.
+    /// when they are believed (`STATES_TTL_MS`). In memory only. Only what
+    /// the guest's view lists: a token is asked of Pipes for each swap.
     states: RefCell<Option<(BTreeMap<String, ProviderState>, i64)>>,
 }
 
@@ -260,7 +255,7 @@ impl DurableObject for ComputerCell {
         let state = State::from(raw.clone().unchecked_into::<worker_sys::DurableObjectState>());
         state.storage().sql().exec(SCHEMA, None).expect("the Computer schema applies");
         let cfg = Config::from_env(&env);
-        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), tokens: RefCell::default(), states: RefCell::default() }
+        ComputerCell { state, raw, cfg, env, adopted: std::cell::Cell::new(false), states: RefCell::default() }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -1157,7 +1152,7 @@ impl ComputerCell {
                 return states.clone();
             }
         }
-        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, owner).await {
+        let (states, until) = match crate::connections::connection_states(&self.env, self.cfg, self.workos_user(owner)).await {
             Ok(s) => (s, now + STATES_TTL_MS),
             Err(e) => {
                 console_error!("{}", json!({ "computer": "connection-states", "error": e.message }));
@@ -1168,7 +1163,25 @@ impl ComputerCell {
         states
     }
 
-    /// One connection's state, as a swap just learned it.
+    /// The WorkOS user the owner signed in as, whose connections Pipes
+    /// keeps: asked of the registry until it names one, then kept here for
+    /// that issuer. A fact, not a cache: the first subject a person signed
+    /// in as with an issuer is theirs for good, since the registry never
+    /// relinks or forgets a sign-in (registry/signin.rs `person_for`).
+    async fn workos_user(&self, owner: &str) -> CellResult<Option<String>> {
+        let issuer = crate::keys::workos(&self.env, self.cfg).await?.issuer();
+        let kept: Option<Value> = self.meta(MetaKey::WorkosUser)?.and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(subject) = kept.as_ref().filter(|k| k["owner"] == owner && k["issuer"] == issuer.as_str()).and_then(|k| k["subject"].as_str()) {
+            return Ok(Some(subject.to_string()));
+        }
+        let subject = crate::ask_registry(&self.env, &crate::registry::calls::SubjectOf { identity: owner.into(), issuer: issuer.clone() }).await?.subject;
+        if let Some(s) = &subject {
+            self.set_meta(MetaKey::WorkosUser, &json!({ "owner": owner, "issuer": issuer, "subject": s }).to_string())?;
+        }
+        Ok(subject)
+    }
+
+    /// One connection's state, as a swap just learned it from Pipes.
     fn note_state(&self, provider: &str, state: ProviderState) {
         if let Some((states, _)) = self.states.borrow_mut().as_mut() {
             states.insert(provider.to_string(), state);
@@ -1621,23 +1634,14 @@ impl ComputerCell {
         Ok(json!({ "runs": true, "computer": id, "agent": agent, "posted": posted["posted"] }))
     }
 
-    /// `owner`'s token for `provider`: the one held, or WorkOS Pipes' for
-    /// the WorkOS user `owner` signed in as.
+    /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
+    /// `owner` signed in as, asked for each swap (Pipes holds and refreshes
+    /// it), so a connection disconnected or revoked stops at the next
+    /// request. What Pipes answers is the connection's state too, as the
+    /// guest's view lists it (`note_state`).
     async fn connection_token(&self, owner: &str, provider: &str) -> CellResult<String> {
-        let now = js::now_ms();
-        let held = (owner.to_string(), provider.to_string());
-        if let Some((token, until)) = self.tokens.borrow().get(&held) {
-            if *until > now {
-                return Ok(token.clone());
-            }
-        }
-        let workos = crate::keys::workos(&self.env, self.cfg).await?;
-        let call = crate::registry::calls::SubjectOf { identity: owner.into(), issuer: workos.issuer() };
-        let user = crate::ask_registry(&self.env, &call)
-            .await?
-            .subject
-            .ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
-        let (status, answer) = crate::keys::pipes_token(&self.env, workos.api, provider, &user).await?;
+        let user = self.workos_user(owner).await?.ok_or_else(|| CellError::new(ErrorCode::NotConnected, format!("{owner} has no WorkOS account to connect {provider} with")))?;
+        let (status, answer) = crate::keys::pipes_token(&self.env, &self.cfg.workos()?.api, provider, &user).await?;
         if status != 200 {
             let why = answer["message"].as_str().unwrap_or("no reason given");
             return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS refused {provider}'s token ({status}): {why}")));
@@ -1652,13 +1656,7 @@ impl ComputerCell {
             return Err(CellError::new(ErrorCode::NotConnected, why));
         }
         let token = answer["access_token"]["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| CellError::new(ErrorCode::UpstreamFailed, "WorkOS answered no token"))?;
-        let expires = answer["access_token"]["expires_at"].as_str().map(js_sys::Date::parse).filter(|t| t.is_finite()).map(|t| t as i64);
-        let until = expires.map_or(now + TOKEN_HOLD_MAX_MS, |e| (e - TOKEN_MARGIN_MS).min(now + TOKEN_HOLD_MAX_MS));
-        let mut tokens = self.tokens.borrow_mut();
-        if tokens.len() >= TOKENS_MAX {
-            tokens.clear();
-        }
-        tokens.insert(held, (token.to_string(), until));
+        self.note_state(provider, ProviderState::Connected);
         Ok(token.to_string())
     }
 
