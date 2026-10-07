@@ -58,7 +58,7 @@ const PROFILES_PER_ASK = 64;
 const MEMBERS_AGAIN_MS = 5000;
 // A timer's longest wait (setTimeout's own bound).
 const TIMER_MAX_MS = 2 ** 31 - 1;
-const ROLES = ["public", "viewer", "editor", "owner"];
+const ROLES = ["public", "viewer", "contributor", "editor", "owner"];
 const atLeast = (role, floor) => ROLES.indexOf(role) >= ROLES.indexOf(floor);
 // Skyler's agent colors; an agent's is chosen by its identity.
 const AGENT_COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"];

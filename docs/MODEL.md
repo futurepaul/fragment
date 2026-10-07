@@ -71,7 +71,7 @@ Declared in `fragment.json`:
 {
   "operations": {
     "list":     { "kind": "query",    "role": "viewer", "input": { "type": "object", "properties": {} } },
-    "add_todo": { "kind": "mutation", "role": "editor", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 500 } } } },
+    "add_todo": { "kind": "mutation", "role": "contributor", "input": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string", "maxLength": 500 } } } },
     "digest":   { "kind": "job",      "role": "editor", "input": { "type": "object" } }
   }
 }
@@ -188,6 +188,12 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   triggered runs only). The platform holds no person's private
   key. An agent's designated owner reads what the agent can read, as a
   viewer, and never acts through it (docs/api.md, Principals and access).
+- Roles, weakest first: `public`, `viewer`, `contributor`, `editor`,
+  `owner`; each holds what the weaker ones do. A `contributor` (the
+  share sheet's "Use") calls the operations and posts to the channels
+  its app declares for it, and holds nothing that needs `editor` (the
+  files, deploys, secrets, blobs, replay, pause): a member who writes an
+  app's data cannot change the app, nor can an agent acting for them.
 - Members and invites are supervisor tables. A grant or revoke is one
   transaction; a revoke closes that principal's sockets. The `events`
   channel records every change. Membership leaves `fragment.json` (a git

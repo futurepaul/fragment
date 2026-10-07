@@ -7,7 +7,7 @@ use anyhow::Result;
 use fragment_core::npub;
 use fragment_nip98::Keys;
 use fragment_proto::{limits, ErrorCode};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::api::{self, Api};
 use crate::Suite;
@@ -174,6 +174,109 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
         "and the one shared with again keeps the new life's row: the ended life's change never undoes it",
         listed(api, &erin, &name)?.as_deref() == Some("viewer"),
         "",
+    );
+    contributor(s, api)
+}
+
+const TODO_APP: &[u8] = include_bytes!("../../fixtures/todo.mjs");
+/// The todo fixture's app as a members-only app declares it: its writes
+/// are its contributors', its whole list its editors'.
+const USED_JSON: &[u8] = br#"{
+  "operations": {
+    "add_todo": { "kind": "mutation", "role": "contributor", "input": { "type": "object" } },
+    "count": { "kind": "query" },
+    "list": { "kind": "query", "role": "editor" }
+  },
+  "channels": { "notes": { "post": "contributor" } }
+}"#;
+
+/// Goal: the role between viewer and editor (#232, item 2: the share
+/// sheet's "Use"). A contributor calls what is declared for it and what a
+/// viewer may, and nothing an editor's role opens; an agent capped at it
+/// acts with no more. Method: Ann's app declares `add_todo` and the
+/// `notes` channel's posts for contributors and `list` for editors. Bea, a
+/// contributor, and Cy, a viewer, try each, and Bea the editor's routes;
+/// then Ann's agent held at contributor, and Bea's agent acting for her;
+/// last, an invite makes Cy a contributor.
+fn contributor(s: &mut Suite, api: &Api) -> Result<()> {
+    let (ann, bea, cy) = (api.person()?, api.person()?, api.person()?);
+    let (ann_id, bea_id) = (api.identity(&ann)?, api.identity(&bea)?);
+    let name = s.named(api, &ann, "used")?;
+    let c = s.create(api, &ann, &name)?;
+    super::app::ship(s, &c, TODO_APP, USED_JSON);
+    let path = |rest: &str| format!("/api/f/{name}/{rest}");
+    let grant = |who: &Keys, role: &str| api.signed(&ann, "PUT", &path(&format!("members/{}", npub::encode(who.pubkey_hex()))), Some(&json!({ "role": role })));
+    let r = grant(&bea, "contributor")?;
+    grant(&cy, "viewer")?;
+    s.ok("the owner shares it with Bea to use: a contributor", r.status == 200 && r.body["role"] == "contributor", &r);
+    let r = api.status(&bea, &name)?;
+    s.ok(
+        "Bea reads its status as a contributor, without the inbox token, and her list says so",
+        r.status == 200 && r.body["role"] == "contributor" && r.body["inboxToken"].is_null() && listed(api, &bea, &name)?.as_deref() == Some("contributor"),
+        &r,
+    );
+    let add = |k: &Keys, id: &str| api.op(k, &name, "add_todo", id, json!({ "text": "from a member" }));
+    let note = |k: &Keys, id: &str| api.signed(k, "POST", &path("channels/notes"), Some(&json!({ "id": id, "body": { "text": "a note" } })));
+    let (added, again, noted) = (add(&bea, "b1")?, add(&bea, "b1")?, note(&bea, "n1")?);
+    let count = api.op(&bea, &name, "count", "q", json!({}))?;
+    s.ok(
+        "a contributor calls an operation declared for it (the same id again is its replay), posts to a channel that takes contributors' posts, and calls a viewer's query",
+        added.status == 200 && again.body["replayed"] == true && noted.status == 200 && count.body["result"]["n"] == 1,
+        json!({ "add": added.body, "again": again.body, "note": noted.body, "count": count.body }),
+    );
+    let r = api.op(&bea, &name, "list", "q", json!({}))?;
+    s.ok("and is refused one declared for editors (403)", r.status == 403 && r.message() == "this needs the editor role", &r);
+    let (added, noted, count) = (add(&cy, "c1")?, note(&cy, "n2")?, api.op(&cy, &name, "count", "q", json!({}))?);
+    s.ok(
+        "a viewer is refused what is declared for contributors, and still reads",
+        added.status == 403 && noted.status == 403 && count.status == 200,
+        json!({ "add": added.body, "note": noted.body, "count": count.status }),
+    );
+    let refused = [
+        ("files", api.signed(&bea, "POST", &path("files"), Some(&json!({ "files": [{ "path": "site/index.html", "text": "mine now" }] })))?),
+        ("deploy", api.signed(&bea, "POST", &path("deploy"), Some(&json!({})))?),
+        ("secret set", api.signed(&bea, "PUT", &path("secrets/API_KEY"), Some(&json!("sk-not-hers")))?),
+        ("secrets", api.signed(&bea, "GET", &path("secrets"), None)?),
+        ("storage token", api.signed(&bea, "GET", &path("storage-token"), None)?),
+    ];
+    s.ok(
+        "a contributor holds nothing of an editor's: no file writes, deploys, secrets, or storage token (403 each)",
+        refused.iter().all(|(_, r)| r.status == 403),
+        json!(refused.iter().map(|(what, r)| (what, r.status)).collect::<Vec<_>>()),
+    );
+    let r = api.op(&ann, &name, "list", "q", json!({}))?;
+    s.ok("the owner's list holds Bea's todo", r.status == 200 && r.body["result"]["todos"].as_array().map(Vec::len) == Some(1), &r);
+
+    // agents capped at it: Ann's, held there, and Bea's, acting for her
+    let (hand, hand_id) = super::delegation::agent_of(api, &ann)?;
+    let held = api.signed(&ann, "PUT", &format!("/api/identities/{hand_id}/held"), Some(&json!({ "held": "contributor" })))?;
+    let for_ann = |rest: &str, body: Value| api.signed(&hand, "POST", &path(&format!("{rest}?for={ann_id}")), Some(&body));
+    let (added, listed_all, wrote) = (
+        for_ann("ops/add_todo", json!({ "id": "h1", "input": { "text": "from Ann's agent" } }))?,
+        for_ann("ops/list", json!({ "id": "h2", "input": {} }))?,
+        for_ann("files", json!({ "files": [{ "path": "site/index.html", "text": "the agent's" }] }))?,
+    );
+    s.ok(
+        "Ann's agent held at contributor, acting for Ann (the owner), calls what contributors may and is refused an editor's operation and file writes",
+        held.status == 200 && added.status == 200 && listed_all.status == 403 && wrote.status == 403,
+        json!({ "held": held.status, "add": added.body, "list": listed_all.body, "files": wrote.body }),
+    );
+    let (juniper, _) = super::delegation::agent_of(api, &bea)?;
+    let for_bea = |op: &str, id: &str, input: Value| api.signed(&juniper, "POST", &path(&format!("ops/{op}?for={bea_id}")), Some(&json!({ "id": id, "input": input })));
+    let (added, listed_all) = (for_bea("add_todo", "j1", json!({ "text": "from Bea's agent" }))?, for_bea("list", "j2", json!({}))?);
+    s.ok(
+        "Bea's agent, acting for Bea, acts as the contributor she is: no further",
+        added.status == 200 && listed_all.status == 403,
+        json!({ "add": added.body, "list": listed_all.body }),
+    );
+
+    let r = api.signed(&ann, "POST", &path("invites"), Some(&json!({ "role": "contributor" })))?;
+    let joined = api.signed(&cy, "POST", &path("join"), Some(&json!({ "token": r.body["token"] })))?;
+    let added = add(&cy, "c2")?;
+    s.ok(
+        "an invite grants contributor: the viewer who joins with it now writes",
+        r.status == 200 && r.body["role"] == "contributor" && joined.body["role"] == "contributor" && added.status == 200,
+        json!({ "invite": r.body, "join": joined.body, "add": added.body }),
     );
     Ok(())
 }
