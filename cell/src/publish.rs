@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use fragment_proto::{ErrorCode, Role};
-use fragment_templates::{blessed, Template, BLANK, CALORIES, INBOX, TODO};
+use fragment_templates::{blessed, Template, BLANK, BRIEF, CALORIES, INBOX, TODO};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -20,7 +20,7 @@ use crate::js;
 /// that names none of them lists them in this order). `notes` stays with
 /// the CLI (`fragment new --template notes`): at 3 MiB it would double the
 /// cell.
-pub(crate) const TEMPLATES: [(&str, Template); 4] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES)];
+pub(crate) const TEMPLATES: [(&str, Template); 5] = [("blank", BLANK), ("todo", TODO), ("inbox", INBOX), ("calories", CALORIES), ("brief", BRIEF)];
 
 /// `live` moving under a deploy this many times is an error.
 const DEPLOY_ATTEMPTS: usize = 5;

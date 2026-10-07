@@ -6,6 +6,7 @@ mod app;
 mod appfiles;
 mod blobs;
 mod brain;
+mod brief;
 mod chat;
 mod author;
 mod computers;
@@ -93,6 +94,7 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     notes::notes,
     brain::brain,
+    brief::brief,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -126,7 +128,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "hermes", "agent-smoke", "agent-ask"],
     &["chat", "shell-ui", "wipe", "sync", "restart"],
-    &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
+    &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "brief"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
