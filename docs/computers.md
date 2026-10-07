@@ -716,10 +716,10 @@ and how a runtime finds them, is the image's.
   `/data` keeps the last install, so a wake fetches only what a release
   changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all (`skills.rs`);
   a file past one, or at a path that is no safe relative path, is refused
-  and the rest installs. A person whose agents predate their skills
-  fragment (setup makes it since 2026-10-03) gets one as the shell loads,
-  once, from the blessed template, as setup makes it (shell.js,
-  `backfillSkills`); their awake computers install it within the minute.
+  and the rest installs. A person without one (setup makes it since
+  2026-10-03) adds it from settings ("Add the managed skills", from the
+  blessed template, as setup makes it); their awake computers install it
+  within the minute.
 - **The platform skill**, `fragment`, is every profile's, whatever the
   skills fragment holds: what an agent knows of the platform it is on. It
   is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
