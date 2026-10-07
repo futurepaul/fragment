@@ -38,6 +38,10 @@ pub const WAIT_S_MAX: u64 = 1_800;
 pub const POLL_MS: u64 = 2_000;
 /// Pages of a channel one look reads, at most (1000 records each).
 const PAGES_MAX: usize = 10;
+/// A question asked again (the same `--id`: a replay) was posted before, so
+/// its answer may be on `work` already: `--wait` reads back this many of
+/// `work`'s records for it. One further back than that is not found.
+pub const REPLAY_BACK_RECORDS: i64 = 2_000;
 
 /// An agent that may be asked: one its owner's computer runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,8 +316,10 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
         .map_err(|e| e.context(crate::CallId::post(&id)))?;
     let seq = posted.record.seq;
     let record = serde_json::to_value(&posted.record)?;
+    // a replay's turn may have run already: read `work` back for it
+    let from = if posted.replayed { (work_seq - REPLAY_BACK_RECORDS).max(0) } else { work_seq };
     let answer = match wait {
-        Some(s) => answered(c, &full, &asked.identity, seq, work_seq, Duration::from_secs(s))?,
+        Some(s) => answered(c, &full, &asked.identity, seq, from, Duration::from_secs(s))?,
         None => None,
     };
     Ok(Asked { chat: full, asked, record, replayed: posted.replayed, created, added, answer, waited_s: wait })
