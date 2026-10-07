@@ -2,7 +2,7 @@
 //! runtime to the fragment API (docs/computers.md).
 //!
 //! ```text
-//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=relay|script)
+//! fragment-bridge run      the bridge (BRIDGE_RUNTIME=goose|script)
 //! fragment-bridge screen   only the screen on BRIDGE_SCREEN_LISTEN
 //! fragment-bridge version
 //! ```
@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use fragment_bridge::driver::{self, Config};
 use fragment_bridge::engine::Settings;
-use fragment_bridge::runtime::relay::{Relay, RelayConfig};
+use fragment_bridge::runtime::goose::{Goose, GooseConfig};
 use fragment_bridge::runtime::script::{Script, ScriptConfig};
 use fragment_bridge::runtime::Runtime;
 use fragment_bridge::{ev, limits, screen};
@@ -42,24 +42,21 @@ fn parse_ms(name: &str, default: u64) -> u64 {
 }
 
 fn runtime() -> Box<dyn Runtime> {
-    match env_or("BRIDGE_RUNTIME", "relay").as_str() {
-        "relay" => {
-            let listen: SocketAddr = env_or("BRIDGE_RELAY_LISTEN", "127.0.0.1:8650").parse().unwrap_or_else(|_| fail("BRIDGE_RELAY_LISTEN is not host:port"));
-            let secret_file = env("BRIDGE_RELAY_SECRET_FILE").unwrap_or_else(|| fail("BRIDGE_RELAY_SECRET_FILE names the Relay secret's file"));
-            let secret = std::fs::read_to_string(&secret_file).unwrap_or_else(|e| fail(&format!("{secret_file}: {e}"))).trim().to_string();
-            if secret.len() < 32 {
-                fail("the Relay secret is at least 32 characters");
-            }
-            let config = RelayConfig {
-                listen,
-                gateway_id: env_or("GATEWAY_RELAY_ID", "fragment-computer"),
-                secret,
-                media_dir: PathBuf::from(env_or("BRIDGE_RELAY_MEDIA_DIR", "/tmp/bridge-relay-media")),
-            };
-            Box::new(Relay { config })
-        }
+    match env_or("BRIDGE_RUNTIME", "goose").as_str() {
+        "goose" => Box::new(Goose::new(GooseConfig {
+            command: PathBuf::from(env_or("BRIDGE_GOOSE_BIN", "/usr/local/bin/goose")),
+            args: ["acp", "--with-builtin", "developer"].map(String::from).to_vec(),
+            work: PathBuf::from(env_or("BRIDGE_GOOSE_WORK", "/data/work")),
+            home: PathBuf::from(env_or("BRIDGE_GOOSE_HOME", "/data/work/home")),
+            root: PathBuf::from(env_or("BRIDGE_GOOSE_ROOT", "/tmp/goose")),
+            api: env("FRAGMENT_API").unwrap_or_else(|| fail("FRAGMENT_API is the fragment API's address")),
+            model: env("FRAGMENT_MODEL").unwrap_or_else(|| fail("FRAGMENT_MODEL is the model intercept's address")),
+            tier: env_or("BRIDGE_GOOSE_TIER", "medium"),
+            cli: env("BRIDGE_GOOSE_CLI").map(PathBuf::from),
+            ca: env("BRIDGE_TRUST_CA").map(|ca| (PathBuf::from(ca), PathBuf::from("/etc/ssl/certs/ca-certificates.crt"))),
+        })),
         "script" => Box::new(Script { config: ScriptConfig { pace: Duration::from_millis(parse_ms("BRIDGE_SCRIPT_PACE_MS", 40)), scratch: PathBuf::from(env_or("BRIDGE_SCRIPT_SCRATCH", "/tmp/bridge-script")), data: PathBuf::from(env_or("BRIDGE_SCRIPT_DATA", "/data")) } }),
-        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither relay nor script")),
+        other => fail(&format!("BRIDGE_RUNTIME {other:?} is neither goose nor script")),
     }
 }
 
@@ -127,9 +124,8 @@ async fn main() {
                 held: PathBuf::from(env_or("BRIDGE_HELD", "/run/computer/held")),
                 left_out: left_out(),
                 settings: Settings { prompt_ttl_ms: parse_ms("BRIDGE_PROMPT_TTL_MS", limits::PROMPT_TTL_MS_DEFAULT), turn_idle_ms: parse_ms("BRIDGE_TURN_IDLE_MS", limits::TURN_IDLE_MS_MAX) },
-                agents_file: env("BRIDGE_AGENTS_FILE").map(PathBuf::from),
             };
-            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending, "agentsFile": cfg.agents_file.as_ref().map(|p| p.display().to_string()) });
+            ev!("bridge.boot", { "computer": env("FRAGMENT_COMPUTER"), "image": env("FRAGMENT_IMAGE"), "restorePending": cfg.restore_pending });
             if let Some(screen) = screen_config() {
                 let stop = stop.clone();
                 tokio::spawn(async move {

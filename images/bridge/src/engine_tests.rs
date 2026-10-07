@@ -155,6 +155,9 @@ fn a_reply_streams_then_posts() {
     let d = ev(&mut e, Event::Draft { turn: turn.clone(), text: "He".into() }, T0 + 2);
     assert_eq!(d.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: Some("He".into()) }]);
     assert!(!d.dirty, "drafts are never stored");
+    // an empty draft stops the draft (its words went to a step)
+    let stop = ev(&mut e, Event::Draft { turn: turn.clone(), text: String::new() }, T0 + 2);
+    assert_eq!(stop.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: None }]);
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
     let end = e.step(Input::Runtime(Event::End { turn: turn.clone(), outcome: Outcome::Idle }), T0 + 4);
@@ -319,8 +322,8 @@ fn an_approval_expires() {
 
 /// Goal (Paul on p5, 2026-10-05: a card missed, then no answers): an open
 /// card keeps its computer awake its whole life, so it expires with its
-/// runtime still there (an idle sleep under it cut its turn, and Hermes
-/// then met the next message with the cut request asked again). At its
+/// runtime still there (an idle sleep under it cut its turn, and the
+/// runtime then met the next message with the cut request asked again). At its
 /// expiry the card is closed `expired` and the runtime told; the turn ends
 /// as the runtime ends it; the message said meanwhile, which waited behind
 /// it, is claimed and run; only then is the computer let go.
@@ -343,8 +346,8 @@ fn an_open_card_keeps_its_computer_awake_until_it_expires() {
     assert_eq!(posts(&x), vec![(records::work_id(&turn, "pc:p1"), json!({ "kind": "turn.prompt.closed", "turn": turn, "prompt": "p1", "outcome": "expired" }))]);
     assert_eq!(commands(&x), vec![Command::Answer { turn: turn.clone(), prompt: "p1".into(), option: None, seq: 0, by: String::new() }]);
     assert_eq!((e.state().turns[&turn].phase, keepalive(&x), e.keepalive()), (Phase::Running, None, true), "running again, as its runtime goes on without the answer");
-    // the runtime ends it (Hermes: its approval timed out with the card, the
-    // command BLOCKED, then its reply): the message that waited is run
+    // the runtime ends it (its approval timed out with the card, the command
+    // not run, then its reply): the message that waited is run
     let end = ev(&mut e, Event::End { turn: turn.clone(), outcome: Outcome::Idle }, T0 + 61_000);
     assert_eq!(posts(&end).iter().filter(|(id, _)| id == &records::work_id(&turn, "end")).count(), 1, "the card's turn ends once");
     let next = started(&end).expect("the message that waited is claimed and run");
@@ -545,8 +548,8 @@ fn attachments_ride_along() {
     assert_eq!(files, Some(vec![file]));
 }
 
-/// Goal: a turn that asks its asker something in words (Hermes' open
-/// clarify) shows the question at once, and the asker's next message is
+/// Goal: a turn that asks its asker something in words (an open clarify)
+/// shows the question at once, and the asker's next message is
 /// handed to that turn as its answer, never queued behind it (where the
 /// turn would wait for it forever). Invalid: someone else's message, an
 /// empty one, or one to another agent is not the answer. Replay: the
@@ -633,8 +636,8 @@ fn a_question_waits_as_long_as_a_prompt() {
     ev(&mut e, Event::Asked { turn: t2.clone() }, T0 + 3_600_003);
     let stop = said(&mut e, &a, &v, 3, "id:paul", json!({ "kind": "stop" }), T0 + 3_600_004);
     assert_eq!(commands(&stop), vec![Command::Stop { turn: t2 }]);
-    // the Stop answered the question (Relay says "Stop." to it): the
-    // asker's next message is a turn of its own, queued behind it
+    // the Stop answered the question: the asker's next message is a turn
+    // of its own, queued behind it
     let after = said(&mut e, &a, &v, 4, "id:paul", json!({ "text": "never mind" }), T0 + 3_600_005);
     assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");
 }
@@ -1128,7 +1131,7 @@ impl World {
         self.step(Input::Runtime(Event::Connected(true)));
     }
 
-    /// Its runtime can take no turn now (Hermes gone from its socket).
+    /// Its runtime can take no turn now (goose died, not yet restarted).
     fn disconnect(&mut self) {
         self.step(Input::Runtime(Event::Connected(false)));
     }
@@ -1326,8 +1329,8 @@ impl World {
         self.step(Input::Runtime(Event::End { turn: turn.into(), outcome }));
     }
 
-    /// The runtime asks its asker something to answer in words (Hermes'
-    /// open clarify): the question is a reply part, and the turn waits,
+    /// The runtime asks its asker something to answer in words (an open
+    /// clarify): the question is a reply part, and the turn waits,
     /// running, for their next message (`Command::Tell`).
     fn ask_in_words(&mut self, turn: &str) {
         let h = self.held.get_mut(turn).expect("held");

@@ -3,9 +3,8 @@
 //! value (a message past `QUEUED_PER_CHAT_MAX` gets a `turn.end` saying so)
 //! or is a bug the bridge crashes on, as each use says.
 
-/// A WebSocket frame (Relay's or `__live`'s) is at most this many bytes.
-/// Hermes' Relay keeps its own frames under 1 MiB; a `__live` page of
-/// records is about 1 MiB (docs/api.md, Serving).
+/// A WebSocket frame (`__live`'s) is at most this many bytes: a `__live`
+/// page of records is about 1 MiB (docs/api.md, Serving).
 pub const FRAME_MAX_BYTES: usize = 1024 * 1024;
 
 /// An HTTP answer the bridge reads whole is at most this many bytes: a page
@@ -76,8 +75,8 @@ pub const ERROR_MAX_CHARS: usize = 300;
 
 /// Attachments one message or reply carries, at most.
 pub const ATTACHMENTS_MAX: usize = 8;
-/// One attachment's bytes, at most: Hermes' own media cap (its
-/// `MEDIA_MAX_BYTES`), well under the platform's 256 MiB blob cap.
+/// One attachment's bytes, at most: a chat's own cap (docs/chat-records.md),
+/// well under the platform's 256 MiB blob cap.
 pub const ATTACHMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A prompt waits this long for its answer unless the runtime says
@@ -116,7 +115,7 @@ pub const PROMPT_TTL_MS_MIN: u64 = 10 * 1000;
 pub const PROMPT_TTL_MS_MAX: u64 = 24 * 60 * 60 * 1000;
 
 /// A running turn that hears nothing from its runtime this long is ended as
-/// an error. Hermes' own liveness watchdog fires at 10 minutes.
+/// an error.
 pub const TURN_IDLE_MS_MAX: u64 = 15 * 60 * 1000;
 
 /// A message an agent writes to another agent (`to`) is answered only this

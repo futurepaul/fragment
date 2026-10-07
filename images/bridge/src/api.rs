@@ -151,26 +151,6 @@ pub struct Page {
     pub next: u64,
 }
 
-/// One file of a fragment at main (`GET /api/f/{name}/files`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileEntry {
-    pub path: String,
-    #[serde(default)]
-    pub size: u64,
-    #[serde(default)]
-    pub last_commit_sha: String,
-}
-
-/// One change of a commit (`POST /api/f/{name}/files`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum FileChange {
-    Text { path: String, text: String },
-    Base64 { path: String, base64: String },
-    Delete { path: String, delete: bool },
-}
-
 /// The fragment API at `FRAGMENT_API`.
 #[derive(Clone)]
 pub struct Api {
@@ -380,54 +360,11 @@ impl Api {
         self.call(Method::GET, &format!("/api/f/{}/blobs/{}", name(fragment)?, encode(sha256)), Some(agent), None, max).await
     }
 
-    /// `GET /api/f/{name}/files`: the files at main.
-    pub async fn files(&self, agent: &str, fragment: &str) -> Result<Vec<FileEntry>, ApiError> {
-        #[derive(Deserialize)]
-        struct A {
-            files: Vec<FileEntry>,
-        }
-        let a: A = self.json(Method::GET, &format!("/api/f/{}/files", name(fragment)?), Some(agent), None).await?;
-        Ok(a.files)
-    }
-
-    /// `GET /api/f/{name}/file?path=`: one file's bytes at main.
-    pub async fn file(&self, agent: &str, fragment: &str, path: &str, max: usize) -> Result<Bytes, ApiError> {
-        self.call(Method::GET, &format!("/api/f/{}/file?path={}", name(fragment)?, encode(path)), Some(agent), None, max).await
-    }
-
-    // ---- as an agent acting for a person (`for`: decision 36) ----
-
-    /// `GET /api/fragments?for=`: the fragments the agent reaches acting for
-    /// `person`, each with its kind.
-    pub async fn fragments_for(&self, agent: &str, person: &str) -> Result<Vec<FragmentEntry>, ApiError> {
-        #[derive(Deserialize)]
-        struct A {
-            fragments: Vec<FragmentEntry>,
-        }
-        let a: A = self.json(Method::GET, &format!("/api/fragments?for={}", encode(person)), Some(agent), None).await?;
-        Ok(a.fragments)
-    }
-
-    /// `GET /api/f/{name}/files?for=`: the files at main, a blessed
-    /// template's data among them.
-    pub async fn files_for(&self, agent: &str, fragment: &str, person: &str) -> Result<Vec<FileEntry>, ApiError> {
-        #[derive(Deserialize)]
-        struct A {
-            files: Vec<FileEntry>,
-        }
-        let a: A = self.json(Method::GET, &format!("/api/f/{}/files?for={}", name(fragment)?, encode(person)), Some(agent), None).await?;
-        Ok(a.files)
-    }
-
-    /// `GET /api/f/{name}/file?path=&for=`: one file's bytes at main.
-    pub async fn file_for(&self, agent: &str, fragment: &str, person: &str, path: &str, max: usize) -> Result<Bytes, ApiError> {
-        self.call(Method::GET, &format!("/api/f/{}/file?path={}&for={}", name(fragment)?, encode(path), encode(person)), Some(agent), None, max).await
-    }
-
-    /// `POST /api/f/{name}/files {files, message, key}`: one commit to main.
-    pub async fn commit(&self, agent: &str, fragment: &str, files: &[FileChange], message: &str, key: &str) -> Result<String, ApiError> {
-        let v: Value = self.json(Method::POST, &format!("/api/f/{}/files", name(fragment)?), Some(agent), Some(json!({ "files": files, "message": message, "key": key }))).await?;
-        Ok(v["commit"].as_str().unwrap_or("").to_string())
+    /// `POST /api/f/{name}/ops/{op} {id, input}` → its `result` (a query's
+    /// answer; the same id answers the same call).
+    pub async fn op(&self, agent: &str, fragment: &str, op: &str, id: &str, input: &Value) -> Result<Value, ApiError> {
+        let v: Value = self.json(Method::POST, &format!("/api/f/{}/ops/{}", name(fragment)?, encode(op)), Some(agent), Some(json!({ "id": id, "input": input }))).await?;
+        Ok(v["result"].clone())
     }
 
     /// `GET /f/{name}/__live`, as the agent.
@@ -458,16 +395,5 @@ mod tests {
         assert!(!ApiError::Refused { status: 409, error: String::new(), message: String::new() }.retryable());
         assert!(ApiError::Refused { status: 403, error: String::new(), message: String::new() }.gone());
         assert!(ApiError::Transport("x".into()).retryable());
-    }
-
-    #[test]
-    fn file_changes_are_the_routes() {
-        let v = serde_json::to_value(vec![
-            FileChange::Text { path: "SOUL.md".into(), text: "x".into() },
-            FileChange::Base64 { path: "a.png".into(), base64: "AA==".into() },
-            FileChange::Delete { path: "old.md".into(), delete: true },
-        ])
-        .unwrap();
-        assert_eq!(v, json!([{ "path": "SOUL.md", "text": "x" }, { "path": "a.png", "base64": "AA==" }, { "path": "old.md", "delete": true }]));
     }
 }

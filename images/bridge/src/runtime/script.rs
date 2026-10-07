@@ -1,6 +1,6 @@
 //! The `script` runtime: a deterministic agent that answers from rules, so
 //! the platform's lanes run with no agent runtime at all (the stub image,
-//! and the proof that the platform holds nothing Hermes-specific). Each
+//! and the proof that the platform holds nothing runtime-specific). Each
 //! turn is a pure function of its message:
 //!
 //! - default: two drafts, then the reply `echo: [<asker>] <text>`;
