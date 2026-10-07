@@ -5,9 +5,8 @@ version: 1.0.0
 author: local
 license: MIT
 metadata:
-  hermes:
-    tags: [PDF, nano-pdf, Gemini, Playwright, Chromium, review, decks]
-    related_skills: [nano-pdf, browser]
+  tags: [PDF, nano-pdf, Gemini, Playwright, Chromium, review, decks]
+  related_skills: [nano-pdf, browser]
 ---
 
 # PDF Workbench
@@ -17,8 +16,8 @@ Use this skill when the user wants to edit or extend an existing PDF, especially
 What this needs on your computer:
 - `nano-pdf`: install it once in user space if `command -v nano-pdf` finds
   nothing (`uv tool install nano-pdf`, or `pipx install nano-pdf`)
-- Chromium through Playwright, for the visual check (Hermes' browser tools
-  work too)
+- Chromium through Playwright, for the visual check (your runtime's
+  browser tools work too)
 
 ## Required Credential
 

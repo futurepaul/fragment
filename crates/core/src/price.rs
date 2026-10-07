@@ -340,7 +340,7 @@ pub const DEFAULT_IMAGES: i64 = 500_000;
 /// and the estimate says what it assumes.
 pub const DEFAULT_KEYS: [(&str, i64, u64); 4] = [
     // Perplexity's Search API (`POST /search`, the perplexity-research
-    // skill's search and Hermes' own web search): $5.00 per 1,000
+    // skill's search): $5.00 per 1,000
     // requests. Source: docs.perplexity.ai/getting-started/pricing. A Sonar
     // Pro brief (`/v1/sonar`) also bills tokens ($3 in, $15 out per
     // million) and a request fee of $6 to $14 per 1,000: it is metered at

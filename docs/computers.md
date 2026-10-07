@@ -3,9 +3,10 @@
 Status: **the contract phase 4 builds** (docs/cloudflare-v1.md, decisions
 13, 18, 19, 22, 23, 39, 41–44). The platform side is the generic Computer
 Durable Object in the cell. The image side is any image: ours runs
-Hermes (`images/hermes/`), and a stub image (`images/stub/`) proves
-the platform needs nothing Hermes-specific. Nothing here names an agent
-runtime. A change that would have to is a design bug (the rule).
+goose (`images/goose/`, docs/optchat.md), and a stub image
+(`images/stub/`) proves the platform needs nothing runtime-specific.
+Nothing here names an agent runtime. A change that would have to is a
+design bug (the rule).
 
 ## What a computer is
 
@@ -145,21 +146,18 @@ that names a PID from before a sleep can name a live process after it.
   (`{computer, hold, held, sleep, ms, tries, last, unheld}`: `tries` the
   DO's looks for the answer, `last` the last one's exit code or error;
   `fragment_core::computer::unheld`). Nothing is decided by it. The DO
-  removes it with the hold's other files. Our Hermes image says it
-  (below); the stub says nothing.
+  removes it with the hold's other files. The stub says nothing.
 - **What the save leaves out.** The guest's `held` may name, one per
   line, what its save leaves out: gitignore patterns relative to `/data`,
   of letters, digits and `._-/*?[]`, at most 512 of at most 256 bytes, the
   answer at most 64 KiB (`fragment_core::computer::left_out`). They are
-  files it copied under the hold to names the save keeps (our Hermes
-  image: its SQLite databases, below), so a hot copy of one, which could
+  files it copied under the hold to names the save keeps (its SQLite
+  databases, say), so a hot copy of one, which could
   tear (F4), is never what a wake restores. An empty answer leaves nothing
   out; an answer the DO refuses saves the guest whole; a save not held
   leaves nothing out. Our bridge answers for the stub, naming what
   `BRIDGE_HELD_LEAVE_OUT` names (the stub's `*.scratch`, only so the
-  platform's lanes can see a save leave something out), and for our Hermes
-  image, which answers itself once its bridge has (docs/bridge.md,
-  `BRIDGE_HELD`).
+  platform's lanes can see a save leave something out).
 
 ### Data and the restore gate
 
@@ -171,8 +169,8 @@ that names a PID from before a sleep can name a live process after it.
 - **The seam** (step 2 of docs/durable-computers.md): `/data/work` is
   what the guest's tools write (a terminal's working directory and home,
   projects, a browser's profile, scratch files), and the rest of `/data` is the
-  guest's own state (for ours, Hermes' home: its databases, sessions,
-  profiles, config; and the bridge's state). Each save is two
+  guest's own state (its runtime's databases, sessions and config, and the
+  bridge's state). Each save is two
   `DirectoryBackup` records, `/data` (its work left out, and what a held
   guest names) and `/data/work` (nothing left out: its SQLite files are
   copied as they are), restored together, `/data` first. The DO makes
@@ -192,8 +190,7 @@ that names a PID from before a sleep can name a live process after it.
   restored. Exit 0: whole. Exit 3: the save is unusable, and the DO
   marks it so and starts again from the save before it. Any other exit:
   the check itself failed, a failed start like any (tried again, on the
-  same save). Our Hermes image's puts its
-  databases' copies back and runs `PRAGMA quick_check` on each.
+  same save).
 - The hold (above, `/run/computer/hold`) is read the same way: our
   bridge checks it before every claim (docs/bridge.md, `BRIDGE_HOLD`).
 - SIGTERM means stop now: flush and exit within 5 s. `/data` was saved
@@ -346,7 +343,7 @@ expires within 30 days. The container application is the deployment's
   The list comes from `GET /api/fragments` and `GET /api/f/{name}/channels`
   as the agent, read again every 5 minutes and on `joined`; the agents
   themselves from `GET /api/computer`, read again every minute (the
-  bridge), or every 3 s (our Hermes image, below).
+  bridge).
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
   agents are woken eagerly, to hide a wake's latency). Whatever adds an
   agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
@@ -362,7 +359,7 @@ expires within 30 days. The container application is the deployment's
   computer has it (`agent.told` in its events); a role change, or the
   same member added again, is no new join. An agent newly assigned to a
   computer is followed while it is awake, with nothing restarted: within
-  a minute on the stub, within seconds on our Hermes image. A sleeping
+  a minute on the stub. A sleeping
   one reads it as it starts (wake it: `POST /api/computers/{id}/wake`, or
   add the agent to a fragment).
 - What was said before an agent joined a chat is not for it: the guest
@@ -383,9 +380,7 @@ expires within 30 days. The container application is the deployment's
 - A call its owner's ledger refuses (zero credit or a canceled seat:
   402 `budget_used_up`; a guest: 403) gets the ledger's reason, and no
   call is made.
-- Any other path is 404, unmetered. Hermes probes `GET /api/show`
-  (Ollama's model metadata) with no `x-fragment-agent`; it falls back to
-  its configured context length. Anthropic's shape
+- Any other path is 404, unmetered. Anthropic's shape
   (`/anthropic/v1/messages`) comes with the high tier, which is off
   (decision 23).
 - `model` may also be `vision`: the deployment's vision model (its
@@ -398,27 +393,14 @@ expires within 30 days. The container application is the deployment's
   bounded, reserved and settled as a tier's call is, at its model's
   price, to the agent's owner. It is no tier: an agent's `agent.json`,
   a job's step and a manifest name only tiers.
-- Our Hermes image's profiles send their image calls to `vision`
-  (`auxiliary.vision`: provider `custom`, model `vision`, through the
-  intercept), whatever the agent's tier. Hermes describes each
-  `computer_use` screenshot with it and hands the main model the words
-  (named outright, Hermes routes every capture so: its
-  `tools/computer_use/vision_routing.py`), and an image a person attaches
-  too. Before, a capture went to the agent's own tier's model, which on
-  the medium tier reads no images. DeepSeek Flash's vision build is only
-  on DeepSeek's own API (decision 23, its status).
-- A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
-  Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
-  sends it whole; one refused as too large (413) it shrinks to 5 MiB of
-  base64 and sends once more (its `_RESIZE_TARGET_BYTES`, which its config
-  does not set), which fits. A call reserves its bytes as input tokens,
-  so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
+- A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`),
+  room for an image of 5 MiB of base64
+  (`fragment_core::models::IMAGE_DATA_URL_MAX_BYTES`). A call reserves its
+  bytes as input tokens, so a 5 MiB screenshot holds about $1.25 of its
+  payer's credit (at
   GLM-5.3 Flash's price, the fee and the margin) until it settles at what
   the model counted; a payer with less is refused it (402).
 - A call without `x-fragment-agent` is refused (401: no one to bill).
-  Our Hermes image sets it on every call of an agent's profile (its
-  `model.default_headers`), the main model's and the auxiliary ones'
-  (titles, the smart-approval guardian, vision).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -484,7 +466,7 @@ the provider's own hosts.
 
   And `credentialEnv`: every environment variable of the catalog, held now
   or not, so an image can pass them all through once. A guest reads the view
-  again while awake (our Hermes image every 3 s) and puts each placeholder
+  again while awake and puts each placeholder
   in its variables.
 - **The intercept** catches the catalog's hosts on HTTPS and on plain HTTP
   alike, and always sends on over HTTPS. For a request to one of them it
@@ -543,8 +525,9 @@ the provider's own hosts.
   default). One agent's guest could send another's placeholder, and that
   is by design: the call is that agent's, and a narrowed list is an agent's
   specialization, never a wall. Walls stand between people (decision 36).
-- **Approvals** are Hermes' own (Paul, 2026-10-04): a person who connected
-  something lets their agents use it, with no approval of the platform's.
+- **Approvals** are the agent runtime's own (Paul, 2026-10-04): a person
+  who connected something lets their agents use it, with no approval of
+  the platform's.
 - HTTPS interception needs Cloudflare's CA: the image waits for it at
   boot and appends it to its trust store.
 - What the catalog cannot express is never swapped: a key in a path is
@@ -591,313 +574,16 @@ port's prefix (`/p/6080/`).
 Each is under `images/` (docs/bridge.md has the bridge's routes,
 settings and state):
 
-- `images/bridge`: the process both images run between an agent runtime
+- `images/bridge`: the process each image runs between an agent runtime
   and the fragment API, with the chat records of docs/chat-records.md.
-  Its core names no runtime; `relay` (Hermes' Relay) and `script` (a
-  deterministic agent) are its two runtimes.
+  Its core names no runtime; `script` (a deterministic agent) and `goose`
+  are its runtimes.
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
-  bridge as Hermes' Relay connector, the screen. One Hermes
-  profile per agent (`juniper.paul` is `juniper-paul`), its agent
-  fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
-  committed back. Each start clears Hermes' cross-process leases (a
-  session's turn, a compression) before the gateway takes a turn: a
-  lease restored with `/data` names a PID that is live again in the new
-  start, and Hermes would wait out its five-minute TTL. And it writes
-  Hermes' clean-exit receipt, so Hermes discards the turns a restart cut
-  short rather than resuming them: `/data` is saved before the guest is
-  signalled, so a restored one always reads as an unclean exit, and a
-  resumed turn would carry the old turn's message id and fold the
-  person's next message into it, while the bridge has already ended it
-  (docs/chat-records.md). Then it closes each turn a restart cut in its
-  Hermes session (`hermes::CLOSE_CUT_TURNS`): a gateway session whose last
-  message has no answer gets the row Hermes itself writes when a turn ends
-  without one, its failed-turn boundary, through Hermes' own session code;
-  left open, Hermes would join the next message to the cut request and its
-  model would do it again (docs/durable-computers.md, P5; the bridge tells
-  the next turn what was cut, docs/bridge.md). The managed skills and
-  the fragment CLI: below,
-  "Skills and the CLI in our Hermes image". An agent fragment's optional
-  `agent.json`
-  (`{"tier": "cheap"|"medium"|"high"}`) picks its model tier (medium by
-  default; `high` only with `FRAGMENT_HIGH_TIER=on`, decision 23). One the
-  platform does not answer for (no 200, 403 or 404) is said
-  (`profile.tier_unread`), and the profile's config stays as the last boot
-  wrote it, its tier with it; a profile with none yet takes the medium
-  tier.
-
-  Its work (the seam, above): each agent's is `/data/work/<profile>`.
-  Its profile's config makes it the terminal's working directory
-  (`terminal.cwd`; left unset, Hermes' multiplexed gateway ran every
-  agent's commands in the gateway's own home, `/data/hermes`). Its home,
-  its terminal's `HOME` and its file tools' `~` (Hermes' profile `home`:
-  "Hermes' container guesses", below), is a link to
-  `/data/work/<profile>/home`, so what its tools write under `~` (a
-  browser's default profile and its databases, a CLI's login) is its
-  work, never Hermes' home (Paul, 2026-10-07). A hard cut: a profile's
-  `home` that already had something in it is set aside in place as
-  `home.before-work` (numbered when taken), unmoved, and the link made;
-  nothing is carried over or deleted (event `profile.home_set_aside`).
-  Its desktop browser's profile (`<profile>/bot-desktop/browser-profile`,
-  where Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
-
-  Its saves (`images/hermes/boot/src/held.rs`; "The hold", above): its
-  bridge answers to `/var/lib/fragment-run/bridge-held`, and `hermes-boot`
-  answers the platform. Held, it starts no new round of its repo sync, its
-  skills install or its agents' reads, and waits (at most 8 s) for those
-  under way. Once its bridge has answered it copies every SQLite database
-  under `/data` but its work (Hermes' `state.db` of each profile, and
-  whatever else Hermes or a plugin keeps: each file named `*.db` that
-  begins with SQLite's header) with SQLite's online backup, one step each (one read
-  transaction: a copy of one moment whatever writes beside it, never
-  restarted), as the hermes user, into `/data/held-copies/<n>.sqlite`,
-  and writes its manifest last; then it answers, naming exactly what it
-  copied as left out: each database's path and its `-wal`, `-shm` and
-  `-journal`, anchored (`/hermes/state.db`, …). A database Hermes makes
-  after the copy (its kanban board appears a few seconds after a first
-  start) is named by none, so the save keeps it hot rather than losing it;
-  so is one whose path no pattern can name. A file named `*.db` that is
-  no SQLite database is no database to copy, and the save keeps it as it
-  is: the agent's desktop keeps Mesa's shader cache, in its own format,
-  as `bot-desktop/xdg/.cache/mesa_shader_cache_db/part<n>/mesa_cache.db`
-  under its profile once it has drawn (until 2026-10-06 the copy took it
-  for one and failed, so every hold after the desktop's first use went
-  unanswered, and a restore's check would have found every such save
-  unusable). A database its owner holds locked through the copy's tries
-  (1 s: SQLite's exclusive locking mode, in which a running Chromium keeps
-  its own, such as `Default/declarative_performance_observer.db`) cannot
-  be copied as of one moment while it runs, so
-  it is kept hot too, and the rest copied and answered (until 2026-10-06
-  it failed the whole copy, so no hold was answered while a browser ran).
-  Any other copy that fails answers nothing: the platform then saves
-  it whole, not held. Until it answers, `/run/computer/unheld` says what
-  it waits on (the bridge, the rounds under way, the copy) or why its
-  copy failed. Hermes'
-  own `hermes backup --quick` was not used: it copies a fixed list of files
-  under one home, and its `_safe_copy_db` copies 256 pages a step with
-  0.1 s between, which a busy database restarts. Once the hold goes the
-  copies go. Held, Hermes' gateway still writes on its own timers: its
-  heartbeat (every 30 s), its status and its cron ticker's stamps (every
-  60 s), its logs, and once per changed config its known-good copy of it.
-  Each is replaced whole, appended, or read only as a broken config's
-  fallback, so the save keeps it as it reads it. Its model-catalog
-  refresh, the one such writer that fetched from outside, is off
-  (`model_catalog.enabled: false` in the managed overlay). Node's compile
-  cache, which npm put in Hermes' home (its `TMPDIR`), is under /tmp
-  (`NODE_COMPILE_CACHE`). docs/durable-computers.md, "What changes under
-  the hold", has each writer and why. At a start, before the gateway
-  opens a database, the copies go back over their live paths (each one's
-  `-wal`, `-shm` and `-journal` removed, its owner and mode as they were): after a restore its
-  `computer-check` does it, then `quick_check`s every database but its work's as the
-  hermes user and exits 3 on one that fails; after a snapshot, `pre-init`
-  does it, so both wakes leave the same `/data`.
-
-  Its agents change while it runs (`images/hermes/boot/src/agents.rs`),
-  and nothing restarts for it: no container, gateway or bridge, so no
-  other agent's turn is cut or waits. `hermes-boot` reads `GET
-  /api/computer` every 3 s. For an agent assigned since, it writes the
-  agent's profile as a boot does (its directories, its config whole
-  before its `.env`, its repo pulled), then asks the gateway to serve it
-  (the `rescan-profiles` verb on its control socket, `gateway.sock`, as
-  Hermes' own `profile create` does: Hermes v0.21.5's multiplexed gateway
-  serves a profile made after it started, and a relayed turn resolves
-  its profile's directory as it arrives), and only then names it in the
-  bridge's ready file (`BRIDGE_AGENTS_FILE`, docs/bridge.md): the bridge
-  runs only the agents that file names, so no turn reaches a profile
-  that is not whole (the 401 of a turn run in Hermes' default profile,
-  which names no agent to bill). On the lower rung (`cargo test -p
-  fragment-bridge --test docker -- --ignored`) an agent assigned to a
-  running image answers its first message about a second after it is
-  assigned. An agent unassigned leaves the ready file at once, so the
-  bridge stops running it; its profile is retired at the next start, when
-  no Hermes could be winding down a turn in it. The screen is the first
-  agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
-  that moves with the first agent, started by `hermes-boot screen-start`
-  for the screen's first viewer (about a second on the lower rung, and
-  about 300 MiB more while it runs), or by Hermes at an agent's first
-  `computer_use` or browser call (`bot_desktop.auto_start`), never at
-  boot. The screen's page follows the desktop: a stream that ends (the
-  desktop stopped or restarted, its viewers' streams ending with it) is
-  opened again on its own, from 1 s backing off to 10 s, while the page's
-  control socket stays open, and the bridge starts the desktop for it at
-  once; Take over is kept. On that desktop an agent operates: Hermes'
-  `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
-  `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
-  bridge and the agent calls it through `tool_call`; each screenshot is
-  described by the route's vision model: Models), and its built-in
-  browser tools, headed there (`browser: {headed: true, backend: off}` in
-  each profile's own config, the only place Hermes reads `browser` from;
-  with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Its browser, and the desktop's Browser icon a
-  person uses after Take over, are the image's Chromium
-  (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
-  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
-  where it sees Docker's marker (`/.dockerenv`), and Containers gives a
-  container neither that marker nor a `/dev/shm` (Docker mounts one in
-  every container), so there Chromium died as it started (p5,
-  2026-10-05); the lower rung runs the desktop as Containers does
-  (`--ipc=none`, no marker). Events: `agents.changed`,
-  `profile.written`, `agents.served` (the gateway's answer and its
-  `ms`), `agents.ready` (the whole change's `ms`).
-
-### Skills and the CLI in our Hermes image
-
-The platform serves skills as any fragment's files; what installs them,
-and how a runtime finds them, is the image's.
-
-- **The managed set** (decision 17) is the owner's skills fragment's
-  `skills/`: a fragment on the blessed `skills` template lists and reads
-  the platform release's managed set as its files (templates/skills/README.md),
-  beneath any file of its own. `hermes-boot` finds it as the computer's
-  first agent acting for the computer's owner (`GET /api/fragments?for=`:
-  of kind `skills`, named under the owner's username, `skills.<username>`
-  first), lists it (`GET /api/f/{skills}/files?for=`) and fetches what is
-  new or changed (`…/file?path=&for=`, eight at once), each file by its
-  listed version. It installs them read-only (the boot's, mode 0644) at
-  `/data/hermes/managed-skills`, `skills/<category>/<name>/…` as
-  `<category>/<name>/…`, and removes what the listing no longer has; no
-  skills fragment means no managed skills. It does so off the boot's path,
-  at each start and every ten minutes while awake, or every minute while
-  the owner has no skills fragment (`skills.installed`, `skills.failed`);
-  `/data` keeps the last install, so a wake fetches only what a release
-  changed. Bounds: 1,000 files, 256 KiB each, 8 MiB in all (`skills.rs`);
-  a file past one, or at a path that is no safe relative path, is refused
-  and the rest installs. A person without one (setup makes it since
-  2026-10-03) adds it from settings ("Add the managed skills", from the
-  blessed template, as setup makes it); their awake computers install it
-  within the minute.
-- **The platform skill**, `fragment`, is every profile's, whatever the
-  skills fragment holds: what an agent knows of the platform it is on. It
-  is the image's own `fragment` CLI's skill (`fragment skill`, cli/SKILL.md:
-  what a fragment is, the commands for the agent's fragments) after a page
-  of what the computer adds (`images/hermes/boot/src/computer.md`: that it
-  is an agent on a Fragment computer acting for its owner with no login,
-  the apps and brain skills to load, its connections as placeholders in
-  its environment, `GOOGLE_OAUTH_ACCESS_TOKEN` and the Google Workspace
-  skill, and its desktop, which its owner watches and can take over from
-  "Its computer's screen"), with a description for Hermes' skills index.
-  `hermes-boot build-info` writes it at the image's build
-  (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
-  agents), so it is always the binary's in the image, and costs a boot
-  nothing; the build fails if `fragment skill` is no skill named
-  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
-- **Every profile** names the managed directory, then the platform skill's,
-  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
-  synced both ways: an agent's own skills are versioned in its fragment).
-  Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. An agent's profile has
-  its own, the managed set, which is what the shell's Skills section
-  lists, and the platform skill. The image carries none of Hermes' bundled
-  skills: Hermes copies them only into the home its sync runs in, the
-  gateway's default profile, which runs no turns (and stage2 and the
-  gateway then sync nothing at a boot). A managed skill a session has not
-  yet seen appears at its next session.
-- **The fragment CLI** is in the image (`/usr/local/bin/fragment`, built
-  from `cli/` with the image: the Hermes image's build context is the
-  repo's root). Each profile's `.env` names its agent and its owner
-  (`FRAGMENT_AS_AGENT`, `FRAGMENT_FOR`), and its config passes those two to
-  its terminal (`terminal.env_passthrough`, scoped to the profile under the
-  one gateway), so a command in an agent's terminal acts as that agent:
-  the CLI's agent mode (cli/GUIDE.md, "As an agent") names the agent in
-  `x-fragment-agent`, signs nothing, and reaches the platform at
-  `FRAGMENT_API`, acting for the owner on the routes that honor `for`. The
-  egress signs. No key is in the container. `fragment sync` and `deploy`
-  still reach code.storage directly, with the short-lived, repo-scoped
-  token the platform mints for the agent.
-- **Its credentials** (Connections and operator keys, above):
-  `hermes-boot` writes each agent's placeholders into its profile's `.env`
-  under their variables (`PERPLEXITY_API_KEY=fck_perplexity_…`), which
-  Hermes reads again at every turn, so its own tools (its Perplexity web
-  search, ElevenLabs speech, xAI) use them too; and the profile's config
-  passes every variable of the catalog (`credentialEnv`) to its terminal,
-  named once since Hermes reads the list once per gateway. Hermes never
-  passes a name it keeps for its own providers' keys (its
-  `_HERMES_PROVIDER_ENV_BLOCKLIST`: `PERPLEXITY_API_KEY`, `XAI_API_KEY`,
-  `ELEVENLABS_API_KEY` among them), so the profile's terminal also sources
-  `credentials.sh` (`terminal.shell_init_files`, after Hermes' own three),
-  which exports each one as a terminal session's shell starts. A change
-  (a connection made or lost, a narrowing) rewrites both within 3 s,
-  nothing restarted: a passed-through variable is current at the next
-  command, one from `credentials.sh` at the next terminal session (an
-  operator key's placeholder does not change). So a skill's helper, a
-  stock `curl` or a vendor's SDK in the terminal finds its variable, with
-  no header of ours (`profile.credentials` in the events).
-- **`gws`**, Google's Workspace CLI (github.com/googleworkspace/cli,
-  v0.22.5, pinned by its checksum), is in the image for the `google`
-  connection: `/usr/local/bin/gws` hands it `GOOGLE_OAUTH_ACCESS_TOKEN`
-  as its pre-obtained access token (`GOOGLE_WORKSPACE_CLI_TOKEN`, which it
-  sends as `Authorization: Bearer`), so the swap fills it on Google's
-  hosts; it trusts the system's CA bundle (rustls with native roots), so
-  the interception CA appended at boot is its too. The image holds no
-  secret of it. The google-workspace skill prefers it.
-
-### Root in our Hermes image
-
-Paul, 2026-10-05: "hermes needs to be able to install binaries (not
-persisted)".
-
-- **Passwordless sudo.** Hermes runs as its unprivileged user, as
-  upstream runs it, and its user may run anything as root with `sudo`
-  (no password, so Hermes' terminal runs `sudo` as written, never asking
-  for one). The system's directories stay root's, as on a CI runner, so
-  `sudo apt-get install`, `sudo install … /usr/local/bin/` and `sudo npm
-  install -g` are how an agent installs software. The computer is one
-  person's VM with no secret in it (decisions 13, 43), and one person's
-  agents are not fenced from each other (decision 44), so root inside it
-  opens nothing of anyone else's.
-- **How long an install lasts.** `/data` is the only place a computer
-  keeps; an install outside it lasts until the computer's next start from
-  its image (a crash, or an image update), and a wake from a snapshot
-  keeps it.
-- **Hermes' own settings.** Its file tools (`write_file`, `patch`) may
-  write its home, its agents' work directories (`/data/work`, where its
-  terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
-  only them, not the terminal: defense in depth, as Hermes says), for the
-  scratch an install is made from; they run as its user, so `/usr/local`
-  is not theirs. Lazy installs stay off, as upstream ships them: they are
-  Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of.
-- **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
-  intercept catches (decision 43); the image keeps apt's lists as of its
-  build, and a `.deb` on disk installs offline. An intranet computer
-  needs an apt mirror (and PyPI's and npm's) named in the image.
-
-### Hermes' container guesses
-
-Hermes v0.21.5 does some things differently when it believes it runs in
-a container, and it guesses: `is_container()`
-(`hermes_platform/host/runtime.py`, once per process) is true on
-`/.dockerenv`, `/run/.containerenv`, `KUBERNETES_SERVICE_HOST`, a
-runtime's name in `/proc/1/cgroup`, or `kubepods`, `containerd` or `crio`
-in the root mount; a few places read `/.dockerenv` (or `docker` in
-`/proc/1/cgroup`) alone. Docker gives every container `/.dockerenv`, so
-the lower rung always reads as a container; Containers likely gives none
-of these (only p5 can confirm), and there Hermes would take the computer
-for a host. The image fakes no marker: it pins every guess its paths
-reach (the gateway, an agent's terminal and file tools, its browser and
-desktop) to what Hermes does in a container, as the Docker rung has
-always run it, in the environment `hermes-boot pre-init` gives everything
-after it (`RUNTIME_ENV`, `images/hermes/boot/src/hermes.rs`).
-
-| Guess | What it decides | Pinned |
-|---|---|---|
-| `get_subprocess_home` (`TERMINAL_HOME_MODE`, `auto` by default) | `HOME` for an agent's terminal and `execute_code`, its file tools' `~`, a skill's paths, the write guard's homes: in a container its profile's `home` (`/data/hermes/profiles/<profile>/home`, a link to its home in its work, above); on a host the gateway's own, `/data/hermes`, one for every agent | `TERMINAL_HOME_MODE=profile`. Only the environment counts: a multiplexed gateway reads no profile's `terminal.home_mode` |
-| `apply_secure_dir_policy`, `_secure_file` | on a host, Hermes' home made owner-only (0700, 0600) at each start; in a container left as made | `HERMES_SKIP_CHMOD=1` |
-| `browser_tool_install._running_in_docker` | Chromium's `--no-sandbox --disable-dev-shm-usage`; Chromium's auto-install | the image's Chromium (above): always those flags, and never missing |
-
-The rest are not reached, or only say something: the install method (the
-image's `docker` stamp in `/opt/hermes` is read first), NixOS container
-mode (no `.container-mode`), `/restart`'s exit for a supervisor (the bridge
-passes no slash command), the startup audit's log line about the home's
-mount, the CLI's service, status, setup and doctor commands, CLI voice, the
-dashboard (off) and OTLP export (off). A skill tagged `environments:
-[docker]` would be offered only on Docker; none of Hermes', ours or the
-templates' is. The lower rung's `an_agents_home_is_the_same_on_either_runtime`
-runs the image both ways (`Runtime::Hosted`: no marker, which Hermes takes
-for a host) and finds the same `HOME`, `~` and modes.
+- `images/goose`: the deployment's default image (`deploy/example.jsonc`),
+  the bridge with its `goose` runtime and goose itself. Its design is
+  docs/optchat.md, "goose on the computer"; its build is `images/goose`.
 
 ## Billing
 
@@ -953,34 +639,14 @@ for a host) and finds the same `HOME`, `~` and modes.
   from that step, its saves gone, its owner's next identity's computer a
   new one that restores nothing and reads no such file; hosted, the same
   on the deployment's own image.
-- The real-Hermes lane: `images/hermes/` with a scripted model (phase
-  4's exit list), a second agent assigned to the awake computer while the
-  first's turn runs included, and an install as root (a `.deb` through
-  apt and a program into `/usr/local/bin`, offline), its home intact
-  after a sleep and a wake; and that agent (on the medium tier) looking
-  at its screen: its `computer_use` screenshot goes to the route's
-  `vision` as that agent, settled on its owner's ledger at GLM-5.3
-  Flash's price, and its answer is what the vision model saw. The
-  Workers AI fake reads images only on a model the catalog marks
-  "Vision: Yes" (GLM-5.3 Flash) and answers 400 for one sent to another,
-  as the ledger lane checks with `vision` itself and a call of Hermes'
-  shrunk-screenshot size.
+- The ledger lane: the route's `vision` on the Workers AI fake, which
+  reads images only on a model the catalog marks "Vision: Yes" (GLM-5.3
+  Flash) and answers 400 for one sent to another, and a call carrying the
+  largest image the route allows.
 - The images' own (`images/`, its own workspace: `cargo test` and
   `cargo clippy --all-targets -- -D warnings` there): the bridge's engine,
-  pure; the bridge against an in-process fake fragment API, with the
-  `script` runtime and with the `relay` runtime against a scripted
-  Hermes gateway; and, with Docker, both images built and run against
-  the fake API and a scripted model on the host
-  (`cargo test -p fragment-bridge --test docker -- --ignored`), real
-  Hermes included. These are lower rung: fakes at the platform's edge.
-  Among them, saves of our Hermes image taken as the DO takes them
-  (`a_save_taken_while_it_writes_opens`: during turns whose tool writes a
-  SQLite database every few ms, half under the hold and half hot, each
-  restored into a fresh container, its `computer-check` run, every SQLite
-  file then `quick_check`ed; and `held_nothing_under_data_changes`: once
-  held, no file the save keeps changes). Measured 2026-10-05: none of 54
-  held databases tore, and none of 54 hot ones either (a WAL database's
-  hot copy rarely tears; the hold makes it never). Hermes itself writes
-  while held, which is why a save names what it copied: its kanban
-  dispatcher makes its board's database some seconds after a first start,
-  and opens it on a timer.
+  pure; the bridge against an in-process fake fragment API; and, with
+  Docker, the images built and run against the fake API and a scripted
+  model on the host
+  (`cargo test -p fragment-bridge --test docker -- --ignored`). These are
+  lower rung: fakes at the platform's edge.

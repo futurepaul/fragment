@@ -7,7 +7,8 @@ proves every route. The TypeScript runtime this replaced was deleted
 (its contract is in git history, last at `35f5e18`). The desktop and the
 personal agent's chat went at the cut (docs/cloudflare-v1.md, decision
 33; their contract is at the tag `celld-final`); computers came back
-(Computers, below), with Hermes as our image's agent runtime.
+(Computers, below), with goose as our image's agent runtime
+(docs/optchat.md).
 
 ## Configuration
 
@@ -1001,7 +1002,7 @@ payer's and the agent's identities). `high` (Opus) is refused, 400,
 saying why, until Cloudflare raises Unified Billing's Opus limit; a model
 id is never a tier. `vision` names the deployment's vision model (its
 config's `vision_model`, GLM-5.3 Flash unless named, one the price book
-prices), for a runtime's calls about an image (Hermes' screenshots:
+prices), for a runtime's calls about an image (a screenshot:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
 
@@ -1018,8 +1019,7 @@ the call counts in its month and is under its cap for anyone but the
 owner (or the owner's agent acting for them); when another person owns
 it, that owner's ledger is asked first whether it is still open
 (decision 26). A request is at most 6 MiB (413 past it, nothing
-reserved): a screenshot Hermes shrinks to 5 MiB of base64 after a 413
-fits. Each call reserves its worst case (the body's bytes as
+reserved): an image of 5 MiB of base64 fits. Each call reserves its worst case (the body's bytes as
 tokens in, `max_tokens` out) under a reference of its own (`aig:<hex>`),
 then settles from its last, cumulative usage, input less what was cached
 (Workers AI puts a per-chunk delta on every chunk and the whole call's
@@ -1491,7 +1491,7 @@ is docs/computers.md; the routes here are its owner's.
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
-| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
+| `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (docs/computers.md); a sleeping one's reads it as it starts |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |

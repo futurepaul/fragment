@@ -36,7 +36,7 @@ Do not treat the brief as the only truth. Show the raw source URLs and inspect k
 Raw search results as JSON:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py search \
+python3 ${SKILL_DIR}/scripts/perplexity_research.py search \
   --query "latest SEC crypto enforcement actions" \
   --domain sec.gov \
   --domain law360.com \
@@ -47,7 +47,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py search \
 Preferred quick human-readable search output:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py search \
+python3 ${SKILL_DIR}/scripts/perplexity_research.py search \
   --query "OpenAI valuation 2026 funding round" \
   --recency month \
   --max-results 6
@@ -56,7 +56,7 @@ python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py search \
 Cited brief with URLs:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py brief \
+python3 ${SKILL_DIR}/scripts/perplexity_research.py brief \
   --query "What changed in recent SEC crypto enforcement this year?" \
   --domain sec.gov \
   --recency year
@@ -65,14 +65,14 @@ python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py brief \
 Fetch the exact source text for a chosen URL:
 
 ```bash
-python3 ${HERMES_SKILL_DIR}/scripts/perplexity_research.py fetch \
+python3 ${SKILL_DIR}/scripts/perplexity_research.py fetch \
   --url "https://www.sec.gov/news/press-release/example"
 ```
 
 ## Guidance
 
 - Use `search` first when the user wants inspectable sources.
-- Prefer the script's normal markdown output plus `--max-results N` for quick inspection; avoid piping JSON directly into `python -c` because Hermes may treat that as an unsafe interpreter pipe and ask for approval.
+- Prefer the script's normal markdown output plus `--max-results N` for quick inspection; avoid piping JSON directly into `python -c` because your runtime may treat that as an unsafe interpreter pipe and ask for approval.
 - Use `brief` when the user wants a fast cited overview after source discovery.
 - Use `fetch` before quoting or relying on a source heavily.
 - Prefer domain filters for regulators, courts, or trusted publications.

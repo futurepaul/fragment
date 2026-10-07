@@ -21,7 +21,7 @@ not offer the `xai` key: say so rather than hunting for one.
 Use the local helper directly:
 
 ```bash
-SKILL_ROOT="${HERMES_SKILL_DIR}"
+SKILL_ROOT="${SKILL_DIR}"
 python3 "$SKILL_ROOT/x-search.py" search "bitcoin etf" --limit 5
 python3 "$SKILL_ROOT/x-search.py" topic "AI regulation" --sides "Pro-regulation|Anti-regulation" --limit 10
 python3 "$SKILL_ROOT/x-search.py" account @elonmusk --topics "AI,Bitcoin,Free speech,Mars"

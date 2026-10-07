@@ -12,8 +12,8 @@ triggers:
 
 Images come from the platform's image model, FLUX.1 [schnell] on Cloudflare
 Workers AI, through a fragment's AI step (`job.ai.image`): a JPEG written to
-a path in the fragment, billed to your owner. Hermes' own `image_generate`
-tool has no provider configured on this computer: do not use it, and never
+a path in the fragment, billed to your owner. Your runtime's own image
+tools have no provider configured on this computer: do not use them, and never
 call an image provider directly or look for its keys.
 
 ## What is missing
@@ -34,7 +34,7 @@ owner's. Make it the first time (it is reused after):
 
 ```sh
 fragment list --json                                  # an images fragment already? reuse it
-mkdir -p ~/apps/images && cp -R ${HERMES_SKILL_DIR}/images-app/. ~/apps/images/
+mkdir -p ~/apps/images && cp -R ${SKILL_DIR}/images-app/. ~/apps/images/
 fragment create images
 fragment deploy images --dir ~/apps/images
 ```

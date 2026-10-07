@@ -8,6 +8,11 @@ The discussion is in the Claude Doc "Durable computers: what's left".
 Where this file and docs/cloudflare-v1.md decision 18 disagree, this
 file is the newer word, and decision 18 points here.
 
+On branch `claude/optchat` the computer's runtime is goose, and Hermes is
+gone (docs/optchat.md). The platform's side below (saves, the hold, the
+seam, three saves kept, a wake's fallback) is unchanged; what was our
+Hermes image's is not on this branch.
+
 ## The rule
 
 > One authority for each fact. Everything else is a cache, and a cache
@@ -15,7 +20,7 @@ file is the newer word, and decision 18 points here.
 
 | Fact | Its one authority | Everything else |
 |---|---|---|
-| What was said | the chat's `chat` channel | Hermes' session transcript, derived |
+| What was said | the chat's `chat` channel | the runtime's session transcript, derived |
 | Which turns started, what they did, how they ended, each prompt's answer | the chat's `work` channel (the journal) | the bridge's `state.json`, a cache of where to resume |
 | The agent's self (`SOUL.md`, memories, skills) | the agent fragment's repo | the profile's checkout, a working copy synced every minute |
 | The model's context and the agent's working files | `/data`, as of its newest save | the snapshot, a cache of that save for one image |
@@ -50,144 +55,42 @@ file is the newer word, and decision 18 points here.
   a wake falls back to the save before one that will not restore; a sleep
   whose save fails keeps its container for at most
   `computers.unsaved_max_ms` (30 minutes by default, Paul's to confirm).
-  Our Hermes image copies every database with SQLite's online backup
-  (from Rust: Hermes' own covers a fixed list, and restarts a busy copy)
-  and its answer names exactly what it copied, so the save leaves out the
-  live files (a database made after the copy is kept hot, not lost); a
-  restore puts the copies back and `quick_check`s each before a turn.
-  Measured in Docker: none of 54 held databases tore (none of 54 hot ones
-  either: the hold makes rarely into never). docs/computers.md.
-- **Step 2, the seam (#149).** `/data/work` is the tools' (Hermes'
-  terminal's cwd, its home, and its browser's profile, per agent), saved
-  as a record of its own; the rest of `/data` is Hermes' home and the
-  bridge's state, saved beside it, restored together. An agent's home
+  A guest's answer names what it copied under the hold, so the save
+  leaves out the live files. docs/computers.md.
+- **Step 2, the seam (#149).** `/data/work` is the tools' (a terminal's
+  cwd, its home, and a browser's profile, per agent), saved as a record
+  of its own; the rest of `/data` is the runtime's own state and the
+  bridge's, saved beside it, restored together. An agent's home
   (its terminal's `HOME`, its file tools' `~`) joined it on 2026-10-07
   (Paul: the whole `~`, not only the browser), a hard cut: what agents
   had written under `~` stayed where it was.
 - **Litestream is cut (P4, #150).** Its replicas were never read; the
-  saves carry Hermes' databases whole. The S3 endpoint it wrote through
+  saves carry the guest's databases whole. The S3 endpoint it wrote through
   (`storage.fragment.internal`) went after it (#156): no image used it.
-- **The hold is answered once the desktop has drawn (2026-10-06).** On
-  the e2e preview every hold after an agent's desktop first drew went
-  unanswered (`held: false` after the 20 s), so those saves carried hot
-  copies of Hermes' databases. The desktop keeps Mesa's shader cache under
-  the profile as `mesa_cache.db`, in Mesa's own format, and our image took
-  every `*.db` for a SQLite database: its copy failed, and a failed copy
-  answers nothing. Once that was fixed, the next hold refused was a
-  running Chromium's: it keeps its own databases (then under Hermes'
-  home, the agent's `~`; now in its work) in SQLite's exclusive locking
-  mode, so no copy of one could be had. A
-  database is now a `*.db` file that begins with SQLite's header, and one
-  its owner holds locked through the copy is kept hot, as one made after
-  the copy is, while the rest are copied and answered. A guest may say
-  why it has not answered (`/run/computer/unheld`), which the DO logs
-  with the hold: that is how the second cause showed.
+- **A guest may say why it has not answered the hold (2026-10-06)**
+  (`/run/computer/unheld`), which the DO logs with the hold.
   docs/computers.md, "The hold".
 - **The model is told what was cut (P5, 2026-10-06).** A turn a restart
-  cut is never redone by the chat's next message (F10, bit on p5: Hermes
-  kept the cut request as its session's last message and joined the next
-  message to it, so its model did the cut request again). Two parts. The
+  cut is never redone by the chat's next message (F10, bit on p5: the
+  runtime kept the cut request as its session's last message and joined
+  the next message to it, so its model did the cut request again). The
   first turn an agent runs in a chat after one of its turns there ended as
   lost carries a note, built from the journal alone (`work` and `chat`):
   that a restart cut it and to check what was done before doing any of it
   again, what was asked, the steps and cards it recorded, what it had
   replied; said once, at most 4 KiB, handed to every runtime
-  (`TurnStart::note`; Relay's read-only `context`, the scripted agent
-  echoes it). And our image's boot closes the cut turn in Hermes' session
-  before the gateway starts, with the row Hermes writes itself when a turn
-  ends without an answer (its failed-turn boundary), through Hermes' own
-  session code, so the next message is a turn of its own. Hermes' own
-  recovery notes stay off. docs/bridge.md, "The turn after a cut one is
-  told"; docs/chat-records.md; docs/computers.md.
-- **What Hermes writes under the hold is chosen (2026-10-07).** Its
-  model-catalog refresh is off and Node's compile cache is out of
-  `/data`; the rest of what its gateway writes on its own timers is kept
-  hot, each named, with why a save cannot tear it (below).
-
-## What changes under the hold (2026-10-07)
-
-The hold promises that no file the save keeps tears. Held, our image
-claims no turn, starts no round of its own (repo sync, skills, the
-agents' reads), and copies every database as of one moment. Hermes'
-gateway is not paused: it cannot be asked, and freezing it is option B.
-So its own timers run on through a hold. `held_nothing_under_data_changes`
-(images/bridge/tests/docker.rs) failed once on 2026-10-07, in a run with
-9 containers starting, when one of those timers landed in its 5 s
-window: four caches under `/data/hermes/cache` and Node's compile cache
-under `cache/scratch` changed while held. Read from Hermes v0.21.5 (tag
-v2026.9.24) and measured idle in Docker, these are the gateway's writers
-and what each now does.
-
-| What | Its writer and when | Choice |
-|---|---|---|
-| `cache/model_catalog.json`, `openrouter_curated_catalog.json`, `nous_recommended_cache.json`, `reasoning_caps.json` | the gateway's `_model_catalog_refresh_watcher` (`gateway/run_watchers.py`): `refresh_catalogs()` 30 s after it starts (written about 47 s in the failing run, the fetch slow), then every 20 minutes | **off**: `model_catalog.enabled: false` in the managed overlay (`hermes.rs`, `managed_config`) |
-| `cache/scratch/node-compile-cache/…` | npm turns on Node's compile cache at every start (`enableCompileCache()`), under `TMPDIR`, which Hermes points at its home's `cache/scratch`; its `npx --version` probes run it | **out of `/data`**: `NODE_COMPILE_CACHE=/tmp/node-compile-cache` (Dockerfile); a cache every start rebuilds |
-| `state/gateway.heartbeat` | its loop heartbeat, every 30 s | kept hot: replaced whole; no switch |
-| `gateway_state.json`, `channel_directory.json` | its housekeeping thread, every 60 s and every 5 minutes | kept hot: replaced whole; no switch |
-| `cron/ticker_heartbeat`, `ticker_last_success` (`ticker_last_error`), `cron/.tick.lock`, in its home and each profile's | its cron ticker, every 60 s, though its cron tool is off (decision 38) | kept hot: the stamps replaced whole, the lock empty; no switch (with more than one profile the built-in ticker always runs) |
-| `logs/*.log` | appended | kept hot: a save may end mid-line |
-| `backups/config/config.yaml.good.<time>`, in its home and each profile's | `load_config()`, the first time a process reads a `config.yaml` whose bytes its newest copy lacks: on a first start, the catalog watcher's tick 30 s in (it reads the config with the catalog off) | kept hot: made once, in place, and read only when that `config.yaml` will not parse, which ours never fail to (the boot writes each whole at every start) |
-
-**Kept hot** means the save keeps whichever version it reads. Hermes
-writes each stamp and state as its `atomic_json_write` does: a temp file
-beside it, fsynced, then renamed over it. So any reader, a save included,
-has the old file or the new one, never a mix. The temp file
-(`.<name>_*.tmp`, `.hb_*.tmp`) may be caught mid-write, but nothing
-reads one. Each is a stamp of the life that wrote it (a heartbeat, a
-status, the ticker's last run), so a wake's copy is stale either way.
-None is a fact with an authority of its own (the rule, above). So the
-test now holds for at least 65 s, until Hermes' heartbeat and its cron
-ticker have both run inside the hold: longer than each of these timers
-but the 5-minute one, so every run sees them inside it. It fails on any
-other file that changes (our own sync, every 60 s, among them) and
-checks that each stamp it saw rewritten parses whole.
-
-**Why the catalogs are off rather than kept hot, left out, or paused:**
-
-- Nothing of ours reads them. Every profile's model is the platform's
-  route (`custom`, or `anthropic` for the high tier, each with a
-  `base_url`). The catalogs feed Hermes' `/model` picker and reasoning
-  hints for OpenRouter's and Nous' routes, nothing else. No person
-  reaches the picker: the bridge keeps a leading `/` from reading as a
-  command. In v0.21.5 no turn of such a profile reads them: their
-  readers (`agent/reasoning_params.py`, `agent/auxiliary_reasoning_floor.py`,
-  `agent/turn_recovery.py`) are for those routes, and `gateway/run_turn.py`
-  reads one only for a profile that names no model. Ours always name one.
-- The refresh was the gateway's only idle egress: four third-party hosts
-  (hermes-agent.nousresearch.com, raw.githubusercontent.com, openrouter.ai,
-  portal.nousresearch.com), from every computer, every 20 minutes.
-- A torn `model_catalog.json` would stop the refresh for good. Hermes'
-  read (`_read_disk_cache`) lets the decode error of a file that is not
-  UTF-8 out. Its watcher logs that at debug and never rewrites the file.
-  Turned off, `get_catalog` returns nothing before it reads the file. The
-  one reader on a turn's path that ignores the switch
-  (`get_default_model_for_provider`, for a profile that names no model)
-  catches the error. Kept hot, the file could
-  never tear in a save (it is renamed into place). But keeping it would
-  keep the egress and that failure for nothing we use.
-- Pausing the refresh while held needs a hook in Hermes' gateway (a
-  patch). Leaving the caches out of the save would make every wake start
-  them cold, and fetch them again at once.
-
-Turned off, the refresh writes nothing even when forced inside a hold,
-and a wake from a save whose four caches are torn answers like any
-other: `a_catalog_refresh_forced_under_the_hold_writes_nothing` (the
-Docker lane). That test also runs the same refresh with the catalog on,
-as a counterfactual: it rewrites `model_catalog.json` under the hold, as
-the failing run saw. Two cautions. Hermes reads a managed overlay that
-will not parse as empty, which would turn the catalog back on. Ours is
-the boot's (unit-tested), and the lane checks that Hermes reads it off.
-Also, a save from before this change keeps its stale caches, unread.
+  (`TurnStart::note`; the scripted agent echoes it). docs/bridge.md,
+  "The turn after a cut one is told"; docs/chat-records.md.
 
 ## The open problem
 
 With steps 1 and 2 built, `/data` is saved between turns and on a timer,
-Hermes' databases whole. A save asked of the guest only covers writers we
+the guest's databases whole. A save asked of the guest only covers writers we
 know of: a messenger
 adapter's SQLite, a browser profile or something a skill installed can
 be mid-write. And some state must never go back in time at all: a
 messenger's encryption ratchets, which a clean but older copy breaks.
-Neither Cloudflare nor Hermes solves that on a disk that can be lost;
+Neither Cloudflare nor the runtime solves that on a disk that can be lost;
 Cloudflare restarts hosts on an irregular cadence, even for always-on
 containers ([Containers FAQ](https://developers.cloudflare.com/containers/faq/)).
 
@@ -196,11 +99,11 @@ containers ([Containers FAQ](https://developers.cloudflare.com/containers/faq/))
 | Option | How it works | Unknown writers | Never-rewind state |
 |---|---|---|---|
 | A. Ask the guest to pause | The guest pauses its known writers | torn if writing | no |
-| **A+. Cloudflare's intended design** | Save when idle; Hermes' databases copied by its own online backup (`hermes backup`, `sqlite3.backup()`); three saves kept; a wake falls back to one that opens | torn files survived by falling back | no |
+| **A+. Cloudflare's intended design** | Save when idle; the guest's databases copied by an online backup (`sqlite3.backup()`); three saves kept; a wake falls back to one that opens | torn files survived by falling back | no |
 | B. Freeze the guest | Stop every guest process for the copy; Cloudflare has no freeze call, so it is image-side, and may stop Cloudflare's own exec path | yes | no |
 | C. No authoritative `/data` | Everything that matters lives outside | nothing to tear | once moved out |
 | D. C as the direction, B as the mechanism | | B's | C's |
-| **E. Hermes' intended design** | Split by writer: the gateway keeps only Hermes' home; its tools run in a separate Cloudflare Sandbox, as a Hermes terminal backend, whose Durable Object starts every command and so knows when it is idle | yes | no |
+| **E. Split by writer** | The runtime's container keeps only its own state; its tools run in a separate Cloudflare Sandbox, as a terminal backend, whose Durable Object starts every command and so knows when it is idle | yes | no |
 | **F. Never-rewind state outside the computer** | Messenger connectors in Durable Objects | not its job | yes |
 
 Sources for A+ and E, read 2026-10-05: Cloudflare's
@@ -224,20 +127,19 @@ tests, each leaving master whole:
 
 1. **A+ (P2, reframed).** *Built (#147, #148; Litestream cut in
    #150), with two refinements: the copy is SQLite's online backup from
-   Rust, since Hermes' own covers a fixed list of files and restarts a
-   busy copy; and the save leaves out exactly what the image names as
-   copied, never `*.db`, so a database Hermes makes after the copy is kept
-   hot rather than lost.*
+   Rust; and the save leaves out exactly what the image names as copied,
+   never `*.db`, so a database made after the copy is kept hot rather
+   than lost.*
    - The Computer DO saves `/data` when work ends (the last keepalive
      closes, after a settle), at every sleep, and every 15 minutes of
      activity, as Cloudflare's auto-save guide does. Saving is an action
      of the pure lifecycle (crates/core/src/computer.rs), tested there
      first.
-   - Under the hold, the image copies each of Hermes' databases with
-     Hermes' own online backup into a staging directory inside `/data`,
-     and the save leaves the live `*.db`, `-wal` and `-shm` files out
+   - Under the hold, the image copies each of its runtime's databases
+     with an online backup into a staging directory inside `/data`, and
+     the save leaves the live `*.db`, `-wal` and `-shm` files out
      (`DirectoryBackup`'s `exclude`). A restore puts the copies back
-     before Hermes starts. Nothing pauses Hermes' gateway.
+     before the runtime starts. Nothing pauses the runtime.
    - The DO keeps the newest three saves. A wake restores the newest;
      the image checks each restored database (`PRAGMA quick_check`)
      before the guest takes a turn; a start that keeps failing on save
@@ -246,25 +148,24 @@ tests, each leaving master whole:
      container, within a bound; the computer's view says so.
    - Litestream goes: it is neither vendor's intended store, and its
      replicas are never read (F8).
-2. **The seam.** `/data` splits into Hermes' home (its databases,
-   sessions, profiles) and a work directory for everything its tools
+2. **The seam.** `/data` splits into the runtime's own state (its
+   databases, sessions, profiles) and a work directory for everything its tools
    write (projects, scratch files, its home, the browser profile), each saved on
    its own. Nothing moves yet; the split is what lets each live
    elsewhere later. *Built (#149): the platform names no runtime, so its
    contract is `/data/work` (the tools') and the rest of `/data` (the
-   guest's own: for ours, Hermes' home at `/data/hermes` and the bridge's
-   state), two records a save.*
-3. **Our terminal backend.** Hermes runs its tools' commands through a
-   terminal-backend plugin of ours, at first locally in the work
+   guest's own, the bridge's state among it), two records a save.*
+3. **Our terminal backend.** The runtime runs its tools' commands
+   through a terminal backend of ours, at first locally in the work
    directory of the same container. We then know when tools are busy,
    which the save schedule can use instead of the keepalive.
 4. **E.** That backend runs commands in a separate Cloudflare Sandbox
    per computer, whose Durable Object starts every command and saves
-   its disk when idle. The gateway's container keeps only Hermes' home.
+   its disk when idle. The runtime's container keeps only its own state.
    To settle first: the latency each tool call gains as a round trip
    through a Durable Object; where the browser and desktop live; the
    credentials swap and the `fragment` CLI inside the sandbox.
-5. **Toward C,** as each piece of Hermes' home gains an outside
+5. **Toward C,** as each piece of the runtime's state gains an outside
    authority.
 
 ## F: messengers outside the computer
@@ -277,8 +178,8 @@ A connector Durable Object per linked messenger account:
   person's chat, which wakes a sleeping computer the way any chat record
   already does; the agent's reply is a record the connector encrypts and
   sends;
-- so the computer never sees the protocol: Hermes talks only to the
-  relay, which is also the condition for Hermes' own scale-to-zero.
+- so the computer never sees the protocol: its agent reads and writes
+  only the chat's records.
 
 F does two jobs: it keeps never-rewind state off a disk that can
 rewind, and it answers how a sleeping computer hears an encrypted

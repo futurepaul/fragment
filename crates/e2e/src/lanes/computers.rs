@@ -1,8 +1,8 @@
 //! Computers (docs/computers.md): the generic Computer Durable Object
 //! against the stub image (`images/stub`: the bridge with its scripted
 //! runtime), under `wrangler dev` with Docker. The platform side names no
-//! runtime, so these checks pass with the stub exactly as with Hermes
-//! (the real-Hermes lane runs the same flows on our Hermes image).
+//! runtime, so these checks pass with the stub exactly as with the
+//! deployment's own image (goose: images/goose).
 //!
 //! A person makes their computer and assigns an agent fragment to it; the
 //! agent, an editor of its own fragment, joins a chat, and the platform
@@ -86,8 +86,8 @@ pub(super) fn phase(api: &Api, owner: &crate::Keys, id: &str) -> String {
 /// the turns a real model answers there (a reply, a wake's, two agents'
 /// three, a routine's, a new chat's), each a few model calls at most.
 const HOSTED_PAID_CALLS: u64 = 40;
-/// A first start on a preview pulls the deployment's image (3.8 GB for our
-/// Hermes', about 29 s) and boots its runtime: far longer than the stub's.
+/// A first start on a preview pulls the deployment's image and boots its
+/// runtime: far longer than the stub's.
 const HOSTED_WAKE: Duration = Duration::from_secs(300);
 
 /// A reply a real model could have made: some text, as the agent, naming
@@ -134,8 +134,8 @@ pub(super) fn newest_save(api: &Api, id: &str) -> Value {
 /// busy (fragment_core::computer::SAVE_SETTLE_MS), and taken within a few
 /// seconds more.
 const SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 30);
-/// On a preview, a model call Hermes makes after its reply (a title) can
-/// keep its work open a while, and a save of its `/data` takes seconds more.
+/// On a preview, a model call the runtime makes after its reply can keep
+/// its work open a while, and a save of its `/data` takes seconds more.
 const HOSTED_SAVED_AFTER_WORK: Duration = Duration::from_secs(fragment_core::computer::SAVE_SETTLE_MS as u64 / 1000 + 120);
 /// The deployment's own image answers the hold: before its saves, awake
 /// and at its sleep (the hosted rung of the stub's save checks).
@@ -389,7 +389,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a person makes their computer, asleep", r.status == 200 && id.starts_with("computer:") && r.body["phase"] == "asleep", &r);
     // The stub's scripted runtime (images/stub) answers its commands ("tool
     // please", "slow…", "fetch …", "think …") and echoes the rest; the
-    // deployment's own image (our Hermes) answers as its real model does.
+    // deployment's own image answers as its real model does.
     // Checks that need the script run on the stub alone; the rest assert
     // what any real model's answer satisfies. The fakes (the swap's
     // upstream and accounts), the node, and the operator are a local run's.
@@ -638,7 +638,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, reserved and settled on its owner's ledger.
-        // Hermes may make one more after its reply (on the e2e preview,
+        // A runtime may make one more after its reply (on the e2e preview,
         // 2026-10-06, one 55 s after the answer's), which settles only when
         // that call ends: the wait covers a model call, not just the ledger.
         let settled = |aig: &[Value]| !aig.is_empty() && aig.iter().all(|e| end_of(e) == "settled");
@@ -715,9 +715,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     s.ok("a second agent runs on the same computer", r.status == 200 && maple_id.starts_with("id:") && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
-    // the stub's bridge reads its agents again every minute (the Hermes lane
-    // proves the seconds of our Hermes image): a sleep and a wake follows the
-    // new one at once
+    // the stub's bridge reads its agents again every minute: a sleep and a
+    // wake follows the new one at once
     api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let maple_label = maple_name.split('.').next().unwrap_or("").to_string();

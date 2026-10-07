@@ -51,7 +51,7 @@
   // models and images are off.
   // "ai_gateway": "fragment",
   // The model a runtime's calls about an image run on (the model route's
-  // `vision`: Hermes' computer_use screenshots, whatever an agent's tier).
+  // `vision`: screenshots, whatever an agent's tier).
   // GLM-5.3 Flash unless named here; it must be one the price book prices
   // (fragment_core::price), or the deploy is refused.
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
@@ -64,12 +64,12 @@
   "operators": [],
   // Computers (docs/computers.md): the images they run, by name, relative
   // to the repo, and the one a new computer is pinned to. Without this
-  // the deployment makes no computers. The Hermes image builds from the
+  // the deployment makes no computers. The goose image builds from the
   // repo's root (it carries the fragment CLI); the stub, from images/.
   "computers": {
-    "default_image": "hermes",
+    "default_image": "goose",
     "images": {
-      "hermes": { "dockerfile": "images/hermes/Dockerfile", "build_context": "." }
+      "goose": { "dockerfile": "images/goose/Dockerfile", "build_context": "." }
     }
     // no size: a computer starts at decision 13's 2 vCPU and 6 GiB
   },

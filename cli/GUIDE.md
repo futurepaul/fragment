@@ -60,7 +60,7 @@ does what that needs when the computer sets:
 FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:… fragment list
 ```
 
-Our Hermes image sets all three in each agent's terminal. `fragment
+A computer's image sets all three in each agent's terminal. `fragment
 whoami` says which agent it is and for whom it acts; `fragment login` and
 `fragment keys` refuse (exit 2): an agent's keys are its owner's to
 manage.

@@ -3,9 +3,8 @@ name: music-generation-finite
 description: Generate songs, jingles, loops, and instrumental music with FAL MiniMax or ElevenLabs, through the operator's music keys
 version: 1.0.0
 metadata:
-  hermes:
-    tags: [audio, music, fal, minimax, elevenlabs, generation, finite]
-    related_skills: []
+  tags: [audio, music, fal, minimax, elevenlabs, generation, finite]
+  related_skills: []
 ---
 
 # Music Generation
