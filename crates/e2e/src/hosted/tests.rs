@@ -161,12 +161,18 @@ fn the_plan_follows_what_each_section_needs() {
     for (section, need) in [("ops", "fakes"), ("ai", "fakes"), ("restart", "node"), ("identities", "deployment"), ("lockdown", "node"), ("frames", "two-sites"), ("chat", "fakes")] {
         assert!(!runs(section) && why(section).contains(need), "{section} is skipped for {need}: {}", why(section));
     }
+    // the mind on real models runs on a preview, by name alone (it spends the run's paid calls)
+    assert!(why("mind-live").contains("--only mind-live") && why("mind-live").contains("--branch p5"), "{}", why("mind-live"));
+    let (named, _) = super::plan(Some(vec!["mind-live".into()]), vec![], &full);
+    assert!(named.len() == 1 && named[0].skip.is_none(), "by name it runs: {:?}", named[0].skip);
     // every lane asked for its section: the whole list, each once
     assert!(plan.len() >= 45, "{} sections", plan.len());
 
     // without computers the computers section is skipped; without a secret, everything
     let bare = hosted(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--secret-file", "/s/test", "--offers", "models", "--dry-run"]);
     assert!(planned(&bare)["computers"].as_deref().is_some_and(|w| w.contains("makes none")));
+    let (named, _) = super::plan(Some(vec!["mind-live".into()]), vec![], &bare);
+    assert!(named[0].skip.as_deref().is_some_and(|w| w.contains("makes none")), "no computers, no mind-live: {:?}", named[0].skip);
     let unsigned = hosted(&["--hosted", "--zone", "finite.place", "--branch", "p5", "--dry-run"]);
     assert!(planned(&unsigned).values().all(|skip| skip.as_deref().is_some_and(|w| w.contains("test secret"))));
     // no paid calls to lend: no models
