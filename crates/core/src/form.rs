@@ -54,7 +54,7 @@ fn mac(session: &str, purpose: &str, at_ms: i64) -> Hmac<Sha256> {
     h
 }
 
-/// The token for a form `purpose` (`share:<name>`, `join:<name>`) on a page
+/// The token for a form `purpose` (`share:<name>`, `consent:<name>`) on a page
 /// made at `now_ms` for the session whose cookie is `session`.
 pub fn issue(session: &str, purpose: &str, now_ms: i64) -> String {
     assert!(now_ms >= 0, "a page is made after 1970");
@@ -108,7 +108,7 @@ mod tests {
         let later = T + DELAY_MS;
         let other = SESSION.replace('5', "6");
         assert_eq!(check(&other, "share:chat.paul", &token, later), Err(Refused::NotThisForm));
-        assert_eq!(check(SESSION, "join:chat.paul", &token, later), Err(Refused::NotThisForm));
+        assert_eq!(check(SESSION, "consent:chat.paul", &token, later), Err(Refused::NotThisForm));
         assert_eq!(check(SESSION, "share:todo.paul", &token, later), Err(Refused::NotThisForm));
         // an earlier time, to skip the delay, breaks the MAC
         let sig = token.split_once('.').unwrap().1;

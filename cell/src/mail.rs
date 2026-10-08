@@ -32,6 +32,11 @@ pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<String> {
     if let Some(why) = mail::refusal(mail) {
         return Err(CellError::invalid(why));
     }
+    // an e2e person's address (`<name>@e2e.test`) names no mailbox: on a
+    // preview, whose mail is real, it goes nowhere rather than bounce
+    if cfg.mail_url.is_none() && cfg.test_hooks && fragment_core::levers::valid_e2e_email(&mail.to) {
+        return Ok(format!("e2e-unsent-{}", js::random_hex::<8>()));
+    }
     let from = cfg.mail_from.as_deref().ok_or_else(|| CellError::host("this deployment sends no mail: set its mail_from (FRAGMENT_MAIL_FROM)"))?;
     let message = mail::message(from, mail);
     let Some(url) = &cfg.mail_url else {

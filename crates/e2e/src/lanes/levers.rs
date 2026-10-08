@@ -169,10 +169,11 @@ fn mail(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["messageId"].as_str().is_some_and(|id| !id.is_empty()) && sent.len() == 1 && sent[0].from == crate::MAIL_FROM && sent[0].subject == "Paul shared a thing with you",
         &r,
     );
+    let before = s.mail.sent().len();
     let refused = [send("not an address", "s")?, send(&format!("{to}, eve@example.com"), "s")?, send(&to, "two\nlines")?];
     s.ok(
         "a message to anything but one plain address, or with a subject of two lines, is refused (400), and nothing is sent",
-        refused.iter().all(|r| r.status == 400) && s.mail.sent().iter().all(|m| m.to == to) && s.mail.sent_to(&to).len() == 1,
+        refused.iter().all(|r| r.status == 400) && s.mail.sent().len() == before && s.mail.sent_to(&to).len() == 1,
         refused.iter().map(ToString::to_string).collect::<Vec<_>>().join(" / "),
     );
     s.mail.fail_next("E_RATE_LIMIT_EXCEEDED");

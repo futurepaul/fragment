@@ -44,10 +44,11 @@ use crate::js;
 pub(crate) const PROFILES_MAX: usize = 64;
 
 pub(crate) mod calls;
+mod invites;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, InviteEmail, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
     ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
     TEST_HOLD_MAX_MS,
 };
@@ -99,6 +100,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(SCHEMA, None).expect("the Registry schema applies");
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
+        state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -657,6 +659,7 @@ impl RegistryCell {
         match path.as_str() {
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),
             Lookup::PATH => reply::<Lookup>(self.lookup(body(&bytes)?)),
+            InviteEmail::PATH => reply::<InviteEmail>(self.invite(body(&bytes)?).await),
             RegisterAgent::PATH => reply::<RegisterAgent>(self.register_agent(body(&bytes)?)),
             Hold::PATH => reply::<Hold>(self.hold(body(&bytes)?)),
             SubjectOf::PATH => reply::<SubjectOf>(self.subject_of(body(&bytes)?)),

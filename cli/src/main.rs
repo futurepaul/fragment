@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 use fragment_core::price::{dollars, USD};
 use fragment_proto::ledger::{LedgerStatus, Standing};
 use fragment_proto::{
-    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted, Rotated, Run, RunList,
+    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, InviteList, Member, MemberList, Shared, OpResult, Posted, Rotated, Run, RunList,
     Visibility,
 };
 use serde::Serialize;
@@ -226,13 +226,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: MembersCmd,
     },
-    /// Invites: a token that makes whoever redeems it a member
+    /// Invites waiting on an email (`members add` makes them)
     Invite {
         #[command(subcommand)]
         sub: InviteCmd,
     },
-    /// Join a fragment with an invite token
-    Join { name: String, token: String },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
         name: String,
@@ -427,10 +425,12 @@ enum BlobCmd {
 enum MembersCmd {
     /// List members and their roles
     List { name: String },
-    /// Add a member, or change their role (the owner, or their agent for them)
+    /// Add a member, or change their role (the owner, or their agent for
+    /// them). An email no one signs in as yet is mailed an invite: they
+    /// are in once they sign in as it
     Add {
         name: String,
-        /// identity or key (an npub, or 64 hex), or NIP-05 name (name@domain)
+        /// an email, or an identity or key (an npub, or 64 hex)
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -439,7 +439,7 @@ enum MembersCmd {
         #[arg(long)]
         people_only: bool,
     },
-    /// Remove a member (the owner, or their agent for them)
+    /// Remove a member (the owner, or their agent for them): an email, or an npub
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
@@ -447,23 +447,10 @@ enum MembersCmd {
 
 #[derive(Subcommand)]
 enum InviteCmd {
-    /// Make an invite (the owner, or their agent for them); prints the token once
-    Create {
-        name: String,
-        /// viewer | editor
-        #[arg(long, default_value = "viewer")]
-        role: String,
-        /// how many people may join with it
-        #[arg(long, default_value = "1")]
-        uses: u32,
-        /// lifetime in seconds (default 7 days, at most 30)
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// List open invites (the owner, or their agent for them; tokens are never shown again)
+    /// List the invites waiting (the owner, or their agent for them)
     List { name: String },
-    /// Revoke an invite by id (the owner, or their agent for them)
-    Revoke { name: String, id: String },
+    /// Revoke the invite waiting on an email (the owner, or their agent for them)
+    Revoke { name: String, email: String },
 }
 
 #[derive(Subcommand)]
@@ -1411,9 +1398,24 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Add { name, who, role, people_only } => {
-                let who = auth::resolve_npub(&who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
+                let v: Member = match auth::member_of(&who)? {
+                    auth::Member::Email(_) if people_only => return Err(usage("--people-only names an npub: an invite by email lends what the person's role does")),
+                    auth::Member::Email(email) => {
+                        let body = fragment_proto::CreateInvite { email: email.clone(), role };
+                        match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
+                            Shared::Member(m) => m,
+                            Shared::Invited(i) => {
+                                json_exit(j, &Shared::Invited(i.clone()));
+                                let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
+                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they sign in as {email}", i.role.as_str());
+                                println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?,
+                };
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
@@ -1421,7 +1423,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Rm { name, who } => {
-                let who = auth::resolve_npub(&who)?;
+                let who = auth::member_of(&who)?;
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 json_exit(j, &v);
                 println!("removed {who} from {name}");
@@ -1433,48 +1435,21 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Invite { sub } => match sub {
-            InviteCmd::Create { name, role, uses, ttl } => {
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
-                let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
-                // the create is the one answer that carries the token
-                let token = v.token.clone().ok_or_else(|| anyhow!("the host made invite {} but did not answer its token", v.id))?;
-                // the link a person opens in a browser: the platform's join
-                // page (they sign in, see what it grants, then join)
-                let status: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-                let link = format!("{}/join/{}?token={token}", platform_of(&c, &status), status.name);
-                if j {
-                    let mut out = serde_json::to_value(&v)?;
-                    out["link"] = json!(link);
-                    ok_exit(&out);
-                }
-                println!("invite {} ({}, {uses} use{})", v.id, v.role.as_str(), if uses == 1 { "" } else { "s" });
-                println!("open in a browser: {link}");
-                println!("or from a CLI: fragment join {name} {token}");
-            }
             InviteCmd::List { name } => {
                 let v: InviteList = c.call_as(c.get(&format!("/api/f/{name}/invites"))?)?;
                 json_exit(j, &v);
                 for i in &v.invites {
                     let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
-                    println!("{}\t{}\t{} left\texpires {}", i.id, i.role.as_str(), i.uses_left, chrono_like(expires_s));
+                    println!("{}\t{}\texpires {}", i.email, i.role.as_str(), chrono_like(expires_s));
                 }
             }
-            InviteCmd::Revoke { name, id } => {
-                let v = c.call(c.delete(&format!("/api/f/{name}/invites/{id}"))?)?;
+            InviteCmd::Revoke { name, email } => {
+                let email = email.trim().to_ascii_lowercase();
+                let v = c.call(c.delete(&format!("/api/f/{name}/invites/{email}"))?)?;
                 json_exit(j, &v);
-                println!("revoked invite {id}");
+                println!("revoked the invite waiting on {email}");
             }
         },
-        Cmd::Join { name, token } => {
-            let v = c.call(c.post_json(&format!("/api/f/{name}/join"), &json!({ "token": token }))?)?;
-            json_exit(j, &v);
-            if v["joined"].as_bool().unwrap_or(false) {
-                println!("joined {name} as {}", v["role"].as_str().unwrap_or(""));
-            } else {
-                println!("already a member of {name} ({})", v["role"].as_str().unwrap_or(""));
-            }
-        }
         Cmd::Call { name, op, input, id } => {
             let input = match (input.as_str(), input.strip_prefix('@')) {
                 ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,
