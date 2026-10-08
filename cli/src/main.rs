@@ -359,7 +359,7 @@ enum OperatorCmd {
     /// deployment's `operators`. It is held by no person, so a wipe never
     /// removes it
     Key { path: PathBuf },
-    /// Wipe a person (a username, or id:…): everything theirs and their
+    /// Wipe a person (a username, or an npub): everything theirs and their
     /// agents' is deleted, and their username and sign-in freed, so their
     /// next sign-in is a new person. --dry-run says what it deletes and
     /// changes nothing; --yes deletes it (again: it goes on where it
@@ -380,7 +380,7 @@ enum OperatorCmd {
 #[derive(Subcommand)]
 enum LedgerCmd {
     /// Grant someone credit (the deployment's operators): a username, an
-    /// identity (id:…), or `me`
+    /// identity (an npub), or `me`
     Grant {
         who: String,
         usd: f64,
@@ -439,7 +439,7 @@ enum MembersCmd {
     /// Add a member, or change their role (the owner, or their agent for them)
     Add {
         name: String,
-        /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
+        /// identity or key (an npub, or 64 hex), or NIP-05 name (name@domain)
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -540,15 +540,6 @@ fn print_identity(v: &IdentityView, this_key: &str) {
     }
 }
 
-/// Whom `members add|rm` names: an identity (`id:…`), or a key (an npub,
-/// 64 hex, or a NIP-05 name).
-fn member_named(who: String) -> Result<String> {
-    if who.starts_with("id:") {
-        return Ok(who);
-    }
-    auth::resolve_npub(&who)
-}
-
 fn load_config() -> Config {
     let v: Value = std::fs::read(config_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
     let text = |k: &str| v[k].as_str().map(str::to_string);
@@ -583,12 +574,12 @@ fn agent_mode_of(agent: Option<String>, acting_for: Option<String>) -> Result<Op
     if !fragment_proto::valid_fragment_name(&agent) {
         return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>.<username>), not {agent:?}")));
     }
-    // an identity as the platform names one (`id:` and its opaque id: the
-    // platform checks it exactly, and only an agent's owner is honored)
-    let identity = |s: &str| s.strip_prefix("id:").is_some_and(|rest| (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric()));
+    // an identity as the platform names one (an npub: the platform checks
+    // it exactly, and only an agent's owner is honored)
+    let identity = |s: &str| s.strip_prefix("npub1").is_some_and(|rest| (1..=96).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
     if let Some(who) = &acting_for {
         if !identity(who) {
-            return Err(usage(format!("FRAGMENT_FOR names an identity (id:…), not {who:?}")));
+            return Err(usage(format!("FRAGMENT_FOR names an identity (an npub), not {who:?}")));
         }
     }
     Ok(Some(api::AgentMode { agent, acting_for }))
@@ -1425,7 +1416,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Add { name, who, role, people_only } => {
-                let who = member_named(who)?;
+                let who = auth::resolve_npub(&who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
                 let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
                 json_exit(j, &v);
@@ -1435,7 +1426,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Rm { name, who } => {
-                let who = member_named(who)?;
+                let who = auth::resolve_npub(&who)?;
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 json_exit(j, &v);
                 println!("removed {who} from {name}");
@@ -1719,12 +1710,12 @@ mod tests {
         assert_eq!(agent_mode_of(None, None).unwrap(), None, "no agent: this machine's key signs");
         assert_eq!(agent_mode_of(s(""), s("  ")).unwrap(), None, "empty is unset");
         assert_eq!(agent_mode_of(s("juniper.paul"), None).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: None }));
-        let id = "id:0123456789abcdef0123456789abcdef";
+        let id = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
         assert_eq!(agent_mode_of(s(" juniper.paul "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: s(id) }));
         for bad in ["juniper", "Juniper.Paul", "a/b.paul", "juniper.paul?for=x"] {
             assert_eq!(code_of(agent_mode_of(s(bad), None)), Code::InvalidUsage, "{bad}");
         }
-        for bad in ["paul", "id:", "id:a b", "npub1xyz", "id:paul&x=1"] {
+        for bad in ["paul", "npub1", "id:0123456789abcdef0123456789abcdef", "NPUB180CVV07TJDRRGPA0J7J7TMNYL2YR6YR7L8J4S3EVF6U64TH6GKWSYJH6W6", "npub1paul&x=1", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"] {
             assert_eq!(code_of(agent_mode_of(s("juniper.paul"), s(bad))), Code::InvalidUsage, "{bad}");
         }
         assert_eq!(code_of(agent_mode_of(None, s(id))), Code::InvalidUsage, "for whom, with no agent?");

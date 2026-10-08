@@ -534,7 +534,7 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk.paul/juniper.paul", chat_name: "talk", profile: "juniper-paul", message_id: "12", user_id: "id:bob", user_name: "bob", text: "/new please", media: &media, context: None };
+        let m = Inbound { chat: "talk.paul/juniper.paul", chat_name: "talk", profile: "juniper-paul", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");

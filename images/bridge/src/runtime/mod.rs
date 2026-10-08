@@ -35,7 +35,7 @@ pub struct Agent {
     /// The agent fragment's name (`<label>.<username>`): who requests act as
     /// (`x-fragment-agent`).
     pub fragment: String,
-    /// The agent's identity (`id:…`): who its records are by.
+    /// The agent's identity (its fragment's npub): who its records are by.
     pub identity: String,
     /// Its display name, which `@mentions` use.
     pub name: String,

@@ -20,8 +20,8 @@ runtime. A change that would have to is a design bug (the rule).
   agent's identity, registered to the fragment's owner, and it signs the
   guest's requests only while it is assigned there.
 - Agents are fragments of kind `agent` that name the computer that runs
-  them (decision 14). An agent's identity is its own (`id:` of the agent
-  fragment's identity), and its owner is a person. The computer's guest
+  them (decision 14). An agent's identity is its own: its agent
+  fragment's npub (decision 45), and its owner is a person. The computer's guest
   acts *as* its agents, never as its owner.
 - The Computer DO is the only thing that talks to its container. It
   starts and stops it, saves and restores `/data`, runs the egress

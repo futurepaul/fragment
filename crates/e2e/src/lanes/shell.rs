@@ -47,7 +47,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[])?;
     let id = r.body["id"].as_str().unwrap_or("").to_string();
     s.ok("the shell's page reads the API as its signed-in person, with no key", r.status == 200 && r.body["kind"] == "person", &r);
-    let username = format!("sh{}", &id.trim_start_matches("id:")[..8]);
+    let username = format!("sh{}", &id.trim_start_matches("npub1")[..8]);
     let r = shell(api, &session, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })), &[])?;
     s.ok("and chooses its username", r.status == 200 && r.body["username"] == username.as_str(), &r);
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[("x-fragment-shell", String::new())])?;
@@ -1050,7 +1050,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let id_of = |label: &str| agents.iter().find(|a| a["fragment"] == format!("{label}.{}", me.username).as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let first_label = me.first;
     let (lead, other) = (id_of("reader"), id_of(first_label));
-    anyhow::ensure!(lead.starts_with("id:") && other.starts_with("id:"), "the two agents' identities: {r}");
+    anyhow::ensure!(fragment_core::npub::is_identity(&lead) && fragment_core::npub::is_identity(&other), "the two agents' identities: {r}");
 
     b.click(page, "#new-group")?;
     let offered = b.until(page, "document.getElementById('new-group-dialog').open && document.querySelectorAll('#new-group-agents .pick').length === 2", wait);
@@ -1176,7 +1176,7 @@ fn agent_ids(api: &Api, session: &str, username: &str, labels: &[&str]) -> Resul
         .iter()
         .map(|l| agents.iter().find(|a| a["fragment"] == format!("{l}.{username}").as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
         .collect();
-    anyhow::ensure!(ids.iter().all(|i| i.starts_with("id:")), "the agents' identities: {r}");
+    anyhow::ensure!(ids.iter().all(|i| fragment_core::npub::is_identity(i)), "the agents' identities: {r}");
     Ok(ids)
 }
 

@@ -1,4 +1,4 @@
-//! The `Principal` cell: one Durable Object per identity (`id:…`), holding
+//! The `Principal` cell: one Durable Object per identity (an npub), holding
 //! the index of the fragments it belongs to (what `GET /api/fragments`
 //! lists). The fragments are the authority; each delivers its changes here
 //! from an outbox, versioned so a late delivery never undoes a newer one.

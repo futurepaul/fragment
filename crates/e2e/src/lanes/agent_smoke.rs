@@ -409,7 +409,7 @@ pub fn agent_smoke(s: &mut Suite, api: &Api) -> Result<()> {
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let statuses = [&skills, &made, &agent, &assigned, &soul, &deployed, &chat_made, &joined].map(|r| r.status);
-    let set_up = statuses.iter().all(|s| *s == 200) && made.body["phase"] == "asleep" && made.body["image"] != "stub" && identity.starts_with("id:");
+    let set_up = statuses.iter().all(|s| *s == 200) && made.body["phase"] == "asleep" && made.body["image"] != "stub" && fragment_core::npub::is_identity(&identity);
     s.ok(
         "an e2e person's default agent, made as the shell makes it: their skills fragment, their computer (asleep, on the deployment's own image), the agent fragment with its SOUL and tier, assigned to it, and its chat with the agent in it",
         set_up,

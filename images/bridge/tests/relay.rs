@@ -470,7 +470,7 @@ async fn two_profiles_on_one_gateway() {
     });
     fake.with(|w| {
         let by = |chat: &str| w.records(chat, "chat").into_iter().find(|r| r["body"].get("turn").is_some()).unwrap()["principal"].clone();
-        assert_eq!((by(&talk), by(&notes)), (json!("id:juniper"), json!("id:rowan")));
+        assert_eq!((by(&talk), by(&notes)), (json!("npub1juniper"), json!("npub1rowan")));
     });
     bridge.stop().await;
 }

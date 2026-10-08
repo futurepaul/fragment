@@ -174,26 +174,26 @@ impl Drop for Fake {
 /// and its `tasks`.
 fn agent_fragment(identity: &str) -> Frag {
     let mut f = Frag { kind: "agent".into(), ..Frag::default() };
-    f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+    f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
     f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
     f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
     f
 }
 
-/// A person, by name: `id:<name>`.
+/// A person, by name: `npub1<name>`, an npub in shape.
 pub fn person(name: &str) -> String {
-    format!("id:{name}")
+    format!("npub1{name}")
 }
 
 impl Fake {
-    /// A fake with `agents` (`label`s: `<label>.paul`, `id:<label>`, owned by
+    /// A fake with `agents` (`label`s: `<label>.paul`, `npub1<label>`, owned by
     /// paul) on one computer, listening on `bind` (`127.0.0.1:0` for tests;
     /// `0.0.0.0:0` for a container to reach).
     pub async fn start(bind: &str, agents: &[&str]) -> Fake {
-        let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}.paul"), "identity": format!("id:{l}"), "name": l, "owner": "id:paul" })).collect();
-        let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "id:paul", "image": "test", "agents": agents }), page: 1000, ..World::default() };
-        world.names.insert("id:paul".into(), "paul".into());
-        world.names.insert("id:skyler".into(), "skyler".into());
+        let agents: Vec<Value> = agents.iter().map(|l| json!({ "fragment": format!("{l}.paul"), "identity": format!("npub1{l}"), "name": l, "owner": "npub1paul" })).collect();
+        let mut world = World { computer: json!({ "computer": "computer:00aa", "owner": "npub1paul", "image": "test", "agents": agents }), page: 1000, ..World::default() };
+        world.names.insert("npub1paul".into(), "paul".into());
+        world.names.insert("npub1skyler".into(), "skyler".into());
         for a in world.computer["agents"].as_array().cloned().unwrap_or_default() {
             world.fragments.insert(a["fragment"].as_str().unwrap().to_string(), agent_fragment(a["identity"].as_str().unwrap()));
         }
@@ -224,9 +224,9 @@ impl Fake {
         let name = format!("{label}.paul");
         self.with(|w| {
             let mut f = Frag { kind: "chat".into(), ..Frag::default() };
-            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
             for (i, a) in agents.iter().enumerate() {
-                f.members.push(Member { principal: format!("id:{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
+                f.members.push(Member { principal: format!("npub1{a}"), role: "editor".into(), kind: "agent".into(), added_at: 10 + i as i64 });
             }
             f.channels.insert("chat".into(), Chan { post: Some("viewer".into()), ..Chan::default() });
             f.channels.insert("work".into(), Chan { post: Some("editor".into()), ..Chan::default() });
@@ -241,7 +241,7 @@ impl Fake {
         let name = format!("{label}.paul");
         self.with(|w| {
             let mut f = Frag { kind: "skills".into(), ..Frag::default() };
-            f.members.push(Member { principal: "id:paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
+            f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
             for (path, text) in files {
                 f.files.insert(path.to_string(), Bytes::from(text.to_string()));
             }
@@ -251,13 +251,13 @@ impl Fake {
     }
 
     /// Assigns the agent `label` to the computer while it runs (its
-    /// fragment `<label>.paul`, identity `id:<label>`), as its owner's
+    /// fragment `<label>.paul`, identity `npub1<label>`), as its owner's
     /// `PUT /api/computers/{id}/agents/{fragment}` does.
     pub fn add_agent(&self, label: &str) {
         self.with(|w| {
-            let (fragment, identity) = (format!("{label}.paul"), format!("id:{label}"));
+            let (fragment, identity) = (format!("{label}.paul"), format!("npub1{label}"));
             w.fragments.insert(fragment.clone(), agent_fragment(&identity));
-            let agent = json!({ "fragment": fragment, "identity": identity, "name": label, "owner": "id:paul" });
+            let agent = json!({ "fragment": fragment, "identity": identity, "name": label, "owner": "npub1paul" });
             w.computer["agents"].as_array_mut().expect("the computer's agents").push(agent);
         });
     }
@@ -274,8 +274,8 @@ impl Fake {
     pub fn join(&self, fragment: &str, label: &str) {
         self.with(|w| {
             let at = w.now();
-            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("id:{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
-            w.append(&format!("{label}.paul"), "tasks", "id:paul", json!({ "kind": "joined", "fragment": fragment }));
+            w.fragments.get_mut(fragment).expect("a fragment").members.push(Member { principal: format!("npub1{label}"), role: "editor".into(), kind: "agent".into(), added_at: at });
+            w.append(&format!("{label}.paul"), "tasks", "npub1paul", json!({ "kind": "joined", "fragment": fragment }));
         });
     }
 
@@ -469,7 +469,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             answer(StatusCode::OK, json!({ "channels": list }))
         }
         (Method::GET, ["members"]) => {
-            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "id:paul" })).collect();
+            let list: Vec<Value> = f.members.iter().map(|m| json!({ "principal": m.principal, "role": m.role, "kind": m.kind, "addedAt": m.added_at, "addedBy": "npub1paul" })).collect();
             answer(StatusCode::OK, json!({ "members": list }))
         }
         (Method::GET, ["subscriptions"]) => {

@@ -16,9 +16,10 @@
 //!   them to a fragment); their username stays theirs, so no one takes it
 //!   meanwhile and no fragment is made under it.
 //! - **The end** (`Step::Registry`, the last): every row naming them or
-//!   their agents goes in one turn: identities, keys, sign-in subjects,
-//!   username, picture, agent fragments, sessions, consents. Their next
-//!   sign-in finds no subject, and is a new person.
+//!   their agents goes in one turn: identities, keys (their own sealed
+//!   key with the rest), sign-in subjects, username, picture, agent
+//!   fragments, sessions, consents. Their next sign-in finds no subject,
+//!   and is a new person, named by a new key.
 
 use fragment_core::wipe::{self, Completed, Named, Progress, Refusal, Step};
 
@@ -222,6 +223,7 @@ impl RegistryCell {
         self.exec(&format!("DELETE FROM redemptions WHERE session IN (SELECT hash FROM sessions WHERE {THEIRS})"), theirs(identity))?;
         self.exec(&format!("DELETE FROM sessions WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM keys WHERE {THEIRS}"), theirs(identity))?;
+        self.exec("DELETE FROM person_keys WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM logins WHERE link_to = ?", vec![identity.into()])?;
         Ok(())
     }

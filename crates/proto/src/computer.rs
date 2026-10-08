@@ -42,7 +42,7 @@ pub enum ComputerPhase {
 pub struct ComputerAgent {
     /// The agent fragment's name (`<label>.<username>`).
     pub fragment: String,
-    /// The agent's identity (`id:…`): it acts as this.
+    /// The agent's identity (its fragment's npub): it acts as this.
     pub identity: String,
     /// What it is called: its fragment's label (`juniper` of
     /// `juniper.paul`), how people @mention it.

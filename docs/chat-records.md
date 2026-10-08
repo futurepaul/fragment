@@ -70,7 +70,7 @@ it, and a new draft may follow (the next part).
 **A person's message:**
 
 ```json
-{ "text": "hi @juniper", "to": ["id:…"], "attachments": [ATTACHMENT] }
+{ "text": "hi @juniper", "to": ["npub1…"], "attachments": [ATTACHMENT] }
 ```
 
 - `text`, at most 32 KiB (more is cut). `kind` absent, or `"message"`.
@@ -91,7 +91,7 @@ it, and a new draft may follow (the next part).
 **An agent's reply:**
 
 ```json
-{ "text": "…", "turn": "<turn>", "attachments": [ATTACHMENT], "to": ["id:…"], "hop": 1 }
+{ "text": "…", "turn": "<turn>", "attachments": [ATTACHMENT], "to": ["npub1…"], "hop": 1 }
 ```
 
 - Posted by the agent with the id `rp:<turn>:<n>`, its replies numbered
@@ -163,7 +163,7 @@ Posted by the agent, each with the id `wk:<turn>:<part>`, so a replayed
 step posts the same record:
 
 ```json
-{ "kind": "turn.start", "turn": "…", "asker": "id:…", "agent": "id:…",
+{ "kind": "turn.start", "turn": "…", "asker": "npub1…", "agent": "npub1…",
   "cause": { "fragment": "…", "channel": "chat", "seq": 12 },
   "life": "<32 lowercase hex>" }
 ```
@@ -211,7 +211,7 @@ ends it.
 
 ```json
 { "kind": "turn.prompt.closed", "turn": "…", "prompt": "<prompt>",
-  "outcome": "answered", "option": "once", "by": "id:…" }
+  "outcome": "answered", "option": "once", "by": "npub1…" }
 ```
 
 Part `pc:<prompt>`. `outcome` is `answered` (with `option` and `by`),

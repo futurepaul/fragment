@@ -48,7 +48,7 @@ pub const REPLAY_BACK_RECORDS: i64 = 2_000;
 pub struct Agent {
     /// Its agent fragment (`fred.paul`).
     pub fragment: String,
-    /// Its identity (`id:…`), which a message's `to` names.
+    /// Its identity (an npub), which a message's `to` names.
     pub identity: String,
     /// Its label (`fred`): how it is @mentioned.
     pub name: String,
