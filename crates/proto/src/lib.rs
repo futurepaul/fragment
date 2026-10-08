@@ -16,6 +16,20 @@ pub mod limits {
     /// A username: a label of 3 to 32 bytes, not a reserved word.
     pub const USERNAME_MIN_BYTES: usize = 3;
     pub const USERNAME_MAX_BYTES: usize = 32;
+    /// A fragment's host label, `<label>--<username>` and a branch
+    /// deployment's mark (`--<branch>`), is one DNS label: a create whose
+    /// host label would be longer is refused, never cut (`label_room`).
+    pub const HOST_LABEL_MAX_BYTES: usize = 63;
+    /// A branch deployment's name (`valid_branch`): its fragments' and
+    /// computers' host labels end in its mark, `--<branch>`.
+    pub const BRANCH_MAX_BYTES: usize = 16;
+    /// The room every username leaves for its labels, on every deployment:
+    /// the longest username's where hosts carry no mark. A label this long
+    /// fits anyone's host; where a branch's mark would leave a username
+    /// less, it is refused as it is chosen (`username_max`).
+    pub const LABEL_ROOM_MIN_BYTES: usize = HOST_LABEL_MAX_BYTES - "--".len() - USERNAME_MAX_BYTES;
+    // the longest branch's mark still leaves a username of some length
+    const _: () = assert!(USERNAME_MAX_BYTES - ("--".len() + BRANCH_MAX_BYTES) >= USERNAME_MIN_BYTES);
     /// A profile picture (PNG, JPEG, WebP, or GIF).
     pub const PICTURE_MAX_BYTES: usize = 256 * 1024;
     /// An operation id: `^[A-Za-z0-9._:-]{1,128}$`.
@@ -286,6 +300,36 @@ pub fn flat_name(name: &str) -> Option<String> {
 pub fn from_flat_name(flat: &str) -> Option<String> {
     let (label, username) = flat.split_once("--")?;
     (valid_label(label) && valid_username(username)).then(|| fragment_name(label, username))
+}
+
+/// A branch deployment's name: 1 to 16 lowercase letters, digits, and
+/// single dashes inside. It is served at `<branch>.<zone>`, and its
+/// fragments' host labels end in its mark, `--<branch>`.
+pub fn valid_branch(branch: &str) -> bool {
+    let b = branch.as_bytes();
+    (1..=limits::BRANCH_MAX_BYTES).contains(&b.len())
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b[0] != b'-'
+        && b[b.len() - 1] != b'-'
+        && !branch.contains("--")
+}
+
+/// A fragment's host label where the deployment's hosts carry `mark` (a
+/// branch's `--<branch>`, or nothing): `<label>--<username><mark>`.
+pub fn host_label(name: &str, mark: &str) -> Option<String> {
+    flat_name(name).map(|flat| format!("{flat}{mark}"))
+}
+
+/// How long a label of `username`'s may be where hosts carry `mark`, so
+/// that its host label is one DNS label.
+pub fn label_room(username: &str, mark: &str) -> usize {
+    limits::HOST_LABEL_MAX_BYTES.saturating_sub("--".len() + username.len() + mark.len())
+}
+
+/// The longest username a deployment whose hosts carry `mark` takes: each
+/// leaves `LABEL_ROOM_MIN_BYTES` for its labels.
+pub fn username_max(mark: &str) -> usize {
+    limits::USERNAME_MAX_BYTES.saturating_sub(mark.len())
 }
 
 pub fn valid_op_id(id: &str) -> bool {
@@ -1423,6 +1467,10 @@ mod tests {
         for not in ["todo", "todo--", "--paul", "a--b--c", "Todo--paul", "todo--pa", "todo.x--paul"] {
             assert_eq!(from_flat_name(not), None, "{not}");
         }
+        assert!(valid_branch("p5") && valid_branch("e2e") && valid_branch(&"b".repeat(16)) && valid_branch("my-branch"));
+        for not in ["", "-b", "b-", "b--c", "B", "b.c", &"b".repeat(17)] {
+            assert!(!valid_branch(not), "{not}");
+        }
         assert!(valid_op_name("add_todo"));
         assert!(!valid_op_name("__mutate"));
         assert!(!valid_op_name("Add"));
@@ -1437,6 +1485,37 @@ mod tests {
         assert!(!valid_repo_path("/abs"));
         assert!(!valid_repo_path("a//b"));
         assert!(!valid_repo_path("a/./b"));
+    }
+
+    /// Goal: a label of `label_room` bytes makes a host label of exactly
+    /// 63 under any username, with or without a branch's mark; the mark
+    /// takes from the room. Every username a deployment takes
+    /// (`username_max`) leaves `LABEL_ROOM_MIN_BYTES`, and a computer's host
+    /// label fits under the longest branch's mark.
+    #[test]
+    fn a_host_label_is_one_dns_label() {
+        assert_eq!(limits::LABEL_ROOM_MIN_BYTES, 29);
+        assert_eq!(host_label("todo.paul", "").as_deref(), Some("todo--paul"));
+        assert_eq!(host_label("todo.paul", "--p5").as_deref(), Some("todo--paul--p5"));
+        assert_eq!(host_label("todo", "--p5"), None);
+        assert_eq!((label_room("paul", ""), label_room("paul", "--p5")), (57, 53));
+        for username in ["abc", "paul", &"u".repeat(limits::USERNAME_MAX_BYTES)] {
+            for mark in ["", "--b", "--p5", &format!("--{}", "b".repeat(limits::BRANCH_MAX_BYTES))] {
+                let room = label_room(username, mark);
+                let host = host_label(&fragment_name(&"l".repeat(room), username), mark).unwrap();
+                assert_eq!(host.len(), limits::HOST_LABEL_MAX_BYTES, "{username} {mark}");
+            }
+        }
+        assert_eq!((username_max(""), username_max("--p5")), (32, 28));
+        for branch in 1..=limits::BRANCH_MAX_BYTES {
+            let mark = format!("--{}", "b".repeat(branch));
+            assert!(username_max(&mark) >= limits::USERNAME_MIN_BYTES, "{mark}");
+            for len in limits::USERNAME_MIN_BYTES..=username_max(&mark) {
+                assert!(label_room(&"u".repeat(len), &mark) >= limits::LABEL_ROOM_MIN_BYTES, "{len} {mark}");
+            }
+            let computer = crate::computer::computer_label(&format!("computer:{}", "0".repeat(24))).unwrap();
+            assert!(computer.len() + mark.len() <= limits::HOST_LABEL_MAX_BYTES, "{computer}{mark}");
+        }
     }
 
     #[test]

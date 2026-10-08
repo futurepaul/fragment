@@ -11,6 +11,21 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## `fragment ask` sizes its chats' labels for a deployment without a branch
+
+- **Observed:** 2026-10-07, the host label limit (docs/api.md, Names).
+  The CLI cuts a pair chat's label (`cli/src/ask.rs`, `label_max`) to
+  the room under its owner's username where hosts carry no mark: it does
+  not know a branch deployment's `--<branch>`, which the cell counts.
+- **Risk:** on a branch, two agents whose labels together come within the
+  mark's length of that room are refused their chat (400, saying why),
+  where on production they get one. Never a fragment no host reaches.
+- **First proof:** `fragment ask` on a preview answering "… is too
+  long: a fragment's address …" for a pair of long agent names.
+- **Delete when:** the CLI learns the room its owner's labels have (say
+  from `GET /api/identities/me`) and cuts to the lesser, so production's
+  labels, and the chats they name, stay as they are.
+
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
@@ -25,6 +40,35 @@ fragment.club until cutover (decisions 34–35).
   said nothing was left.
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
+
+## Objects made before a column of their table refuse what writes it
+
+- **Observed:** 2026-10-08, p5: a wipe's cleanup never finished. #197
+  (2026-10-07) removed every migration as state "from before
+  Cloudflare", among them three made for Cloudflare-era columns: a list's
+  `memberships.searched` (#186, 11 minutes before), a fragment's
+  `runs.code` (#178, 9 minutes before) and `code_triggers.from_kind`
+  (#117, 10-03). `CREATE TABLE IF NOT EXISTS` never adds a column, so an
+  object made before each refuses every statement that names it (a 500):
+  a list made before #186 takes no change (its fragments' rows freeze), a
+  fragment made before #178 launches and advances no job run, one made
+  before #117 installs no deploy and fires no channel trigger. Two more
+  columns never had a migration (#116): the Registry's
+  `identities.held` (a Registry made before it, one object for the whole
+  deployment, refuses every sign-in and key) and a fragment's
+  `members.people_only`. A wipe no longer waits on its person's own lists
+  (ended.rs), so this holds no wipe; everything else of such an object
+  stays refused.
+- **Risk:** p5's (and the e2e preview's) objects made before those
+  columns stay broken until they are made again. A fragment its owner's
+  frozen list never took is one a wipe does not find (the entry above).
+- **First proof:** a list that refuses an index change with `no column
+  named searched` (the wipe's report names it; `POST /api/test/list
+  {op: before-searched}` makes one).
+- **Delete when:** the deployments that hold such objects are reset (or
+  those objects deleted: Paul's call, a hard cut), and a check refuses a
+  column added to an existing table without a migration or a reset the
+  deploy enforces.
 
 ## The browser half of web push is not driven by a test
 
@@ -591,18 +635,32 @@ fragment.club until cutover (decisions 34–35).
   interval passes, proven by the Docker rung's `use the terminal twice`
   turn on an unpatched image.
 
-## The screen's Take over is the image's, not Hermes'
+## The screen writes Hermes' lease file, not through Hermes
 
-- **Observed:** phase 4 (`images/bridge/src/screen.rs`). The screen
-  proxies raw RFB from Hermes' desktop socket and passes input only from
-  the viewer holding control. Hermes' own take-over lease (its
-  dashboard's ticketed display socket) is not used, so the agent's
-  computer-use tools do not know a person holds the screen.
-- **Risk:** a person and the agent move the pointer at once.
-- **First proof:** a person taking over while a computer-use turn runs.
-- **Delete when:** the screen goes through Hermes' lease (its ticketed
-  `/api/display/ws`, or a lease the image can set), proven by a turn
-  that waits while a person holds control.
+- **Observed:** 2026-10-07 (`images/bridge/src/lease.rs`,
+  `images/hermes/boot/src/desktop.rs`). Take over is each agent's Hermes
+  Bot Desktop lease, so its `computer_use` refuses while a person holds
+  the screen; but Hermes changes its lease only in its own process
+  (`tools/bot_desktop/lease.py`) or through its TUI gateway's
+  `display.lease.*` RPCs, which this image does not run. The bridge
+  writes the file as Hermes' `_transition` does (its `lease.lock` flock,
+  `lease.json.tmp` renamed over it, the epoch one on): Hermes' file
+  format, not an interface it promises. Likewise the idle stop reads the
+  desktop's `activity` and `env` files' times as Hermes' `stop_if_idle`
+  does (that watcher too is its TUI gateway's), and the screen touches
+  `activity` as Hermes' own viewer does.
+- **Risk:** a Hermes release that changes the lease's file, path or
+  lock: the screen and the agent's tools then disagree on who holds it
+  (a person typing while the agent acts, or an agent refused for good);
+  or that renames the activity file: desktops stop under their viewers,
+  or never.
+- **First proof:** the Docker rung's `two_agents_two_desktops` on a new
+  Hermes: it reads the lease with Hermes' own code, has the agent's
+  `computer_use` refuse while a person holds the screen, and has an
+  unwatched desktop stop and a watched one stay.
+- **Delete when:** Hermes offers a lease and an idle stop outside its TUI
+  gateway (a gateway control verb, or its RPCs on the messaging gateway),
+  and the image uses them, proven by the same test.
 
 ## Each agent's Hermes profile config is rewritten at every boot
 
@@ -679,6 +737,35 @@ fragment.club until cutover (decisions 34–35).
   allowlist of its own), or the catalog's names for those providers are
   ones Hermes does not keep, proven by the same check with no
   `credentials.sh`.
+
+## An agent's execute_code makes its temp files in Hermes' home
+
+- **Observed:** 2026-10-07, the Docker lane's
+  `a_tools_temp_files_are_its_work` (`images/hermes`; docs/computers.md,
+  "Our images"). An agent's terminal commands, foreground and background,
+  make their temp files in its work (`/data/work/<profile>/tmp`, through
+  its profile's linked `cache/scratch`), but an execute_code script makes
+  its own in the gateway's scratch, `/data/hermes/cache/scratch`. Hermes
+  (v0.21.5, and v0.21.6 alike) builds a script's environment with a
+  scrub that keeps `TMPDIR`,
+  `TMP` and `TEMP` and drops every `HERMES_*` name it does not list, its
+  `HERMES_SCRATCH_DIR` marker among them (`tools/code_execution_env.py`,
+  `_scrub_child_env`). So its `apply_scratch_tmp_env`, run after, takes the
+  gateway's `TMPDIR` for one a user set, and keeps it. No profile setting
+  reaches it: Hermes resolves `TMPDIR` process-wide.
+- **Risk:** what a script leaves in its temp directory is saved with
+  Hermes' home, not its agent's work, and every agent's scripts share that
+  directory (Hermes prunes what is idle 24 hours). When the work moves to a
+  sandbox of its own (step 4 of docs/durable-computers.md), those files
+  stay behind.
+- **First proof:** before step 4, one agent's script reading a file
+  another's left in that directory; after it, a file a script left there
+  that its agent's terminal, in the sandbox, cannot find.
+- **Delete when:** our terminal backend runs execute_code's scripts (step
+  3: Hermes runs them through any backend but `local`), or Hermes keeps
+  its marker for them. Either fails the lane's check that pins the
+  script's temp file in the gateway's scratch, which then holds it to the
+  work with the rest.
 
 ## Own keys are kept by the person's computer
 

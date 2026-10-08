@@ -112,8 +112,17 @@ pub struct TurnStart {
     /// (crate::note), by the driver, before the runtime hears of the turn;
     /// `None` when that turn ended any other way. Every runtime is handed
     /// it: Relay as the inbound's read-only `context`, the scripted agent
-    /// echoes it.
+    /// echoes it. It also says what the agent no longer remembers of this
+    /// chat (`forgotten`).
     pub note: Option<String>,
+    /// The agent's turns in this chat that another life ran since the
+    /// `/data` this life restored (their claims answered 409: a rollback
+    /// sent the cursor back), the newest at most `NOTE_FORGOTTEN_MAX`, and
+    /// how many more: in no memory of the runtime's, so the note says what
+    /// they were (crate::note, "forgotten"). Said once, at the agent's
+    /// first turn in the chat after them.
+    pub forgotten: Vec<String>,
+    pub forgotten_more: u32,
 }
 
 /// What the bridge asks of a runtime.

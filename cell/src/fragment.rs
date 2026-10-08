@@ -1063,8 +1063,10 @@ impl FragmentCell {
     async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
-            return Err(CellError::invalid("a fragment name must match ^[a-z0-9][a-z0-9-]{0,62}$"));
+            return Err(CellError::invalid("a fragment's name is <label>.<username> (docs/api.md, Names)"));
         }
+        // the create door checked it (lib.rs); a fragment no host reaches is never made
+        fragment_core::names::host_fits(&body.name, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
         if let Some(t) = body.template.as_deref().filter(|t| crate::publish::template(t).is_none() && blessed::template(t).is_none()) {
             let names: Vec<&str> = crate::publish::TEMPLATES.iter().map(|(n, _)| *n).chain(blessed::BLESSED).collect();
             return Err(CellError::invalid(format!("no template {t:?}; the templates are {}", names.join(", "))));

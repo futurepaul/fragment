@@ -530,6 +530,40 @@ async fn a_group_mention_picks_the_agent() {
     bridge.stop().await;
 }
 
+/// Goal (decision 8): two scripted agents told to name each other hand off
+/// A, B, A, B and stop at the hop cap. Invalid: an agent's post made around
+/// the bridge right after (the CLI's: no `hop`, which once read as 0 and
+/// started the loop over) is one hop past its turn just ended: answered
+/// once, and the answer hands on nothing.
+#[tokio::test]
+async fn a_scripted_hand_off_loop_stops_at_the_cap() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper", "rowan"]).await;
+    let group = fake.chat("group", &["juniper", "rowan"]);
+    let dir = support::dir("hand-off-loop");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 4).await;
+    // each echoes what it was told, so each reply names both agents
+    fake.say(&group, &person("paul"), json!({ "text": "loop @juniper @rowan", "to": ["id:juniper"] }));
+    let cap = 1 + fragment_bridge::limits::HOPS_MAX as usize;
+    fake.until(WAIT, "the loop's replies up to the cap", |w| replies(w, &group).len() == cap).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let by = |w: &World| -> Vec<String> { w.records(&group, "chat").into_iter().filter(|r| r["body"].get("turn").is_some()).map(|r| r["principal"].as_str().unwrap().to_string()).collect() };
+    fake.with(|w| {
+        assert_eq!(by(w), vec!["id:juniper", "id:rowan", "id:juniper", "id:rowan"], "A, B, A, B, then nothing");
+        let hops: Vec<Value> = replies(w, &group).iter().map(|r| r["hop"].clone()).collect();
+        assert_eq!(hops, vec![json!(1), json!(2), json!(3), json!(4)], "each hands on, the last past the cap");
+    });
+    // juniper posts around the bridge, as `fragment post` does: no hop
+    fake.say(&group, "id:juniper", json!({ "text": "@rowan once more, then back to @juniper", "to": ["id:rowan"] }));
+    fake.until(WAIT, "rowan's one answer", |w| replies(w, &group).len() == cap + 1).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    fake.with(|w| {
+        assert_eq!(replies(w, &group).len(), cap + 1, "answered once, the loop not started again: {:?}", by(w));
+        assert_eq!(replies(w, &group)[cap]["to"], json!(["id:juniper"]), "its answer names juniper, who does not take it");
+    });
+    bridge.stop().await;
+}
+
 /// Goal: attachments both ways: a message's files reach the runtime, and a
 /// reply's files are uploaded as the chat's blobs and listed on it.
 #[tokio::test]
@@ -777,9 +811,11 @@ async fn a_turn_cut_by_a_crash_ends_once_whatever_state_wakes() {
 /// Goal (P5, rung 2): the first turn after one a crash cut is told what was
 /// cut, from the chat's journal alone: that a restart cut it, what it was
 /// asked, and the step it had recorded; the turn after that is told nothing.
-/// The note is the same whether the next life wakes with the state the
-/// crash left (the turn running), one from before the cut turn, or none.
-/// The scripted agent echoes what it is told, so the stub's lanes see it.
+/// The cut's note is the same whether the next life wakes with the state
+/// the crash left (the turn running), one from before the cut turn, or
+/// none; with none, the turn it ran before the cut is in no state either,
+/// and is told after it, as forgotten (never the cut turn twice). The
+/// scripted agent echoes what it is told, so the stub's lanes see it.
 #[tokio::test]
 async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
     let mut told: Vec<String> = Vec::new();
@@ -821,10 +857,17 @@ async fn the_turn_after_a_cut_one_is_told_what_was_cut() {
             assert_eq!(text(&after), "echo: [paul] and after", "{wakes}: said once");
             note
         });
-        told.push(note);
+        // what a lost state forgot follows the cut's note: "one", ran by the
+        // life the crash ended, which no state woke with
+        let (cut_note, forgot) = note.split_once("\n\nYour memory of this chat is behind").map_or((note.clone(), None), |(c, f)| (c.to_string(), Some(f.to_string())));
+        match wakes {
+            "none" => assert!(forgot.as_deref().is_some_and(|f| f.contains("You were asked: “one”") && !f.contains("a slow tool please")), "{wakes}: {note}"),
+            _ => assert_eq!(forgot, None, "{wakes}: the state remembered the rest: {note}"),
+        }
+        told.push(cut_note);
         bridge.stop().await;
     }
-    assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note, whatever state woke: {told:#?}");
+    assert!(told.windows(2).all(|p| p[0] == p[1]), "the journal's note of the cut, whatever state woke: {told:#?}");
 }
 
 /// Goal (I2): a turn whose run ended, but whose end a crash kept from the
@@ -872,7 +915,9 @@ async fn an_end_a_crash_kept_from_the_platform_is_posted_by_the_next_life() {
 
 /// Goal (I4): a message said while the computer was down is answered once
 /// by the next life, even one that wakes with an older save, and the turn
-/// that save does not know is not run again for it.
+/// that save does not know is not run again for it. That turn is in no
+/// memory of the runtime's: the answer is told what it was (forgotten,
+/// docs/bridge.md "What a rollback forgot"), once.
 #[tokio::test]
 async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
@@ -898,8 +943,15 @@ async fn said_while_it_was_down_is_answered_once_after_a_rollback() {
     assert_eq!(runs.all(), vec![t1, t2.clone(), t3.clone()], "three ran once; two was not run again");
     fake.with(|w| {
         let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t3.as_str()).collect();
-        assert_eq!(r, vec![json!({ "text": "echo: [paul] three", "turn": t3 })], "answered once");
+        let told = "echo: [paul] three\n\n(told: Your memory of this chat is behind: your computer went back to an earlier save, so you do not remember these turns of yours here, which came after it (the chat keeps them). What they did may have had effects: check before you do any of it again.\nYou were asked: “two”\nYou replied: “echo: [paul] two”)";
+        assert_eq!(r, vec![json!({ "text": told, "turn": t3 })], "answered once, told what the save forgot");
         assert_eq!(ends_of(w, &chat, &t2)[0]["outcome"], "idle", "two's end stands");
+    });
+    // told once: the turn after it is told nothing
+    let t4 = said_and_ended(&fake, &chat, "four").await;
+    fake.with(|w| {
+        let r: Vec<Value> = replies(w, &chat).into_iter().filter(|r| r["turn"] == t4.as_str()).collect();
+        assert_eq!(r, vec![json!({ "text": "echo: [paul] four", "turn": t4 })], "said once");
     });
     bridge.stop().await;
 }

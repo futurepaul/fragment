@@ -108,6 +108,33 @@ pub struct Ran {
     /// What it says (what it skipped and why, what is still to clean).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The `cleanup` step's: each fragment whose cleanup is not done yet,
+    /// and what it has left (at most `fragment_core::wipe::NAMES_SHOWN_MAX`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cleaning: Vec<Cleaning>,
+}
+
+/// A fragment of the wiped person's, ended, whose cleanup is not done: what
+/// its ended lives have left (docs/api.md, Operators: `cleanup`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cleaning {
+    pub fragment: String,
+    /// Members' lists still to tell.
+    pub lists: u64,
+    /// Its app's database or blobs remain.
+    pub stored: bool,
+    /// Its repo is still to delete.
+    pub repo: bool,
+    /// The most failed tries of a part left.
+    pub tries: u64,
+    /// A part failed past its tries, or was refused: held, tried again
+    /// daily, and by each wipe call.
+    pub held: bool,
+    /// The last error of a part left, when one failed (`part: error`,
+    /// bounded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// A wipe's report: a dry run's (`GET`) or a call's (`POST`).

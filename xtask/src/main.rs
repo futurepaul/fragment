@@ -163,6 +163,7 @@ fn dev(args: &[String]) -> Result<()> {
         test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
+        computer_unsaved_max_ms: None,
         providers: None,
         operator_key_values: vec![],
         swap_upstream: None,

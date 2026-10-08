@@ -120,7 +120,7 @@ pub(super) fn lever(api: &Api, id: &str, op: &str) -> Result<crate::api::Reply> 
 }
 
 /// A lever with its arguments (`{op, times?, on?}`).
-fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply> {
+pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply> {
     body["computer"] = json!(id);
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
@@ -375,6 +375,244 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     // one after (and the cut turn's, where a crash's restore ran it again)
     let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count();
     Ok(added)
+}
+
+/// The recovery checks (docs/computers.md, "What its owner is told"), each
+/// skipped off the stub and the fakes (the lever fails saves, and the
+/// node's bound is short: `crate::UNSAVED_MAX_MS`).
+const RECOVERY_CHECKS: [&str; 11] = [
+    "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
+    "no one else restarts it",
+    "its owner's restart, its save failing too: it starts again at once, from its last save",
+    "the same restart asked again (the same start named) restarts nothing more",
+    "its owner is told what the restart went back to: which save, and when it was taken",
+    "seen, it is told no more; seen again, the same; a notice never told is refused",
+    "when no save works for the bound, it is put to sleep unsaved at the time it said, and told it will go back",
+    "its next wake goes back to that save, told once, the same notice; and its agent answers",
+    "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
+    "asleep, its owner's restart starts it, fresh from its save",
+    "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from a sleep's failed save to its bound, or to the restart that ended it; the time before and after is",
+];
+
+/// What its owner is told, and the way back to working (rung 4 of
+/// docs/explorations/pi-durable.md, with the platform's notices): a sleep
+/// whose save fails tells them at once, a restart (asked twice) goes back to
+/// the last save and says so until seen, the bound puts it to sleep unsaved
+/// when it said, and the wake after is told once. Starts and ends awake.
+/// Answers how many replies of its agent it added.
+fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Keys, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
+    let notice = |v: &Value, kind: &str| v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null);
+    let replied = |seq: i64| {
+        let turn = turn_of(c.agent, c.chat, "chat", seq);
+        agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
+    };
+    let bound = crate::UNSAVED_MAX_MS as i64;
+    // its owner's sleep, its save failing, once the guest's last turn has
+    // let go of its keepalive: a keepalive that closes after the sleep
+    // holds it as a record does (its work ended), and its stop with it
+    let failing_sleep = |s: &Suite| -> Result<crate::api::Reply> {
+        s.eventually(Duration::from_secs(15), || lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+        std::thread::sleep(Duration::from_secs(1));
+        api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))
+    };
+    // a sleep whose save fails: told at once, the bound's stop with it
+    std::thread::sleep(QUEUE_DRAIN);
+    let before = view();
+    let g = before["generation"].as_u64().unwrap_or(0);
+    let newest = newest_save(api, c.id);
+    // its work is in no save since this life's newest save, or its start
+    let since = if newest["generation"] == g { newest["atMs"].clone() } else { before["restored"]["at"].clone() };
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
+    let t0 = crate::api::now_ms();
+    let r = failing_sleep(s)?;
+    let t1 = crate::api::now_ms();
+    // its free window opens at the failure (the lever says when)
+    let unsaved_since = || lever(api, c.id, "saves").ok().and_then(|r| r.body["unsavedSince"].as_i64());
+    let first_free = unsaved_since();
+    let unsaved = notice(&r.body, "unsaved");
+    let stops = unsaved["stopsAt"].as_i64().unwrap_or(0);
+    s.ok(
+        RECOVERY_CHECKS[0],
+        failing.status == 200
+            && r.body["phase"] == "awake"
+            && unsaved["since"] == since
+            && unsaved["save"] == newest["number"]
+            && unsaved["why"].as_str().is_some_and(|w| w.contains("the test lever failed it"))
+            && (t0 + bound..=t1 + bound).contains(&stops),
+        format!("since {since}, save {}; {r}", newest["number"]),
+    );
+    let r = api.signed(stranger, "POST", &path("/restart"), Some(&json!({ "generation": g })))?;
+    s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
+    // its owner restarts it: the restart's own save fails, so it goes back
+    let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
+    let restarted_at = crate::api::now_ms();
+    let r = restart()?;
+    let restored = r.body["restored"].clone();
+    s.ok(
+        RECOVERY_CHECKS[2],
+        r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
+        &r,
+    );
+    let again = restart()?;
+    s.ok(RECOVERY_CHECKS[3], again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored, &again);
+    let went_back = notice(&again.body, "went_back");
+    s.ok(
+        RECOVERY_CHECKS[4],
+        went_back["life"].as_u64() == Some(g)
+            && went_back["cause"] == "restart"
+            && went_back["pending"] == false
+            && went_back["save"] == newest["number"]
+            && went_back["savedAt"] == newest["atMs"]
+            && went_back["at"] == restored["at"]
+            && notice(&again.body, "unsaved").is_null(),
+        &again,
+    );
+    let seen = |life: u64| api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })));
+    let (once, twice, never) = (seen(g)?, seen(g)?, seen(g + 100)?);
+    s.ok(
+        RECOVERY_CHECKS[5],
+        once.status == 200 && notice(&once.body, "went_back").is_null() && twice.status == 200 && twice.body["notices"] == once.body["notices"] && never.status == 400 && notice(&view(), "went_back").is_null(),
+        format!("{once} / {twice} / {never}"),
+    );
+    // a turn of this life: its end's save fails (the lever), so the stop
+    // below loses it, and its agent's runtime will not remember it
+    let zebra = say(91, "remember the zebra")?;
+    let zebra_seq = zebra.body["record"]["seq"].as_i64().unwrap_or(0);
+    let zebra_ran = s.eventually(c.wake, || replied(zebra_seq).is_some());
+    // the bound runs out: no save works, and nothing uses it
+    let r = failing_sleep(s)?;
+    let second_free = unsaved_since();
+    let stops = notice(&r.body, "unsaved")["stopsAt"].as_i64().unwrap_or(i64::MAX);
+    let wait = Duration::from_millis((stops - crate::api::now_ms()).clamp(0, bound + 5_000) as u64) + Duration::from_secs(30);
+    let slept = s.eventually(wait, || view()["phase"] == "asleep");
+    let asleep_at = crate::api::now_ms();
+    let v = view();
+    let pending = notice(&v, "went_back");
+    s.ok(
+        RECOVERY_CHECKS[6],
+        r.body["phase"] == "awake"
+            && slept
+            && asleep_at >= stops - 1_000
+            && v["why"].as_str().is_some_and(|w| w.contains("slept unsaved"))
+            && pending["life"].as_u64() == Some(g + 1)
+            && pending["cause"] == "unsaved"
+            && pending["pending"] == true
+            && pending["save"] == newest["number"]
+            && pending["endedAt"].as_i64().is_some_and(|at| at >= stops - 1_000),
+        format!("stops at {stops}, asleep by {asleep_at}; {v}"),
+    );
+    // its awake time, as its owner's ledger has it (each interval's
+    // reference ends with where it starts): none in either free window
+    let awake = || -> Vec<(i64, i64)> {
+        entries(api, c.owner_id, &format!("awake:{}:", c.id))
+            .iter()
+            .filter_map(|e| {
+                let from = e["ref"].as_str()?.rsplit(':').next()?.parse::<i64>().ok()?;
+                Some((from, from + e["entry"]["row"]["usage"]["ms"].as_i64()?))
+            })
+            .collect()
+    };
+    let windows: Vec<(i64, i64)> = [first_free.map(|f| (f, restarted_at)), second_free.map(|f| (f, f + bound))].into_iter().flatten().collect();
+    // the stop's seconds past the bound reach the ledger as it goes to sleep
+    let after = |rows: &[(i64, i64)]| second_free.is_some_and(|f| rows.iter().any(|(from, _)| *from >= f + bound));
+    s.eventually(Duration::from_secs(15), || after(&awake()));
+    let rows = awake();
+    let overlapping: Vec<&(i64, i64)> = rows.iter().filter(|(from, to)| windows.iter().any(|(a, b)| from < b && to > a)).collect();
+    s.ok(
+        RECOVERY_CHECKS[10],
+        windows.len() == 2 && overlapping.is_empty() && second_free.is_some_and(|f| rows.iter().any(|(_, to)| *to <= f)) && after(&rows),
+        json!({ "windows": windows, "overlapping": overlapping, "rows": rows }),
+    );
+    // saves work again; its next wake goes back to that save, told once
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    let r = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let told = notice(&r.body, "went_back");
+    let said = say(90, "after going back")?;
+    let seq = said.body["record"]["seq"].as_i64().unwrap_or(0);
+    let answered = s.eventually(c.wake, || replied(seq).is_some());
+    let after_back = replied(seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let seen_now = seen(g + 1)?;
+    s.ok(
+        RECOVERY_CHECKS[7],
+        r.body["restored"]["rollback"] == true
+            && r.body["restored"]["save"] == newest["id"]
+            && told["life"].as_u64() == Some(g + 1)
+            && told["pending"] == false
+            && told["cause"] == "unsaved"
+            && answered
+            && seen_now.status == 200
+            && notice(&seen_now.body, "went_back").is_null(),
+        format!("{r} / {seen_now}"),
+    );
+    // the stub echoes what its turn was told: the zebra turn, which the life
+    // the stop ended ran, is in no memory of this one's; once
+    let once = say(92, "once more after going back")?;
+    let once_seq = once.body["record"]["seq"].as_i64().unwrap_or(0);
+    let answered_once = s.eventually(c.wake, || replied(once_seq).is_some());
+    let then = replied(once_seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    s.ok(
+        RECOVERY_CHECKS[8],
+        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("You were asked: “remember the zebra”") && answered_once && !then.contains("(told:"),
+        json!([after_back, then]),
+    );
+    // asleep, a restart is a start
+    std::thread::sleep(QUEUE_DRAIN);
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let asleep = r.body["generation"].as_u64().unwrap_or(0);
+    let woke = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    s.ok(
+        RECOVERY_CHECKS[9],
+        r.body["phase"] == "asleep"
+            && woke.body["phase"] == "awake"
+            && woke.body["generation"].as_u64() == Some(asleep + 1)
+            && woke.body["restored"]["from"] == "backup"
+            && woke.body["restored"]["rollback"] == false
+            && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
+        format!("{r} / {woke}"),
+    );
+    Ok(3)
+}
+
+/// The intercept's one rule for whose a model call is (decision 9's
+/// transcriptions; docs/computers.md, Models): an OpenAI SDK, which sends
+/// no header of its own, names its agent by its key, `agent:<name>`, for a
+/// voice memo's transcription and a chat call alike. The key goes no
+/// further than the computer: Workers AI (the fake) never sees it. A key
+/// naming a fragment that does not run on this computer is refused (403),
+/// a malformed one and one that disagrees with `x-fragment-agent` too
+/// (401), each before anything is reserved or sent. The replies it adds.
+fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str, chat: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    use fragment_fakes::workers_ai::TRANSCRIBE_MODEL;
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let said = fetched(s, 70, "transcribe hello from a voice memo")?;
+    let sent = s.ai.calls().get(calls).cloned();
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and metered to the agent's owner",
+        said == "heard: hello from a voice memo" && aig.len() == before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig.len(),
+        json!({ "said": said, "aig": aig }),
+    );
+    s.ok(
+        "the guest's key goes no further than the computer: the vendor sees no authorization and no agent: in its input",
+        sent.as_ref().is_some_and(|c| c.model == TRANSCRIBE_MODEL && c.authorization.is_none() && !c.body.to_string().contains("agent:") && !c.metadata.to_string().contains(agent)),
+        json!(sent.map(|c| json!({ "model": c.model, "authorization": c.authorization, "metadata": c.metadata }))),
+    );
+    let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
+    s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let elsewhere = fetched(s, 72, &format!("transcribe hi as agent:{chat}"))?;
+    let malformed = fetched(s, 73, "transcribe hi as agent:not-a-name")?;
+    let disagree = fetched(s, 74, &format!("transcribe hi as agent:{chat} header {agent}"))?;
+    let missing = fetched(s, 75, "transcribe hi as fragment-model")?;
+    s.ok(
+        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing reserved or sent",
+        elsewhere.starts_with("transcribe refused: 403") && malformed.starts_with("transcribe refused: 401") && disagree.starts_with("transcribe refused: 401") && missing.starts_with("transcribe refused: 401")
+            && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
+        json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
+    );
+    Ok(6)
 }
 
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
@@ -635,6 +873,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
             json!(aig),
         );
+        if fakes {
+            replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
+        }
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, reserved and settled on its owner's ledger.
@@ -700,8 +941,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
         replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
@@ -777,11 +1019,29 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("nor anyone else who signs", r.status == 401, &r);
     let r = api.call(Call { method: "GET", url: format!("{origin}/p/6080/"), keys: Some(&owner), ..Call::default() })?;
     s.ok("its owner's signed request needs no session", r.status == 200, &r);
-    // a socket on its port, bridged through the Computer DO both ways: the
-    // screen's control socket speaks first (who holds control), as an RFB
-    // server does, and that first word reaches the page
-    let control = || Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
-    let heard = control().and_then(|mut c| {
+    // a ticket lands where its page asks, on its port: an agent's screen
+    // is the screen page at `?agent=<agent>`, the image's to read
+    let landing = format!("/?agent={agent_name}");
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": landing })))?;
+    let landed = match r.body["url"].as_str() {
+        Some(url) => Some(api.call(Call { method: "GET", url: url.to_string(), ..Call::default() })?),
+        None => None,
+    };
+    s.ok(
+        "a ticket that names a path lands there on its port (an agent's screen: the page at ?agent=)",
+        r.status == 200 && landed.as_ref().is_some_and(|l| l.status == 303 && l.header("location") == format!("/p/6080{landing}")),
+        format!("{r} / {}", landed.map(|l| l.to_string()).unwrap_or_default()),
+    );
+    let refused: Vec<u16> = ["//elsewhere.example/", "/../6081/", "no-slash", "/a#b"]
+        .iter()
+        .map(|path| api.signed(&owner, "POST", &format!("/api/computers/{id}/ports/6080/ticket"), Some(&json!({ "path": path }))).map(|r| r.status).unwrap_or(0))
+        .collect();
+    s.ok("a ticket's path is a path on its port, or refused (400)", refused.iter().all(|st| *st == 400), format!("{refused:?}"));
+    // a socket on its port, bridged through the Computer DO both ways: an
+    // agent's screen's control socket speaks first (whose screen, who holds
+    // control), as an RFB server does, and that first word reaches the page
+    let control = |agent: &str| Socket::connect(api, &format!("{origin}/p/6080/control?viewer=e2e&agent={agent}"), None, cookie.as_deref(), Some(&origin)).map(|(socket, _)| socket);
+    let heard = control(&agent_name).and_then(|mut c| {
         let first = c.next()?;
         c.send(&json!({ "type": "take" }))?;
         let taken = c.next()?;
@@ -789,9 +1049,17 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         Ok((first, taken))
     });
     s.ok(
-        "a socket on its port opens from its own page, and carries the container's first word and the page's answer",
-        heard.as_ref().is_ok_and(|(first, taken)| *first == json!({ "type": "control", "holder": null }) && taken["holder"] == "e2e"),
+        "a socket on its port opens from its own page, and carries the container's first word (the agent's screen, held by no one) and the page's answer",
+        heard.as_ref().is_ok_and(|(first, taken)| first["type"] == "control" && first["agent"] == agent_name.as_str() && first["name"].as_str().is_some_and(|n| !n.is_empty()) && first["holder"].is_null() && taken["holder"] == "e2e"),
         format!("{heard:?}"),
+    );
+    // an agent this computer does not run, or no agent's name, is refused
+    // by the image: the platform carries the query and reads nothing in it
+    let (absent, malformed) = (control(&format!("nobody.{}", api.username(&owner)?)).map(|_| ()), control("Not%20A%20Name").map(|_| ()));
+    s.ok(
+        "an agent's screen the computer does not run is refused (404), and a query that names no agent (400): the image's answers, through its port",
+        absent.as_ref().is_err_and(|e| format!("{e:#}").contains("404")) && malformed.as_ref().is_err_and(|e| format!("{e:#}").contains("400")),
+        format!("{absent:?} / {malformed:?}"),
     );
     // and in a frame of the platform's page (the shell's tab onto its screen),
     // where the platform is cross-site from the computer's origin
@@ -956,5 +1224,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         r.body["phase"] == "asleep" && agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == replies_now,
         &r,
     );
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({})))?;
+    let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
+    s.ok("nor does its owner's restart: the ledger refuses it too, and it stays asleep", r.status == 403 && r.text.contains("a guest pays for nothing") && v.body["phase"] == "asleep", &r);
     Ok(())
 }
