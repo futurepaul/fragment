@@ -518,12 +518,13 @@ fn fill(selector: &str, value: &str) -> String {
 }
 
 /// The shell in a browser (phase 5's exit, at desktop and phone sizes):
-/// first run (a username, the first agent and the person's mind, which
-/// opens at `/`), then the shell at `/?apps`: the agent's chat framed and
-/// signed in on its own origin with the agent's answer in it, a second
-/// agent, an app's window, settings (at `/settings`, which the address
-/// keeps), and the phone's layout. The agents run on the stub image
-/// (Docker), as the computers section's do.
+/// first run (a username, the first agent and the person's mind), then the
+/// shell at `/` with the mind in its middle column, its sidebar the
+/// mind's (docs/optchat.md); an agent's chat framed and signed in on its
+/// own origin with the agent's answer in it, a second agent, an app's
+/// window, settings (at `/settings`, which the address keeps), and the
+/// phone's layout. The agents run on the stub image (Docker), as the
+/// computers section's do.
 pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("shell-ui", &[crate::Need::Chrome, crate::Need::LocalDocker]) {
         return Ok(());
@@ -549,7 +550,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // first run: a username, then the default agent and the person's mind,
     // made while the shell waits with no question asked (Paul, 2026-10-03),
-    // and the mind opens full-screen (docs/optchat.md)
+    // and then the shell with the mind in its middle column (docs/optchat.md)
     let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
     s.ok("signed in with no username, the shell asks for one", asked, "");
     let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
@@ -560,7 +561,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let _ = b.screenshot(&page, &shots.join("creating.png"));
     let mind = format!("mind.{username}");
     let mind_host = format!("{}.", fragment_proto::flat_name(&mind).unwrap_or_default());
-    let landed = b.until(&page, &format!("location.hostname.startsWith({}) && location.pathname === '/'", js(&mind_host)), agent_wait);
+    // the mind's page tells the shell its personas, which the sidebar lists
+    let home = format!(
+        "location.pathname === '/' && !document.getElementById('layout').hidden && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment === {}) && document.querySelectorAll('#personas .persona-row').length === 3",
+        js(&mind)
+    );
+    let landed = b.until(&page, &home, agent_wait);
     if !landed {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
@@ -571,26 +577,44 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let members = shell(api, &session, "GET", &format!("/api/f/{mind}/members"), None, &[])?;
     let editor = members.body["members"].as_array().is_some_and(|l| l.iter().any(|m| m["principal"] == agent["identity"] && m["role"] == "editor"));
     s.ok(
-        "their mind opens full-screen on its own origin: their agent is on their computer and an editor of the mind, and no chat is made",
+        "the shell opens at / with their mind in its middle column and its three personas in the sidebar: their agent is on their computer and an editor of the mind, and no chat is made",
         landed && rows.iter().any(|f| f["name"] == mind.as_str() && f["kind"] == "mind" && f["role"] == "owner") && rows.iter().all(|f| f["kind"] != "chat") && editor,
-        json!({ "at": b.eval(&page, "location.href")?, "fragments": rows, "agent": agent, "members": members.body }),
+        json!({ "at": b.eval(&page, "location.href")?, "fragments": rows, "agent": agent, "members": members.body, "sidebar": b.eval(&page, "[...document.querySelectorAll('#personas .row, #mind-links .row')].map((r) => r.textContent)")? }),
     );
-    // the shell itself is at /?apps; the rest of this lane is its: the
-    // first agent's direct chat, made as the shell's new agent makes one
+    // in the shell the mind's page has no rail of its own, and goes where
+    // the sidebar says: the address and the topbar follow it
+    let bare = b.eval_in_frame(&page, &mind_host, "getComputedStyle(document.querySelector('.rail')).display === 'none' && document.querySelector('.app').classList.contains('embedded')").ok() == Some(Value::Bool(true));
+    b.click(&page, "#mind-links [data-key='mind:search']")?;
+    let searched = b.until(&page, "location.hash === '#/search' && document.getElementById('chat-title').textContent === 'Search' && document.querySelector(\"#mind-links [data-key='mind:search']\").classList.contains('active')", wait);
+    b.click(&page, "#personas [data-key='persona:builder'] .persona-pick")?;
+    let builder = b.until(&page, "location.hash === '#/new' && document.querySelector('#personas .persona-row.active')?.dataset.key === 'persona:builder'", wait);
+    let asks = b.eval_in_frame(&page, &mind_host, "document.querySelector('.composer textarea')?.placeholder ?? null").unwrap_or(Value::Null);
+    s.ok(
+        "in the shell the mind's page has no rail of its own, and the sidebar drives it: its Search, then a new chat with Builder",
+        bare && searched && builder && asks == "Message Builder…",
+        json!({ "bare": bare, "searched": searched, "builder": builder, "placeholder": asks, "at": b.eval(&page, "location.href")? }),
+    );
+    let _ = b.screenshot(&page, &shots.join("desktop-mind.png"));
+    // the first agent's direct chat, made as the shell's new agent makes
+    // one: the shell's list shows it, live, and it opens in the middle
+    // column in the mind's place
     let agent_fragment = agent["fragment"].as_str().unwrap_or("").to_string();
     let title = rows.iter().find(|f| f["name"] == agent_fragment.as_str()).and_then(|f| f["title"].as_str()).unwrap_or("").to_string();
     let label = agent_fragment.split('.').next().unwrap_or("");
     let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": format!("{label}-chat"), "template": "chat", "title": title })), &[])?;
     let joined = shell(api, &session, "PUT", &format!("/api/f/{label}-chat.{username}/members/{}", agent["identity"].as_str().unwrap_or("")), Some(&json!({ "role": "editor" })), &[])?;
     anyhow::ensure!(made.status == 200 && joined.status == 200, "the first agent's chat: {made} {joined}");
-    b.eval(&page, &format!("(location.href = {}, true)", js(&format!("{}/?apps", api.base))))?;
-    let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
+    let listed = b.until(&page, "!document.getElementById('agents').hidden && document.querySelectorAll('#chats .agent-row').length === 1", agent_wait);
+    if listed {
+        b.click(&page, "#chats .agent-row")?;
+    }
+    let opened = listed && b.until(&page, "document.querySelector('#chats .agent-row.active') && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && 'chat:' + f.dataset.fragment === document.querySelector('#chats .agent-row').dataset.key)", wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
     if !opened {
         let _ = b.screenshot(&page, &shots.join("creating-failed.png"));
     }
-    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, card: document.getElementById('first-run-card').innerText.slice(0, 300), apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
-    s.ok("at /?apps, the shell: the agent, named, and its chat open", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
+    let said = b.eval(&page, "({ row: document.querySelector('#chats .agent-row .label')?.textContent ?? null, at: location.href, apps: [...document.querySelectorAll('#apps .row')].map((r) => r.textContent) })")?;
+    s.ok("the agent's chat shows in the sidebar, named, and opens in the middle column", opened && row.as_str().is_some_and(|t| !t.is_empty()), &said);
     // the chat's name as the sidebar holds it: a title like "Starfire 40K"
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
@@ -719,12 +743,12 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let kept = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden && document.getElementById('frames').hidden && document.getElementById('settings-page').innerText.includes('Account'.toUpperCase())", wait);
     s.ok("a reload stays on settings", kept, b.eval(&page, "location.pathname")?);
     b.click(&page, "#chats .agent-row")?;
-    let home = b.until(&page, "location.pathname + location.search === '/?apps' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
+    let home = b.until(&page, "location.pathname + location.search === '/' && document.getElementById('settings-page').hidden && !document.getElementById('frames').hidden", wait);
     b.eval(&page, "history.back(), true")?;
     let back = b.until(&page, "location.pathname === '/settings' && !document.getElementById('settings-page').hidden", wait);
     b.eval(&page, "history.forward(), true")?;
-    let forward = b.until(&page, "location.pathname + location.search === '/?apps' && document.getElementById('settings-page').hidden", wait);
-    s.ok("a chat opened from settings is at /?apps, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname + location.search")?);
+    let forward = b.until(&page, "location.pathname + location.search === '/' && document.getElementById('settings-page').hidden", wait);
+    s.ok("a chat opened from settings is at /, and back and forward walk between the two", home && back && forward, b.eval(&page, "location.pathname + location.search")?);
 
     // the phone: the list, then a chat
     b.color_scheme(&page, "light")?;
