@@ -26,6 +26,7 @@ import { DurableObject } from "cloudflare:workers";
 import * as F from "./applib/files.mjs";
 import * as M from "./applib/optmem.mjs";
 import { COMPACT, SUGGEST, TOOLS, system } from "./applib/prompts.mjs";
+import * as W from "./applib/web.mjs";
 
 const THREAD = /^t_[0-9a-f]{16}$/;
 const LOGGED_KINDS = new Set(["talk", "tool", "echo"]);
@@ -50,6 +51,11 @@ const RESERVE_STEPS = 8;
 const TURN_START_STEPS = 64;
 const SETTLE_STEPS = 96;
 const RESULTS_SOFT_BYTES = 3 * 1024 * 1024;
+// A web fetch's answer is kept whole (up to the 1 MiB a step's result
+// takes): one is taken only while the run's 4 MiB of answers has room for it.
+const FETCH_ROOM_BYTES = 4 * 1024 * 1024 - 1024 * 1024 - 64 * 1024;
+// A web tool keeps this many steps for its answer's log, a last call and its log.
+const WEB_KEEP_STEPS = 3;
 const TURNS_PER_RUN = 4;
 // A turn's settle tries a failing node this many times, RETRY_MS apart.
 const SETTLE_FAILS_MAX = 3;
@@ -110,7 +116,7 @@ const PERSONAS = [
     emoji: "🛠️",
     hands: 1,
     instructions:
-      "You get things done on the user's computer. When a task needs files, a shell, a browser or code, hand it to the computer with everything it needs, say what you started, and report results plainly when they come back.",
+      "You get things done on the user's computer. When a task needs files, a shell, code, or an app (a fragment) made or changed, hand it to the computer with everything it needs, say what you started, and report results plainly when they come back.",
   },
   {
     id: "coach",
@@ -119,6 +125,14 @@ const PERSONAS = [
     hands: 0,
     instructions:
       "Ask one question at a time, and wait for the answer. Help the user think it through rather than handing them answers: say back in one sentence what you heard before the next question.",
+  },
+  {
+    id: "researcher",
+    name: "Researcher",
+    emoji: "🔎",
+    hands: 0,
+    instructions:
+      "You find things out. Check anything current or uncertain on the web before you answer: research for a question that needs several sources, web_search and web_fetch for a quick look. Give your sources, and say plainly what you could not confirm.",
   },
 ];
 
@@ -229,6 +243,10 @@ class Steps {
     return this.#took(this.job.publish(channel, body));
   }
 
+  fetch(url, init) {
+    return this.#took(this.job.fetch(url, init));
+  }
+
   blob(sha256) {
     return this.#took(this.job.blob(sha256));
   }
@@ -283,14 +301,21 @@ export class App extends DurableObject {
     // a message's files (applib/files.mjs), JSON; null with none. A log made
     // before them gains the column.
     if (!sql.exec("SELECT * FROM log LIMIT 0").columnNames.includes("attachments")) sql.exec("ALTER TABLE log ADD COLUMN attachments TEXT");
-    if (sql.exec("SELECT COUNT(*) AS n FROM persona").one().n === 0) {
+    // The seeded personas, each once: a mind made before one was seeded
+    // (`seeded` counts them; three before it was kept) gains it, and one
+    // its person removed stays removed.
+    const fresh = sql.exec("SELECT COUNT(*) AS n FROM persona").one().n === 0;
+    const seeded = fresh ? 0 : Number(this.#get("seeded") ?? 3);
+    if (seeded < PERSONAS.length) {
       ctx.storage.transactionSync(() => {
         const now = Date.now();
         // listed in this order (by `made`)
         for (const [k, p] of PERSONAS.entries()) {
+          if (k < seeded || sql.exec("SELECT id FROM persona WHERE id = ?", p.id).toArray().length) continue;
           sql.exec("INSERT INTO persona (id, name, emoji, instructions, hands, made) VALUES (?, ?, ?, ?, ?, ?)", p.id, p.name, p.emoji, p.instructions, p.hands, now + k);
         }
-        this.#set("default", PERSONAS[0].id);
+        if (fresh) this.#set("default", PERSONAS[0].id);
+        this.#set("seeded", PERSONAS.length);
       });
     }
   }
@@ -1075,8 +1100,18 @@ export class App extends DurableObject {
       const v = await s.call("view", { upto: b.tail });
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
       const hands = b.persona.hands === true && agent !== null;
-      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, ...(hands ? [TOOLS.computer] : [])];
-      const ctx = { thread, hands, agent, attachments: Array.isArray(b.attachments) ? b.attachments : [] };
+      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, ...(hands ? [TOOLS.computer] : [])];
+      // the web's steps (applib/web.mjs), and the secrets found missing this turn
+      const web = {
+        fetch: (url, init) => {
+          if (s.bytes > FETCH_ROOM_BYTES) throw new Error("this turn has read all the web its run can keep; answer with what you have");
+          return s.fetch(url, init);
+        },
+        text: (opts) => s.text(opts),
+        room: (n) => s.left() - WEB_KEEP_STEPS >= n,
+        missing: new Set(),
+      };
+      const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [] };
       const messages = [
         { role: "system", content: system(b.persona, b.about) },
         { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: b.texts.join("\n\n") }] },
@@ -1099,6 +1134,8 @@ export class App extends DurableObject {
         const entries = [];
         if (content.trim()) entries.push({ kind: "talk", text: content });
         const results = [];
+        // what this answer's results add to the conversation so far
+        let adding = 0;
         for (const [k, tc] of asked.entries()) {
           const name = String(tc?.function?.name ?? "");
           const raw = tc?.function?.arguments;
@@ -1115,8 +1152,13 @@ export class App extends DurableObject {
           else if (s.left() < 6) {
             out = { text: "Error: this turn is out of steps; answer with what you have." };
             last = true;
+          } else if (convo + adding > CONVO_MAX_BYTES) {
+            // a page or a message whole is up to CAP: a few fill a call's arguments
+            out = { text: "Error: this turn has read all it can hold; answer with what you have." };
+            last = true;
           } else out = await this.#tool(job, s, name, args, ctx);
           const echo = M.capText(out.text);
+          adding += M.utf8(echo);
           entries.push({ kind: "tool", text: `${name} ${args === null ? String(raw) : JSON.stringify(args)}`, task: out.task ?? null });
           entries.push({ kind: "echo", text: echo, task: out.task ?? null });
           results.push({ role: "tool", tool_call_id: String(tc?.id ?? `call_${calls}_${k}`), content: echo });
@@ -1239,8 +1281,9 @@ export class App extends DurableObject {
     return { built, rounds: PUMP_ROUNDS_MAX, continued: true };
   }
 
-  // One tool call of a turn: zoom, date and search are queries; computer
-  // hands the task to goose on `chat` (docs/optchat.md, "Hand-offs").
+  // One tool call of a turn: zoom, date and search are queries; the web's
+  // are fetches (applib/web.mjs); computer hands the task to goose on
+  // `chat` (docs/optchat.md, "Hand-offs").
   async #tool(job, s, name, args, ctx) {
     switch (name) {
       case "zoom": {
@@ -1260,6 +1303,19 @@ export class App extends DurableObject {
         const limit = clamp(Number(args.limit ?? SEARCH_TOOL_MAX), 1, SEARCH_TOOL_MAX);
         const { results } = await s.call("search", { q, limit });
         return { text: results.length ? results.map((r) => `${r.i}+1|${r.kind}: ${r.snippet}`).join("\n") : "No match." };
+      }
+      case "web_search": {
+        const q = String(args.q ?? "").trim().slice(0, 400);
+        if (!q) return { text: "Error: web_search needs what to search for (q)." };
+        const n = clamp(Number(args.limit ?? W.SEARCH_DEFAULT), 1, W.SEARCH_MAX);
+        return { text: W.searchText(q, await W.search(ctx.web, q, n)) };
+      }
+      case "web_fetch":
+        return { text: W.pageText(await W.read(ctx.web, args.url)) };
+      case "research": {
+        const question = String(args.question ?? "").trim().slice(0, 2000);
+        if (!question) return { text: "Error: research needs the question." };
+        return { text: await W.research(ctx.web, question) };
       }
       case "computer": {
         if (!ctx.hands) return { text: "Error: no computer is at hand for this persona; answer yourself." };

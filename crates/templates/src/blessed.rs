@@ -298,8 +298,8 @@ mod tests {
     /// starts a turn, goose's reply on `chat` reaches `hands_said`, and its
     /// steps on `work` run nothing (one run a hand-off, under the triggered
     /// runs' hourly breaker); a new topic's `sort` record classifies; `log`
-    /// takes no posts (so it is never trimmed); its memory and its files
-    /// are the template's own modules beside its prompts; and every operation
+    /// takes no posts (so it is never trimmed); its memory, its web and its
+    /// files are the template's own modules beside its prompts; and every operation
     /// the contract names is declared, the five an MCP client sees
     /// described.
     #[test]
@@ -317,7 +317,7 @@ mod tests {
         assert!(m.channels["say"].signed_in, "say takes people signed in");
         let c = code("mind").unwrap().expect("a mind carries code");
         assert!(
-            ["applib/optmem.mjs", "applib/prompts.mjs", "applib/files.mjs"].iter().all(|m| c.modules.contains_key(*m)),
+            ["applib/optmem.mjs", "applib/prompts.mjs", "applib/web.mjs", "applib/files.mjs"].iter().all(|m| c.modules.contains_key(*m)),
             "{:?}",
             c.modules.keys()
         );

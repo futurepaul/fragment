@@ -15,8 +15,14 @@ release of this code, and its repo holds only its face.
   two-block input with SCALE (512 bytes, checked at load), the cut-at-limit
   retry, CAP, and byte-safe cuts.
 - `applib/prompts.mjs`: COMPACT, MASTER, VIEW_DOC and the subagent framing,
-  the spec's verbatim with "OptChat" as "Mind" and MASTER's one change;
-  the tools; topic_suggest's prompt.
+  the spec's verbatim with "OptChat" as "Mind" and MASTER's one change
+  (the web, and the computer with its fragment CLI); the tools;
+  topic_suggest's prompt; research's.
+- `applib/web.mjs`: the web tools, through `job.fetch`: `web_search`
+  (Perplexity, Brave or Tavily by the secret the owner set, else
+  DuckDuckGo's HTML page, else Wikipedia's search), `web_fetch` (a page
+  as readable text), and `research` (Perplexity's sonar, else a search,
+  three pages read and one cheap call answering from them, with sources).
 - `applib/files.mjs`: a message's files (attachments): their checks, a
   small text one's text, and the message as the memory reads it with them.
 
@@ -35,14 +41,18 @@ release of this code, and its repo holds only its face.
   the turn, stopping before the newest messages still waiting (they go
   whole, as block 2: the spec renders before it logs); then model calls
   (`medium`, drafting on `log` as `turn:<thread>`) with zoom, date,
-  search, and computer (a persona with hands, and an agent member),
-  each answer logged (`logged`: talk, tool, echo). `turn_end` lets the
-  lock go; the thread is classified; when nothing waits, `pump` runs.
+  search, web_search, web_fetch, research, and computer (a persona with
+  hands, and an agent member), each answer logged (`logged`: talk, tool,
+  echo). `turn_end` lets the lock go; the thread is classified; when
+  nothing waits, `pump` runs.
 - **Files:** a `say` record's `attachments` (the mind's blobs) are
   logged with the message; `heard` reads the small text ones first
   (`job.blob`), so the memory (the compactor, zoom, a turn) reads a
   message with its files. A hand-off carries the turn's files on `chat`,
   and goose's reply's files come back on its report.
+- **Keys** for the web are the owner's, as the mind's secrets:
+  `fragment secret set <mind> PERPLEXITY_API_KEY` (or `BRAVE_API_KEY`,
+  `TAVILY_API_KEY`). With none, search is DuckDuckGo's, then Wikipedia's.
 - **`pump`** builds what is ready, the level-0 node alone first (a turn
   waits on it), merges when none is: each node one conversation of up to
   TRIES `cheap` calls, written by `node_built` (first write wins). A job's
@@ -100,5 +110,13 @@ blocks a chain past 16).
   the turn with an error, its message logged and unanswered; each pump
   tries again.
 - `date` answers UTC: the mind does not know its person's time zone.
+- **A web page is kept whole in its run.** `job.fetch` answers up to 1
+  MiB, kept with the run's 4 MiB of answers, so a turn reads three or so
+  large pages at most, and `research` reads fewer when the turn has read
+  much already. A page drawn by its scripts reads as little, and a PDF
+  is the computer's.
+- **The app cannot tell which secrets are set**: each web tool tries
+  the keyed providers in order, one failed step for each key that is
+  not set, once a turn.
 - Internal operations are editors': the agent may call them as the owner
   can.

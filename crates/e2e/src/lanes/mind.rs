@@ -16,15 +16,19 @@
 //! report, and comes back as a `[<task>] …` user message that runs a turn
 //! of its own. Its steps on `work` start nothing (a page follows them).
 //!
-//! Files: a message's text file (the mind's blob, named on `say`) is read
-//! whole into its turn, goes with the hand-off on `chat`, the stub names
-//! it, and its reply's file comes back on the report and is read into the
-//! next turn.
+//! The web: web_fetch reads a page of a local upstream (a redirect
+//! followed) as text, its chrome and scripts left out. A search reaches the
+//! internet, which a local run does not call: a skip. Files: a message's
+//! text file (the mind's blob, named on `say`) is read whole into its turn,
+//! goes with the hand-off on `chat`, the stub names it, and its reply's
+//! file comes back on the report and is read into the next turn.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use fragment_core::blob::sha256_hex;
+use fragment_fakes::http::{Handler, Response, Server};
 use serde_json::{json, Value};
 
 use super::computers::{agent_replies, phase, told, turn_of, AGENT_JSON};
@@ -65,6 +69,21 @@ fn op(api: &Api, owner: &Keys, mind: &str, name: &str, input: Value) -> Value {
     api.op(owner, mind, name, &format!("{name}-{}", crate::api::now_ms()), input).map(|r| r.body["result"].clone()).unwrap_or(Value::Null)
 }
 
+/// A page for web_fetch, behind a redirect: words, a link to make absolute,
+/// and a script, a nav and a footer to leave out.
+const COMPOST_HTML: &str = "<!doctype html><html><head><title>Compost, &amp; how</title><script>var words = \"a script's words\";</script></head>\
+<body><nav><a href=\"/\">Home</a> menu words</nav><main><h1>Compost</h1><p>Turn the heap every <b>two weeks</b> &mdash; keep it damp.</p>\
+<ul><li>Browns: leaves</li><li>Greens: scraps</li></ul><p>See <a href=\"/guide\">the guide</a>.</p></main><footer>footer words</footer></body></html>";
+
+fn page_upstream() -> Result<Server> {
+    let handler: Handler = Arc::new(|req| match req.path.as_str() {
+        "/old" => Response::bytes(301, "text/plain", b"moved".to_vec()).with_header("location", "/compost.html"),
+        "/compost.html" => Response::bytes(200, "text/html; charset=utf-8", COMPOST_HTML.as_bytes().to_vec()),
+        _ => Response::bytes(404, "text/plain", b"no such page".to_vec()),
+    });
+    Ok(Server::start(0, handler)?)
+}
+
 pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("mind", &[crate::Need::Fakes, crate::Need::Computers]) {
         return Ok(());
@@ -85,7 +104,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let personas = op(api, &owner, &mind, "personas", json!({}));
     let ids: Vec<&str> = personas["personas"].as_array().into_iter().flatten().filter_map(|p| p["id"].as_str()).collect();
-    s.ok("it starts with three personas, Mind the default and Builder's hands on", ids == ["mind", "builder", "coach"] && personas["default"] == "mind" && personas["personas"][1]["hands"] == true, &personas);
+    s.ok(
+        "it starts with four personas, Mind the default, Builder's hands on, and Researcher",
+        ids == ["mind", "builder", "coach", "researcher"] && personas["default"] == "mind" && personas["personas"][1]["hands"] == true,
+        &personas,
+    );
 
     // ---- a first message: logged, answered, the answer drafted first
     let mut page = Socket::open(api, &mind, "__live", Some(&owner), None)?;
@@ -134,11 +157,11 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let calls = s.ai.chats();
     let first = calls.iter().find(|c| c["messages"][1]["content"][1]["text"] == "hello mind, the garden has tomatoes and basil");
     s.ok(
-        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date and search",
+        "the turn's call is the system prompt, then the view before the message and the message whole, with zoom, date, search and the web's tools",
         first.is_some_and(|c| {
             c["messages"][0]["content"].as_str().is_some_and(|p| p.starts_with("You are Mind, an AI agent"))
                 && c["messages"][1]["content"][0]["text"] == "<chat>\n</chat>"
-                && c["tools"].as_array().is_some_and(|t| t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search"])
+                && c["tools"].as_array().is_some_and(|t| t.iter().filter_map(|t| t["function"]["name"].as_str()).collect::<Vec<_>>() == ["zoom", "date", "search", "web_search", "web_fetch", "research"])
         }),
         format!("{first:?}"),
     );
@@ -203,6 +226,27 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     let topics = op(api, &owner, &mind, "topics", json!({}));
     s.ok("the topic counts its thread", topics["topics"][0]["name"] == "Garden" && topics["topics"][0]["count"] == 1, &topics);
     s.ok("its threads' topics are published on log", logged(api, &owner, &mind, "topics").iter().any(|t| t["body"]["thread"] == garden), "");
+
+    // ---- the web: a page read as text, behind a redirect
+    let web = page_upstream()?;
+    let compost = "t_0c0c0c0c0c0c0c0c";
+    let r = say("m5", json!({ "text": padded(&format!("read the page [[call web_fetch {{\"url\": \"{}/old\"}}]]", web.url)), "thread": compost }))?;
+    anyhow::ensure!(r.status == 200, "saying m5: {r}");
+    let read = s.eventually(TURN, || messages(api, &owner, &mind, compost).iter().any(|m| m["kind"] == "talk" && m["text"].as_str().is_some_and(|t| t.starts_with("the tool said: "))));
+    let said = messages(api, &owner, &mind, compost);
+    let echo = said.iter().find(|m| m["kind"] == "echo").and_then(|m| m["text"].as_str()).unwrap_or("");
+    s.ok(
+        "web_fetch follows the redirect and reads the page as text: its title, its address, its words, a link made absolute",
+        read && said.iter().any(|m| m["kind"] == "tool" && m["text"] == format!("web_fetch {{\"url\":\"{}/old\"}}", web.url).as_str())
+            && echo.starts_with(&format!("# Compost, & how\n{}/compost.html\n\n# Compost\n\nTurn the heap every two weeks — keep it damp.\n\n- Browns: leaves\n- Greens: scraps", web.url))
+            && echo.contains(&format!("[the guide]({}/guide)", web.url)),
+        echo,
+    );
+    s.ok("its scripts and its chrome (nav, footer) are left out", !echo.is_empty() && ["a script's words", "menu words", "footer words"].iter().all(|w| !echo.contains(w)), echo);
+    s.skip(
+        "web_search and research find pages on the internet (a keyed search, else DuckDuckGo, else Wikipedia)",
+        "a local run calls nothing on the internet: the no-key search was tried by hand (docs/optchat.md, \"The web\")",
+    );
 
     // ---- hands: the stub agent, an editor of the mind
     let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
