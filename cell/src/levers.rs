@@ -46,8 +46,10 @@ const E2E_SEAT_ID: &str = "e2e-seat";
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct SignIn {
     email: String,
+    /// The paid calls to cap them at from now; none keeps the cap they
+    /// have (a new person's: none lent).
     #[serde(default)]
-    paid_calls: u64,
+    paid_calls: Option<u64>,
 }
 
 /// Its answer: the platform session's token (the cookie's value), whose
@@ -187,7 +189,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
 /// An e2e person's session: the registry signs them in (making them the
 /// first time), then their ledger makes them a seat with `paid_calls` paid
 /// calls at most. Again for the same email: the same person, a new
-/// session, and the cap set anew.
+/// session, and the cap set anew when asked; a sign-in that asks none (a
+/// sweep's, beside runs still spending) leaves it as it is.
 async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
     if !levers::valid_e2e_email(&asked.email) {
         return Err(CellError::invalid(format!(
@@ -196,16 +199,17 @@ async fn sign_in(env: &Env, asked: SignIn) -> CellResult<SignedIn> {
             levers::E2E_EMAIL_NAME_BYTES_MAX
         )));
     }
-    if asked.paid_calls > levers::E2E_PAID_CALLS_MAX {
+    let lent = asked.paid_calls.unwrap_or(0);
+    if lent > levers::E2E_PAID_CALLS_MAX {
         return Err(CellError::invalid(format!("an e2e person makes at most {} paid calls", levers::E2E_PAID_CALLS_MAX)));
     }
-    let answer = ask_registry(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: asked.paid_calls })).await?;
+    let answer = ask_registry(env, &calls::TestHook::E2eSignIn(calls::E2eSignIn { email: asked.email, paid_calls: lent })).await?;
     let signed: calls::E2eSignedIn = serde_json::from_value(answer).map_err(|e| CellError::host(format!("the registry's e2e sign-in: {e}")))?;
     assert!(npub::is_identity(&signed.identity), "the registry answers an identity");
     ledger::ask(env, &signed.identity, &SetPlan { id: E2E_SEAT_ID.into(), plan: Plan::Seat }).await?;
     let cap = ledger::ask(env, &signed.identity, &ledger::TestHook::PaidCalls { max: asked.paid_calls }).await?;
     let paid_calls = cap["max"].as_u64().ok_or_else(|| CellError::host(format!("the ledger's paid-calls cap: {cap}")))?;
-    assert_eq!(paid_calls, asked.paid_calls, "the ledger holds the cap it was given");
+    assert!(asked.paid_calls.is_none_or(|asked| asked == paid_calls), "the ledger holds the cap it was given");
     Ok(SignedIn { session: signed.token, identity: signed.identity, created: signed.created, paid_calls })
 }
 

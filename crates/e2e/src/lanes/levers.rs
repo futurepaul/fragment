@@ -55,7 +55,7 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
     // the e2e sign-in: valid
     let email = format!("levers-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
     let signin = |email: &str, paid_calls: Value| api.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email, "paidCalls": paid_calls })));
-    let first = signin(&email, json!(0))?;
+    let first = api.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email })))?;
     let session = first.body["session"].as_str().unwrap_or("").to_string();
     let identity = first.body["identity"].as_str().unwrap_or("").to_string();
     let me = who(api, &session)?;
@@ -73,6 +73,16 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
         "the same email again is the same person, not made again, in a new session; both work",
         again.status == 200 && again.body["identity"] == identity.as_str() && again.body["created"] == false && again_session != session && who(api, &session)?["id"] == identity.as_str() && who(api, &again_session)?["id"] == identity.as_str(),
         &again,
+    );
+    // a sign-in that names no paid calls (a sweep's, beside a run still
+    // spending them) leaves their cap as it is
+    let lent = signin(&email, json!(1))?;
+    let kept = api.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email })))?;
+    let cap = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "paid-calls" })))?;
+    s.ok(
+        "a sign-in lent paid calls caps them; another that names none (a sweep's) leaves the cap as it is",
+        lent.body["paidCalls"] == 1 && kept.status == 200 && kept.body["paidCalls"] == 1 && cap.status == 200 && cap.body == json!({ "max": 1, "used": 0 }),
+        json!([lent.body["paidCalls"], kept.body["paidCalls"], cap.body]),
     );
     // a preview may hold many e2e people: their pages, until this one's
     let (mut found, mut after, mut pages) = (false, Value::Null, 0);
