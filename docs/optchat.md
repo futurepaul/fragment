@@ -671,16 +671,22 @@ beside the mind; opened on its own origin the page shows its own rail.
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 
-- **The image:** Debian trixie-slim, 152 MB compressed, with:
+- **The image:** Debian trixie-slim, 499 MB compressed (1.28 GB on
+  disk; Chromium is most of it), with:
   - tini as PID 1;
   - the sandbox-shim (docs/computers.md);
   - the bridge (`BRIDGE_RUNTIME=goose`, built for musl);
   - the fragment CLI;
   - goose, built in a stage of its own from `futurepaul/goose` at a pinned
     rev of `fragment/optmem`;
-  - git, curl, jq, python3, ripgrep;
-  - no Node, no Chromium and no display yet: port 6080 serves a "no
-    screen yet" page.
+  - git, curl, jq, python3, ripgrep, Node 24.21.0;
+  - a desktop per agent (`images/goose/desktop`, `fragment-desktop`):
+    Xvnc (TigerVNC, on a Unix socket only), the matchbox window manager,
+    and the agent's own Chromium over CDP, all under `/run/desktop`, never
+    `/data`. It starts at its screen's first viewer or its agent's first
+    browser or computer call, and stops after 10 idle minutes (not while
+    watched or held). The owner watches it on the agent's screen (#230's
+    per-agent screens: `BRIDGE_SCREENS_DIR`, noVNC 1.7.0).
 - **The runtime** (`images/bridge/src/runtime/goose.rs`):
   - It runs one `goose acp` per agent, because goose's custom headers
     and its shell's environment are per process. Each goose starts at
@@ -707,9 +713,30 @@ beside the mind; opened on its own origin the page shows its own rail.
   Compaction is off (`GOOSE_AUTO_COMPACT_THRESHOLD=0`,
   `GOOSE_NO_COMPACTION=1`), and `GOOSE_STABLE_SYSTEM_PROMPT=1` keeps the
   system prompt fixed.
-- **Extensions:** `EXTENSIONS={}`, which leaves `developer` (shell,
-  edit, tree), plus the session's `mind` MCP server (read-only: view,
-  zoom, date, search).
+- **Extensions:** goose's `developer` and `skills` builtins
+  (`EXTENSIONS={}` drops the rest), plus four MCP servers a session:
+  - `mind`: `fragment mcp <mind>` (read-only: view, zoom, date, search);
+  - `browser`: Playwright MCP 0.0.83 (18 of its tools) on the agent's
+    visible Chromium, reading pages as accessibility snapshots;
+  - `computer`: cua-driver 0.28.3 (17 tools: windows, keys, mouse,
+    clipboard), plus `screen_look` (a screenshot and a question to the
+    route's `vision` model) and `screen_click` (Clef picks a cell of a
+    numbered grid drawn on the screenshot, then a finer grid inside it;
+    xdotool clicks);
+  - `web`: `web_search` (DuckDuckGo's HTML, then Bing, then DuckDuckGo
+    lite) and `web_read` (a page as Markdown, in parts; files to
+    `/data/work/downloads`).
+  - A gate before `browser` and `computer` refuses calls while a person
+    holds the screen, starts the desktop, strips images from results
+    (GLM reads none) and cuts results past 40k characters.
+- **Skills:** each turn installs the agent's skills into goose's skills
+  directory: the `fragment` skill (the computer page plus `fragment
+  skill`), our `web-search` skill, and the owner's managed skills (26 by
+  default, 12 more only with their provider's credential). The system
+  prompt's `HANDS` text says to load `fragment` then `apps-finite`
+  before any app work.
+- **Clef from a computer:** `POST /api/models/v1/decide` beside chat
+  completions (docs/api.md, Models), metered as `job.ai.decide` is.
 - **Hermes is gone** on this branch: `images/hermes`, the bridge's
   Relay runtime, the hermes and agent-smoke lanes, and the docs about
   them. The deploy config's default image is `goose`.

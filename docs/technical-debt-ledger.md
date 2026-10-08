@@ -11,6 +11,51 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
+## A computer's browser forgets its sign-ins at every sleep
+
+- **Observed:** 2026-10-07, the goose image's desktops (docs/optchat.md).
+  Each agent's Chromium profile lives in `/run/desktop`, outside `/data`,
+  so a save never copies a profile Chromium is writing.
+- **Risk:** sites the agent signed in to ask again after each sleep.
+- **First proof:** a hand-off that needs a site it signed in to before
+  a sleep, asking for the sign-in again.
+- **Delete when:** a profile is saved under the hold (Chromium stopped
+  or its profile copied whole), or sign-ins go through connections.
+
+## goose's web search scrapes DuckDuckGo and Bing
+
+- **Observed:** 2026-10-07, `images/goose/desktop/src/web.rs` and the
+  mind's no-key search (templates/mind/applib/web.mjs). No search API
+  key is configured; the HTML endpoints rate-limit and serve CAPTCHAs to
+  some addresses (DuckDuckGo locks one out for ~12 minutes after about a
+  dozen quick searches).
+- **Risk:** searches that fail, or return CAPTCHA pages, mid-task.
+- **First proof:** a hand-off whose search answered nothing on a
+  preview.
+- **Delete when:** a search API (Perplexity, Brave, Tavily) is a
+  connection or a deployment secret the computer reaches.
+
+## cua-driver reads no accessibility tree, and is behind upstream
+
+- **Observed:** 2026-10-07, the goose image pins cua-driver 0.28.3 (the
+  latest is 0.34.0) and runs no D-Bus session or at-spi2-core, so its
+  accessibility tools are not offered; `screen_click` grounds clicks on
+  a screenshot grid through Clef instead.
+- **Risk:** clicks on desktop apps miss where an accessibility tree
+  would have named the element.
+- **First proof:** a desktop task Clef's grid cannot click through.
+- **Delete when:** the image runs at-spi2 with Chromium's accessibility
+  on and a newer cua-driver, and its tree tools are offered.
+
+## The screen's lease file is Hermes' format
+
+- **Observed:** 2026-10-07, #230's Take over lease (images/bridge/src/
+  lease.rs) kept for goose's desktops: a person's hold is a file shaped
+  as Hermes read it.
+- **Risk:** none until another runtime reads it; the shape names Hermes.
+- **First proof:** n/a (naming only).
+- **Delete when:** the lease is redesigned as the bridge's own.
+
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
