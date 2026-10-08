@@ -64,6 +64,9 @@ pub struct SeatView {
     /// Whether its holder lets their `seat_always_on` computer sleep.
     pub sleeps: bool,
     pub admin: bool,
+    /// While its org's subscription is a trial: when it ends (seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_ends: Option<i64>,
 }
 
 /// A seat waiting for a person: its org named it to their email, and they
@@ -152,6 +155,71 @@ pub struct Comped {
     /// deployment that sends mail; a mail that failed is `false`, the seat made).
     #[serde(default)]
     pub mailed: bool,
+}
+
+/// A trial code (decision 56), as operators see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrialCode {
+    pub id: String,
+    /// As shown: `XXXX-XXXX-XXXX-XXXX`.
+    pub code: String,
+    pub name: String,
+    pub kind: SeatKind,
+    pub days: u32,
+    pub capacity: u64,
+    /// After this (ms), it is refused.
+    pub expires_at: Option<i64>,
+    pub active: bool,
+    /// Each change raises it: a change names the one it saw.
+    pub revision: u64,
+    pub created_at: i64,
+    pub created_by: String,
+    /// Its uses that bought a subscription, and its Checkouts still open.
+    pub subscribed: u64,
+    pub open: u64,
+    pub uses: Vec<TrialUse>,
+}
+
+/// Someone's use of a trial code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrialUse {
+    pub person: String,
+    pub email: Option<String>,
+    pub at: i64,
+    /// Its subscription's status, once its Checkout completed.
+    pub status: Option<String>,
+}
+
+/// `POST /api/admin/trials`: a new code; `code` none, one is made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewTrialCode {
+    pub name: String,
+    pub kind: SeatKind,
+    pub days: u32,
+    pub capacity: u64,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// `PATCH /api/admin/trials/<id>`: what changes, if `revision` is still
+/// the code's (else 409). Capacity only grows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TrialCodeChange {
+    pub revision: u64,
+    #[serde(default)]
+    pub capacity: Option<u64>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 #[cfg(test)]

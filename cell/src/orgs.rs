@@ -14,6 +14,7 @@ use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, OrgOf, Sleeps, SyncSeat};
 use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat, SeatKindChange};
+use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
 use crate::{acting_for, ask_registry, caller, json_answer, read_body, signer, Caller};
 use fragment_nip98::Payload;
 
@@ -109,6 +110,10 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         }
         (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &EndComp { seat: seat.to_string() }).await?),
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
+        (Method::Post, ["trials"]) => json_answer(&ask_registry(env, &TrialNew { by: who.id.clone(), code: body(&bytes)? }).await?),
+        (Method::Get, ["trials"]) => json_answer(&ask_registry(env, &TrialList {}).await?),
+        (Method::Get, ["trials", id]) => json_answer(&ask_registry(env, &TrialGet { id: id.to_string() }).await?),
+        (Method::Patch, ["trials", id]) => json_answer(&ask_registry(env, &TrialChange { id: id.to_string(), change: body(&bytes)? }).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }
 }

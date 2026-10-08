@@ -35,6 +35,7 @@ mod signin;
 mod site;
 mod sync;
 mod templates;
+mod trials;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -100,6 +101,7 @@ const LANES: &[Lane] = &[
     ledger::ledger_lane,
     orgs::orgs,
     billing::billing,
+    trials::trials,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -133,7 +135,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "orgs", "billing",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "orgs", "billing", "trials",
     ],
 ];
 

@@ -57,7 +57,12 @@ impl From<Snapshot> for SubscriptionCopy {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CheckoutBegin {
     pub by: By,
-    pub kind: SeatKind,
+    /// The seat's kind; a trial code's own when one is named.
+    pub kind: Option<SeatKind>,
+    /// A trial code, as typed.
+    pub trial: Option<String>,
+    /// Until when a trial's place is held: the Checkout's own expiry (ms).
+    pub until_ms: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -68,6 +73,8 @@ pub(crate) struct CheckoutPlan {
     pub org: String,
     pub org_name: String,
     pub customer: Option<String>,
+    pub kind: SeatKind,
+    pub trial: Option<super::trials::TrialOffer>,
 }
 
 impl Call for CheckoutBegin {
@@ -102,6 +109,9 @@ pub(crate) struct ApplyCheckout {
     pub person: String,
     pub kind: SeatKind,
     pub subscription: SubscriptionCopy,
+    /// The trial code it redeemed.
+    #[serde(default)]
+    pub trial: Option<String>,
 }
 
 impl Call for ApplyCheckout {
@@ -175,7 +185,8 @@ impl RegistryCell {
     fn checkout_begin(&self, b: CheckoutBegin) -> CellResult<CheckoutPlan> {
         let who = self.person_by(&b.by)?;
         let email = self.latest_email(&who.id)?.ok_or_else(|| CellError::invalid("a seat is bought by someone who signs in, with their email"))?;
-        let org = match self.member_of(&who.id)? {
+        // everything is checked before anything is written: a refusal leaves no org behind
+        let existing = match self.member_of(&who.id)? {
             Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already")),
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
@@ -186,17 +197,31 @@ impl RegistryCell {
                     (true, false) | (false, false) => return Err(conflict(format!("you are in {}: its admins give you a seat", o.name))),
                     // an admin of an org that pays for nothing (new, or
                     // lapsed) buys again: their lapsed seat, if they had one
-                    (false, true) => o,
+                    (false, true) => Some(o),
                 }
             }
+            None => None,
+        };
+        let (kind, trial) = match &b.trial {
+            Some(raw) => {
+                let offer = self.trial_offer(&who.id, raw, b.kind, existing.as_ref().map(|o| o.id.as_str()))?;
+                (offer.kind, Some(offer))
+            }
+            None => (b.kind.ok_or_else(|| CellError::invalid("name the seat's kind, or a trial code"))?, None),
+        };
+        let org = match existing {
+            Some(o) => o,
             None => {
                 let o = self.new_org(&email, &who.id)?;
                 self.insert_member(&o.id, Some(&who.id), &email, true, None, false, &who.id)?;
                 o
             }
         };
+        if let Some(t) = &trial {
+            self.hold_trial_place(&t.id, &who.id, b.until_ms)?;
+        }
         let customer = self.billing_row(&org.id)?.customer;
-        Ok(CheckoutPlan { person: who.id, email, org: org.id, org_name: org.name, customer })
+        Ok(CheckoutPlan { person: who.id, email, org: org.id, org_name: org.name, customer, kind, trial })
     }
 
     fn set_customer(&self, b: SetCustomer) -> CellResult<Customer> {
@@ -289,6 +314,9 @@ impl RegistryCell {
         if let Some(m) = self.member_of(&b.person)?.filter(|m| m.org == b.org && m.comped == 0) {
             self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
             self.queue_sync(&b.person)?;
+        }
+        if let Some(code) = &b.trial {
+            self.trial_bought(code, &b.person, &b.subscription.id)?;
         }
         self.exec(
             "INSERT INTO checkouts (session, org, person, kind, at) VALUES (?, ?, ?, ?, ?)",
