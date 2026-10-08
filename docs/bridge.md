@@ -311,8 +311,8 @@ real model, so told, checks before it redoes is a hosted run's to see.
 
 ## Hermes' Relay, as the bridge speaks it
 
-Hermes v0.21.5 (tag `v2026.9.24`, the newest release on 2026-10-03;
-`gateway/relay/`), contract version 1. The bridge serves
+Hermes v0.21.6 (tag `v0.21.6`, 2026-10-08; read first from v0.21.5,
+whose wire it keeps; `gateway/relay/`), contract version 1. The bridge serves
 `ws://127.0.0.1:8650/relay` and `/relay/media` and checks Hermes'
 token; the descriptor names platform `relay` with draft streaming and
 the ops `send, edit, delete, typing, react, draft, prompt, send_media,

@@ -6,16 +6,15 @@ The platform carries no Hermes code (docs/cloudflare-v1.md, "The rule");
 the connector the cell had until the cut is at tag `celld-final`
 (`cell/src/relay.rs`).
 
-Pinned to Hermes v0.21.5 (tag `v2026.9.24`, the newest release on
-2026-10-03), contract version 1, read from `gateway/relay/` (its code
-wins over its contract document). Relay is marked experimental: it may
-change without a deprecation cycle, so a Hermes upgrade re-reads it, and
-the real-Hermes lane (`images/bridge/tests/docker.rs`) runs the real
-image against it. Re-read on upstream's main at `90194c64ff99`
-(`main-desktop` of 2026-10-06, the image's pin until a stable release of
-its new pipeline): `gateway/relay/` only drops its plugin-compat names
-and takes its prompts' labels from translations (English as before);
-contract version 1, the wire unchanged.
+Pinned to Hermes v0.21.6 (tag `v0.21.6`, commit `818c13be1dc4`,
+2026-10-08; images/hermes/Dockerfile names its image), contract version
+1, read from `gateway/relay/` (its code wins over its contract
+document). Read first from v0.21.5 (tag `v2026.9.24`); v0.21.6 only drops
+its plugin-compat names and takes its prompts' labels from translations
+(English as before): the wire is unchanged. Relay is marked
+experimental: it may change without a deprecation cycle, so a Hermes
+upgrade re-reads it, and the real-Hermes lane
+(`images/bridge/tests/docker.rs`) runs the real image against it.
 
 ## The dial
 

@@ -288,6 +288,13 @@ async fn the_hermes_image() {
         assert!(!calls.is_empty());
         assert!(calls.iter().all(|c| c.agent.as_deref() == Some("juniper.paul")), "every model call names its agent: {calls:?}");
         assert!(calls.iter().any(|c| c.model == "cheap"), "the agent's tier from agent.json: {calls:?}");
+        // A fresh profile's first message carries no first-contact note of
+        // Hermes' (v0.21.5 appended "This is the user's very first message
+        // ever…", and the model introduced itself and named /help; since
+        // v0.21.6 Hermes adds it only in a direct message, and the bridge's
+        // chats are groups): the model is asked exactly what was said.
+        let first: Vec<String> = calls.iter().map(|c| c.body["messages"].to_string()).filter(|m| m.contains("hello hermes")).collect();
+        assert!(!first.is_empty() && first.iter().all(|m| !m.contains("very first message")), "no first-contact note in the first message's request: {first:?}");
     }
     // The screen: its viewer page, noVNC, and the socket's refusal of a
     // viewer that names no id and no agent (a display starts at a viewer).
@@ -499,13 +506,6 @@ async fn the_hermes_image() {
         let reply = answered(w, &tn).unwrap();
         assert!(reply["text"].as_str().unwrap_or("").contains("npm-global=/usr/local\""), "npm's global prefix, as root: {reply}");
     });
-    // Hermes fetches none of its optional backends on its own (its lazy
-    // installs, which its image turns on, off in the managed overlay), in
-    // the gateway's home or an agent's
-    for home in ["/data/hermes", "/data/hermes/profiles/juniper-paul"] {
-        let allowed = c.exec_out(&["/command/s6-setuidgid", "hermes", "env", &format!("HERMES_HOME={home}"), "/opt/hermes/.venv/bin/python", "-c", "import os; os.chdir('/opt/hermes'); from pm import lazy_installs_allowed; print(lazy_installs_allowed())"]);
-        assert_eq!(allowed.trim().lines().last(), Some("False"), "no lazy installs for {home}: {allowed}");
-    }
     // Hermes' file tools (write_file, patch) may write where its terminal
     // works, its home and /tmp, and nowhere else (HERMES_WRITE_SAFE_ROOT),
     // as Hermes' own check decides
@@ -740,7 +740,7 @@ fn unexplained(changed: &[String]) -> Vec<&String> {
 /// Each of `paths` Hermes replaces whole, a state or a stamp, read now:
 /// whole, it parses as JSON; a stamp is its epoch, a number, and the
 /// cron ticker's heartbeat its writer's pid after it (`<epoch> <pid>`, since
-/// Hermes' main of 2026-10).
+/// Hermes v0.21.6).
 fn whole(c: &Container, paths: &[String]) {
     let replaced = |p: &&String| p.ends_with(".json") || ["/gateway.heartbeat", "/ticker_heartbeat", "/ticker_last_success", "/ticker_last_error"].iter().any(|s| p.ends_with(s));
     for p in paths.iter().filter(replaced) {
@@ -1385,7 +1385,7 @@ fn held_event(c: &Container) -> Option<serde_json::Value> {
 /// home pinned, the profile's `home/.config/…`), and its
 /// `declarative_performance_observer.db` was held locked. Chrome 153 (Hermes
 /// v0.21.5's image) kept that temporary profile under `~`, in its work;
-/// Chrome 145 (Hermes' main) keeps it in `TMPDIR`, which Hermes points at
+/// Chrome 145 (Hermes v0.21.6) keeps it in `TMPDIR`, which Hermes points at
 /// its home's scratch, so the image's Chromium gives it the container's
 /// `/tmp` (hermes.rs, `CHROMIUM_TMP`).
 /// The agent starts it as Hermes' background process (`start:`).
@@ -1809,4 +1809,35 @@ async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
     let woke = hermes_python(&c, &[], REFRESH);
     assert_eq!(woke["catalog"], json!({}), "woken, its catalog is still off, the torn caches unread: {woke}");
     fake.with(|w| assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}", x.reply(w, &next)));
+}
+
+// ---- nothing installed at run time (Paul, 2026-10-07) ----
+
+/// Goal: Hermes installs nothing at run time. Its lazy installs are off, as
+/// Hermes itself reads them, both in the gateway's own scope and in an
+/// agent's profile (upstream's image turns them on, into its home's
+/// `installs`). Its `text_to_speech` is still offered, Edge's SDK being in
+/// the image (Hermes' image leaves it to a first-use install). A feature
+/// asked for at run time (local Whisper, as a voice note's local fallback
+/// would) is refused. And nothing an install leaves is under `/data`.
+/// Method: Hermes' own PM (`lazy_installs_allowed`, `extras.available`,
+/// `ensure_import`, as its tools call it) and `check_tts_requirements`, run
+/// as its gateway runs them, in each scope; then `/data` searched.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn nothing_is_installed_at_run_time() {
+    let (_fake, _model, _chat, c) = hermes_running().await;
+    const PROBE: &str = "import json, os\nos.chdir('/opt/hermes')\nfrom pm import lazy_installs_allowed, ensure_import\nfrom pm.extras import available\nfrom tools.tts_tool import check_tts_requirements\ntry:\n    ensure_import('stt-whisper')\n    forced = 'installed'\nexcept Exception as e:\n    forced = str(e)\nprint(json.dumps({'allow': lazy_installs_allowed(), 'edge': available('edge-tts'), 'whisper': available('stt-whisper'), 'speaks': check_tts_requirements(), 'forced': forced}))";
+    for home in ["/data/hermes", "/data/hermes/profiles/juniper-paul"] {
+        let seen = hermes_python(&c, &[&format!("HERMES_HOME={home}")], PROBE);
+        eprintln!("lazy: {home}: {seen}");
+        assert_eq!(seen["allow"], json!(false), "lazy installs are off in {home}: {seen}");
+        assert_eq!(seen["edge"], json!(true), "Edge's SDK is in the image: {seen}");
+        assert_eq!(seen["speaks"], json!(true), "text_to_speech is offered in {home}: {seen}");
+        assert_eq!(seen["whisper"], json!(false), "local Whisper is not: {seen}");
+        assert!(seen["forced"].as_str().is_some_and(|f| f.contains("lazy installs are disabled")), "an install asked for at run time is refused in {home}: {seen}");
+    }
+    // no package, generation or installer cache of an install under /data
+    let left = c.exec_out(&["sh", "-c", "find /data -maxdepth 7 \\( -path '*/lazy-packages/*' -o -path '*/installs/*/site-packages' -o -path '*/.cache/uv' -o -iname 'edge_tts*' -o -iname '*faster_whisper*' \\) | head -5"]);
+    assert_eq!(left.trim(), "", "no install left anything under /data");
 }

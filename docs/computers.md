@@ -605,9 +605,15 @@ settings and state):
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes' desktop image (pinned by digest in its
-  Dockerfile), `hermes-boot`, the bridge as Hermes' Relay connector, the
-  screen. One Hermes
+- `images/hermes`: Hermes v0.21.6's desktop image, `hermes-boot`, the
+  bridge as Hermes' Relay connector, the screen. The base is pinned by
+  digest to the build upstream's `stable-desktop` named on 2026-10-08
+  (its versioned tag `rc.4-v0.21.6-desktop`; its install stamp says
+  0.21.6, commit `818c13be`); the tag named `v0.21.6-desktop` is an
+  earlier attempt's build, not that release. Hermes there is Python
+  3.14.7 in a venv its own package manager (PM) builds, its tools (its
+  Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
+  store at `/opt/hermes/tools`. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
@@ -856,8 +862,8 @@ and how a runtime finds them, is the image's.
   fragment). Hermes ranks a profile's own skills above its external dirs,
   so an agent's own wins over a managed one or the platform's; its
   external dirs are one rank, in which two skills of one name are
-  ambiguous and Hermes finds neither by it (since its main of 2026-10;
-  v0.21.5 took the first dir's), so a managed `fragment` wins over the
+  ambiguous and Hermes finds neither by it (since v0.21.6; v0.21.5 took
+  the first dir's), so a managed `fragment` wins over the
   platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, and the platform skill. The image carries none of Hermes' bundled
@@ -930,7 +936,13 @@ persisted)".
   is not theirs. Lazy installs are off (upstream's image turns them on;
   `security.allow_lazy_installs: false` in the managed overlay): they are
   Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of. npm's global prefix is `/usr/local`
+  computer configures none of. What its agents use is in the image:
+  Edge's speech SDK, `text_to_speech`'s default provider, which Hermes'
+  image leaves to a first-use install (without it, with installs off,
+  Hermes offers no `text_to_speech`), is installed at build at its
+  `uv.lock` pins; local Whisper, a voice note's fallback, is never
+  installed. Nothing is installed under `/data` at run time (the Docker
+  lane's `nothing_is_installed_at_run_time`). npm's global prefix is `/usr/local`
   (`npm_config_prefix`, which sudo keeps): npm's own, since Hermes' PM
   ships Node, is its Node's directory in Hermes' tool store, on no PATH.
 - **The network.** apt reaches `deb.debian.org` over plain HTTP, which no

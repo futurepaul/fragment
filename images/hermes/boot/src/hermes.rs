@@ -126,8 +126,9 @@ pub fn managed_config(disabled_plugins: &[String], approval_timeout_s: u64, scre
     // Lazy installs are off (upstream's image turns them on): they fetch
     // Hermes' own optional backends (providers, platforms, speech) into its
     // home, which a computer configures none of (its model is the platform's
-    // route, its chat the relay). Software the agent wants is its terminal's
-    // to install.
+    // route, its chat the relay). What our agents use is in the image (Edge's
+    // speech for text_to_speech: images/hermes/Dockerfile). Software the
+    // agent wants is its terminal's to install.
     y.push_str("security:\n  allow_lazy_installs: false\n");
     if !disabled_plugins.is_empty() {
         // Messaging platforms this computer never serves (it is reached through its
@@ -177,9 +178,8 @@ pub fn profile_config(agent: &Agent, tier: Tier, model_base: &str, credential_en
     // agent's tier (the medium tier's GLM-5.3 reads no images). Named
     // outright, Hermes routes every capture and attachment through it (its
     // image routing, `agent/image_routing.py`: in `auto`, an explicit
-    // `auxiliary.vision` makes it text, which each capture asks:
-    // `tools/computer_use/vision_routing.py` in the pinned image,
-    // `tools/vision_tools.py`'s `_native_tool_result_images` after it) and
+    // `auxiliary.vision` makes it text, which each capture asks through
+    // `tools/vision_tools.py`'s `_native_tool_result_images`) and
     // sends it, as every
     // call to a custom endpoint, with `model.default_headers`: the agent's
     // `x-fragment-agent`, so the intercept meters it to the agent's owner.
@@ -246,7 +246,7 @@ pub fn chromium_script(full: &Path) -> String {
 /// Chromium's scratch: the container's own `/tmp`, which no save keeps.
 /// Hermes points `TMPDIR` into its home (`<profile>/cache/scratch`, under
 /// `/data`), and Chromium keeps there a headless browser's profile when its
-/// caller names none (Chrome 145, which Hermes' main pins; 153, in its
+/// caller names none (Chrome 145, which Hermes v0.21.6 pins; 153, in its
 /// v0.21.5 image, kept it under `~`), and the shared memory
 /// `--disable-dev-shm-usage` moves out of `/dev/shm`: a hold while one runs
 /// would find its databases under Hermes' home, locked.

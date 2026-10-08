@@ -9,11 +9,16 @@
 # workspace; .dockerignore keeps the context to what the build reads):
 #   docker build --platform linux/amd64 -f images/hermes/Dockerfile .
 
-# Upstream's main (no stable release of its new pipeline is published yet),
-# pinned by digest: `main-desktop` as of 2026-10-06, built from
-# NousResearch/hermes-agent@90194c64ff99. The first stable is
-# `vX.Y.Z-desktop`, pinned here the same way (a tag and its index digest).
-ARG HERMES=nousresearch/hermes-agent:main-desktop@sha256:7c6c7debc9e8fe623ffd5afce1c80116e8cff4e818ef42eb649d43562139d140
+# Hermes v0.21.6, the first stable of upstream's release pipeline (git tag
+# v0.21.6, commit 818c13be1dc4; its install stamp says 0.21.6), pinned by
+# digest. Upstream publishes a release as its attempt's versioned tag
+# (`rc.<N>-vX.Y.Z-desktop`) and moves `stable-desktop` and `latest-desktop`
+# to it: on 2026-10-08 both were this digest. The tag named
+# `v0.21.6-desktop` is NOT this release (sha256:bc8b0edd…, an earlier
+# attempt's build, 2 of its 37 amd64 layers shared): never pin to it. A
+# next release is pinned the same way: its attempt's tag and the digest
+# `stable-desktop` points at, checked against its install stamp.
+ARG HERMES=nousresearch/hermes-agent:rc.4-v0.21.6-desktop@sha256:1343accb74013f38a22a11139ea7267bba9e8765d1236750c012f6b44a8ef127
 
 # The bridge and hermes-boot, static (Alpine's Rust targets musl): the
 # images' own workspace.
@@ -147,6 +152,22 @@ RUN rm /etc/cont-init.d/02-reconcile-profiles \
 # changed. Its .pyc goes, so the bytecode step below compiles the patch.
 RUN /opt/hermes/.venv/bin/python -c "import sys; p = sys.argv[1]; s = open(p).read(); old = '                        await asyncio.sleep(remaining)\n                        continue\n'; assert s.count(old) == 1, 'upstream progress sender changed: ' + p; open(p, 'w').write(s.replace(old, '                        await asyncio.sleep(remaining)\n'))" /opt/hermes/gateway/run_turn_runner.py \
  && rm -f /opt/hermes/gateway/__pycache__/run_turn_runner.*.pyc
+
+# What our agents use is in the image, never installed at run time (lazy
+# installs are off: boot/src/hermes.rs, `managed_config`). Hermes'
+# text_to_speech speaks with Edge, its default provider, whose SDK is an
+# optional extra (`edge-tts`) Hermes' image leaves to a first-use install:
+# with installs off, Hermes never offers text_to_speech. Installed here into
+# Hermes' venv by its PM's own uv, at the versions and hashes its uv.lock
+# pins (the extra's two packages; the rest are there at the same pins), its
+# environment lock removed as upstream removes it after its own builds. The
+# build fails unless Hermes' PM reads the extra available.
+RUN cd /opt/hermes \
+ && uv="$(/opt/hermes/.venv/bin/python -c 'from pm._uv import _toolchain; print(_toolchain(realize=False)[0])')" \
+ && "$uv" export --frozen --no-default-groups --no-emit-project --extra edge-tts --format requirements-txt --output-file /tmp/edge-tts.txt > /dev/null \
+ && UV_CACHE_DIR=/tmp/uv-cache "$uv" pip install --python /opt/hermes/.venv/bin/python --require-hashes --no-build -r /tmp/edge-tts.txt \
+ && rm -rf /tmp/uv-cache /tmp/edge-tts.txt /opt/hermes/.venv/.lock \
+ && /opt/hermes/.venv/bin/python -c 'from pm.extras import available; assert available("edge-tts"), "edge-tts is not in the venv"'
 
 # Bytecode in the image (S3b, cut a: -6.2 s). unchecked-hash: /opt/hermes is
 # sealed, so nothing can make a .pyc stale.

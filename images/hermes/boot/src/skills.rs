@@ -20,8 +20,8 @@
 //! ranks a profile's own `skills/` (its agent fragment's, synced: sync.rs)
 //! above its external dirs, so an agent's own skill wins over a managed one
 //! or the platform's. Its external dirs are one rank: two skills there of
-//! one name are ambiguous, and Hermes finds neither by it (since its main
-//! of 2026-10; v0.21.5 took the first dir's). So a managed `fragment` wins
+//! one name are ambiguous, and Hermes finds neither by it (since v0.21.6;
+//! v0.21.5 took the first dir's). So a managed `fragment` wins
 //! over the platform skill by the platform skill leaving the view.
 //!
 //! The plan is a pure function (`pick`, `plan`); `install` carries it out.
@@ -491,7 +491,7 @@ mod tests {
     }
 
     /// Hermes' rule for a profile's skills (its `resolve_skill_catalog`,
-    /// `agent/skill_utils.py`, since its main of 2026-10): the profile's own
+    /// `agent/skill_utils.py`, since v0.21.6): the profile's own
     /// dir ranks above its external dirs, which are one rank. A skill is
     /// known by its name, its directory's name and its path under its dir;
     /// the best rank holding a name wins it, and two skills of that rank
