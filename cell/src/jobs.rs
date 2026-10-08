@@ -1004,12 +1004,12 @@ impl FragmentCell {
     /// publish may wait on the ledger here, and a crash while it does is a
     /// failed try, which their retries finish by the record's key.
     pub(crate) async fn fire_channel(&self, record: &ChannelRecord, depth: u32) -> CellResult<Vec<i64>> {
-        if self.channel_triggers(&record.channel, &record.principal)?.is_empty() {
+        if self.channel_triggers(record)?.is_empty() {
             return Ok(vec![]);
         }
         let read_only = self.read_only().await?;
         // read after the wait, so the runs start from the code installed now
-        let ops = self.channel_triggers(&record.channel, &record.principal)?;
+        let ops = self.channel_triggers(record)?;
         let own = self.own_key()?;
         let input = json!({ "channel": record.channel, "record": record });
         let mut started = vec![];
