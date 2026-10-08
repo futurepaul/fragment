@@ -687,7 +687,15 @@ runaround".
       or named by its npub.
     - Anything shaped like an email is an email: the CLI's NIP-05
       lookup goes.
-    - The invites a person can have mailed are capped per day.
+    - The invites a person can have mailed are capped per day. The
+      platform mails them through Cloudflare Email Sending.
+    - Unguessable links are `link` visibility, which is the default
+      (Paul: "useful for some cases where you just want people to see
+      something (just like making a google doc public doesn't make it
+      easy to find without the link)"). Its share link carries
+      `?view=<token>` and can be rotated, and the fragment's bare
+      address opens nothing. So an invite always names someone, and
+      bearer invites (`/join/<name>?token=` for whoever holds it) go.
 49. **Sign-up is open; creating needs a seat.** This replaced
     invite-only sign-up. Anyone signs in through WorkOS's own sign-in
     methods (fragment mails no login links) and is a guest (decision
