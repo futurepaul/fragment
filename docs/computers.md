@@ -1094,6 +1094,23 @@ actually makes a chat a Bot Chat"), so the image does both
   Bot Chat of its own, outside the bridge, which the person sees nowhere
   until the agent has its own chat, whose session then takes the title.
   So does every agent while the keeper is down.
+- Hermes' roster tells a bot that a teammate messaged to answer with
+  `message_agent` too, so a sender often hears an answer twice: the
+  teammate's own message (a hand-off in the sender's chat) and its
+  delivery's settlement (the wake). The second one usually only says
+  that it already passed the answer on.
+
+Proven by the Docker lane's `bots_message_each_other` (the scripted
+model: the roster and the tool from an agent's first turn in its own
+chat, a message posted into the other's chat as the sender, answered
+there by a turn of the bridge's, settled once, and said in the sender's
+chat), and on a preview by the hosted `bot-mode` section, run by name
+(`--only bot-mode`): two real agents. Juniper, asked to have Maple make
+and publish a todo app and show it in her browser, runs `message_agent`.
+Maple's turn of it, in her own chat, makes the app, which goes live, and
+opens it on her desktop. Juniper then tells the person. Both chats and
+both screens are shot as the run's evidence; Maple's screen is checked
+to connect.
 
 ### Skills and the CLI in our Hermes image
 
