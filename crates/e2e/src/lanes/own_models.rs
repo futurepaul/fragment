@@ -424,10 +424,15 @@ pub(super) fn cli(s: &mut Suite, api: &Api, home: &std::path::Path, keys: &Keys)
             }
         };
         // the browser: the authorize page redirects to the CLI's loopback, which answers it
+        let browser = reqwest::blocking::Client::builder().redirect(reqwest::redirect::Policy::limited(3)).timeout(Duration::from_secs(30)).build()?;
         let page = match &link {
-            Some(url) => api.external(url).map(|r| r.text).unwrap_or_else(|e| format!("{e:#}")),
+            Some(url) => browser.get(url).send().and_then(|r| r.text()).unwrap_or_else(|e| format!("{e:#}")),
             None => String::new(),
         };
+        // a page that is not the CLI's answer: the CLI would wait ten minutes for it
+        if !page.contains("ChatGPT is connected to fragment") {
+            let _ = child.kill();
+        }
         let out = child.wait_with_output()?;
         let mut rest = String::new();
         std::io::Read::read_to_string(&mut err, &mut rest)?;

@@ -344,7 +344,8 @@ impl FragmentCell {
             return Err(permanent(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES).message));
         }
         // the payer's choice for the step's role: a tier, or their own provider (providers/step.rs)
-        let tier = match crate::providers::step::chosen_for_step(&self.env, &p.owner, t, tier, !p.capped).await? {
+        let own_spend = self.spends_own(run, p.capped)?;
+        let tier = match crate::providers::step::chosen_for_step(&self.env, &p.owner, t, tier, own_spend).await? {
             crate::providers::Chosen::Fragment(tier) => tier,
             crate::providers::Chosen::Own(own) => {
                 let draft = drafting.as_ref().map(|d| crate::providers::step::DraftTo { channel: &d.channel, turn: &d.turn, principal: &d.principal });

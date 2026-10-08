@@ -1051,7 +1051,10 @@ are the platform's.
 - **Whose spending.** The choice applies to every call its person pays
   for that they or their agents make, whoever's fragment it is in: a
   step of a run whose principal is the fragment's owner or an agent of
-  theirs, and every call an agent of theirs makes on the route. Anyone
+  theirs, or the fragment's own (its triggers', cron's and nested runs,
+  run as its key) while it is its owner's alone (`members`, no member but
+  its owner and their agents, as the mind is: `access::owner_lent`'s
+  test), and every call an agent of theirs makes on the route. Anyone
   else's run in their fragment runs as it names, on Fragment's model,
   under the fragment's cap (decision 26): a person's own account is never
   spent by someone else.

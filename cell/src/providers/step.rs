@@ -9,15 +9,15 @@
 use fragment_core::models::{self as bounds, Stream};
 use fragment_core::providers::{self as own, Role};
 use fragment_core::steps::AiText;
-use fragment_proto::{limits, ErrorCode, Tier};
+use fragment_proto::{limits, ErrorCode, Tier, Visibility};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use worker::*;
 
 use super::{Chosen, Own};
 use crate::error::CellError;
-use crate::fragment::FragmentCell;
-use crate::jobs::{permanent, StepFail};
+use crate::fragment::{FragmentCell, MetaKey};
+use crate::jobs::{permanent, RunRow, StepFail};
 
 /// A streamed step's drafts go at most this often (ai.rs's pace).
 const DRAFT_EVERY_MS: i64 = 250;
@@ -65,6 +65,27 @@ fn failed(f: &own::Failure) -> StepFail {
 }
 
 impl FragmentCell {
+    /// Whether `run`'s steps spend its payer's own choice: a run of the
+    /// fragment's owner or an agent of theirs (one the fragment's cap does
+    /// not apply to: `capped` false), or the fragment's own (its triggers'
+    /// runs, its cron's, the runs its jobs call: run as its key) while it is
+    /// its owner's alone (`members`, no member but its owner and their own
+    /// agents: `access::owner_lent`'s test), so no one else started it.
+    pub(crate) fn spends_own(&self, run: &RunRow, capped: bool) -> Result<bool, StepFail> {
+        if !capped {
+            return Ok(true);
+        }
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        if run.principal != self.own_key().map_err(retry)? {
+            return Ok(false);
+        }
+        let owner = self.must(MetaKey::Owner).map_err(retry)?;
+        let others = self
+            .count_of("SELECT COUNT(*) AS n FROM members WHERE principal != ? AND (owner IS NULL OR owner != ?)", vec![owner.as_str().into(), owner.as_str().into()])
+            .map_err(retry)?;
+        Ok(self.facts().map_err(retry)?.visibility == Visibility::Members && others == 0)
+    }
+
     /// One draft of the text so far: its length, when it went (none past a
     /// record's size, or past the fragment's pace).
     fn own_draft(&self, d: &DraftTo<'_>, text: &str) -> Option<usize> {

@@ -1255,7 +1255,8 @@ The steps:
   model, tier, usage}`: `model` is a tier, `cheap` (the default) or `medium`
   (`high` is refused: Models); `role` is `chat` or `memory` (unnamed: the
   tier's, `cheap` memory, else chat), and when the fragment's owner (or an
-  agent of theirs) runs it, the owner's choice for that role runs it
+  agent of theirs, or the fragment itself while it is its owner's alone)
+  runs it, the owner's choice for that role runs it
   instead (Models, "A person's own models": another tier, or their own
   provider, whose answer adds `provider`, its `model` the provider's, its
   `usage` that provider's counts, and is charged nothing);
@@ -1388,7 +1389,9 @@ provider the deployment offers (its catalog's `own` row: `anthropic`, or
 OpenAI's Responses API) or `chatgpt` (their Sign in with ChatGPT tokens;
 the Responses API under its preview's rules). The choice applies to the
 calls they pay for that they or their agents make: a run of the
-fragment's owner or an agent of theirs, every call of an agent of
+fragment's owner or an agent of theirs, or the fragment's own (its
+triggers', cron's, nested) while it is its owner's alone (`members`, no
+member but its owner and their agents), every call of an agent of
 theirs on the route; anyone else's runs as it names. A call on an own
 provider is the same OpenAI-shaped call to its client (translated:
 `fragment_core::providers`), reserves nothing and is charged nothing; its
