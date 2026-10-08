@@ -19,6 +19,14 @@ export const JOBS = 8;
 export const TRIES = 5;
 export const CAP = 30_000;
 export const PLACEHOLDER = "(not summarized yet: zoom it)";
+// The batched compactor (docs/optchat.md, "Importing chats": a deviation
+// from the spec, which builds one node a call): one call builds up to
+// BATCH level-0 nodes in a row, or up to BATCH merges, a line each. A
+// level-0 batch's messages are at most BATCH_MAX_BYTES, within the first
+// BATCH_WINDOW messages from `first`.
+export const BATCH = 8;
+export const BATCH_MAX_BYTES = 192 * 1024;
+export const BATCH_WINDOW = 64;
 
 // A realistic summary line of exactly NODE bytes (spec 4.2: models cannot
 // count bytes; a real example gives them the size). Checked below.
@@ -322,19 +330,141 @@ export function covering(mem, a, b) {
 /// them summaries by rule 3; `step` is SCALE and the message whole (level
 /// 0, `line(i)`) or the two lines to merge, written out again.
 export function compactInput(mem, l, i, line) {
-  const end = l === 0 ? i : (i + 1) * 2 ** l;
+  const context = contextBefore(mem, l === 0 ? i : (i + 1) * 2 ** l);
+  const ask =
+    l === 0
+      ? `Compress this message into one line, in at most ${NODE} bytes:\n${line(i)}`
+      : `Merge these two lines into one, in at most ${NODE} bytes:\n${flat(mem.text[l - 1][2 * i])}\n${flat(mem.text[l - 1][2 * i + 1])}`;
+  return { context, step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
+}
+
+/// A compactor call's context (spec 4.2): the view's lines that start
+/// before `end`, bare, in `<chat>`; every one a summary (rule 3).
+function contextBefore(mem, end) {
   const lines = [];
   for (const p of mem.view) {
     if (startOf(p) >= end) break;
     assert(isBuilt(mem, p.l, p.i), `the compactor sees only summaries (rule 3): ${startOf(p)}+${2 ** p.l} is not built`);
     lines.push(flat(mem.text[p.l][p.i]));
   }
-  const context = `<chat>\n${lines.map((t) => `${t}\n`).join("")}</chat>`;
+  return `<chat>\n${lines.map((t) => `${t}\n`).join("")}</chat>`;
+}
+
+/// The level-0 nodes one batched call builds (docs/optchat.md, "Importing
+/// chats"): `first`'s, the one rule 3 makes ready, then each later message
+/// not built whose line is over NODE, at most `max`, their lines at most
+/// `maxBytes` in all, within `window` messages of `first` and before
+/// `upto`. A short message between them is a free node, built when `first`
+/// reaches it; one another run holds (`busy`) ends the batch.
+export function batch(mem, line, { busy = new Set(), upto = mem.T, max = BATCH, maxBytes = BATCH_MAX_BYTES, window = BATCH_WINDOW } = {}) {
+  const f = first(mem);
+  const out = [];
+  let bytes = 0;
+  const end = Math.min(upto, mem.T, f + window);
+  for (let j = f; j < end && out.length < max; j++) {
+    if (isBuilt(mem, 0, j)) continue;
+    if (busy.has(key(0, j))) break;
+    const b = utf8(line(j));
+    if (b <= NODE) continue;
+    if (out.length && bytes + b > maxBytes) break;
+    bytes += b;
+    out.push({ l: 0, i: j });
+  }
+  return out;
+}
+
+const BATCH_ANSWER = (n, what) =>
+  `Answer with exactly ${n} lines, one per ${what} in order, each starting with its number and ") ", and nothing else.`;
+
+/// What one batched level-0 call sees: the view before the batch's first
+/// message as its context (spec 4.2), and as its step SCALE and the batch's
+/// messages in order, each whole and numbered; a message between them that
+/// is a line already (a short one, or one built) shows as that line,
+/// unnumbered.
+export function compactBatchInput(mem, nodes, line) {
+  assert(nodes.length >= 2 && nodes.every((n, k) => n.l === 0 && (k === 0 || n.i > nodes[k - 1].i)), "a level-0 batch is two or more messages in order");
+  const number = new Map(nodes.map((n, k) => [n.i, k + 1]));
+  const blocks = [];
+  for (let j = nodes[0].i; j <= nodes[nodes.length - 1].i; j++) {
+    const k = number.get(j);
+    blocks.push(k === undefined ? `--- a line already ---\n${flat(built(mem, 0, j) ?? line(j))}` : `--- ${k} ---\n${line(j)}`);
+  }
+  const n = nodes.length;
   const ask =
-    l === 0
-      ? `Compress this message into one line, in at most ${NODE} bytes:\n${line(i)}`
-      : `Merge these two lines into one, in at most ${NODE} bytes:\n${flat(mem.text[l - 1][2 * i])}\n${flat(mem.text[l - 1][2 * i + 1])}`;
-  return { context, step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
+    `Compress each of these ${n} messages into one line, in at most ${NODE} bytes each. They come next in the chat, in order; ` +
+    `a short message between them is a line already, shown for context.\n\n${blocks.join("\n")}\n---\n\n${BATCH_ANSWER(n, "message")}`;
+  return { context: contextBefore(mem, nodes[0].i), step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
+}
+
+/// What one batched merge call sees: the view's lines before the earliest
+/// end among the merges as its context (none sees past its own stretch),
+/// and as its step SCALE and each merge's two lines, numbered.
+export function compactMergeBatchInput(mem, nodes) {
+  assert(nodes.length >= 2 && nodes.every((n) => n.l > 0 && isBuilt(mem, n.l - 1, 2 * n.i) && isBuilt(mem, n.l - 1, 2 * n.i + 1)), "a merge batch is two or more merges of built lines");
+  const end = Math.min(...nodes.map((n) => (n.i + 1) * 2 ** n.l));
+  const blocks = nodes.map((n, k) => `--- ${k + 1} ---\n${flat(mem.text[n.l - 1][2 * n.i])}\n${flat(mem.text[n.l - 1][2 * n.i + 1])}`);
+  const n = nodes.length;
+  const ask =
+    `Merge each of these ${n} pairs of adjacent lines into one line, in at most ${NODE} bytes each. ` +
+    `Each pair covers a stretch of the chat; the pairs are in the chat's order.\n\n${blocks.join("\n")}\n---\n\n${BATCH_ANSWER(n, "pair")}`;
+  return { context: contextBefore(mem, end), step: `For scale, this line is exactly ${NODE} bytes:\n${SCALE}\n\n${ask}` };
+}
+
+/// A batched reply's lines by their number (1 to k): a line starting `n) `
+/// (or `[n]`, `n.`, `n:`) starts line n, the first such wins, and a line
+/// that starts with no number goes on the one before it.
+export function batchLines(reply, k) {
+  const out = new Map();
+  let cur = null;
+  for (const raw of String(reply ?? "").split(/\r?\n/)) {
+    const m = /^\s*(?:[-*]\s+)?(?:\*\*)?(?:\[(\d{1,3})\]|(\d{1,3})[).:])(?:\*\*)?\s*(.*)$/.exec(raw);
+    if (m) {
+      const n = Number(m[1] ?? m[2]);
+      cur = n >= 1 && n <= k && !out.has(n) ? n : null;
+      if (cur !== null) out.set(cur, m[3].trim());
+    } else if (cur !== null && raw.trim()) {
+      out.set(cur, `${out.get(cur)} ${raw.trim()}`.trim());
+    }
+  }
+  for (const [n, t] of out) if (!t) out.delete(n);
+  return out;
+}
+
+/// A line's state in a batch is done when its last try fits or it has
+/// TRIES of them; else it is asked again.
+const lineOpen = (tries) => tries.length === 0 || (utf8(tries[tries.length - 1]) > NODE && tries.length < TRIES);
+const shortest = (tries) => tries.reduce((best, t) => (best === null || utf8(t) < utf8(best) ? t : best), null);
+
+export function batchStart(k) {
+  assert(Number.isSafeInteger(k) && k >= 2 && k <= BATCH, "a batch is 2 to BATCH lines");
+  return { k, tries: Array.from({ length: k }, () => []), calls: 0 };
+}
+
+/// Spec 4.3 for a batch, line by line: a reply's lines are tries of the
+/// lines still open; when none is open, or after TRIES calls, each line is
+/// its shortest try (null: it never got one). Else the retry to send in
+/// the same conversation: each line over the limit cut where it falls, and
+/// each one missing named.
+export function batchTry(state, reply) {
+  const got = batchLines(reply, state.k);
+  const tries = state.tries.map((t, n) => (lineOpen(t) && got.has(n + 1) ? [...t, got.get(n + 1)] : t));
+  const s = { k: state.k, tries, calls: state.calls + 1 };
+  const open = tries.flatMap((t, n) => (lineOpen(t) ? [n] : []));
+  if (!open.length || s.calls >= TRIES) return { state: s, lines: tries.map(shortest) };
+  const say = open.map((n) => {
+    const t = tries[n];
+    if (!t.length) return `${n + 1}) is missing.`;
+    const last = t[t.length - 1];
+    return `${n + 1}) is ${utf8(last)} bytes; the limit is ${NODE}. It must end where it is cut here:\n${n + 1}) ${cutBytes(last, NODE)}| ← LIMIT`;
+  });
+  const nums = open.map((n) => n + 1).join(", ");
+  return { state: s, retry: `${say.join("\n")}\n\nWrite line${open.length > 1 ? "s" : ""} ${nums} again, each starting with its number and ") ", and nothing else.` };
+}
+
+/// A batch's lines as they stand (its calls cut short): each line's
+/// shortest try that fits, else null.
+export function batchDone(state) {
+  return state.tries.map((t) => shortest(t.filter((x) => utf8(x) <= NODE)));
 }
 
 /// The compactor's first request: COMPACT, then one user message of two

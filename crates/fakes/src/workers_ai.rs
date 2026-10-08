@@ -186,7 +186,23 @@ pub fn plain_reply(body: &Value) -> Reply {
     if last["role"] == "tool" {
         return Reply::Text(format!("{TOOL_SAID}{}", said.chars().take(TOOL_SAID_CHARS).collect::<String>()));
     }
+    if let Some(n) = batch_asked(&said).filter(|_| last["role"] == "user" && body["tools"].is_null()) {
+        return Reply::Text((1..=n).map(|k| format!("{k}) {BATCH_SAID}{k}")).collect::<Vec<_>>().join("\n"));
+    }
     Reply::Text(format!("echo: {}", last["content"].as_str().unwrap_or("")))
+}
+
+/// A batched compactor call's line (templates/mind, `compactBatchInput`
+/// and `compactMergeBatchInput`): the fake answers `k) ` and this and `k`
+/// for each of the N it is asked for.
+pub const BATCH_SAID: &str = "a batch's line ";
+
+/// How many lines a batched compactor call asks for: "Compress each of
+/// these N messages" or "Merge each of these N pairs".
+fn batch_asked(text: &str) -> Option<usize> {
+    let rest = ["Compress each of these ", "Merge each of these "].iter().find_map(|ask| text.find(ask).map(|at| &text[at + ask.len()..]))?;
+    let n: usize = rest.split(' ').next()?.parse().ok()?;
+    (1..=64).contains(&n).then_some(n)
 }
 
 /// Text's words, lowercased: its runs of letters and digits.
@@ -603,6 +619,23 @@ mod tests {
         let again = json!({ "messages": [{ "role": "tool", "content": "then [[call lookup {\"word\": \"more\"}]]" }], "tools": lookup_tools() });
         assert!(matches!(plain_reply(&again), Reply::Tools(c) if c[0].1 == json!({ "word": "more" })), "a tool's result may ask for another call");
         assert!(matches!(plain_reply(&ask("hi", json!(null))), Reply::Text(t) if t == "echo: hi"));
+    }
+
+    /// Goal: a batched compactor call is answered a numbered line for each
+    /// node it asks for. Method: the mind's two asks, in a content list as
+    /// it sends them, and one with tools offered (a turn's, never batched).
+    #[test]
+    fn a_batched_compactor_call_gets_its_lines() {
+        let ask = |step: &str, tools: Value| json!({ "messages": [{ "role": "system", "content": "You write the memory" }, { "role": "user", "content": [{ "type": "text", "text": "<chat>\n</chat>" }, { "type": "text", "text": step }] }], "tools": tools });
+        let lines = |r: Reply| match r {
+            Reply::Text(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let three = "For scale…\n\nCompress each of these 3 messages into one line, in at most 512 bytes each.";
+        assert_eq!(lines(plain_reply(&ask(three, Value::Null))), format!("1) {BATCH_SAID}1\n2) {BATCH_SAID}2\n3) {BATCH_SAID}3"));
+        assert_eq!(lines(plain_reply(&ask("Merge each of these 2 pairs of adjacent lines", Value::Null))).lines().count(), 2);
+        assert!(lines(plain_reply(&ask(three, lookup_tools()))).starts_with("echo: "), "a call with tools is a turn's");
+        assert!(lines(plain_reply(&ask("Compress each of these many messages", Value::Null))).starts_with("echo: "));
     }
 
     /// Goal: a plain streamed text comes in pieces, and a directive's call

@@ -321,11 +321,16 @@ mod tests {
             "view", "zoom", "date", "search", "note", "threads", "thread", "context", "memory", "node", "topics", "personas", "tasks", "status",
             "settings", "topic_add", "topic_remove", "persona_set", "persona_remove", "persona_default", "settings_set", "stop", "topic_suggest",
             "heard", "pump", "classify", "hands_said", "hear", "turn_begin", "turn_touch", "turn_end", "logged", "pump_plan", "node_built",
-            "task_open", "hands_reply", "topics_set",
+            "task_open", "hands_reply", "topics_set", "import", "imported", "nodes_built",
         ] {
             assert!(m.operations.contains_key(op), "the mind declares {op}");
         }
-        assert_eq!(m.operations.len(), 37, "and nothing else");
+        assert_eq!(m.operations.len(), 40, "and nothing else");
+        // an import starts the compactor through its own channel, and a long
+        // history needs more than the platform's 16 MiB
+        assert_eq!(runs("compact"), Some(("pump", None)));
+        assert!(m.channels["compact"].post.is_none(), "compact is the app's alone");
+        assert_eq!(m.storage, Some(fragment_proto::limits::APP_DB_DECLARED_MAX_BYTES));
         let raw: serde_json::Value = serde_json::from_slice(template("mind").unwrap().iter().find(|(p, _)| *p == "fragment.json").unwrap().1).unwrap();
         let described: Vec<&str> = raw["operations"].as_object().unwrap().iter().filter(|(_, d)| d.get("description").is_some()).map(|(k, _)| k.as_str()).collect();
         assert_eq!(described, ["date", "note", "search", "view", "zoom"], "the MCP tools");

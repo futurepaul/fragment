@@ -55,10 +55,21 @@ const SETTLE_FAILS_MAX = 3;
 const RETRY_MS = 10_000;
 // A node a pump took is another run's to build for this long.
 const LEASE_MS = 5 * 60_000;
-// One pump run's rounds; a node's steps at most (TRIES calls and its write).
+// One pump run's rounds; a node's steps at most (TRIES calls and its write),
+// and a batch's (the same: its lines are retried together).
 const PUMP_ROUNDS_MAX = 30;
 const NODE_STEPS = M.TRIES + 1;
 const COMPACT_TOKENS = 4096;
+const BATCH_TOKENS = 8192;
+// The compactor is started again by an import when no pump planned this
+// long ago (a `compact` record, whose trigger runs `pump`).
+const PUMP_KICK_MS = 3 * 60_000;
+// An import's part: at most this many messages (docs/optchat.md, "Importing
+// chats"); `imported` answers for at most this many conversations.
+const IMPORT_MESSAGES_MAX = 64;
+const IMPORTED_ASK_MAX = 200;
+const IMPORT_SOURCE = /^[a-z][a-z0-9-]{0,31}$/;
+const IMPORT_ID_MAX = 200;
 // A node a stubborn model wrote over twice NODE is cut there.
 const NODE_TEXT_MAX = 2 * M.NODE;
 // A `msg` record's text (docs/optchat.md, "Records on log"), and the most
@@ -180,6 +191,18 @@ function namesOf(text, have) {
   return out;
 }
 
+// An imported conversation's thread: `t_` and 16 hex of FNV-1a 64 over its
+// source and id, the same on every import of it (a mutation cannot await a
+// SHA-256).
+function importThread(source, id) {
+  let h = 0xcbf29ce484222325n;
+  for (const b of new TextEncoder().encode(`${source}\n${id}`)) {
+    h ^= BigInt(b);
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return `t_${h.toString(16).padStart(16, "0")}`;
+}
+
 // The bridge's turn for a record (images/bridge/src/records.rs `turn_id`,
 // docs/chat-records.md): 24 hex of SHA-256 of `<agent>|<fragment>/<channel>/<seq>`.
 async function turnOf(agentFragment, fragment, channel, seq) {
@@ -273,6 +296,9 @@ export class App extends DurableObject {
     sql.exec("CREATE INDEX IF NOT EXISTS task_turn ON task (turn)");
     sql.exec("CREATE INDEX IF NOT EXISTS task_thread ON task (thread, started)");
     sql.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    // what an import landed of each conversation: its first n messages
+    sql.exec(`CREATE TABLE IF NOT EXISTS import (
+      source TEXT NOT NULL, conv TEXT NOT NULL, thread TEXT NOT NULL, n INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (source, conv))`);
     sql.exec("CREATE VIRTUAL TABLE IF NOT EXISTS log_fts USING fts5(text, content='log', content_rowid='i')");
     if (sql.exec("SELECT COUNT(*) AS n FROM persona").one().n === 0) {
       ctx.storage.transactionSync(() => {
@@ -357,18 +383,20 @@ export class App extends DurableObject {
   }
 
   // One message appended to the log (capped: the 16 MiB debt), its thread
-  // touched, its free nodes built, and its record published on `log`.
-  #log(call, m, kind, text, { thread = null, persona = null, task = null } = {}) {
+  // touched, its free nodes built, and its record published on `log`. An
+  // import's message keeps its own time and publishes no record (a page
+  // reads an imported thread with `thread`).
+  #log(call, m, kind, text, { thread = null, persona = null, task = null, at = null, publish = true } = {}) {
     const sql = this.ctx.storage.sql;
     const i = m.T;
     const t = M.capText(text);
-    const at = Date.now();
+    at ??= Date.now();
     sql.exec("INSERT INTO log (i, kind, text, at, thread, persona, task) VALUES (?, ?, ?, ?, ?, ?, ?)", i, kind, t, at, thread, persona, task);
     sql.exec("INSERT INTO log_fts (rowid, text) VALUES (?, ?)", i, t);
     if (thread !== null) sql.exec("UPDATE thread SET last = ?, last_i = ? WHERE id = ?", at, i, thread);
     M.append(m);
     this.#free(m);
-    call.publish("log", { type: "msg", i, kind, text: recordText(t), thread, at, persona, task });
+    if (publish) call.publish("log", { type: "msg", i, kind, text: recordText(t), thread, at, persona, task });
     return { i, at };
   }
 
@@ -520,11 +548,16 @@ export class App extends DurableObject {
     return { queued: queue.length, topics };
   }
 
-  // Spec 4.1, for a job: up to `max` nodes ready to build, each leased to
-  // this run (another's lease is skipped until it runs out), and whether
+  // Spec 4.1, for a job, batched (docs/optchat.md, "Importing chats"): the
+  // level-0 nodes one call builds (`nodes`: `first`'s and the long messages
+  // after it, M.batch) and up to `max` ready merges (`merges`), each leased
+  // to this run (another's lease is skipped until it runs out), and whether
   // the view is settled up to `upto` (all of it by default). A turn's
-  // settle (`upto` named) takes level 0 alone: merges only coarsen. A query
-  // that writes its leases (as the brain's reindex writes its index).
+  // settle (`upto` named) takes merges only while the view is over VIEW:
+  // they only coarsen it, but a long backlog (an import) would otherwise
+  // grow it, and every call's context with it, without bound. A query that
+  // writes its leases (as the brain's reindex writes its index), and when a
+  // pump planned last (`status`, and an import's start of the compactor).
   pump_plan({ run = null, upto = null, skip = [], max = M.JOBS } = {}) {
     const now = Date.now();
     const m = this.#memory();
@@ -537,13 +570,14 @@ export class App extends DurableObject {
     for (const [k, v] of Object.entries(leases)) if (v.run !== run) busy.add(k);
     const f = M.first(m);
     const settled = f >= (upto ?? m.T);
-    let nodes;
-    if (upto === null) nodes = M.ready(m, { busy, max: clamp(max, 1, M.JOBS) });
-    else nodes = settled ? [] : M.ready(m, { busy, max: M.JOBS }).filter((n) => n.l === 0).slice(0, 1);
-    for (const n of nodes) leases[M.key(n.l, n.i)] = { run, until: now + LEASE_MS };
+    const n = clamp(max, 1, M.JOBS);
+    const nodes = settled ? [] : M.batch(m, (i) => this.#line(i), { busy, upto: upto ?? m.T, max: n });
+    const merges = upto === null || m.bytes > M.VIEW ? M.ready(m, { busy, max: n + 1 }).filter((x) => x.l > 0).slice(0, n) : [];
+    for (const x of [...nodes, ...merges]) leases[M.key(x.l, x.i)] = { run, until: now + LEASE_MS };
     this.#setJson("busy", leases);
+    if (upto === null && run !== null) this.#set("pump_at", now);
     const lock = this.#json("turn", null);
-    return { nodes, settled, first: f, T: m.T, stopped: !!(run !== null && lock && lock.run === run && lock.stop) };
+    return { nodes, merges, settled, first: f, T: m.T, stopped: !!(run !== null && lock && lock.run === run && lock.stop) };
   }
 
   // A node the compactor built: the first write wins, and the view is
@@ -551,6 +585,30 @@ export class App extends DurableObject {
   // kept for `status` (the next pump tries again).
   node_built({ run = null, l, i, text = null, error = null }) {
     need(isInt(l) && isInt(i), "node_built: l and i are counts");
+    if (text === null) return this.#nodeFailed(run, l, i, error);
+    need(typeof text === "string" && text.trim().length > 0, "node_built: text is the line");
+    return this.#changing((m) => this.#nodeBuilt(m, l, i, text));
+  }
+
+  // A batch's nodes (docs/optchat.md, "Importing chats"), each as
+  // node_built takes one, in order: a level-0 batch's messages, or a
+  // batch's merges (never a parent and its child).
+  nodes_built({ run = null, nodes }) {
+    need(Array.isArray(nodes) && nodes.length >= 1 && nodes.length <= 2 * M.BATCH, `nodes_built: 1 to ${2 * M.BATCH} nodes`);
+    for (const x of nodes) {
+      need(x && isInt(x.l) && isInt(x.i), "nodes_built: each node's l and i are counts");
+      need(x.text === null || x.text === undefined || (typeof x.text === "string" && x.text.trim().length > 0), "nodes_built: a node's text is its line, or null");
+    }
+    const out = [];
+    for (const x of nodes) if (typeof x.text !== "string") out.push(this.#nodeFailed(run, x.l, x.i, x.error ?? null));
+    const done = nodes.filter((x) => typeof x.text === "string");
+    if (done.length) out.push(...this.#changing((m) => done.map((x) => this.#nodeBuilt(m, x.l, x.i, x.text))));
+    return { built: out.filter((r) => r.built).length, first: M.first(this.#memory()) };
+  }
+
+  // A node's build failed: its lease let go, the failure kept for `status`
+  // (the next pump tries again).
+  #nodeFailed(run, l, i, error) {
     const k = M.key(l, i);
     const leases = this.#json("busy", {});
     if (k in leases) {
@@ -558,29 +616,37 @@ export class App extends DurableObject {
       this.#setJson("busy", leases);
     }
     const fails = this.#json("fails", {});
-    if (text === null) {
-      const first = !(k in fails);
-      fails[k] = { id: i * 2 ** l, n: 2 ** l, error: String(error ?? "failed").slice(0, 500), at: Date.now(), tries: (fails[k]?.tries ?? 0) + 1, run };
-      const keys = Object.keys(fails);
-      if (keys.length > FAILS_KEPT) for (const old of keys.slice(0, keys.length - FAILS_KEPT)) delete fails[old];
-      this.#setJson("fails", fails);
-      return { built: false, first };
+    const first = !(k in fails);
+    fails[k] = { id: i * 2 ** l, n: 2 ** l, error: String(error ?? "failed").slice(0, 500), at: Date.now(), tries: (fails[k]?.tries ?? 0) + 1, run };
+    const keys = Object.keys(fails);
+    if (keys.length > FAILS_KEPT) for (const old of keys.slice(0, keys.length - FAILS_KEPT)) delete fails[old];
+    this.#setJson("fails", fails);
+    return { built: false, first };
+  }
+
+  // A node built, in a #changing: the first write wins, its lease let go,
+  // its failures forgotten, the view refitted and the free nodes it readied
+  // built.
+  #nodeBuilt(m, l, i, text) {
+    const k = M.key(l, i);
+    const leases = this.#json("busy", {});
+    if (k in leases) {
+      delete leases[k];
+      this.#setJson("busy", leases);
     }
-    need(typeof text === "string" && text.trim().length > 0, "node_built: text is the line");
-    return this.#changing((m) => {
-      if (M.isBuilt(m, l, i)) return { built: false, why: "built already" };
-      need((i + 1) * 2 ** l <= m.T, `node_built: ${i * 2 ** l}+${2 ** l} covers messages past the log`);
-      need(l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)), "node_built: a parent comes after its children");
-      const t = M.cutBytes(text, NODE_TEXT_MAX);
-      this.ctx.storage.sql.exec("INSERT INTO node (l, i, text) VALUES (?, ?, ?)", l, i, t);
-      M.setNode(m, l, i, t);
-      this.#free(m);
-      if (k in fails) {
-        delete fails[k];
-        this.#setJson("fails", fails);
-      }
-      return { built: true, first: M.first(m) };
-    });
+    if (M.isBuilt(m, l, i)) return { built: false, why: "built already" };
+    need((i + 1) * 2 ** l <= m.T, `node_built: ${i * 2 ** l}+${2 ** l} covers messages past the log`);
+    need(l === 0 || (M.isBuilt(m, l - 1, 2 * i) && M.isBuilt(m, l - 1, 2 * i + 1)), "node_built: a parent comes after its children");
+    const t = M.cutBytes(text, NODE_TEXT_MAX);
+    this.ctx.storage.sql.exec("INSERT INTO node (l, i, text) VALUES (?, ?, ?)", l, i, t);
+    M.setNode(m, l, i, t);
+    this.#free(m);
+    const fails = this.#json("fails", {});
+    if (k in fails) {
+      delete fails[k];
+      this.#setJson("fails", fails);
+    }
+    return { built: true, first: M.first(m) };
   }
 
   // A hand-off opened: its task, published on `chat` at `seq`, recorded
@@ -716,6 +782,68 @@ export class App extends DurableObject {
   note({ text }, call) {
     need(typeof text === "string" && text.trim().length > 0, "note: text is words");
     return this.#changing((m) => ({ i: this.#log(call, m, "note", text).i }));
+  }
+
+  // ---- importing chats (docs/optchat.md, "Importing chats") ----
+
+  // Another agent's chat played into the log: a part of one conversation,
+  // its messages `from` on, appended in order with their own times as
+  // `user` and `talk`, in the conversation's thread (made on its first
+  // part, titled from it). No turn is started: an import plays history, it
+  // asks the agent nothing. A part already landed changes nothing, so a
+  // retry or a rerun resumes; one past what landed is refused (parts go in
+  // order). The compactor is started when none ran lately.
+  import({ source, conversation, from = 0, total = null, messages }, call) {
+    need(typeof source === "string" && IMPORT_SOURCE.test(source), "import: source is a word (claude-code, codex, …)");
+    const id = conversation?.id;
+    need(typeof id === "string" && id.length >= 1 && id.length <= IMPORT_ID_MAX, `import: conversation.id is 1 to ${IMPORT_ID_MAX} characters`);
+    need(isInt(from), "import: from is the index of the part's first message");
+    need(Array.isArray(messages) && messages.length >= 1 && messages.length <= IMPORT_MESSAGES_MAX, `import: 1 to ${IMPORT_MESSAGES_MAX} messages`);
+    for (const msg of messages) {
+      need(msg && (msg.role === "user" || msg.role === "assistant") && typeof msg.text === "string" && msg.text.trim().length > 0 && isInt(msg.at), "import: each message is {role: user|assistant, text, at}");
+    }
+    const sql = this.ctx.storage.sql;
+    const thread = importThread(source, id);
+    const landed = sql.exec("SELECT n FROM import WHERE source = ? AND conv = ?", source, id).toArray()[0]?.n ?? 0;
+    need(from <= landed, `import: ${source} ${id} has ${landed} messages in; a part from ${from} is ahead of them`);
+    const fresh = messages.slice(landed - from);
+    if (!fresh.length) return { thread, landed, appended: 0, T: this.#memory().T };
+    const now = Date.now();
+    return this.#changing((m) => {
+      if (!this.#thread(thread)) {
+        const named = typeof conversation.title === "string" ? titleOf(conversation.title) : "";
+        const title = named && named !== "New chat" ? named : titleOf((fresh.find((x) => x.role === "user") ?? fresh[0]).text);
+        const started = isInt(conversation.started) ? Math.min(conversation.started, fresh[0].at) : fresh[0].at;
+        sql.exec(
+          "INSERT INTO thread (id, title, persona, started, last, first_i, last_i) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          thread, title, this.#persona(null).id, started, fresh[0].at, m.T, m.T,
+        );
+        call.publish("log", { type: "thread", id: thread, title });
+      }
+      for (const msg of fresh) this.#log(call, m, msg.role === "user" ? "user" : "talk", msg.text, { thread, at: msg.at, publish: false });
+      const n = landed + fresh.length;
+      sql.exec(
+        "INSERT INTO import (source, conv, thread, n, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (source, conv) DO UPDATE SET n = excluded.n, at = excluded.at",
+        source, id, thread, n, now,
+      );
+      call.publish("log", { type: "import", source, conversation: id, thread, n, total: isInt(total) ? total : null, T: m.T });
+      // a pump planned lately is running, or about to: else one is started
+      const last = Math.max(Number(this.#get("pump_at") ?? 0), Number(this.#get("kicked") ?? 0));
+      if (now - last > PUMP_KICK_MS) {
+        this.#set("kicked", now);
+        call.publish("compact", { at: now });
+      }
+      return { thread, landed: n, appended: fresh.length, T: m.T };
+    });
+  }
+
+  // How many messages of each conversation an import landed (0: none).
+  imported({ conversations }) {
+    need(Array.isArray(conversations) && conversations.length <= IMPORTED_ASK_MAX, `imported: at most ${IMPORTED_ASK_MAX} conversations`);
+    const sql = this.ctx.storage.sql;
+    return {
+      landed: conversations.map((c) => sql.exec("SELECT n FROM import WHERE source = ? AND conv = ?", String(c?.source ?? ""), String(c?.id ?? "")).toArray()[0]?.n ?? 0),
+    };
   }
 
   #threadTopics(thread) {
@@ -861,7 +989,10 @@ export class App extends DurableObject {
 
   status() {
     const m = this.#memory();
-    const l = this.#lock(Date.now());
+    const now = Date.now();
+    const l = this.#lock(now);
+    const imp = this.ctx.storage.sql.exec("SELECT COUNT(*) AS conversations, COALESCE(SUM(n), 0) AS messages, MAX(at) AS last FROM import").one();
+    const pumped = Number(this.#get("pump_at") ?? 0);
     return {
       turn: l ? { running: true, thread: l.thread, since: l.since } : null,
       queued: this.#json("queue", []).length,
@@ -869,6 +1000,13 @@ export class App extends DurableObject {
       T: m.T,
       hands: this.#get("agent") !== null,
       failing: Object.values(this.#json("fails", {})).map((f) => ({ id: f.id, n: f.n, error: f.error, tries: f.tries })),
+      // the compactor: whether it has a node to build now, when a pump last
+      // planned, and the view's size (over VIEW while merges lag)
+      ready: M.ready(m, { max: 1 }).length > 0,
+      pump: pumped ? { at: pumped } : null,
+      view: m.bytes,
+      import: imp.conversations ? { conversations: imp.conversations, messages: imp.messages, last: imp.last } : null,
+      now,
     };
   }
 
@@ -1065,28 +1203,36 @@ export class App extends DurableObject {
   }
 
   // Spec 6: no turn sees a placeholder. Builds the view's unsummarized
-  // lines before the turn's messages, level 0 one at a time (sharing the
-  // work with a pump through leases), or waits for another run building
-  // them. Answers true, or how the turn ends.
+  // lines before the turn's messages, level 0 in order a batch at a time
+  // (sharing the work with a pump through leases), and merges while the
+  // view is over its budget (a long backlog, as an import leaves); or waits
+  // for another run building them. Answers true, or how the turn ends.
   async #settle(job, s, b) {
     const began = s.n;
     const fails = new Map();
+    const skip = [];
     let waits = 0;
     for (;;) {
-      const plan = await s.call("pump_plan", { run: job.run, upto: b.tail });
+      const plan = await s.call("pump_plan", { run: job.run, upto: b.tail, skip });
       if (plan.settled) return true;
       if (plan.stopped) return { state: "stopped" };
-      if (s.n - began > SETTLE_STEPS || s.left() < NODE_STEPS + 2) return { state: "settling", requeue: b.taken, handOn: true };
-      if (plan.nodes.length) {
+      if (s.n - began > SETTLE_STEPS || s.left() < 2 * NODE_STEPS + 2) return { state: "settling", requeue: b.taken, handOn: true };
+      if (plan.nodes.length || plan.merges.length) {
         waits = 0;
-        for (const f of await this.#build(job, s, plan.nodes)) {
+        const failed = [...(await this.#build(job, s, plan.nodes)), ...(await this.#build(job, s, plan.merges))];
+        for (const f of failed) {
+          // a merge that failed waits for the pump: the turn needs level 0 alone
+          if (f.l > 0) {
+            skip.push(M.key(f.l, f.i));
+            continue;
+          }
           const k = M.key(f.l, f.i);
           fails.set(k, (fails.get(k) ?? 0) + 1);
           if (fails.get(k) >= SETTLE_FAILS_MAX) {
             return { state: "error", error: `the memory could not summarize message ${f.i * 2 ** f.l}: ${f.error}` };
           }
-          await s.sleep(RETRY_MS);
         }
+        if (failed.some((f) => f.l === 0)) await s.sleep(RETRY_MS);
       } else {
         // another run is building what this turn waits for
         waits++;
@@ -1096,13 +1242,14 @@ export class App extends DurableObject {
     }
   }
 
-  // The compactor (spec 4.2, 4.3): each node in its own conversation,
+  // The compactor (spec 4.2, 4.3): a node alone in its own conversation,
   // asked again with the line cut at the limit until it fits or TRIES,
-  // then written (`node_built`, first write wins). Nodes are built one
-  // after another: a job's steps run one at a time (cell/platform.mjs), so
-  // the spec's parallel JOBS are the nodes a round takes, not calls at once.
-  // Answers the nodes that failed.
+  // then written (`node_built`, first write wins). Two or more go in one
+  // call (#buildBatch): a job's steps run one at a time (cell/platform.mjs),
+  // so the spec's parallel JOBS would be one call after another, each with
+  // the whole view as its context. Answers the nodes that failed.
   async #build(job, s, nodes) {
+    if (nodes.length >= 2) return this.#buildBatch(job, s, nodes);
     const failed = [];
     for (const { l, i } of nodes) {
       // read from this instance as the step is built (see the top)
@@ -1140,28 +1287,63 @@ export class App extends DurableObject {
     return M.compactInput(this.#memory(), l, i, (k) => this.#line(k));
   }
 
-  // The compactor's job (docs/optchat.md, "The compactor"): rounds of up
-  // to JOBS ready nodes until none is ready; a node that failed waits for
-  // the next pump. Past PUMP_ROUNDS_MAX or the run's budget with work left,
-  // a fresh pump takes the rest (a chain the hop limit ends at 16).
+  // A batch in one call (docs/optchat.md, "Importing chats"): level-0
+  // nodes in a row, or merges, a numbered line each, with the spec's SCALE
+  // and its cut-at-limit retry line by line, all of them in the same
+  // conversation (M.batchTry). Its lines are written at once
+  // (`nodes_built`); a line that never came, or a call that failed, fails
+  // its node alone.
+  async #buildBatch(job, s, nodes) {
+    // read from this instance as the step is built (see the top)
+    const m = this.#memory();
+    const input = nodes[0].l === 0 ? M.compactBatchInput(m, nodes, (k) => this.#line(k)) : M.compactMergeBatchInput(m, nodes);
+    let messages = M.compactMessages(COMPACT, input);
+    let state = M.batchStart(nodes.length);
+    let lines = null;
+    let error = null;
+    for (;;) {
+      let a;
+      try {
+        a = await s.text({ model: "cheap", messages, max_tokens: BATCH_TOKENS });
+      } catch (e) {
+        error = describe(e);
+        lines = M.batchDone(state);
+        break;
+      }
+      const r = M.batchTry(state, a?.text);
+      state = r.state;
+      if (r.lines) {
+        lines = r.lines;
+        break;
+      }
+      messages = [...messages, { role: "assistant", content: a?.text ?? "" }, { role: "user", content: r.retry }];
+    }
+    const results = nodes.map(({ l, i }, k) => ({ l, i, text: lines[k], error: lines[k] === null ? (error ?? "the compactor wrote no line for it") : null }));
+    await s.call("nodes_built", { run: job.run, nodes: results });
+    return results.filter((x) => x.text === null).map(({ l, i, error }) => ({ l, i, error }));
+  }
+
+  // The compactor's job (docs/optchat.md, "The compactor"): rounds of a
+  // level-0 batch and up to JOBS ready merges until none is ready; a node
+  // that failed waits for the next pump. Past PUMP_ROUNDS_MAX or the run's
+  // budget with work left, a fresh pump takes the rest (a chain the hop
+  // limit ends at 16; an import's next part, or `fragment mind import`
+  // following it, starts another).
   async pump(input, job) {
     const s = new Steps(job);
     const skip = [];
     let built = 0;
     for (let round = 0; round < PUMP_ROUNDS_MAX; round++) {
-      const room = Math.floor((s.left() - 2) / NODE_STEPS);
-      if (room < 1 || s.bytes > RESULTS_SOFT_BYTES) {
+      if (s.left() < 2 * NODE_STEPS + 2 || s.bytes > RESULTS_SOFT_BYTES) {
         await s.call("pump", {});
         return { built, continued: true };
       }
-      const plan = await s.call("pump_plan", { run: job.run, skip, max: Math.min(M.JOBS, room) });
-      if (!plan.nodes.length) return { built, unbuilt: plan.T - plan.first };
-      // a turn waits on level 0 alone (spec 6), and its next node is ready
-      // only once this one is built: built first and alone, the merges
-      // behind it (still leased to this run) wait for a round of their own
-      const round = plan.nodes[0].l === 0 ? plan.nodes.slice(0, 1) : plan.nodes;
-      const failed = await this.#build(job, s, round);
-      built += round.length - failed.length;
+      const plan = await s.call("pump_plan", { run: job.run, skip });
+      if (!plan.nodes.length && !plan.merges.length) return { built, unbuilt: plan.T - plan.first };
+      // level 0 first (a turn waits on it, spec 6), then the merges behind
+      // it, which keep the view near its budget while level 0 catches up
+      const failed = [...(await this.#build(job, s, plan.nodes)), ...(await this.#build(job, s, plan.merges))];
+      built += plan.nodes.length + plan.merges.length - failed.length;
       for (const f of failed) skip.push(M.key(f.l, f.i));
     }
     // its rounds spent with work left: a fresh run takes the rest
