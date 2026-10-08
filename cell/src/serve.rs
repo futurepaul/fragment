@@ -9,8 +9,8 @@
 //! `public` floor. An unsigned browser calling an operation gets an
 //! anonymous principal: a random cookie whose hash names it. A browser
 //! signed in on this origin (`__signin`, the router's) is its person.
-//! Invites are accepted on the platform's origin (`/join/<name>`,
-//! share.rs), never here: a page here is the fragment's author's.
+//! Sharing is the platform's (`/share/<name>`, share.rs), never here: a
+//! page here is the fragment's author's.
 //!
 //! The router hands a site request's signer or session on unresolved: a
 //! page or a file answers alike for everyone who may see the fragment, so

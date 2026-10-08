@@ -430,7 +430,10 @@ impl RegistryCell {
         let key = PersonKey::make(&self.env).await?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
         let sid = signed_in.access_token.as_deref().and_then(sid_of);
-        self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)
+        let done = self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)?;
+        let person = self.person_by_email(&email)?.ok_or_else(|| CellError::host("a sign-in's email names no one after it"))?;
+        self.meet_invites(&email, &person).await?;
+        Ok(done)
     }
 
     fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>, key: PersonKey) -> CellResult<Exchanged> {
@@ -532,6 +535,7 @@ impl RegistryCell {
         }
         let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None, key)?;
         let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
+        self.meet_invites(email, &identity).await?;
         Ok(E2eSignedIn { token, identity, created })
     }
 

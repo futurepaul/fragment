@@ -766,6 +766,27 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["inboxToken"] != c["inboxToken"],
         json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "inbox_changed": r["inboxToken"] != c["inboxToken"] }),
     );
+
+    // sharing by email (decision 48): anything with an `@` is an email
+    let invited = format!("c-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
+    let r = s.cli_json(api, &home, &["members", "add", &name, &invited.to_uppercase(), "--role", "editor", "--json"])?;
+    s.ok(
+        "fragment members add <email>: no one signs in as it yet, so an invite waits on it (mailed), as typed in any case",
+        r["invited"]["email"] == invited.as_str() && r["invited"]["role"] == "editor",
+        &r,
+    );
+    let listed = s.cli_json(api, &home, &["invite", "list", &name, "--json"])?;
+    let revoked = s.cli_json(api, &home, &["invite", "revoke", &name, &invited, "--json"])?;
+    let after = s.cli_json(api, &home, &["invite", "list", &name, "--json"])?;
+    s.ok(
+        "fragment invite list shows it, and fragment invite revoke takes it back",
+        listed["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["email"] == invited.as_str()))
+            && revoked["revoked"] == invited.as_str()
+            && after["invites"].as_array().is_some_and(|a| a.iter().all(|i| i["email"] != invited.as_str())),
+        json!([listed, revoked, after]),
+    );
+    let out = s.cli(api, &home, &["members", "add", &name, &invited, "--people-only", "--json"]);
+    s.ok("--people-only with an email is a usage error (it names an npub)", out.status.code() == Some(2), String::from_utf8_lossy(&out.stdout));
     Ok(())
 }
 

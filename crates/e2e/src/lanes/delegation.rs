@@ -145,19 +145,19 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("Bob sees it in his list, as a viewer", bobs.as_deref() == Some("viewer"), json!(bobs));
     let r = hand_for_paul("PUT", &format!("members/{bob_id}"), Some(json!({ "role": "editor" })))?;
     s.ok("it changes Bob's role", r.status == 200 && r.body["role"] == "editor" && r.body["addedBy"] == hand_id.as_str(), &r);
-    let r = hand_for_paul("POST", "invites", Some(viewer.clone()))?;
-    let invite = r.body["id"].as_str().unwrap_or("").to_string();
+    let invited = format!("d-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
+    let r = hand_for_paul("POST", "invites", Some(json!({ "email": invited, "role": "viewer" })))?;
     s.ok(
-        "it makes an invite, which names the agent as its maker",
-        r.status == 200 && r.body["token"].as_str().is_some_and(|t| !t.is_empty()) && r.body["createdBy"] == hand_id.as_str(),
+        "it invites by email someone who has never signed in: the invite waits, naming the agent as its maker",
+        r.status == 200 && r.body["invited"]["email"] == invited.as_str() && r.body["invited"]["createdBy"] == hand_id.as_str(),
         &r,
     );
     let r = hand_for_paul("GET", "invites", None)?;
-    s.ok("lists the open invites", r.status == 200 && r.body["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["id"] == invite.as_str())), &r);
-    let r = hand_for_paul("DELETE", &format!("invites/{invite}"), None)?;
-    s.ok("and revokes one", r.status == 200 && r.body["revoked"] == invite.as_str(), &r);
-    let r = hand_for_paul("POST", "invites", Some(json!({ "role": "viewer", "invitee": paul_id })))?;
-    s.ok("an invite for Paul himself is 400: the owner is in already", r.status == 400, &r);
+    s.ok("lists the invites waiting", r.status == 200 && r.body["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["email"] == invited.as_str())), &r);
+    let r = hand_for_paul("DELETE", &format!("invites/{invited}"), None)?;
+    s.ok("and revokes one", r.status == 200 && r.body["revoked"] == invited.as_str(), &r);
+    let r = hand_for_paul("POST", "invites", Some(json!({ "email": Api::email_of(&paul), "role": "viewer" })))?;
+    s.ok("an invite to Paul's own email is 400: the owner is in already", r.status == 400, &r);
     let closed = api.page(&app, "", None)?;
     let r = hand_for_paul("PUT", "visibility", Some(json!({ "visibility": "public" })))?;
     let mut open = None;

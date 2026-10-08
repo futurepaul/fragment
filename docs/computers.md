@@ -349,8 +349,8 @@ expires within 30 days. The container application is the deployment's
   bridge), or every 3 s (our Hermes image, below).
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
   agents are woken eagerly, to hide a wake's latency). Whatever adds an
-  agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
-  accepts, a fragment an agent makes for its owner), the platform tells
+  agent as a member (`PUT /api/f/{name}/members/{agent}`, a fragment an
+  agent makes for its owner), the platform tells
   its computer: the agent fragment itself posts `{kind: "joined",
   fragment}` on its `tasks` (when it declares a postable `tasks`), once
   for that membership, and the computer wakes (`joined`, held as a

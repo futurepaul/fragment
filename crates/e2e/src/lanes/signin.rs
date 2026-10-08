@@ -747,8 +747,6 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = who(api, &member_session)?;
     s.ok("the platform no longer knows the browser", r.is_null(), &r);
 
-    // invites are accepted on the platform's origin (`/join/<name>`: the share lane)
-
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     // (paul is not in f: he says yes to it once, and its redemptions follow)
     let r = consent(api, &paul, &f, &api.base)?;

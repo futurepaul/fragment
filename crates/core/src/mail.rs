@@ -57,6 +57,37 @@ pub fn message(from: &str, mail: &Mail) -> Value {
     json!({ "to": mail.to, "from": from, "subject": mail.subject, "text": mail.text })
 }
 
+/// A subject's longest title and sharer, in characters.
+const SUBJECT_PART_MAX: usize = 80;
+
+/// `s` on one line, at most `max` characters.
+fn one_line(s: &str, max: usize) -> String {
+    let line: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let line = line.trim();
+    match line.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}\u{2026}", &line[..cut]),
+        None => line.to_string(),
+    }
+}
+
+/// The mail an invite by email sends `to` (docs/cloudflare-v1.md, decision
+/// 48): who shares what, whether they may edit it, and its address (`link`),
+/// which signs them in. It waits `days`.
+pub fn invite(to: &str, from: &str, title: &str, edit: bool, link: &str, days: i64) -> Mail {
+    let (title, from) = (one_line(title, SUBJECT_PART_MAX), one_line(from, SUBJECT_PART_MAX));
+    let may = if edit { "edit" } else { "view" };
+    Mail {
+        to: to.to_string(),
+        subject: format!("{from} shared \u{201c}{title}\u{201d} with you"),
+        text: format!(
+            "{from} invited you to {may} \u{201c}{title}\u{201d} on Fragment.\n\n\
+             Open it: {link}\n\n\
+             Sign in as {to} to open it. The invite waits {days} days.\n\n\
+             If you did not expect this, ignore this mail: nothing happens unless you sign in as {to}.\n"
+        ),
+    }
+}
+
 fn truncated(s: &str) -> String {
     s.chars().take(80).collect()
 }
@@ -88,5 +119,30 @@ mod tests {
             message("fragment <mail@fragment.club>", &mail("bob@example.com", "s", "t")),
             json!({ "to": "bob@example.com", "from": "fragment <mail@fragment.club>", "subject": "s", "text": "t" })
         );
+    }
+
+    /// Goal: an invite's mail says who shares what, as which role, and
+    /// where, and stays a message the service takes whatever the title
+    /// holds. Method: a title with a newline, and a title and sharer far
+    /// past a subject's length.
+    #[test]
+    fn an_invite_names_its_sharer_fragment_and_role_on_one_line() {
+        let m = invite("bea@example.com", "ann@example.com", "Garden\nplans", true, "https://garden--k3x9.fragment.boats/", 30);
+        assert_eq!(m.subject, "ann@example.com shared \u{201c}Garden plans\u{201d} with you");
+        assert!(m.text.contains("invited you to edit"), "{}", m.text);
+        assert!(m.text.contains("Open it: https://garden--k3x9.fragment.boats/\n"), "{}", m.text);
+        assert!(m.text.contains("Sign in as bea@example.com to open it. The invite waits 30 days."), "{}", m.text);
+        assert_eq!(refusal(&m), None);
+        let long = "x".repeat(500);
+        let m = invite("bea@example.com", &long, &long, false, "https://a--k3x9.fragment.boats/", 30);
+        assert_eq!(refusal(&m), None, "{}", m.subject);
+        assert!(m.text.contains("invited you to view"));
+    }
+
+    #[test]
+    fn one_line_cuts_by_characters() {
+        assert_eq!(one_line("  a\tb\n", 10), "a b");
+        assert_eq!(one_line("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}\u{2026}");
+        assert_eq!(one_line("abc", 3), "abc");
     }
 }

@@ -983,7 +983,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             let segs = segments.clone();
             auth::platform(req, env, cfg, &url, &segs).await
         }
-        (_, ["share" | "join", _]) => {
+        (_, ["share", _]) => {
             let segs = segments.clone();
             share::route(req, env, cfg, &url, &segs).await
         }
