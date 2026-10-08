@@ -337,6 +337,60 @@ fn preview_cards(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     );
     let site = api.page(&name, &format!("?view={view}"), None)?;
     s.ok("and the fragment serves its page all the same", site.status == 200 && site.text.contains("a card"), &site);
+    page_errors(s, api, owner, page)
+}
+
+/// What a page reports as its card's shot loads it: on status and in
+/// events, and cleared by a clean page's deploy.
+fn page_errors(s: &mut Suite, api: &Api, owner: &Keys, clean: &[u8]) -> Result<()> {
+    let name = s.named(api, owner, "site-errors")?;
+    let c = s.create(api, owner, &name)?;
+    let status = || api.signed(owner, "GET", &format!("/api/f/{name}/status"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let before = status();
+    s.ok("before its first shot, a fragment's status has no page report", before["name"] == name.as_str() && before.get("page").is_none(), &before);
+    let throws: &[u8] = b"<!doctype html><meta http-equiv=\"Content-Security-Policy\" content=\"img-src 'none'\"><title>throws</title>\
+        <script src=\"missing.js\"></script><img src=\"blocked.png\">\
+        <script>console.error(\"e2e console\", 7); throw new Error(\"e2e boom\")</script>";
+    s.commit(&c, &[("site/index.html", Some(throws))]);
+    let live = s.deploy(&c);
+    let mut page = Value::Null;
+    s.eventually(CARD_WAIT, || {
+        page = status()["page"].clone();
+        page["live"] == live.as_str()
+    });
+    let errors = page["errors"].as_array().cloned().unwrap_or_default();
+    let has = |kind: &str, f: &dyn Fn(&Value) -> bool| errors.iter().any(|e| e["kind"] == kind && f(e));
+    let text = |e: &Value, s: &str| e["text"].as_str().is_some_and(|t| t.contains(s));
+    s.ok(
+        "a page that throws as it loads shows on status, tagged with its live: the exception, the console error, the failed load, the CSP violation",
+        has("exception", &|e| text(e, "Error: e2e boom"))
+            && has("console", &|e| text(e, "e2e console 7"))
+            && has("network", &|e| e["source"].as_str().is_some_and(|u| u.ends_with("/missing.js")))
+            && has("security", &|e| text(e, "img-src"))
+            && errors.len() == 4
+            && page["dropped"] == 0
+            && page["at"].as_i64().is_some_and(|at| at > 0),
+        &page,
+    );
+    let r = api.signed(owner, "GET", &format!("/api/f/{name}/events?tail=200"), None)?;
+    let said: Vec<Value> = r.body["events"].as_array().into_iter().flatten().filter(|e| e["kind"] == "page.errors").cloned().collect();
+    s.ok(
+        "and as one page.errors event, saying the first",
+        said.len() == 1 && said[0]["data"] == page && said[0]["summary"].as_str().is_some_and(|t| t.contains("4 errors") && t.contains(&live[..12])),
+        json!({ "said": said, "page": page }),
+    );
+    s.commit(&c, &[("site/index.html", Some(clean))]);
+    let fixed = s.deploy(&c);
+    s.eventually(CARD_WAIT, || {
+        page = status()["page"].clone();
+        page["live"] == fixed.as_str()
+    });
+    let said = event_kinds(api, owner, &name).iter().filter(|k| *k == "page.errors").count();
+    s.ok(
+        "a later deploy of a clean page clears it, and says nothing",
+        page["errors"] == json!([]) && page["dropped"] == 0 && said == 1,
+        json!({ "page": page, "said": said }),
+    );
     Ok(())
 }
 

@@ -21,10 +21,16 @@
 //!   the object lost mid-shot (a restart) is a failed try; a failure is
 //!   tried again after a wait that doubles, at most `ATTEMPTS_MAX` tries
 //!   in all, and then given up quietly: the card before stays, and
-//!   nothing else changes.
+//!   nothing else changes;
+//! - what the page reported as it loaded (`Heard`): its uncaught
+//!   exceptions, console errors, failed loads and security refusals, the
+//!   first `ERRORS_MAX` kept (the rest counted), each cut to
+//!   `ERROR_BYTES_MAX`; the try that ends its live's tries makes it the
+//!   page's report (`Cards::report`), which status shows.
 
-use fragment_proto::{FragmentKind, Visibility};
+use fragment_proto::{FragmentKind, PageError, PageErrorKind, PageReport, Visibility};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// The viewport a page is shot at, at a device scale of 1: a laptop's.
 pub const WIDTH: u16 = 1280;
@@ -53,7 +59,19 @@ pub const SETTLE_MS: u64 = 1_000;
 /// last use, and is billed for it (`billed_ms`).
 pub const KEEP_ALIVE_MS: u64 = 10_000;
 
+/// A shot keeps the first this many errors the page reports, and counts
+/// the rest.
+pub const ERRORS_MAX: usize = 10;
+/// An error's text, and its source, are each cut to this many bytes.
+pub const ERROR_BYTES_MAX: usize = 1024;
+
 const _: () = assert!(BYTES_MAX.div_ceil(3) * 4 < 1024 * 1024, "a card's base64 fits one 1 MiB WebSocket message");
+// `cut` leaves no control character but a newline or a tab, so each byte
+// is at most two in JSON; the summary is at most an error's text and 100 bytes
+const _: () = assert!(
+    (ERRORS_MAX + 1) * (2 * 2 * ERROR_BYTES_MAX + 100) < fragment_proto::limits::RECORD_BODY_MAX_BYTES,
+    "a report is one `page.errors` event"
+);
 const _: () = assert!(LOAD_TIMEOUT_MS + SETTLE_MS < SHOT_TIMEOUT_MS, "a slow page is still shot within the deadline");
 
 /// As whom the renderer opens the page.
@@ -75,7 +93,8 @@ pub enum Skip {
     NotAnApp,
     /// A members-only fragment: an anonymous visitor gets its refusal.
     MembersOnly,
-    /// Its owner pays for nothing now (a guest), or is past the overdraft.
+    /// Its owner pays for nothing now (a guest, or an unclaimed draft's
+    /// maker), or is past the overdraft.
     OwnerPays,
 }
 
@@ -84,7 +103,7 @@ impl Skip {
         match self {
             Skip::NotAnApp => "a chat or an agent is not an app: it has no card",
             Skip::MembersOnly => "a members-only fragment has no card: a visitor without an account sees only its refusal",
-            Skip::OwnerPays => "its owner's ledger takes no shot now (a guest pays for nothing; past the overdraft, nothing new is made)",
+            Skip::OwnerPays => "its owner's ledger takes no shot now (a guest, or a draft no one claimed, pays for nothing; past the overdraft, nothing new is made)",
         }
     }
 }
@@ -168,6 +187,108 @@ pub fn valid_live(s: &str) -> bool {
     (12..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// What one try heard the page report over CDP (`Runtime` and `Log`
+/// enabled on its target), bounded as it is heard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Heard {
+    pub errors: Vec<PageError>,
+    pub dropped: u32,
+}
+
+impl Heard {
+    /// A message from the page's target, kept if it is one of the page's
+    /// errors: `Runtime.exceptionThrown`, `Runtime.consoleAPICalled` of an
+    /// error or a failed assert, `Log.entryAdded` of an error from the
+    /// network or security. Anything else is not, nor a failed
+    /// `/favicon.ico`: Chrome asks for it whether or not the page names it.
+    pub fn hear(&mut self, msg: &Value) {
+        let p = &msg["params"];
+        let (kind, text, source) = match msg["method"].as_str() {
+            Some("Runtime.exceptionThrown") => {
+                let d = &p["exceptionDetails"];
+                // the thrown value says it best ("TypeError: …" and its stack)
+                let text = if d["exception"].is_object() { remote_text(&d["exception"]) } else { d["text"].as_str().unwrap_or_default().to_string() };
+                (PageErrorKind::Exception, text, source_of(d))
+            }
+            Some("Runtime.consoleAPICalled") if matches!(p["type"].as_str(), Some("error" | "assert")) => {
+                let args = p["args"].as_array().map(Vec::as_slice).unwrap_or_default();
+                (PageErrorKind::Console, args.iter().map(remote_text).collect::<Vec<_>>().join(" "), source_of(&p["stackTrace"]["callFrames"][0]))
+            }
+            Some("Log.entryAdded") if p["entry"]["level"] == "error" => {
+                let kind = match p["entry"]["source"].as_str() {
+                    Some("network") if p["entry"]["url"].as_str().and_then(|u| url::Url::parse(u).ok()).is_some_and(|u| u.path() == "/favicon.ico") => return,
+                    Some("network") => PageErrorKind::Network,
+                    Some("security") => PageErrorKind::Security,
+                    _ => return,
+                };
+                (kind, p["entry"]["text"].as_str().unwrap_or_default().to_string(), source_of(&p["entry"]))
+            }
+            _ => return,
+        };
+        self.keep(kind, &text, source.as_deref());
+    }
+
+    /// One error, cut to size; past `ERRORS_MAX`, only counted.
+    pub fn keep(&mut self, kind: PageErrorKind, text: &str, source: Option<&str>) {
+        if self.errors.len() >= ERRORS_MAX {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        self.errors.push(PageError { kind, text: cut(text), source: source.map(cut) });
+    }
+}
+
+/// A CDP `RemoteObject` as the console prints it, near enough: a string
+/// as itself, an object by its description (an `Error`'s is its message
+/// and stack), another value as JSON, `undefined` by its type.
+fn remote_text(o: &Value) -> String {
+    match (&o["value"], o["description"].as_str().or(o["unserializableValue"].as_str())) {
+        (Value::String(s), _) => s.clone(),
+        (_, Some(d)) => d.to_string(),
+        (Value::Null, None) if o["subtype"] != "null" => o["type"].as_str().unwrap_or("undefined").to_string(),
+        (v, None) => v.to_string(),
+    }
+}
+
+/// Where a CDP exception, stack frame, or log entry points: its URL, with
+/// its line and column (1-based; CDP's are 0-based) when it has both.
+fn source_of(at: &Value) -> Option<String> {
+    let url = at["url"].as_str().filter(|u| !u.is_empty())?;
+    Some(match (at["lineNumber"].as_u64(), at["columnNumber"].as_u64()) {
+        (Some(line), Some(column)) => format!("{url}:{}:{}", line + 1, column + 1),
+        _ => url.to_string(),
+    })
+}
+
+/// `s` with no control character but a newline or a tab (any other is a
+/// space), cut on a character to at most `ERROR_BYTES_MAX` bytes, ending
+/// `…` when cut.
+pub fn cut(s: &str) -> String {
+    let clean = |c: char| if c.is_control() && c != '\n' && c != '\t' { ' ' } else { c };
+    // a control character is never shorter than a space
+    if s.len() <= ERROR_BYTES_MAX {
+        return s.chars().map(clean).collect();
+    }
+    let mut out = String::with_capacity(ERROR_BYTES_MAX);
+    for c in s.chars().map(clean) {
+        if out.len() + c.len_utf8() > ERROR_BYTES_MAX - '…'.len_utf8() {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// A `page.errors` event's summary: how many, of which live, and the
+/// first one's first line.
+pub fn summary(report: &PageReport) -> String {
+    assert!(valid_live(&report.live), "a report names a commit");
+    let n = report.errors.len() as u64 + u64::from(report.dropped);
+    let first = report.errors.first().and_then(|e| e.text.lines().next()).unwrap_or_default();
+    format!("the page reported {n} error{} as it loaded (live {}): {first}", if n == 1 { "" } else { "s" }, &report.live[..12])
+}
+
 /// How a fragment's failed tries back off: the wait after the first
 /// failure, doubling, never past the longest (the deployment's delivery
 /// retry settings, `FRAGMENT_DELIVERY_RETRY_S` and `_MAX_S`).
@@ -196,6 +317,9 @@ pub struct Cards {
     pub card: Option<Card>,
     /// The newest live with no card yet, and its tries so far.
     pub wanted: Option<Wanted>,
+    /// What the page reported to the last try that ended its live's tries
+    /// having opened it.
+    pub page: Option<PageReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +488,19 @@ impl Cards {
                 Verdict::Retry { at: w.next_at }
             }
         })
+    }
+
+    /// What a try that opened the page heard, once it has landed: the
+    /// page's report when the try ended its live's tries (`Kept`,
+    /// `GaveUp`); a retry's and a stale try's are dropped. Answers the
+    /// report it made.
+    pub fn report(&mut self, verdict: &Verdict, live: &str, heard: Heard, now: i64) -> Option<&PageReport> {
+        assert!(valid_live(live), "a shot names a commit");
+        if !matches!(verdict, Verdict::Kept | Verdict::GaveUp { .. }) {
+            return None;
+        }
+        self.page = Some(PageReport { live: live.to_string(), at: now, errors: heard.errors, dropped: heard.dropped });
+        self.page.as_ref()
     }
 }
 
@@ -635,6 +772,144 @@ mod tests {
         assert_eq!(check_image(&big), Err(ImageFault::TooLarge { size: BYTES_MAX + 1 }));
         big.truncate(BYTES_MAX);
         assert_eq!(check_image(&big), Ok(()), "exactly the cap is a card");
+    }
+
+    fn heard(msgs: &[Value]) -> Heard {
+        let mut h = Heard::default();
+        msgs.iter().for_each(|m| h.hear(m));
+        h
+    }
+
+    fn error(kind: PageErrorKind, text: &str, source: Option<&str>) -> PageError {
+        PageError { kind, text: text.into(), source: source.map(str::to_string) }
+    }
+
+    /// Goal: what the page reports as it loads is heard as Chrome says it,
+    /// and nothing else is. Method: each kind as CDP sends it, then the
+    /// messages a load also sends that are no error.
+    #[test]
+    fn the_pages_errors_are_heard() {
+        use serde_json::json;
+        use PageErrorKind::*;
+        let page = "http://a--ann.fragment.localhost:8790/";
+        let h = heard(&[
+            json!({ "method": "Runtime.exceptionThrown", "sessionId": "s", "params": { "exceptionDetails": {
+                "text": "Uncaught", "lineNumber": 2, "columnNumber": 8, "url": page,
+                "exception": { "type": "object", "subtype": "error", "className": "Error", "description": "Error: boom\n    at http://a/:3:9" } } } }),
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught", "lineNumber": 0, "columnNumber": 0, "exception": { "type": "string", "value": "thrown" } } } }),
+            json!({ "method": "Runtime.exceptionThrown", "params": { "exceptionDetails": { "text": "Uncaught SyntaxError: Unexpected token '}'", "lineNumber": 4, "columnNumber": 1, "url": "http://a/app.js" } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "error", "args": [
+                { "type": "string", "value": "failed:" }, { "type": "number", "value": 42, "description": "42" }, { "type": "boolean", "value": true },
+                { "type": "object", "className": "Object", "description": "Object", "objectId": "1" }, { "type": "undefined" }, { "type": "object", "subtype": "null", "value": null },
+                { "type": "number", "unserializableValue": "NaN" } ],
+                "stackTrace": { "callFrames": [{ "functionName": "", "url": "http://a/app.js", "lineNumber": 9, "columnNumber": 4 }] } } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "assert", "args": [{ "type": "string", "value": "console.assert" }] } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "network", "level": "error", "text": "Failed to load resource: the server responded with a status of 404 (Not Found)", "url": "http://a/missing.js" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "security", "level": "error", "text": "Refused to load the image 'http://a/x.png' because it violates the following Content Security Policy directive: \"img-src 'none'\".", "url": page, "lineNumber": 3 } } }),
+        ]);
+        assert_eq!(
+            h.errors,
+            [
+                error(Exception, "Error: boom\n    at http://a/:3:9", Some(&format!("{page}:3:9"))),
+                error(Exception, "thrown", None),
+                error(Exception, "Uncaught SyntaxError: Unexpected token '}'", Some("http://a/app.js:5:2")),
+                error(Console, "failed: 42 true Object undefined null NaN", Some("http://a/app.js:10:5")),
+                error(Console, "console.assert", None),
+                error(Network, "Failed to load resource: the server responded with a status of 404 (Not Found)", Some("http://a/missing.js")),
+                error(Security, "Refused to load the image 'http://a/x.png' because it violates the following Content Security Policy directive: \"img-src 'none'\".", Some(page)),
+            ]
+        );
+        assert_eq!(h.dropped, 0);
+        let quiet = heard(&[
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "log", "args": [{ "type": "string", "value": "hi" }] } }),
+            json!({ "method": "Runtime.consoleAPICalled", "params": { "type": "warning", "args": [] } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "network", "level": "warning", "text": "slow" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "deprecation", "level": "error", "text": "old" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "network", "level": "error", "text": "Failed to load resource: the server responded with a status of 404 (Not Found)", "url": "http://a--ann.fragment.localhost:8790/favicon.ico" } } }),
+            json!({ "method": "Log.entryAdded", "params": { "entry": { "source": "security" } } }),
+            json!({ "method": "Runtime.executionContextCreated", "params": { "context": {} } }),
+            json!({ "method": "Page.loadEventFired", "params": { "timestamp": 1.0 } }),
+            json!({ "id": 7, "result": { "exceptionDetails": { "text": "an answer, not an event" } } }),
+            json!({ "method": 7 }),
+            json!(null),
+            json!("Runtime.exceptionThrown"),
+        ]);
+        assert_eq!(quiet, Heard::default(), "only errors are heard");
+    }
+
+    /// Goal: what a shot keeps of the page's errors is bounded: the first
+    /// `ERRORS_MAX` (the rest counted), each text and source cut to
+    /// `ERROR_BYTES_MAX` on a character, no control character but a
+    /// newline or a tab; so a report at its largest is one event.
+    #[test]
+    fn what_a_shot_keeps_is_bounded() {
+        let mut h = Heard::default();
+        for i in 0..ERRORS_MAX + 3 {
+            h.keep(PageErrorKind::Console, &format!("e{i}"), None);
+        }
+        assert_eq!((h.errors.len(), h.dropped, h.errors[ERRORS_MAX - 1].text.as_str()), (ERRORS_MAX, 3, "e9"), "the first are kept, the rest counted");
+        let whole = "x".repeat(ERROR_BYTES_MAX);
+        assert_eq!(cut(&whole), whole, "exactly the cap is kept whole");
+        let over = cut(&format!("{whole}y"));
+        assert!(over.len() <= ERROR_BYTES_MAX && over.ends_with('…') && over.starts_with("xxx"), "{}", over.len());
+        let wide = cut(&"é".repeat(ERROR_BYTES_MAX));
+        assert!(wide.len() <= ERROR_BYTES_MAX && wide.ends_with("é…"), "cut on a character: {}", wide.len());
+        assert_eq!(cut("a\u{0}b\rc\u{1b}[31md\u{85}e\nf\tg"), "a b c [31md e\nf\tg");
+        let mut h = Heard::default();
+        h.keep(PageErrorKind::Network, "x", Some(&format!("http://a/{}", "p".repeat(2 * ERROR_BYTES_MAX))));
+        assert!(h.errors[0].source.as_ref().is_some_and(|s| s.len() <= ERROR_BYTES_MAX && s.ends_with('…')), "a source is cut too");
+        // the largest report: every error at its longest, every byte escaped
+        let mut h = Heard { dropped: u32::MAX - 1, ..Heard::default() };
+        for _ in 0..ERRORS_MAX + 1 {
+            h.keep(PageErrorKind::Exception, &"\"".repeat(2 * ERROR_BYTES_MAX), Some(&"\\".repeat(2 * ERROR_BYTES_MAX)));
+        }
+        assert_eq!(h.dropped, u32::MAX, "the count saturates");
+        let report = PageReport { live: "f".repeat(64), at: T0, errors: h.errors, dropped: h.dropped };
+        let event = serde_json::json!({ "summary": summary(&report), "data": report });
+        let size = serde_json::to_string(&event).unwrap().len();
+        assert!(size <= fragment_proto::limits::RECORD_BODY_MAX_BYTES, "{size} bytes");
+        let one = PageReport { live: A.into(), at: T0, errors: vec![error(PageErrorKind::Exception, "Error: boom\n    at x", None)], dropped: 0 };
+        assert_eq!(summary(&one), "the page reported 1 error as it loaded (live aaaaaaaaaaaa): Error: boom");
+    }
+
+    /// Goal: the page's report is the one the try that ended its live's
+    /// tries heard: kept or given up, not a retry's or a stale try's, and
+    /// a replay changes nothing; it survives a restart, and a state kept
+    /// without one reads back as none. Method: land tries with what they
+    /// heard.
+    #[test]
+    fn the_report_is_the_ending_tries() {
+        let boom = || Heard { errors: vec![error(PageErrorKind::Exception, "Error: boom", None)], dropped: 0 };
+        let mut c = Cards::default();
+        c.want(A, T0).unwrap();
+        let s = shoot(&mut c, T0);
+        let v = c.landed(&s, Outcome::Failed { retry: true }, T0 + 1, PACE).unwrap();
+        assert_eq!(c.report(&v, A, boom(), T0 + 1), None, "a retry's is dropped");
+        assert_eq!(c.page, None);
+        let s = shoot(&mut c, T0 + 1 + PACE.first_ms);
+        let v = c.landed(&s, image(1), T0 + PACE.first_ms + 2, PACE).unwrap();
+        let made = c.report(&v, A, boom(), T0 + PACE.first_ms + 2).cloned();
+        let want = PageReport { live: A.into(), at: T0 + PACE.first_ms + 2, errors: boom().errors, dropped: 0 };
+        assert_eq!((made, c.page.clone()), (Some(want.clone()), Some(want.clone())), "the kept try's is the report");
+        // a replayed landing is stale: the report stays
+        let v = c.landed(&s, image(1), T0 + PACE.first_ms + 3, PACE).unwrap();
+        assert_eq!((v.clone(), c.report(&v, A, Heard::default(), T0 + PACE.first_ms + 3)), (Verdict::Stale, None));
+        assert_eq!(c.page, Some(want.clone()));
+        // a clean page next replaces it with no errors
+        c.want(B, T0 + 100_000).unwrap();
+        let s = shoot(&mut c, T0 + 100_000);
+        let v = c.landed(&s, image(2), T0 + 100_001, PACE).unwrap();
+        c.report(&v, B, Heard::default(), T0 + 100_001);
+        assert_eq!(c.page, Some(PageReport { live: B.into(), at: T0 + 100_001, errors: vec![], dropped: 0 }));
+        // a try given up reports what it heard
+        c.want(C, T0 + 200_000).unwrap();
+        let s = shoot(&mut c, T0 + 200_000);
+        let v = c.landed(&s, Outcome::Failed { retry: false }, T0 + 200_001, PACE).unwrap();
+        assert_eq!(c.report(&v, C, boom(), T0 + 200_001).map(|p| p.live.as_str()), Some(C));
+        let back: Cards = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back, c, "the report survives a restart");
+        let old: Cards = serde_json::from_value(serde_json::json!({ "card": null, "wanted": null })).unwrap();
+        assert_eq!(old.page, None);
     }
 
     /// Goal: a shot is metered as Browser Rendering bills it: its session's

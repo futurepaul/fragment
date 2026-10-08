@@ -112,6 +112,7 @@ impl FragmentCell {
                 return Err(CellError::invalid(format!("{:?} is not a file path (relative, no . or .. segments)", w.path)));
             }
         }
+        self.draft_files_fit(writes)?;
         let repo = self.must(MetaKey::Repo)?;
         let cs = self.cs()?;
         let (author, email) = author(principal);

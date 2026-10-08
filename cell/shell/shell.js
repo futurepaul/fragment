@@ -42,6 +42,14 @@ const CURRENT = "shell.chat.v1";
 const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
+  { template: "when", name: "When", about: "Find a time or run a poll: anyone with the link votes, live." },
+  { template: "wall", name: "Wall", about: "A page anyone with the link posts to, live." },
+  { template: "board", name: "Board", about: "Chores or tasks, live, with a push when one is yours." },
+  { template: "watch", name: "Watch", about: "A page or a price, checked hourly: a push when it changes." },
+  { template: "brief", name: "Brief", about: "Your feeds, summed up each morning, with a push." },
+  { template: "hook", name: "Hook", about: "CI, deploys and payments, live from their webhooks." },
+  { template: "wiki", name: "Wiki", about: "Your team's pages in markdown, edited here or in a folder." },
+  { template: "split", name: "Split", about: "Shared costs: snap a receipt, see who owes whom, live." },
   { template: "blank", name: "Blank", about: "One page to start from." },
   // blessed (decision 40): named, not copied, and made with a title, as a chat is
   { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
@@ -1051,10 +1059,11 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked, uses] = await Promise.all([
+  const [ledger, linked, uses, clients] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+    api("GET", "/api/oauth/connections").catch(() => null),
   ]);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
@@ -1141,7 +1150,41 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER));
+}
+
+// ---- connected clients (docs/api.md, Connected clients): the apps a
+// person let act as them (Claude, ChatGPT, any MCP client), each on one
+// fragment or on their fragments as a whole, and an end to each
+function clientsSection(listed) {
+  const s = section("Connected clients");
+  s.id = "settings-clients";
+  const all = listed?.connections;
+  if (!all) return s.append(el("p", "muted", "Your connected clients could not be read.")), s;
+  if (!all.length) return s.append(el("p", "muted", "None yet. An app you connect acts as you, and what it does names it.")), s;
+  for (const c of all) {
+    const row = el("p", "settings-line");
+    row.dataset.connection = c.id;
+    let reach = "your fragments";
+    try {
+      const at = new URL(c.resource);
+      if (at.pathname === "/__mcp") reach = at.host;
+    } catch {}
+    const end = el("button", "quiet", "End");
+    end.type = "button";
+    end.onclick = async () => {
+      end.disabled = true;
+      try {
+        await api("DELETE", `/api/oauth/connections/${seg(c.id)}`);
+      } catch (e) {
+        notice("That was not ended", e.message);
+      }
+      await openSettings(false);
+    };
+    row.append(el("span", "settings-key", c.client), el("span", "settings-value", `${reach}, ${c.writes ? "reads and changes" : "reads only"}, since ${new Date(c.createdAt).toLocaleDateString()}`), end);
+    s.append(row);
+  }
+  return s;
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform

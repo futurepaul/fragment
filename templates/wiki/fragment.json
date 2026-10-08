@@ -1,0 +1,30 @@
+{
+  "name": "wiki",
+  "operations": {
+    "pages": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } },
+    "page": {
+      "kind": "query",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["path"], "additionalProperties": false, "properties": { "path": { "type": "string", "maxLength": 300 } } }
+    },
+    "recent": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } },
+    "save": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["path", "text"],
+        "additionalProperties": false,
+        "properties": { "path": { "type": "string", "maxLength": 300 }, "text": { "type": "string", "maxLength": 60000 } }
+      }
+    },
+    "remove": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": { "type": "object", "required": ["path"], "additionalProperties": false, "properties": { "path": { "type": "string", "maxLength": 300 } } }
+    },
+    "changed": { "kind": "mutation" }
+  },
+  "triggers": [{ "files": "wiki/**", "run": "changed" }],
+  "meta": { "title": "Wiki", "description": "A team's wiki in markdown: edit it here, or sync its folder and edit it anywhere." }
+}

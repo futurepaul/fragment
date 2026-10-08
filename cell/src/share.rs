@@ -13,6 +13,10 @@
 //!                              an invite answers the sheet with the link to send
 //!   GET  /join/<name>?token=   what the invite grants, and a Join button
 //!   POST /join/<name>          joins, then → the fragment, signed in on its origin
+//!   GET  /claim/<name>?code=   a draft (docs/api.md, Drafts): what claiming it takes, its code
+//!                              asked for (the link its maker gave carries it), and a Claim button
+//!   POST /claim/<name>         claims it and approves the key that made it, then → the
+//!                              fragment, signed in on its origin
 //!
 //! A fragment's page (its author's code, or an agent's) is cross-site from
 //! the platform on fragment.club, but one site
@@ -191,6 +195,7 @@ pub(crate) fn label(name: &str) -> &str {
 fn role_phrase(role: Role) -> &'static str {
     match role {
         Role::Editor => "an editor (they can change it)",
+        Role::Contributor => "a contributor (they can use it, not change it)",
         Role::Owner => "its owner",
         _ => "a viewer (they can see it)",
     }
@@ -205,7 +210,7 @@ fn fragment_named(name: &str) -> Option<String> {
 pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &[&str]) -> CellResult<Response> {
     let method = req.method();
     let (what, name) = match segments {
-        [what @ ("share" | "join"), name] => (*what, *name),
+        [what @ ("share" | "join" | "claim"), name] => (*what, *name),
         _ => return Err(CellError::new(ErrorCode::NotFound, format!("no route {}", url.path()))),
     };
     let Some(name) = fragment_named(name) else { return notice(404, "No such fragment", "This link names no fragment.") };
@@ -214,6 +219,9 @@ pub async fn route(req: Request, env: &Env, cfg: &Config, url: &Url, segments: &
         (Method::Post, "share") => share_post(req, env, cfg, url, &name).await,
         (Method::Get, "join") => join_page(&req, env, cfg, url, &name).await,
         (Method::Post, "join") => join_post(req, env, cfg, url, &name).await,
+        (_, "claim") if !fragment_proto::is_draft_name(&name) => notice(404, "No such draft", "This link names no draft."),
+        (Method::Get, "claim") => claim_page(&req, env, cfg, url, &name).await,
+        (Method::Post, "claim") => claim_post(req, env, cfg, url, &name).await,
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {}", m.as_ref(), url.path()))),
     }
 }
@@ -360,13 +368,22 @@ fn action_form(sheet: &Sheet, action: &str, fields: &str, button: &str, class: &
     )
 }
 
+/// A role as the sheet says it: what the owner grants is View, Use, or Edit.
 fn role_name(role: Role) -> &'static str {
     match role {
         Role::Owner => "Owner",
-        Role::Editor => "Editor",
-        Role::Viewer => "Viewer",
+        Role::Editor => "Edit",
+        Role::Contributor => "Use",
+        Role::Viewer => "View",
         Role::Public => "Anyone",
     }
+}
+
+/// The roles the owner grants, as a menu's options, `current` chosen.
+fn role_options(current: Option<Role>) -> String {
+    [Role::Viewer, Role::Contributor, Role::Editor]
+        .map(|r| format!("<option value=\"{}\"{}>{}</option>", r.as_str(), if current == Some(r) { " selected" } else { "" }, role_name(r)))
+        .concat()
 }
 
 /// Who can open it, as General access says it: an icon, its name, and
@@ -409,8 +426,11 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &action_form(
             sheet,
             "invite",
-            "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
-             <select name=\"role\" aria-label=\"role\"><option value=\"viewer\">Viewer</option><option value=\"editor\">Editor</option></select>",
+            &format!(
+                "<input name=\"username\" required minlength=\"3\" maxlength=\"32\" pattern=\"@?[a-z0-9]([a-z0-9-]*[a-z0-9])?\" placeholder=\"Add people by username\" autocomplete=\"off\" aria-label=\"username\">\
+                 <select name=\"role\" aria-label=\"role\">{}</select>",
+                role_options(None)
+            ),
             "Invite",
             "add",
         );
@@ -422,12 +442,10 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
         out += &person(&m.principal, sheet.profiles.get(&m.principal), &sheet.me);
         if sheet.owner() && m.role != Role::Owner {
             let member = format!("<input type=\"hidden\" name=\"member\" value=\"{}\">", esc(&m.principal));
-            let choice = |r: Role| format!("<option value=\"{}\"{}>{}</option>", r.as_str(), if m.role == r { " selected" } else { "" }, role_name(r));
             // the menu ends in removing them (`share_post`)
             let select = format!(
-                "<select name=\"role\" aria-label=\"role\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{}{}<hr><option value=\"remove\">Remove access</option></select>",
-                choice(Role::Viewer),
-                choice(Role::Editor)
+                "<select name=\"role\" aria-label=\"role\" class=\"bare\" autocomplete=\"off\" data-send data-arm disabled>{}<hr><option value=\"remove\">Remove access</option></select>",
+                role_options(Some(m.role))
             );
             out += &action_form(sheet, "role", &format!("{member}{select}"), "", "");
         } else {
@@ -552,8 +570,8 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         m => Err(CellError::invalid(format!("{m:?} is not a member"))),
     };
     let role = || match Role::parse(field("role")) {
-        Some(r @ (Role::Viewer | Role::Editor)) => Ok(r),
-        _ => Err(CellError::invalid("a role is viewer or editor")),
+        Some(r @ (Role::Viewer | Role::Contributor | Role::Editor)) => Ok(r),
+        _ => Err(CellError::invalid("a role is viewer, contributor, or editor")),
     };
     // a member's role menu ends in "Remove access" (`render`)
     let action = match (field("action"), field("role")) {
@@ -696,6 +714,96 @@ async fn join_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &
         Ok(_) => Ok(auth::redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])?.with_status(303)),
         Err(e) if e.code == ErrorCode::NotFound => notice(404, "This invite is not good", "It was used, revoked, or it expired. Ask for a new one."),
         Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::InvalidRequest) => notice(e.code.status(), "Not joined", &esc(&e.message)),
+        Err(e) => Err(e),
+    }
+}
+
+/// A claim code as a link carries it (`fragment_core::drafts::code`, shown
+/// with its dash), or typed: a few characters.
+const CLAIM_CODE_MAX: usize = 32;
+
+const DRAFT_GONE: &str = "It was deleted, or no one claimed it in time.";
+
+/// The claim page (docs/api.md, Drafts): what claiming the draft does, and
+/// its code asked for, filled in from the link its maker gave. Signed out:
+/// sign-in first, as the deployment has it (on an invite-only one, an
+/// invited person's), and back.
+async fn claim_page(req: &Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
+    let code = auth::query(url, "code").filter(|c| c.len() <= CLAIM_CODE_MAX).unwrap_or_default();
+    let Some((session, live)) = auth::platform_session(req, env, url).await? else {
+        let back = format!("/claim/{name}{}", if code.is_empty() { String::new() } else { format!("?code={}", enc(&code)) });
+        return auth::to_login(&cfg.platform(), &back);
+    };
+    let who = Signed::new(live.identity, None);
+    let view = match ask(env, url, name, &who, Method::Get, "/claim", None).await {
+        Err(e) if e.code == ErrorCode::NotFound => return notice(404, "No such draft", DRAFT_GONE),
+        view => view?,
+    };
+    let title = format!("Claim {}", label(name));
+    let form = form::issue(&session, &purpose("claim", name), js::now_ms());
+    let key = view["key"].as_str().unwrap_or_default();
+    let tail = esc(&key[key.len().saturating_sub(8)..]);
+    match view["claimedBy"].as_str() {
+        // its key may not have joined them yet (a claim cut short): the same claim again adds it
+        Some(by) if by == who.id => {
+            let open = format!("/auth/fragment?name={}&return=/", enc(name));
+            let body = format!(
+                "<p>It is yours. <a href=\"{}\">Open it</a></p>\
+                 <form method=\"post\" class=\"quiet\"><input type=\"hidden\" name=\"form\" value=\"{}\"><p class=\"hint\">The key that made it (ending in <code>{tail}</code>) not acting as you yet? <button data-arm disabled>Add it</button></p></form>",
+                esc(&open),
+                esc(&form)
+            );
+            return sheet_page(200, &title, &body, false);
+        }
+        Some(_) => return notice(409, "Claimed already", "Someone else claimed this draft."),
+        None => {}
+    }
+    let body = format!(
+        "<p><b>{l}</b> was made without an account, by the key ending in <code>{tail}</code> (an agent's, or a <code>fragment</code> CLI's).</p>\
+         <p>Claiming it makes it yours: you own it, it bills you, and its limits lift. The key that made it becomes yours too: <b>whatever holds it can do anything you can</b>, as a key you add with <code>fragment login</code> can.</p>\
+         <form method=\"post\"><input type=\"hidden\" name=\"form\" value=\"{f}\"><p class=\"add\"><input name=\"code\" value=\"{c}\" placeholder=\"Its claim code\" aria-label=\"Its claim code\" autocomplete=\"off\" required><button data-arm disabled>Claim it</button></p></form>\
+         <p class=\"hint\">Claim it only if your own agent, or your own <code>fragment</code>, made it for you: its code is in the link it gave you. Sent this by someone else? Close this page.</p>",
+        l = esc(label(name)),
+        f = esc(&form),
+        c = esc(&code),
+    );
+    // no forms-here rule: claiming redirects on to the fragment's origin
+    sheet_page(200, &title, &body, false)
+}
+
+/// The claim page's form: a claim is a create (a guest makes none, nor
+/// does someone past the overdraft); the draft becomes the signed-in
+/// person's, and the key that made it joins them as `/cli/approve` adds
+/// one. Sent again, it is theirs already, and the key is approved again.
+async fn claim_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str) -> CellResult<Response> {
+    let platform = cfg.platform();
+    let (session, live, fields) = match poster(&mut req, env, url, &platform, &purpose("claim", name)).await? {
+        Ok(posted) => posted,
+        Err(page) => return Ok(page),
+    };
+    let who = Signed::new(live.identity, None);
+    if let Err(e) = crate::may_create(env, &who.id).await {
+        return notice(e.code.status(), "Not claimed", &esc(&e.message));
+    }
+    let code = fields.get("code").map_or("", String::as_str);
+    let claimed = match ask(env, url, name, &who, Method::Post, "/claim", Some(json!({ "code": code }))).await {
+        Err(e) if e.code == ErrorCode::NotFound => return notice(404, "No such draft", DRAFT_GONE),
+        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::AlreadyExists) => return notice(e.code.status(), "Not claimed", &esc(&e.message)),
+        claimed => claimed?,
+    };
+    let key = claimed["key"].as_str().unwrap_or_default().to_string();
+    match ask_registry(env, &calls::ApproveKey { token: session, key }).await {
+        // signed in on the fragment's own origin, and there
+        Ok(()) => Ok(auth::redirect(&format!("/auth/fragment?name={}&return=/", enc(name)), &[])?.with_status(303)),
+        Err(e) if e.code == ErrorCode::AlreadyExists => notice(
+            200,
+            "Claimed",
+            &format!(
+                "{} is yours. The key that made it is not one you can add ({}), so it does not act as you: run <code>fragment login</code> where it was made.",
+                esc(label(name)),
+                esc(&e.message)
+            ),
+        ),
         Err(e) => Err(e),
     }
 }

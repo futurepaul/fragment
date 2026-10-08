@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use fragment_core::oauth;
 use fragment_proto::{Identity, IdentityKind, IdentityView};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -470,6 +471,9 @@ pub(crate) struct SigninCounts {
     pub logins: u64,
     pub redemptions: u64,
     pub sessions: u64,
+    /// Connected clients' codes not yet exchanged, and their connections.
+    pub codes: u64,
+    pub connections: u64,
 }
 
 impl Call for TestHook {
@@ -667,5 +671,160 @@ pub(crate) struct ApproveKey {
 
 impl Call for ApproveKey {
     const PATH: &'static str = "/cli/add";
+    type Answer = ();
+}
+
+// ------------------------------------------------------------- connected clients (OAuth)
+
+/// `POST /oauth/register`: a client registers (RFC 7591), its metadata
+/// checked by the router (`fragment_core::oauth::registration`).
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct RegisterClient(pub oauth::Client);
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ClientRegistered {
+    pub client_id: String,
+    pub issued_at_ms: i64,
+}
+
+impl Call for RegisterClient {
+    const PATH: &'static str = "/oauth/register";
+    type Answer = ClientRegistered;
+}
+
+/// `POST /oauth/client`: a registered client (404: none, or its
+/// registration went: `oauth::CLIENTS_MAX`).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct FindClient {
+    pub client_id: String,
+}
+
+impl Call for FindClient {
+    const PATH: &'static str = "/oauth/client";
+    type Answer = oauth::Client;
+}
+
+/// `POST /oauth/grant`: the person a platform session names said yes to a
+/// client acting as them on `resource` (canonical, the router's): a code.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct GrantCode {
+    pub token: String,
+    pub client_id: String,
+    pub client: String,
+    pub redirect_uri: String,
+    pub challenge: String,
+    pub resource: String,
+    /// The person let it change things there, not only read.
+    pub writes: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Granted {
+    pub code: String,
+}
+
+impl Call for GrantCode {
+    const PATH: &'static str = "/oauth/grant";
+    type Answer = Granted;
+}
+
+/// `POST /oauth/tokens`: tokens for a code, or for a refresh token (which
+/// they replace). A `resource` it names is the canonical one the router
+/// read.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct IssueTokens(pub oauth::Grant);
+
+/// Tokens, or the refusal a client reads (RFC 6749 5.2): typed, so the
+/// router answers it as OAuth's and never as the platform's.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Issued {
+    Tokens(oauth::Tokens),
+    Refused(oauth::Refused),
+}
+
+impl Call for IssueTokens {
+    const PATH: &'static str = "/oauth/tokens";
+    type Answer = Issued;
+}
+
+/// `POST /oauth/revoke`: the connection a token of `client_id`'s names
+/// ends (RFC 7009); any other token is no error.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RevokeToken {
+    pub token: String,
+    pub client_id: String,
+}
+
+impl Call for RevokeToken {
+    const PATH: &'static str = "/oauth/revoke";
+    type Answer = ();
+}
+
+/// `POST /oauth/connected`: whom an access token acts as, on `resource`
+/// (the canonical one the request arrived at): 401 when it is no live
+/// token, or another resource's.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Connected {
+    pub token: String,
+    pub resource: String,
+}
+
+/// A live connection: its person, its id, and its client's name.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LiveConnection {
+    #[serde(flatten)]
+    pub identity: Identity,
+    pub connection: String,
+    pub client: String,
+    /// Its person let it change things, not only read.
+    pub writes: bool,
+}
+
+impl Call for Connected {
+    const PATH: &'static str = "/oauth/connected";
+    type Answer = LiveConnection;
+    fn checked(answer: LiveConnection) -> CellResult<LiveConnection> {
+        Ok(LiveConnection { identity: identity_checked(answer.identity)?, ..answer })
+    }
+}
+
+/// `POST /oauth/connections`: the asker's connections, newest first.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ListConnections {
+    pub by: By,
+}
+
+impl Call for ListConnections {
+    const PATH: &'static str = "/oauth/connections";
+    type Answer = fragment_proto::Connections;
+}
+
+/// `POST /oauth/disconnect`: one of the asker's connections ends (404:
+/// none of theirs).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Disconnect {
+    pub by: By,
+    pub id: String,
+}
+
+impl Call for Disconnect {
+    const PATH: &'static str = "/oauth/disconnect";
+    type Answer = ();
+}
+
+/// `POST /draft/start`: a key no one holds starts a draft from `address`
+/// (`fragment_core::drafts::address`), counted against the day's caps
+/// once per key (registry/drafts.rs).
+#[derive(Serialize, Deserialize)]
+pub(crate) struct StartDraft {
+    pub key: String,
+    pub address: String,
+}
+
+impl Call for StartDraft {
+    const PATH: &'static str = "/draft/start";
     type Answer = ();
 }

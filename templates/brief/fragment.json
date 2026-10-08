@@ -1,0 +1,68 @@
+{
+  "name": "brief",
+  "operations": {
+    "add_feed": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["url"],
+        "additionalProperties": false,
+        "properties": { "url": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+      }
+    },
+    "remove_feed": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "probe": {
+      "kind": "job",
+      "role": "editor",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "probed": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "url": { "type": "string", "maxLength": 2000 },
+          "title": { "type": "string", "maxLength": 200 },
+          "problem": { "type": "string", "maxLength": 300 }
+        }
+      }
+    },
+    "set_time": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["hour", "tz"],
+        "additionalProperties": false,
+        "properties": { "hour": { "type": "integer", "minimum": 0, "maximum": 23 }, "tz": { "type": "string", "minLength": 1, "maxLength": 64 } }
+      }
+    },
+    "state": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } },
+    "brief": {
+      "kind": "job",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": { "cron": { "type": "string" }, "at": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "sent": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": { "type": "object", "required": ["at"], "additionalProperties": false, "properties": { "at": { "type": "integer", "minimum": 0 } } }
+    }
+  },
+  "channels": { "briefs": { "read": "viewer" } },
+  "triggers": [{ "cron": "0 * * * *", "run": "brief" }],
+  "meta": { "title": "Brief", "description": "Your feeds, read and summed up each morning, with a push when it is ready." }
+}

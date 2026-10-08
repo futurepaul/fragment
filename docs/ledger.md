@@ -23,8 +23,15 @@ is the wire contract. It replaced the OpenRouter-backed ledger and
   meter batches (`guest_payer`). A guest owns nothing billable, so a
   guest makes no fragment either (`guest_creates`, 403: "guests can't
   create fragments"; Paul, 2026-10-03): every create asks its maker's
-  ledger first (`may_spend(create)`). A guest still edits the fragments
-  shared with them, whose writes bill those fragments' owners.
+  ledger first (`may_spend(create)`), and so does a draft's claim (its
+  claimer becomes its owner: docs/api.md, Drafts). A guest still edits
+  the fragments shared with them, whose writes bill those fragments'
+  owners.
+- **An unclaimed draft bills no one.** Made by a key no one holds, it has
+  no ledger: it spends nothing (no AI steps, fetches, cron runs, push or
+  cards), its writes are its own caps', and its meter rows wait in its
+  outbox until a claim makes it someone's, whose ledger they go to with
+  the rest.
 - **Plans** (decision 25): `guest`; `seat` ($100 a month, $50 of credit
   included, a computer that sleeps); `seat_always_on` ($200 a month,
   $100 included, an always-on computer whose awake time is not metered).

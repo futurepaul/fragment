@@ -95,7 +95,7 @@ fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> 
 }
 
 /// A file compiled into the cell, revalidated by its build-time hash.
-fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
+pub(crate) fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
     let etag = site::hash_etag(hash);
     if let Some(resp) = not_modified(req, &etag, "no-cache")? {
         return Ok(resp);
@@ -443,6 +443,22 @@ impl FragmentCell {
             Some(text) => Some(serde_json::from_str(&text).map_err(|e| CellError::host(format!("the stored meta does not decode: {e}")))?),
             None => None,
         };
+        // An unclaimed draft's page says it is one, with its end and its
+        // claim link, and no cache keeps it past its claim (drafts.rs).
+        if let (true, Some(draft)) = (page, self.draft()?) {
+            let h = headers(mime, "no-store")?;
+            if head {
+                return Ok(Response::empty()?.with_headers(h));
+            }
+            if let Some(bytes) = self.cs()?.read(&facts.repo, live, &row.path, OG_MAX_BYTES as usize).await? {
+                let mut html = String::from_utf8_lossy(&bytes).into_owned();
+                if let Some(meta) = &og {
+                    html = site::inject_og(&html, name, meta, &format!("{}__preview.svg", self.cfg.canonical(&caller.url, name)));
+                }
+                let claim = self.draft_status(name, &draft, false).claim;
+                return Ok(Response::from_html(fragment_core::drafts::with_banner(&html, &claim, draft.until))?.with_headers(h));
+            }
+        }
         // Revalidation is answered here, before code.storage is asked for
         // anything: the tree row already names the bytes.
         let etag = match og {

@@ -1,0 +1,54 @@
+{
+  "name": "watch",
+  "operations": {
+    "add": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["url"],
+        "additionalProperties": false,
+        "properties": {
+          "url": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "label": { "type": "string", "maxLength": 100 },
+          "pick": { "type": "string", "maxLength": 200 },
+          "header": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "remove": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "list": { "kind": "query", "role": "viewer", "input": { "type": "object", "additionalProperties": false } },
+    "watch": {
+      "kind": "query",
+      "role": "editor",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "check": {
+      "kind": "job",
+      "role": "editor",
+      "input": { "type": "object", "required": ["id"], "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1 } } }
+    },
+    "sweep": { "kind": "job", "role": "editor" },
+    "seen": {
+      "kind": "mutation",
+      "role": "editor",
+      "input": {
+        "type": "object",
+        "required": ["id", "value", "hash"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "value": { "type": "string", "maxLength": 500 },
+          "hash": { "type": "string", "minLength": 64, "maxLength": 64 }
+        }
+      }
+    }
+  },
+  "channels": { "changes": { "read": "viewer" }, "problems": { "read": "viewer" } },
+  "triggers": [{ "cron": "0 * * * *", "run": "sweep" }],
+  "meta": { "title": "Watch", "description": "Pages and prices, checked every hour: a push when one changes." }
+}

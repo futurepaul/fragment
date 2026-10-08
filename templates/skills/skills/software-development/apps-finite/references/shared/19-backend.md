@@ -49,7 +49,9 @@ export class App extends DurableObject {
 - A **query** reads; a **mutation** changes the database, all or nothing,
   once per id; a **job** runs durable steps (`job.fetch`, `job.ai.*`,
   `job.sleep`, `job.call`, `job.files.*`) outside any request.
-- `role` says who may call it: `public`, `viewer`, `editor`, `owner`.
+- `role` says who may call it: `public`, `viewer`, `contributor`,
+  `editor`, `owner`. `contributor` is for members who write the app's
+  data and not its code (no files, deploys, or secrets).
   `input` is a JSON Schema checked before your code runs.
 - **Channels** are append-only feeds every open page follows live:
   publish from a mutation (`call.publish`), or let people post to one with
