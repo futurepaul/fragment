@@ -675,6 +675,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    computer_ui(s, api, &mut b, &page, &session, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));
     b.color_scheme(&page, "light")?;
@@ -718,6 +719,67 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the open chat names its agent", names(&placeholder), json!({ "fragment": open, "placeholder": placeholder }));
     let _ = b.screenshot(&page, &shots.join("phone-chat.png"));
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// What the person is told of their computer, and the way back to working
+/// (docs/computers.md, "What its owner is told"), as they see it on
+/// settings: a sleep whose save fails (the lever's) shows at once, with no
+/// reload (the computer tells the page's list socket); its Restart restarts
+/// it once, the restart's own save failing too, and the notice then says
+/// what it went back to; OK tells it no more, here or after a reload; and
+/// settings' Restart computer asks once more, then restarts it, saved.
+fn computer_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(30);
+    let computers = shell(api, session, "GET", "/api/computers", None, &[])?;
+    let id = computers.body["computers"][0]["computer"].as_str().unwrap_or("").to_string();
+    let view = || shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[]).map(|r| r.body).unwrap_or(Value::Null);
+    let shown = |kind: &str| format!("document.querySelector('#computer-notices:not([hidden]) .computer-notice[data-kind={kind}]')");
+    // its saves fail; its owner's sleep keeps it awake, and tells them
+    std::thread::sleep(super::computers::QUEUE_DRAIN);
+    let failing = super::computers::lever_with(api, &id, json!({ "op": "fail-saves", "times": 50 }))?;
+    let r = shell(api, session, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})), &[])?;
+    let generation = r.body["generation"].as_u64().unwrap_or(0);
+    let warned = b.until(page, &format!("{n}?.innerText.includes(\"can't save\") && !!{n}.querySelector('button[data-action=restart]')", n = shown("unsaved")), wait);
+    let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
+    let _ = b.screenshot(page, &shots.join("computer-unsaved.png"));
+    s.ok(
+        "a sleep whose save fails is shown at once, with no reload: since when its work is unsaved, when it stops, and Restart",
+        failing.status == 200 && r.body["phase"] == "awake" && warned && said.as_str().is_some_and(|t| t.contains("hasn't saved since") && t.contains("If it still can't by")),
+        &said,
+    );
+    // Restart, in the notice: its save fails too, so it goes back, and says so
+    b.eval(page, &format!("({}.querySelector('button[data-action=restart]').click(), true)", shown("unsaved")))?;
+    let back = b.until(page, &format!("{n}?.innerText.includes(\"Your restart couldn't save first\") && !!{n}.querySelector('button[data-action=seen]')", n = shown("went_back")), std::time::Duration::from_secs(90));
+    let v = view();
+    let said = b.eval(page, "document.getElementById('computer-notices').innerText")?;
+    let _ = b.screenshot(page, &shots.join("computer-went-back.png"));
+    s.ok(
+        "Restart in the notice restarts it once, back to its last save, and the notice says which save, with an OK",
+        back && v["generation"].as_u64() == Some(generation + 1) && v["restored"]["rollback"] == true && said.as_str().is_some_and(|t| t.contains("It went back to its save of")),
+        json!({ "said": said, "view": v }),
+    );
+    super::computers::lever_with(api, &id, json!({ "op": "fail-saves", "times": 0 }))?;
+    b.eval(page, &format!("({}.querySelector('button[data-action=seen]').click(), true)", shown("went_back")))?;
+    let gone = b.until(page, "document.getElementById('computer-notices').hidden", wait);
+    b.reload(page)?;
+    let loaded = b.until(page, "!document.getElementById('settings-page').hidden && document.getElementById('settings-page').innerText.toUpperCase().includes('COMPUTER')", wait);
+    let still = b.eval(page, "document.getElementById('computer-notices').hidden")?;
+    s.ok("OK: it is told no more, here or after a reload", gone && loaded && still == true && view()["notices"].as_array().is_none_or(|l| l.is_empty()), view());
+    // settings' Restart computer asks once more, then restarts it, saved
+    let asked = b.until(page, "!!document.querySelector('#settings-page [data-action=restart-ask]')", wait);
+    b.click(page, "#settings-page [data-action=restart-ask]")?;
+    let confirm = b.until(page, "!!document.querySelector('#settings-page button[data-action=restart]')", wait);
+    let before = view()["generation"].as_u64().unwrap_or(0);
+    b.click(page, "#settings-page button[data-action=restart]")?;
+    let restarted = s.eventually(std::time::Duration::from_secs(90), || view()["generation"].as_u64() == Some(before + 1) && view()["phase"] == "awake");
+    let settled = b.until(page, "!!document.querySelector('#settings-page [data-action=restart-ask]') && document.getElementById('computer-notices').hidden", wait);
+    let v = view();
+    s.ok(
+        "settings' Restart computer asks once more, then restarts it, saved first: nothing to tell",
+        asked && confirm && restarted && settled && v["restored"]["rollback"] == false && v["notices"].as_array().is_none_or(|l| l.is_empty()),
+        &v,
+    );
     Ok(())
 }
 
