@@ -644,7 +644,9 @@ person removed stays removed: `kv.seeded`):
 ### The page
 
 One screen at a time, and calm, in the shell's look (Paul, 2026-10-07):
-the platform's stylesheet (`__fragment.css`) with the shell's values.
+the platform's stylesheet (`__fragment.css`), which is the shell's look;
+`mind.css` holds only the mind's own values (its ground, the middle
+column's, and a chat's surfaces).
 In the shell (`?embed=shell`, docs/api.md "The mind in the shell") the
 shell's sidebar is the rail and its topbar the header, and apps open
 beside the mind; opened on its own origin the page shows its own rail.
@@ -677,9 +679,18 @@ beside the mind; opened on its own origin the page shows its own rail.
 - **Topic screen:** the threads in the topic, each a summary card that
   expands in place.
 - **The mobile layout** comes first: the rail is a drawer.
-- **Settings:** about you, the memory and **Export memory** (the whole
-  log as one JSON file, the `export` query paged), and **Connect another
-  agent** (`claude mcp add mind -- fragment mcp mind.<username>`).
+- **Settings** (`site/settings.js`): a screen (`#/settings`), never a
+  sheet (Paul, 2026-10-07: "I prefer using the center column rather than
+  a modal"). About you; the memory and **Export memory** (the whole log
+  as one JSON file, the `export` query paged); **Import chats** (the
+  page's upload, below); and **Connect another agent**: the claude.ai
+  connector's URL (the mind's origin's `/__mcp`), Claude Code's `claude
+  mcp add --transport http`, and `claude mcp add mind -- fragment mcp
+  mind.<username>`. In the shell they are the **Mind** section of its
+  own Settings, in the middle column: the page alone, framed with
+  `?embed=settings` (docs/api.md, "The mind in the shell"), which the
+  heading menu's Mind settings opens. On its own origin the rail's foot
+  opens the screen.
 
 ## Platform additions (generic: no platform code names the mind)
 

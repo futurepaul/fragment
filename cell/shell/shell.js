@@ -707,8 +707,8 @@ async function openScreen(agent) {
 // that changes (`{fragment: "mind", state}`: its personas and the default,
 // its recent threads as one-line summaries, its screen, title and route),
 // and this page asks it (`{fragment: "mind", go | new | sheet | panel}`) to
-// open a screen, a new chat with a persona, a sheet (a persona's, its
-// settings) or its panel. It may ask for the computer's screen (`screen`)
+// open a screen, a new chat with a persona, a persona's sheet or its
+// panel. Its settings are a section of this page's Settings (`mindSection`). It may ask for the computer's screen (`screen`)
 // or one of the person's fragments a link names (`app`). Each side takes
 // a message only from the other: this page from the mind's frame at the
 // mind's origin, the mind from the page around it.
@@ -855,7 +855,7 @@ function mindMenu() {
   openMenu($("agent-heading"), [
     ...(mind.said?.screen === "thread" ? [{ icon: "panel", text: "What it did here", onClick: () => tellMind({ panel: "toggle" }) }] : []),
     ...(state.computer && mindHands() ? [{ icon: "screen", text: "Its computer's screen", onClick: () => openScreen(mindHands()) }] : []),
-    { icon: "gear", text: "Mind settings", onClick: () => tellMind({ sheet: "settings" }) },
+    { icon: "gear", text: "Mind settings", onClick: () => openSettings().then(() => $("settings-mind")?.scrollIntoView({ block: "start" })).catch((e) => notice("Settings did not open", e.message)) },
   ]);
 }
 $("new-persona").onclick = () => toMind({ sheet: "persona" });
@@ -1256,7 +1256,8 @@ async function openSettings(push = true) {
   $("frames").hidden = true;
   const page = $("settings-page");
   page.hidden = false;
-  page.replaceChildren(el("p", "muted", "Loading…"));
+  // settings already drawn stay until they are drawn again
+  if (!page.querySelector(".settings-section")) page.replaceChildren(el("p", "muted", "Loading…"));
   renderHeading();
   renderChats();
   leaveSidebar();
@@ -1352,7 +1353,47 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER));
+  place(page, [account, mindSection(), credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER)].filter(Boolean));
+}
+
+// ---- the mind's settings (docs/optchat.md, "The page"): about you, its
+// memory and its export, importing chats, connecting another agent. Its
+// page's own, framed at the mind's origin with `?embed=settings` (the
+// mind's operations are its page's to call), as tall as it says it is:
+// one Settings, in the middle column. Made once, and kept in place when
+// settings are drawn again or left, so an import in it goes on.
+const mindSettings = { name: null, section: null, frame: null };
+function mindSection() {
+  const m = mindOf();
+  if (!m) return null;
+  if (mindSettings.name !== m.name) {
+    const s = section("Mind");
+    s.id = "settings-mind";
+    const frame = frameOf(framed(m.name, "/?embed=settings"), "Your mind's settings", m.name);
+    frame.className = "mind-settings";
+    s.append(frame);
+    Object.assign(mindSettings, { name: m.name, section: s, frame });
+  }
+  return mindSettings.section;
+}
+// its height, from that frame at the mind's origin alone, while settings show
+const MIND_SETTINGS_MAX = 20_000;
+addEventListener("message", async (event) => {
+  const { frame, name } = mindSettings;
+  const d = event.data;
+  if (d?.fragment !== "mind" || !frame || event.source !== frame.contentWindow || !Number.isFinite(d.height)) return;
+  if (event.origin !== (await originOf(name).catch(() => null)) || $("settings-page").hidden) return;
+  frame.style.height = `${Math.max(80, Math.min(MIND_SETTINGS_MAX, Math.ceil(d.height)))}px`;
+});
+// The page's sections, in order, the mind's left where it is: a frame
+// taken out of the page loads again.
+function place(page, parts) {
+  const keep = mindSettings.section;
+  if (!keep || keep.parentNode !== page || !parts.includes(keep)) return page.replaceChildren(...parts);
+  for (const child of [...page.children]) if (child !== keep) child.remove();
+  const at = parts.indexOf(keep);
+  keep.before(...parts.slice(0, at));
+  keep.after(...parts.slice(at + 1));
 }
 
 // ---- connected clients (docs/api.md, Connected clients): the apps a

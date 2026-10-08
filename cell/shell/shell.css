@@ -336,6 +336,8 @@ body.frame-note { margin: 0; min-height: 100vh; background: var(--bg-window); co
 .settings-value { min-width: 0; overflow-wrap: anywhere; }
 .settings-warning { color: var(--danger-text); font-size: 14px; }
 .settings-section .row { width: 100%; }
+/* the mind's settings, its page's own, framed: as tall as it says (shell.js `mindSection`) */
+.settings-section .mind-settings { display: block; width: 100%; height: 640px; margin-top: 4px; border: 0; background: transparent; }
 .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .settings-actions form { margin: 0; }
 .settings-value.mono, .settings-section code { font: 500 12.5px/1.6 var(--font-mono); }

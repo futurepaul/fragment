@@ -1850,9 +1850,15 @@ memory}}`, posted to the platform's origin only; the shell takes it only
 from that frame at the mind's origin (its status's canonical URL). The
 shell asks the page `{fragment: "mind", go}` (a route of its hash),
 `{new}` (New chat with a persona, null the default), `{sheet: "persona",
-id?}` or `{sheet: "settings"}`, and `{panel}` (true, false or "toggle");
-the page takes them from the page around it alone, from the platform's
-origin. The page may ask the shell for its computer's screen (`{screen:
+id?}`, and `{panel}` (true, false or "toggle"); the page takes them from
+the page around it alone, from the platform's origin. The mind's
+settings are a section of the shell's own Settings: the shell frames the
+mind there with `?embed=settings` (its settings alone: about you, its
+memory and export, importing chats, connecting another agent), and that
+page tells the shell its height, `{fragment: "mind", height}`, to the
+platform's origin; the shell takes it from that frame at the mind's
+origin alone, and keeps the frame in place while Settings are drawn
+again or left, so an import in it goes on. The page may ask the shell for its computer's screen (`{screen:
 true}`) and to open a link to one of the person's fragments (`{app:
 <url>}`): the shell opens it beside the mind when the URL's origin is that
 fragment's and it is in their list, else in a tab.
