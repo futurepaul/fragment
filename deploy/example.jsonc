@@ -57,6 +57,10 @@
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
+  // The address the platform's mail (invites, seats) comes from, on a
+  // domain onboarded to Cloudflare Email Sending (`wrangler email sending
+  // enable <domain>`). Without it, the deployment sends no mail.
+  // "mail_from": "fragment <mail@example.com>",
   // The operators (npubs or identities): they grant credit, set plans,
   // release usernames, and wipe a person (docs/api.md, Operators). Wipe
   // with an operator key no person holds (`fragment operator key <file>`

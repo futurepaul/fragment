@@ -10,6 +10,7 @@
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
 //!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, always-on)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
+//!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
 //! An e2e person signs in by an `@e2e.test` email under the e2e issuer, so
 //! no real sign-in ever reaches them, and is made a seat whose paid calls
@@ -19,8 +20,8 @@
 //!
 //! On a branch deployment (a preview, `Config::levers_scoped`) the levers
 //! reach the e2e's own things alone: fragments labelled `e2e-…`, e2e
-//! people's ledgers and computers; the registry's (the whole deployment's) are no
-//! route; and a day makes at most `levers::E2E_PEOPLE_DAILY_MAX` e2e
+//! people's ledgers and computers; the registry's (the whole deployment's)
+//! and the mail lever (a preview's mail is real) are no route; and a day makes at most `levers::E2E_PEOPLE_DAILY_MAX` e2e
 //! people and lends them at most `levers::E2E_PAID_CALLS_DAILY_MAX` paid
 //! calls. A secret that leaked spends that much, and touches no one real.
 
@@ -142,6 +143,20 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 return Err(CellError::invalid("sign e2e people in at /api/test/signin, and list them at /api/test/people"));
             }
             json_answer(&ask_registry(env, &hook).await?)
+        }
+        // a preview's mail goes out for real: only the fake's is a test's
+        (Method::Post, ["mail"]) if cfg.levers_scoped => Err(no_route("/api/test/mail")),
+        (Method::Post, ["mail"]) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestMail {
+                to: String,
+                subject: String,
+                text: String,
+            }
+            let asked: TestMail = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let mail = crate::mail::Mail { to: asked.to, subject: asked.subject, text: asked.text };
+            json_answer(&serde_json::json!({ "messageId": crate::mail::send(env, cfg, &mail).await? }))
         }
         (m, _) => Err(CellError::new(fragment_proto::ErrorCode::NotFound, format!("no lever {} /api/test/{}", m.as_ref(), rest.join("/")))),
     }
