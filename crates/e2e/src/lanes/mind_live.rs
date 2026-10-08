@@ -35,8 +35,8 @@
 //! awake, and two in thread G from asleep: one cold (its task's record
 //! wakes the computer), one whose person opened the mind's page `TYPING`
 //! before (its socket pre-wakes the computer). The run prints each turn's timing (its `turn` record on `log`:
-//! its wait, each model call's first data line and whole answer, its tries
-//! and hedge), each hand-off's marks (the task on `chat`, goose's claim, its
+//! its wait, each model call's first data line and whole answer, its calls
+//! and tries), each hand-off's marks (the task on `chat`, goose's claim, its
 //! `turn.timing` and steps on `work`, its reply, the report, the follow-up),
 //! and their percentiles (mind_timing.rs).
 //!
@@ -60,8 +60,7 @@ pub const SECTION: &str = "mind-live";
 
 /// The paid calls the run lends the section's person: the turns' model
 /// calls (one a tool round), the compactor's, Clef's sorts and goose's
-/// calls (its screen tools' Clef and vision calls among them), and a hedged
-/// call's second (each its own reservation); about 40 through the shell
+/// calls (its screen tools' Clef and vision calls among them); about 40 through the shell
 /// hand-off, about 30 for the latency measures (thread G's from asleep
 /// among them), about 30 more for the
 /// browsing two. Above the run's default budget (60): run it with
@@ -320,7 +319,7 @@ fn turn_secs(said: &[Value]) -> f64 {
 /// The run's latency (docs/optchat.md, "Latency"), printed: each turn's
 /// timing by thread, the turns answered in words, the mind's model calls'
 /// first data line and whole answer, each hand-off's marks, goose's model
-/// calls, and the hedges the ledger holds.
+/// calls, and the models the ledger settled.
 fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &[(String, Handoff)], identity: &str, api: &Api) {
     let label = |t: &str| threads.iter().find(|(id, _)| id.as_str() == t).map_or("?", |(_, l)| *l);
     let turns = m.turn_timings();
@@ -331,8 +330,7 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
     let calls: Vec<(Option<f64>, Option<f64>, bool)> = turns.iter().flat_map(|(_, t)| timing::calls(t)).collect();
     let firsts: Vec<f64> = calls.iter().filter_map(|c| c.0).collect();
     let wholes: Vec<f64> = calls.iter().filter_map(|c| c.1).collect();
-    let hedged = calls.iter().filter(|c| c.2).count();
-    let (fell, of) = timing::fell_back(&turns.iter().map(|(_, t)| t).collect::<Vec<_>>());
+    let twice = calls.iter().filter(|c| c.2).count();
     // simple ones, the computer awake (not D's browsing, nor G's from asleep)
     let reports: Vec<f64> = handoffs.iter().filter(|(l, _)| l.starts_with('C') || l.starts_with('F')).filter_map(|(_, h)| h.total()).collect();
     let follows: Vec<f64> = handoffs.iter().filter_map(|(_, h)| h.follow_up()).collect();
@@ -355,8 +353,7 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
     }
     println!("      (said → logged, the trigger and the steps before hear: {})", timing::stats(&heard));
     let holds = entries(api, identity, "");
-    let hedges = holds.iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains("hedge"))).count();
-    // which models answered (a fallback's when a tier's own was busy), the ledger's rows
+    // which models answered, the ledger's rows
     let mut by_model: std::collections::BTreeMap<String, usize> = Default::default();
     for e in &holds {
         if let Some(m) = e["entry"]["end"]["usage"]["model"].as_str() {
@@ -364,9 +361,9 @@ fn latency(m: &Mind, threads: &[(&String, &str)], word_secs: &[f64], handoffs: &
         }
     }
     println!(
-        "      (latency: turns in words, logged→answered {}; by the page's clock (ask→talk) {}; the mind's model calls, first data line {}, whole {}, {hedged} of {} hedged, {fell} of {of} answered on a fallback (their own model busy); \
+        "      (latency: turns in words, logged→answered {}; by the page's clock (ask→talk) {}; the mind's model calls, first data line {}, whole {}, {twice} of {} made twice (their first failed before it began); \
          simple hand-offs ask→report {}; follow-ups report→talk {}; goose's model calls (wait before each step, and its last) {}; \
-         the ledger: {hedges} hedge holds of {} reservations, settled by model {by_model:?})",
+         the ledger: {} reservations, settled by model {by_model:?})",
         timing::stats(&words),
         timing::stats(word_secs),
         timing::stats(&firsts),

@@ -15,15 +15,12 @@
 //! not that owner nor an agent of theirs (a run does not record whom an
 //! agent asked for, so an agent of the owner's counts as the owner).
 //!
-//! A text step always streams, and its call is hedged (models.rs,
-//! fragment_core::hedge): past its first data line's wait, a second call
-//! (the same request on its tier's next model) is made under a reservation of its own
-//! (`<reference>/hedge/<hex>`), the first to stream is the answer and the
-//! other is aborted. The answer is kept and settled as any call's; the
-//! second's hold is then charged what the cancelled call is (the answer's
-//! prompt, split as the answer's was, and no output), or released when the call that was
-//! not the answer failed before it began. Nothing is called twice after an
-//! answer was kept: a step tried again finds it.
+//! A text step always streams, one call on its tier's model (models.rs
+//! `streamed`: made once more at once when it failed for now before its
+//! first data line, under the same reservation, which it never used). Its
+//! answer says its `timing`: its first data line, its whole answer, the
+//! model, its tries. Nothing is called twice after an answer was kept: a
+//! step tried again finds it.
 //!
 //! A paid step reserves its worst case under its reference
 //! (`step:<f>@<life>/run/<run>/attempt/<a>/step/<i>`: a replay is a new
@@ -53,7 +50,7 @@ use crate::files::FileWrite;
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::jobs::{permanent, RunRow, StepFail};
 use crate::ledger::{self, LedgerError};
-use crate::models::{Begun, Failed, SecondCall};
+use crate::models::{Begun, Failed};
 use crate::ops::JOB_ID_PREFIX;
 
 /// Holds released per pass, of runs that ended.
@@ -388,7 +385,7 @@ impl FragmentCell {
             return Err(permanent(CellError::too_large("a model call", body_bytes, MODEL_BODY_MAX_BYTES).message));
         }
         // the payer's choice for the step's role: a tier, or their own
-        // provider (providers/step.rs), which is no hedge's nor ladder's
+        // provider (providers/step.rs)
         let own_spend = self.spends_own(run, p.capped)?;
         let tier = match crate::providers::step::chosen_for_step(&self.env, &p.owner, t, tier, own_spend).await? {
             crate::providers::Chosen::Fragment(tier) => tier,
@@ -404,73 +401,29 @@ impl FragmentCell {
                 return answered;
             }
         };
-        // every text step streams: its first data line is what a hedge races to
+        // every text step streams: its first data line is its timing's first
         let bounded = bounds::model_of(tier).and_then(|m| bounds::bound(m, body, true)).map_err(|why| permanent(why.message()))?;
-        let worst = bounded.worst(body_bytes);
-        self.reserve(&p, worst.clone()).await?;
+        self.reserve(&p, bounded.worst(body_bytes)).await?;
         let t0 = crate::js::now_ms();
         let (tries, began) = try_begins(&p.key, t0);
-        let read = self.streamed(&p, &bounded, drafting.as_ref(), worst).await?;
+        let read = self.streamed(&p, &bounded, drafting.as_ref()).await?;
         let usage = bounds::usage_of(read.model, &read.used);
         if usage.is_none() {
             self.event("ai.cost-missing", &format!("{}: the model reported no usage; the step is charged its reservation", p.reference), json!({ "ref": p.reference, "logId": read.log_id }));
         }
         // how long it took (docs/optchat.md, "Latency"): its first data line
-        // and its whole answer on this try, whether it was hedged and which
-        // call answered, its tries, and since its first
+        // and its whole answer on this try, the model, its calls on this try
+        // (a second when its first failed before it began), its tries, and
+        // since its first
         let now = crate::js::now_ms();
-        let won = read.second.as_ref().map(|s| if s.won { "second" } else { "first" });
-        let timing = json!({ "first_ms": read.first_ms, "ms": now - t0, "hedged": won.is_some(), "won": won, "model": read.model, "passed": read.passed, "thought": read.thought, "tries": tries, "since_ms": now - began, "at": now });
+        let timing = json!({ "first_ms": read.first_ms, "ms": now - t0, "model": read.model, "calls": read.calls, "thought": read.thought, "tries": tries, "since_ms": now - began, "at": now });
         let answer = &read.answer;
         let result = json!({ "text": answer.content, "message": answer.message(), "finish_reason": answer.finish_reason, "model": read.model, "tier": tier, "usage": read.used, "timing": timing });
         tries_end(&p.key);
         self.keep(&p, &result, usage.as_ref())?;
-        self.settle_kept(&p, &Kept { result: result.clone(), usage: usage.clone(), settled: false }).await?;
-        self.end_hedge(&p, read.second, usage.as_ref(), body_bytes).await;
+        self.settle_kept(&p, &Kept { result: result.clone(), usage, settled: false }).await?;
         self.test_countdown(MetaKey::TestFailAfterPaid, "the step failed after its paid call").map_err(retry)?;
         Ok(result)
-    }
-
-    /// A hedged step's second call's hold (`<reference>/hedge/<hex>`: a new
-    /// one each try, as no try settles another's), held at the step's worst
-    /// case and recorded on the run as the step's own is; none when the
-    /// ledger refuses it or does not answer (the step waits on its first
-    /// call alone).
-    async fn reserve_hedge(&self, p: &Paying, worst: Usage) -> Option<String> {
-        let reference = format!("{}/hedge/{}", p.reference, crate::js::random_hex::<4>());
-        let reserve = Reserve { reference: reference.clone(), spend: Spend::AiStep, worst, fragment: Some(p.fragment.clone()), agent: p.agent.clone(), capped: p.capped };
-        match ledger::ask(&self.env, &p.owner, &reserve).await {
-            Ok(Reserved::Held { .. }) => {}
-            _ => return None,
-        }
-        let recorded = self.exec(
-            "INSERT INTO charges (ref, run, micros, held, at) VALUES (?, ?, 0, 1, ?) ON CONFLICT (ref) DO NOTHING",
-            vec![reference.as_str().into(), SqlStorageValue::Integer(p.run), SqlStorageValue::Integer(crate::js::now_ms())],
-        );
-        if recorded.is_err() {
-            self.release(&p.owner, &reference).await;
-            return None;
-        }
-        Some(reference)
-    }
-
-    /// A hedged step's second call's hold, ended once the step's answer is
-    /// kept (or it failed): charged what the cancelled call is
-    /// (fragment_core::hedge::cancelled_usage), or released when the call
-    /// that was not the answer failed before it began. A settle the ledger
-    /// does not answer leaves it held, for `release_ended_holds`.
-    async fn end_hedge(&self, p: &Paying, second: Option<SecondCall<String>>, answer: Option<&Usage>, body_bytes: usize) {
-        let Some(s) = second else { return };
-        if !s.cancelled {
-            self.release(&p.owner, &s.hold).await;
-            return;
-        }
-        let charged = self.settle(&p.owner, &s.hold, Some(fragment_core::hedge::cancelled_usage(s.cancelled_model, answer, body_bytes))).await;
-        let summary = match &charged {
-            Ok(micros) => format!("{}: the other call of its hedge was cancelled before it began, charged its prompt ({micros} micros)", s.hold),
-            Err(_) => format!("{}: the other call of its hedge was cancelled; its charge did not land, and its hold goes back when the run ends", s.hold),
-        };
-        self.event("ai.hedged", &summary, json!({ "ref": s.hold, "won": if s.won { "second" } else { "first" }, "charged": charged.ok() }));
     }
 
     /// A text step's draft: a channel the app declares (whoever may read it
@@ -482,35 +435,29 @@ impl FragmentCell {
         Ok(Drafting { channel: d.channel.clone(), turn: d.turn.clone(), principal: npub::display(&self.own_key().map_err(retry)?) })
     }
 
-    /// A text step's call, streamed and hedged (models.rs `hedged`): its
-    /// answer and usage read as they come, and with a draft, its text so far
-    /// put as the draft (at most every `DRAFT_EVERY_MS`, its whole text once
-    /// more at the end, none past a record's size). A stream that breaks, or
-    /// ends before its answer says why it stopped, is the step's to try
-    /// again under the same hold, as an unstreamed answer cut short is; its
-    /// hedge's hold ends first. Read to its `[DONE]`, the connection is
-    /// aborted: the gateway can hold it open for minutes after.
-    async fn streamed(&self, p: &Paying, bounded: &Bounded, d: Option<&Drafting>, worst: Usage) -> Result<Read, StepFail> {
+    /// A text step's call, streamed (models.rs `streamed`): its answer and
+    /// usage read as they come, and with a draft, its text so far put as the
+    /// draft (at most every `DRAFT_EVERY_MS`, its whole text once more at
+    /// the end, none past a record's size). A stream that breaks, or ends
+    /// before its answer says why it stopped, is the step's to try again
+    /// under the same hold, as an unstreamed answer cut short is. Read to
+    /// its `[DONE]`, the connection is aborted: the gateway can hold it open
+    /// for minutes after.
+    async fn streamed(&self, p: &Paying, bounded: &Bounded, d: Option<&Drafting>) -> Result<Read, StepFail> {
         let meta = crate::models::Metadata::of(&p.owner, p.agent.as_deref());
-        let body_bytes = bounded.input.to_string().len();
         let t0 = crate::js::now_ms();
         // the page sees the call begin: thinking, until its words come
         if let Some(d) = d {
             self.put_thinking(d, 0);
         }
-        let h = crate::models::hedged(&self.env, bounded, &meta, || Box::pin(self.reserve_hedge(p, worst))).await;
-        let (first_ms, second) = (h.first_ms, h.second);
-        let begun = match h.opened {
+        let opened = crate::models::streamed(&self.env, bounded, &meta).await;
+        let (first_ms, calls) = (opened.first_ms, opened.calls);
+        let begun = match opened.opened {
             Ok(b) => b,
-            Err(failed) => {
-                self.end_hedge(p, second, None, body_bytes).await;
-                return Err(match failed {
-                    Failed::Unanswered(e) => retry(e),
-                    Failed::Refused { status, body, .. } => self.unpaid(p, model_failure(status, &body)).await,
-                });
-            }
+            Err(Failed::Unanswered(e)) => return Err(retry(e)),
+            Err(Failed::Refused { status, body }) => return Err(self.unpaid(p, model_failure(status, &body)).await),
         };
-        let Begun { log_id, head, mut rest, abort, model, passed } = begun;
+        let Begun { log_id, head, mut rest, abort } = begun;
         let mut stream = Stream::answering();
         let (mut sent, mut sent_at) = (0usize, None::<i64>);
         // what it had thought when it last said it was thinking, and when
@@ -527,10 +474,7 @@ impl FragmentCell {
             };
             let chunk = match chunk {
                 Ok(c) => c,
-                Err(e) => {
-                    self.end_hedge(p, second, None, body_bytes).await;
-                    return Err(StepFail::Retry(format!("the model's stream broke: {e}")));
-                }
+                Err(e) => return Err(StepFail::Retry(format!("the model's stream broke: {e}"))),
             };
             stream.push(&chunk, None);
             if let Some(d) = d {
@@ -555,13 +499,12 @@ impl FragmentCell {
         stream.finish(None);
         let answer = stream.answer().cloned().expect("an answering stream keeps its answer");
         if answer.finish_reason.is_none() {
-            self.end_hedge(p, second, None, body_bytes).await;
             return Err(StepFail::Retry("the model's stream ended before its answer did".into()));
         }
         if let Some(d) = d.filter(|_| answer.content.len() > sent) {
             self.put_draft(d, &answer.content);
         }
-        Ok(Read { answer, used: stream.usage().cloned().unwrap_or(Value::Null), log_id, first_ms, thought: stream.thought(), model, passed, second })
+        Ok(Read { answer, used: stream.usage().cloned().unwrap_or(Value::Null), log_id, first_ms, calls, thought: stream.thought(), model: bounded.model })
     }
 
     /// One draft of the text so far, to the channel's live readers: its
@@ -620,20 +563,18 @@ impl FragmentCell {
 }
 
 /// A text step's call, read: its answer and the usage it reported, its
-/// gateway log id, when its first data line came (ms from the call), and
-/// its hedge's second call, when one was made.
+/// gateway log id, and when its first data line came (ms from the call).
 struct Read {
     answer: Answer,
     used: Value,
     log_id: Option<String>,
     first_ms: i64,
+    /// Its calls (a second when the first failed before it began).
+    calls: u32,
     /// Characters of reasoning it streamed (none kept).
     thought: u64,
-    /// The model that answered (the call's own, or its ladder's), and the
-    /// rungs passed over before it.
+    /// The model that answered: its tier's.
     model: &'static str,
-    passed: Vec<&'static str>,
-    second: Option<SecondCall<String>>,
 }
 
 /// Where a streamed text step's drafts go, and who drafts them.

@@ -21,18 +21,15 @@
 //! the vendor boundary (crates/fakes, `workers_ai`), never product proof.
 //! A job's image and decision steps call their models on the same
 //! transport (`run`), and its text step reads its answer as it streams
-//! (`hedged`).
+//! (`streamed`).
 //!
-//! A streamed call is hedged (fragment_core::hedge): its first data line
-//! is waited for `hedge::AFTER_MS`, and past it, or at a failure for now
-//! before it, one second call (the same request on the tier's next model,
-//! `bounds::plan`) is made under a reservation of its
-//! own (`aig:<hex>:hedge` here, `…/hedge/<hex>` for a job's step).
-//! Whichever streams first is the answer, and the other is aborted. The
-//! answer's reservation settles from its usage; the second's from what the
-//! cancelled call is charged (`hedge::cancelled_usage`: the answer's prompt,
-//! split as the answer's was, and no output), or is released when the other call failed
-//! before it used anything.
+//! A streamed call is one call on its tier's model, waiting in its queue
+//! when the model is busy, read to its first data line (its `first_ms`):
+//! one that failed for now before that (a 429, a 5xx, a stream that broke
+//! or ended) is made once more at once, under the same reservation, which
+//! it never used (`streamed`). (A race of a second call on another model,
+//! and a ladder of fallbacks for a busy model, were measured and removed:
+//! docs/optchat.md, "Latency".)
 //!
 //! Who calls: an agent, `POST /api/models/v1/chat/completions` (`route`),
 //! signed by the agent (its computer's model intercept signs it), `for`
@@ -51,11 +48,9 @@
 //! its input's bytes as tokens, its answer the step's `{answers, model,
 //! usage}`.
 
-use std::future::Future;
 use std::pin::Pin;
 
 use fragment_core::decide;
-use fragment_core::hedge::{self, Arm, Next, Opening, Race};
 use fragment_core::ledger::{Release, Reserve, Settle, Spend};
 use fragment_core::models::{self as bounds, Bounded, Named, Stream};
 use fragment_core::price::Usage;
@@ -153,12 +148,12 @@ impl Held {
     /// left held, and the ledger's sweep charges it at its worst case after
     /// six hours: the money path fails closed.
     async fn settle(&self, usage: Option<Usage>, log_id: Option<String>) {
-        self.settle_timed(usage, log_id, None, None).await;
+        self.settle_timed(usage, log_id, None).await;
     }
 
     /// `settle`, its log line saying when the answer's first data line came
     /// (`first_ms`, a streamed answer's) and how long the call took.
-    async fn settle_timed(&self, usage: Option<Usage>, log_id: Option<String>, first_ms: Option<i64>, hedge: Option<&'static str>) {
+    async fn settle_timed(&self, usage: Option<Usage>, log_id: Option<String>, first_ms: Option<i64>) {
         let ms = js::now_ms() - self.t0;
         // its tokens (in, cached, out), for the latency they explain
         let tokens = match &usage {
@@ -168,7 +163,7 @@ impl Held {
         let settle = Settle { reference: self.reference.clone(), usage };
         match ledger::retried(&self.env, &self.payer, &settle).await {
             // one line per event: `wrangler tail` drops lines (lesson 14)
-            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": first_ms, "ms": ms, "hedge": hedge, "tokens": tokens })),
+            Ok(settled) => console_log!("{}", json!({ "event": "model.settled", "ref": self.reference, "logId": log_id, "tier": self.named, "model": self.model, "charge": settled.charge, "basis": settled.basis, "first_ms": first_ms, "ms": ms, "tokens": tokens })),
             Err(e) => console_error!("{}", json!({ "event": "model.settle-failed", "ref": self.reference, "logId": log_id, "message": e.message })),
         }
     }
@@ -186,8 +181,7 @@ impl Held {
 /// its own (`aig:<hex>`), as an agent's turn. Whose cap applies: the
 /// payer's own fragment's, on its ledger; another owner's, asked of
 /// theirs first, unless the spender is that owner's (decision 26).
-#[allow(clippy::too_many_arguments)]
-async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, named: &'static str, worst: Usage, hedge: bool) -> CellResult<Held> {
+async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InFragment<'_>>, model: &'static str, named: &'static str, worst: Usage) -> CellResult<Held> {
     let (fragment, capped) = match fragment {
         Some(f) if f.owner == payer => (Some(f.name.to_string()), !f.by_owner),
         Some(f) => {
@@ -198,7 +192,7 @@ async fn hold(env: &Env, payer: &str, agent: Option<&str>, fragment: Option<&InF
         }
         None => (None, false),
     };
-    let reference = format!("aig:{}{}", js::random_hex::<16>(), if hedge { ":hedge" } else { "" });
+    let reference = format!("aig:{}", js::random_hex::<16>());
     let reserve = Reserve { reference, spend: Spend::AgentTurn, worst, fragment, agent: agent.map(str::to_string), capped };
     ledger::hold(env, payer, &reserve).await?;
     Ok(Held { env: env.clone(), payer: payer.to_string(), reference: reserve.reference, model, named, t0: js::now_ms() })
@@ -226,15 +220,13 @@ pub async fn complete(env: &Env, mut call: ModelCall<'_>, after: &dyn Background
     let model = bounds::capped(call.named, cfg.vision_model.as_str()).map_err(refused)?;
     let bounded = bounds::bound(model, call.body, call.stream).map_err(refused)?;
     let named = call.named.as_str();
-    let worst = bounded.worst(body_bytes);
-    let held = hold(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model, named, worst.clone(), false).await?;
+    let held = hold(env, call.payer, call.agent, call.fragment.as_ref(), bounded.model, named, bounded.worst(body_bytes)).await?;
     let meta = Metadata::of(call.payer, call.agent);
     if bounded.stream {
-        let (payer, agent, fragment, model) = (call.payer, call.agent, call.fragment.as_ref(), bounded.model);
-        let h = hedged(env, &bounded, &meta, move || Box::pin(async move { hold(env, payer, agent, fragment, model, named, worst, true).await.ok() })).await;
-        return answer_hedged(held, h, body_bytes, after);
+        let s = streamed(env, &bounded, &meta).await;
+        return answer_streamed(held, s, after);
     }
-    let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta, None, false).await {
+    let mut upstream = match transport(env, cfg, bounded.model, &bounded.input, &meta, None).await {
         Ok(r) => r,
         Err(e) => {
             held.release("the model was not reached").await;
@@ -271,40 +263,25 @@ fn refusal_response(status: u16, text: String) -> CellResult<Response> {
     Ok(resp)
 }
 
-/// A streamed route call's answer, hedged: the client's branch, and the
-/// meter's read to its end by `after`, which settles the answer's hold
-/// from its usage and the second call's as `SecondCall` says. A call that
-/// failed releases both holds (neither used anything) and passes the
-/// refusal on.
-fn answer_hedged(held: Held, h: Hedged<Held>, body_bytes: usize, after: &dyn Background) -> CellResult<Response> {
-    let (first_ms, second) = (h.first_ms, h.second);
-    let begun = match h.opened {
+/// A streamed route call's answer: the client's branch, and the meter's
+/// read to its end by `after`, which settles the call's hold from its
+/// usage. A call that failed releases its hold (it used nothing) and
+/// passes the refusal on.
+fn answer_streamed(held: Held, s: Streamed, after: &dyn Background) -> CellResult<Response> {
+    let first_ms = s.first_ms;
+    let begun = match s.opened {
         Ok(b) => b,
-        Err(failed) => {
-            after.later(Box::pin(async move {
-                if let Some(s) = second {
-                    s.hold.release("its hedged call failed").await;
-                }
-            }));
-            return match failed {
-                Failed::Unanswered(e) => {
-                    after.later(Box::pin(async move { held.release("the model was not reached").await }));
-                    Err(e)
-                }
-                Failed::Refused { status, body, .. } => {
-                    after.later(Box::pin(async move { held.release(&format!("the model answered {status}")).await }));
-                    refusal_response(status, String::from_utf8_lossy(&body).chars().take(REFUSAL_MAX_CHARS).collect())
-                }
-            };
+        Err(Failed::Unanswered(e)) => {
+            after.later(Box::pin(async move { held.release("the model was not reached").await }));
+            return Err(e);
+        }
+        Err(Failed::Refused { status, body }) => {
+            after.later(Box::pin(async move { held.release(&format!("the model answered {status}")).await }));
+            return refusal_response(status, String::from_utf8_lossy(&body).chars().take(REFUSAL_MAX_CHARS).collect());
         }
     };
     let log_id = begun.log_id.clone();
-    // the model that answered (its ladder's, when its own was busy), priced as itself
-    let model = begun.model;
-    if !begun.passed.is_empty() {
-        console_log!("{}", json!({ "event": "model.passed", "ref": held.reference, "passed": begun.passed, "answered": model }));
-    }
-    let hedge = second.as_ref().map(|s| if s.won { "second" } else { "first" });
+    let model = held.model;
     let whole = Response::from_stream(begun.bytes())?;
     let ResponseBody::Stream(source) = whole.body() else { unreachable!("an answer made from a stream is one") };
     // one branch for the client, one read to its end for the meter: a
@@ -326,27 +303,13 @@ fn answer_hedged(held: Held, h: Hedged<Held>, body_bytes: usize, after: &dyn Bac
         }
         stream.finish(None);
         let usage = if broke { None } else { stream.usage().and_then(|u| bounds::usage_of(model, u)) };
-        if let Some(s) = second {
-            s.end(usage.as_ref(), body_bytes).await;
-        }
-        held.settle_timed(usage, log_id, Some(first_ms), hedge).await;
+        held.settle_timed(usage, log_id, Some(first_ms)).await;
     }));
     let normalized = Normalized { source: Box::pin(ByteStream::from(client)), stream: Stream::default(), done: false };
     let mut resp = Response::from_stream(normalized)?;
     resp.headers_mut().set("content-type", "text/event-stream")?;
     resp.headers_mut().set("cache-control", "no-cache")?;
     Ok(resp)
-}
-
-impl SecondCall<Held> {
-    /// The route's second call's hold, ended: charged what the cancelled
-    /// call is (`hedge::cancelled_usage`), or released.
-    async fn end(self, answer: Option<&Usage>, body_bytes: usize) {
-        match self.cancelled {
-            true => self.hold.settle_timed(Some(hedge::cancelled_usage(self.cancelled_model, answer, body_bytes)), None, None, Some("cancelled")).await,
-            false => self.hold.release("the other call of its hedge failed before it began").await,
-        }
-    }
 }
 
 /// An answer that began: its gateway log id, what was read of it up to its
@@ -358,10 +321,6 @@ pub(crate) struct Begun {
     pub head: Vec<u8>,
     pub rest: ByteStream,
     pub abort: AbortController,
-    /// The model that answered: the call's own, or a rung of its ladder.
-    pub model: &'static str,
-    /// The rungs passed over before it (busy, or refusing it), in order.
-    pub passed: Vec<&'static str>,
 }
 
 impl Begun {
@@ -371,7 +330,7 @@ impl Begun {
     }
 }
 
-/// Why a hedged call failed before it began.
+/// Why a streamed call failed before it began.
 pub(crate) enum Failed {
     /// The model's refusal: its status and body (read whole).
     Refused { status: u16, body: Vec<u8> },
@@ -380,216 +339,75 @@ pub(crate) enum Failed {
     Unanswered(CellError),
 }
 
-/// What a hedged call's second call came to, for its hold (`H`).
-pub(crate) struct SecondCall<H> {
-    pub hold: H,
-    /// It was the answer.
-    pub won: bool,
-    /// The call that was not the answer was cancelled before it began: the
-    /// second's hold is charged `hedge::cancelled_usage`. Otherwise it
-    /// failed before it used anything (or the whole call failed), and the
-    /// second's hold is released.
-    pub cancelled: bool,
-    /// The model the cancelled call asked first (its plan's), whose prices
-    /// it is charged at.
-    pub cancelled_model: &'static str,
+impl Failed {
+    /// Whether the same call made again may answer: a 429, a 5xx, or no
+    /// answer at all.
+    fn passing(&self) -> bool {
+        matches!(self, Failed::Refused { status: 429 | 500..=599, .. } | Failed::Unanswered(_))
+    }
 }
 
-/// A hedged call (fragment_core::hedge): the answer that began, or why it
-/// failed (the first call's failure when both failed); when its first data
-/// line came (ms from the first call made); and its second call, when one
-/// was made.
-pub(crate) struct Hedged<H> {
+/// A streamed call, opened: the answer that began, or why it failed; when
+/// its first data line came (ms from its first call made); and how many
+/// calls it took.
+pub(crate) struct Streamed {
     pub opened: std::result::Result<Begun, Failed>,
     pub first_ms: i64,
-    pub second: Option<SecondCall<H>>,
+    pub calls: u32,
 }
 
-/// One call of a hedged pair, opened: read until its first data line.
-enum Arrived {
-    Begun { log_id: Option<String>, head: Vec<u8>, rest: ByteStream, model: &'static str, passed: Vec<&'static str> },
-    Failed(Failed),
-}
+/// The calls one streamed call makes at most: the second is made at once
+/// when the first failed for now before it began, having used nothing (a
+/// retry within its step; no race, no other model: docs/optchat.md,
+/// "Latency").
+const STREAM_CALLS_MAX: u32 = 2;
 
-impl Arrived {
-    fn opening(&self) -> Opening {
-        match self {
-            Arrived::Begun { .. } => Opening::Streaming,
-            Arrived::Failed(Failed::Refused { status: 429 | 500..=599, .. }) | Arrived::Failed(Failed::Unanswered(_)) => Opening::Passing,
-            Arrived::Failed(Failed::Refused { .. }) => Opening::Lasting,
+/// A streamed call (`bounded`, on its own model, waiting in its queue
+/// when busy), read to its first data line, and made once more at once
+/// when it failed for now before that (`STREAM_CALLS_MAX`). Unmetered:
+/// its caller holds one reservation for it, which a call that failed
+/// before it began never used.
+pub(crate) async fn streamed(env: &Env, bounded: &Bounded, meta: &Metadata) -> Streamed {
+    assert!(bounded.stream, "a streamed call asks for a stream");
+    let cfg = Config::from_env(env);
+    let t0 = js::now_ms();
+    let mut calls = 0;
+    // bounded by STREAM_CALLS_MAX
+    loop {
+        calls += 1;
+        let opened = open(env, cfg, bounded, meta).await;
+        match opened {
+            Err(f) if f.passing() && calls < STREAM_CALLS_MAX => continue,
+            opened => return Streamed { opened, first_ms: js::now_ms() - t0, calls },
         }
     }
 }
 
-/// One call of a hedged pair (`which`): made down its plan
-/// (bounds::plan: each rung asked not to queue, then its own model's
-/// queue), and read until its first data line.
-async fn arm(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata, signal: AbortSignal, which: Arm) -> Arrived {
-    let plan = bounds::plan(bounded.model, which);
-    let mut passed: Vec<&'static str> = Vec::new();
-    let last = plan.len() - 1;
-    // bounded by the plan: a rung each pass
-    for (k, (model, reject_if_busy)) in plan.into_iter().enumerate() {
-        let mut resp = match transport(env, cfg, model, &bounded.input, meta, Some(&signal), reject_if_busy).await {
-            Ok(r) => r,
-            // a fallback not reached: the next rung
-            Err(_) if k > 0 && k < last => {
-                passed.push(model);
-                continue;
-            }
-            Err(e) => return Arrived::Failed(Failed::Unanswered(e)),
-        };
-        let status = resp.status_code();
-        let log_id = resp.headers().get("cf-aig-log-id").ok().flatten();
-        if status != 200 {
-            let body = read_whole(&mut resp).await.unwrap_or_default();
-            // busy (or a fallback that refused it): the next rung, unpaid
-            if k < last && (bounds::busy(status, &body) || k > 0) {
-                passed.push(model);
-                continue;
-            }
-            return Arrived::Failed(Failed::Refused { status, body });
-        }
-        return began(resp, log_id, model, passed).await;
+/// One call, read until its first data line.
+async fn open(env: &Env, cfg: &Config, bounded: &Bounded, meta: &Metadata) -> std::result::Result<Begun, Failed> {
+    let abort = AbortController::default();
+    let mut resp = transport(env, cfg, bounded.model, &bounded.input, meta, Some(&abort.signal())).await.map_err(Failed::Unanswered)?;
+    let status = resp.status_code();
+    let log_id = resp.headers().get("cf-aig-log-id").ok().flatten();
+    if status != 200 {
+        let body = read_whole(&mut resp).await.unwrap_or_default();
+        return Err(Failed::Refused { status, body });
     }
-    unreachable!("a plan's last rung answers or fails")
-}
-
-/// A call that answered 200, read until its first data line.
-async fn began(mut resp: Response, log_id: Option<String>, model: &'static str, passed: Vec<&'static str>) -> Arrived {
-    let unanswered = |why: String| Arrived::Failed(Failed::Unanswered(CellError::new(ErrorCode::UpstreamFailed, why)));
-    let mut rest = match resp.stream() {
-        Ok(s) => s,
-        Err(e) => return unanswered(format!("the model's answer had no stream: {e}")),
-    };
+    let unanswered = |why: String| Failed::Unanswered(CellError::new(ErrorCode::UpstreamFailed, why));
+    let mut rest = resp.stream().map_err(|e| unanswered(format!("the model's answer had no stream: {e}")))?;
     let mut head = Vec::new();
-    // bounded by hedge::HEAD_MAX_BYTES: `began` is true past it
+    // bounded by bounds::HEAD_MAX_BYTES: `began` is true past it
     loop {
         match rest.next().await {
             Some(Ok(chunk)) => {
                 head.extend_from_slice(&chunk);
-                if hedge::began(&head) {
-                    return Arrived::Begun { log_id, head, rest, model, passed };
+                if bounds::began(&head) {
+                    return Ok(Begun { log_id, head, rest, abort });
                 }
             }
-            Some(Err(e)) => return unanswered(format!("the model's stream broke before it began: {e}")),
-            None => return unanswered("the model's stream ended before it began".into()),
+            Some(Err(e)) => return Err(unanswered(format!("the model's stream broke before it began: {e}"))),
+            None => return Err(unanswered("the model's stream ended before it began".into())),
         }
-    }
-}
-
-/// What a hedged call's race heard next.
-enum Heard {
-    Arm(Arm, Arrived),
-    Timer,
-}
-
-fn slot(arm: Arm) -> usize {
-    match arm {
-        Arm::First => 0,
-        Arm::Second => 1,
-    }
-}
-
-/// A streamed call, hedged (the module's doc; fragment_core::hedge): the
-/// first call made at once; past `hedge::AFTER_MS` with no data line, or at
-/// a failure for now before it, `second` holds the second call's
-/// reservation (none: it is not made) and the second call is made. The
-/// first to stream is the answer, the other aborted. Unmetered: the caller
-/// meters both calls.
-pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: &'a Metadata, second: impl FnOnce() -> LocalBoxFuture<'a, Option<H>>) -> Hedged<H> {
-    assert!(bounded.stream, "a hedged call streams: its first data line is what it races to");
-    let cfg = Config::from_env(env);
-    let t0 = js::now_ms();
-    let mut race = Race::new();
-    // the second call on a model of its own (bounds::plan) and a prefix-cache
-    // session of its own (`Metadata::hedge`): the slowest calls were slow on
-    // both calls of one model at once (2026-10-08: 15 and 30 s)
-    let mut hedge_meta = Some(meta.hedge());
-    let open = |meta: Metadata, c: &AbortController, which: Arm| -> LocalBoxFuture<'a, Arrived> {
-        let signal = c.signal();
-        Box::pin(async move { arm(env, cfg, bounded, &meta, signal, which).await })
-    };
-    let first = AbortController::default();
-    let mut arms: [Option<LocalBoxFuture<'a, Arrived>>; 2] = [Some(open(meta.clone(), &first, Arm::First)), None];
-    let mut controllers: [Option<AbortController>; 2] = [Some(first), None];
-    let mut arrived: [Option<Arrived>; 2] = [None, None];
-    let mut timer = Some(Delay::from(std::time::Duration::from_millis(hedge::AFTER_MS)));
-    let mut second = Some(second);
-    let mut hold: Option<H> = None;
-    // bounded: each pass hears one of at most three things (each call
-    // opening, the timer), and the race ends by the last of them
-    loop {
-        let heard = std::future::poll_fn(|cx| {
-            for arm in [Arm::First, Arm::Second] {
-                if let Some(f) = arms[slot(arm)].as_mut() {
-                    if let std::task::Poll::Ready(a) = f.as_mut().poll(cx) {
-                        return std::task::Poll::Ready(Heard::Arm(arm, a));
-                    }
-                }
-            }
-            if let Some(t) = timer.as_mut() {
-                if Pin::new(t).poll(cx).is_ready() {
-                    return std::task::Poll::Ready(Heard::Timer);
-                }
-            }
-            std::task::Poll::Pending
-        })
-        .await;
-        let mut next = match heard {
-            Heard::Arm(arm, a) => {
-                arms[slot(arm)] = None;
-                let how = a.opening();
-                arrived[slot(arm)] = Some(a);
-                race.opened(arm, how)
-            }
-            Heard::Timer => {
-                timer = None;
-                race.timer()
-            }
-        };
-        if next == Next::Hedge {
-            timer = None;
-            let reserve = second.take().expect("the second call is made once");
-            next = match reserve().await {
-                Some(h) => {
-                    hold = Some(h);
-                    race.made();
-                    let c = AbortController::default();
-                    arms[1] = Some(open(hedge_meta.take().expect("the second call is made once"), &c, Arm::Second));
-                    controllers[1] = Some(c);
-                    Next::Wait
-                }
-                None => race.refused(),
-            };
-        }
-        let (outcome, cancel) = match next {
-            Next::Wait => continue,
-            Next::Hedge => unreachable!("a hedge is made or refused as it is asked"),
-            Next::Won { winner, cancel } => (Ok(winner), cancel),
-            Next::Failed { arm, cancel } => (Err(arm), cancel),
-        };
-        if let Some(c) = cancel {
-            arms[slot(c)] = None;
-            if let Some(ctrl) = controllers[slot(c)].take() {
-                ctrl.abort();
-            }
-        }
-        let first_ms = js::now_ms() - t0;
-        // the cancelled call: the one that did not answer, priced as its plan's first model
-        let cancelled_model = bounds::plan(bounded.model, if outcome == Ok(Arm::Second) { Arm::First } else { Arm::Second })[0].0;
-        let second = hold.map(|hold| SecondCall { hold, won: outcome == Ok(Arm::Second), cancelled: outcome.is_ok() && cancel.is_some(), cancelled_model });
-        let opened = match outcome {
-            Ok(winner) => match arrived[slot(winner)].take() {
-                Some(Arrived::Begun { log_id, head, rest, model, passed }) => Ok(Begun { log_id, head, rest, model, passed, abort: controllers[slot(winner)].take().expect("a call made has its controller") }),
-                _ => unreachable!("the winner began"),
-            },
-            Err(arm) => match arrived[slot(arm)].take() {
-                Some(Arrived::Failed(f)) => Err(f),
-                _ => unreachable!("the call failed as its arm did"),
-            },
-        };
-        return Hedged { opened, first_ms, second };
     }
 }
 
@@ -598,7 +416,7 @@ pub(crate) async fn hedged<'a, H: 'a>(env: &'a Env, bounded: &'a Bounded, meta: 
 /// ai.rs, whose caller bounds the input and meters it).
 pub(crate) async fn run(env: &Env, model: &str, input: &Value, payer: &str, agent: Option<&str>) -> CellResult<(u16, Vec<u8>, Option<String>)> {
     let meta = Metadata::of(payer, agent);
-    let mut resp = transport(env, Config::from_env(env), model, input, &meta, None, false).await?;
+    let mut resp = transport(env, Config::from_env(env), model, input, &meta, None).await?;
     let status = resp.status_code();
     let log_id = resp.headers().get("cf-aig-log-id")?;
     let bytes = read_whole(&mut resp).await?;
@@ -618,12 +436,6 @@ impl Metadata {
     pub(crate) fn of(payer: &str, agent: Option<&str>) -> Metadata {
         let agent_id = agent.map(opaque);
         Metadata { user_id: opaque(payer), affinity: agent_id.clone(), agent_id }
-    }
-
-    /// A hedge's second call's: its prefix-cache session its own, so it
-    /// is not routed where its first is slow.
-    fn hedge(&self) -> Metadata {
-        Metadata { affinity: self.affinity.as_ref().map(|a| format!("{a}.hedge")), ..self.clone() }
     }
 }
 
@@ -674,8 +486,9 @@ pub(crate) struct Metadata {
 
 /// Makes a bounded call: `input` to `model`, through the AI binding and
 /// the deployment's gateway, or, in dev and the e2e, to the fake at
-/// `FRAGMENT_AI_URL`; `signal` aborts it (a hedged call's other).
-async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata, signal: Option<&AbortSignal>, reject_if_busy: bool) -> CellResult<Response> {
+/// `FRAGMENT_AI_URL`; `signal` aborts it (a stream read to its end, whose
+/// connection the gateway may hold open after it).
+async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &Metadata, signal: Option<&AbortSignal>) -> CellResult<Response> {
     let mut metadata = json!({ "user_id": meta.user_id });
     if let Some(agent) = &meta.agent_id {
         metadata["agent_id"] = json!(agent);
@@ -690,9 +503,6 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
         let h = Headers::new();
         h.set("content-type", "application/json")?;
         h.set("x-fragment-ai-metadata", &metadata.to_string())?;
-        if reject_if_busy {
-            h.set("x-fragment-ai-options", &json!({ "rejectIfBusy": true }).to_string())?;
-        }
         if let Some(agent) = &meta.affinity {
             h.set("x-session-affinity", agent)?;
         }
@@ -708,11 +518,7 @@ async fn transport(env: &Env, cfg: &Config, model: &str, input: &Value, meta: &M
     let Some(gateway) = &cfg.ai_gateway_id else {
         return Err(CellError::host("this deployment has no model route: set AI_GATEWAY_ID (its AI Gateway)"));
     };
-    let mut options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
-    if reject_if_busy {
-        // a busy model refuses at once (429, error 3040) instead of queueing the call
-        options["rejectIfBusy"] = json!(true);
-    }
+    let options = json!({ "gateway": { "id": gateway, "metadata": metadata, "collectLog": false }, "extraHeaders": headers });
     js::ai_run(env.as_ref(), model, input, &options, signal).await.map_err(|e| CellError::new(ErrorCode::UpstreamFailed, format!("the model did not answer: {}", e.message)))
 }
 
@@ -824,7 +630,7 @@ pub(crate) async fn decide_route(mut req: Request, env: &Env, url: &Url) -> Cell
     if input_bytes > MODEL_BODY_MAX_BYTES {
         return Err(CellError::too_large("a model call", input_bytes, MODEL_BODY_MAX_BYTES));
     }
-    let held = hold(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), call.model, "decide", call.worst(input_bytes), false).await?;
+    let held = hold(env, &caller.owner, Some(&caller.agent), caller.in_fragment().as_ref(), call.model, "decide", call.worst(input_bytes)).await?;
     let (status, bytes, log_id) = match run(env, call.model, &call.input, &caller.owner, Some(&caller.agent)).await {
         Ok(answered) => answered,
         Err(e) => {

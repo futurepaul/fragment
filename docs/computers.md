@@ -377,9 +377,9 @@ expires within 30 days. The container application is the deployment's
   the tier's model and a capped `max_tokens`, drops the guest's auth
   headers, reserves the call's worst case on the agent's owner's ledger,
   calls the model through AI Gateway, streams its answer back, and
-  settles the final usage (lesson 7). A streamed call passes over a busy
-  model to its tier's next (Workers AI's `rejectIfBusy`), and a slow one is
-  hedged with a second (docs/api.md, Models).
+  settles the final usage (lesson 7). A streamed call is one call on its
+  tier's model, made once more at once when it fails for now before its
+  first data line (docs/api.md, Models).
 - `POST http://model.fragment.internal/v1/decide`, a Clef decision (a
   job's `ai.decide` input: `{model?, state, questions, images?}`, `model`
   `clef` or `clef-flash`, the default) with `x-fragment-agent`: the

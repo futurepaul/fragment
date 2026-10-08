@@ -257,11 +257,12 @@ pub struct PriceBook {
 /// price, its output free. A deployment whose ledgers already hold book 1
 /// takes Clef's rows by naming a newer `price_book_version`.
 ///
-/// The tiers' fallbacks when their model is busy (crate::models::ladder),
-/// from their Workers AI catalog pages (read 2026-10-08): DeepSeek V4
-/// Flash, and Gemma 4 26B A4B, which names no cached price (its cached
-/// tokens are its input's). A deployment whose ledgers hold an older book
-/// takes them by naming a newer `price_book_version`.
+/// DeepSeek V4 Flash, and Gemma 4 26B A4B (which names no cached price:
+/// its cached tokens are its input's), from their Workers AI catalog pages
+/// (read 2026-10-08): the fallbacks of a busy model's ladder, measured and
+/// removed the same day (docs/optchat.md, "Latency"). No call names them
+/// now; their rows stay, data in the book the preview's ledgers hold
+/// (version 3), so no deployment's book moves back.
 pub const DEFAULT_MODELS: [(&str, TokenPrices); 7] = [
     // $0.15 in, $0.03 cached, $0.50 out per million tokens
     ("@cf/zai-org/glm-5.3-flash", TokenPrices { input: 150_000, cached_input: 30_000, cache_write: 150_000, output: 500_000 }),

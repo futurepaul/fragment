@@ -322,18 +322,16 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "run": run, "ledger": v }),
     );
     // each of its five tries is two calls: a 503 before a call begins is
-    // its hedge's cue (fragment_core::hedge), whose hold goes back with it
+    // made once more at once, within the try (models.rs `streamed`)
     s.ai.fail_next(&[503; 10]);
     let r = api.op(&owner, &name, "summarize", "t-503", json!({ "text": "flaky", "tier": "cheap" }))?;
     let run = settle(api, &owner, &name, started(&r), &["succeeded", "held"], Duration::from_secs(90));
-    let ended = entries(api, &owner_id, &format!("step:{name}@"));
-    let (hedges, steps): (Vec<&Value>, Vec<&Value>) = ended.iter().partition(|e| e["ref"].as_str().is_some_and(|r| r.contains("/hedge/")));
-    let released = steps.iter().filter(|e| end_of(e) == "released").count();
+    let released = entries(api, &owner_id, &format!("step:{name}@")).into_iter().filter(|e| end_of(e) == "released").count();
     let v = ledger(api, &owner);
     s.ok(
-        "a step whose retries run out gives its reservation back too (bug 3), and each try's hedge's",
-        run["status"] == "held" && released == 2 && hedges.len() == 5 && hedges.iter().all(|e| end_of(e) == "released") && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
-        json!({ "run": run, "ledger": v, "hedges": hedges }),
+        "a step whose retries run out gives its reservation back too (bug 3)",
+        run["status"] == "held" && released == 2 && m(&v, "reservedMicros") == 0 && run_charged(api, &owner_id, &name, &run) == 0,
+        json!({ "run": run, "ledger": v }),
     );
 
     // ---- bug 2: a step tried again after its call was paid never buys again
@@ -562,24 +560,16 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
     let landed = s.eventually(wait, || aig().iter().any(|e| e["entry"]["end"]["charge"] == streamed && e["entry"]["end"]["basis"] == "usage"));
     s.ok("a streamed call reaches the client in OpenAI's shape (usage once, last)", r.status == 200 && shaped, &r.text);
     s.ok("and is settled from its last, cumulative usage only", landed, json!(aig()));
-    // a slow one is hedged: the second call on a prefix-cache session of
-    // its own, the first aborted and charged on the second's hold
-    let calls = s.ai.calls().len();
-    s.ai.delay_next(&[fragment_core::hedge::AFTER_MS + 6_000]);
-    let t0 = std::time::Instant::now();
+    // a 503 before it begins: made once more at once, under its one hold
+    let (calls, before) = (s.ai.calls().len(), aig().len());
+    s.ai.fail_next(&[503]);
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;
-    let took = t0.elapsed();
     let sent: Vec<_> = s.ai.calls().into_iter().skip(calls).collect();
-    let hedged = s.eventually(wait, || aig().iter().any(|e| e["ref"].as_str().is_some_and(|x| x.ends_with(":hedge")) && end_of(e) == "settled"));
+    let one = s.eventually(wait, || aig().len() == before + 1 && aig().iter().all(|e| end_of(e) != "held"));
     s.ok(
-        "a streamed call slow to begin is hedged: a second, identical call on its own prefix-cache session answers, before the first would have, and the first is charged on the second's hold",
-        r.status == 200
-            && took < std::time::Duration::from_millis(fragment_core::hedge::AFTER_MS + 6_000)
-            && sent.len() == 2
-            && sent[0].body == sent[1].body
-            && sent[0].affinity.as_deref().is_some_and(|a| sent[1].affinity.as_deref() == Some(format!("{a}.hedge").as_str()))
-            && hedged,
-        json!({ "took_ms": took.as_millis() as u64, "affinities": sent.iter().map(|c| c.affinity.clone()).collect::<Vec<_>>(), "aig": aig() }),
+        "a streamed call that fails for now before it begins is made once more at once, the same call on the same model and session, under its one hold",
+        r.status == 200 && sent.len() == 2 && sent[0].body == sent[1].body && sent[0].model == sent[1].model && sent[0].affinity == sent[1].affinity && one,
+        json!({ "status": r.status, "calls": sent.len(), "aig": aig() }),
     );
     s.ai.break_next();
     let r = api.signed(&hand, "POST", route, Some(&chat(true)))?;

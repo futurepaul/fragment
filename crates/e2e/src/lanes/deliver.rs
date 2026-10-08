@@ -386,121 +386,57 @@ fn tools_and_drafts(s: &mut Suite, api: &Api, owner: &Keys, c: &Value, run: &dyn
         r["status"] == "succeeded" && r["output"]["text"] == "echo: after a break" && s.ai.calls().len() == calls + 2,
         &r,
     );
-    hedges(s, api, owner, run)
+    retries(s, api, owner, run)
 }
 
-/// A text step's call is hedged (fragment_core::hedge): one whose first
-/// data line has not come `AFTER_MS` after it was made gets a second,
-/// identical call, the first to stream answers, and the other is cancelled
-/// and charged its prompt alone; one that fails for now before it begins
-/// gets the second call at once, and the failed call's hold goes back.
-fn hedges(s: &mut Suite, api: &Api, owner: &Keys, run: &dyn Fn(&str, &str, Value) -> Result<Value>) -> Result<()> {
+/// A text step's call is one call on its tier's model (models.rs
+/// `streamed`; the race and the ladder were measured and removed:
+/// docs/optchat.md, "Latency"): one slow to begin is waited for, never
+/// raced; one that fails for now before it begins is made once more at
+/// once within the step, under its one hold. Its timing says its first
+/// data line, its whole answer, the model and its calls.
+fn retries(s: &mut Suite, api: &Api, owner: &Keys, run: &dyn Fn(&str, &str, Value) -> Result<Value>) -> Result<()> {
     let identity = api.identity(owner)?;
-    let hedge_holds = |run: &Value| -> Vec<Value> {
+    let holds = |run: &Value| -> Vec<Value> {
         let marker = format!("/run/{}/attempt/", run["id"]);
-        super::ledger::entries(api, &identity, "step:").into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker) && r.contains("/hedge/"))).collect()
+        super::ledger::entries(api, &identity, "step:").into_iter().filter(|e| e["ref"].as_str().is_some_and(|r| r.contains(&marker))).collect()
     };
-    let slow = Duration::from_millis(fragment_core::hedge::AFTER_MS + 6_000);
+    let flash = fragment_core::models::CHEAP_MODEL;
+    let slow = Duration::from_millis(4_000);
     let calls = s.ai.calls().len();
     s.ai.delay_next(&[slow.as_millis() as u64]);
-    let t0 = Instant::now();
-    let r = run("hedge-slow", "ask_text", json!({ "prompt": "a slow start", "draft": { "channel": "thinking", "turn": "turn:t_3" } }))?;
-    let took = t0.elapsed();
+    let r = run("slow-one", "ask_text", json!({ "prompt": "a slow start", "draft": { "channel": "thinking", "turn": "turn:t_3" } }))?;
     let timing = &r["output"]["timing"];
-    let holds = hedge_holds(&r);
     let models: Vec<String> = s.ai.calls().into_iter().skip(calls).map(|c| c.model).collect();
-    let sent: Vec<Value> = s.ai.chats().into_iter().skip(calls).collect();
-    let (own, next) = (fragment_core::models::CHEAP_MODEL, fragment_core::models::ladder(fragment_core::models::CHEAP_MODEL)[0]);
     s.ok(
-        "a text step whose first call has not begun to stream after the hedge's wait makes one second call, the same request on its tier's next model, which answers first: the step is answered well before the first would have",
+        "a text step slow to begin is waited for, never raced: one call on its tier's model (GLM-5.3 Flash), its timing its first data line, its whole answer and the model",
         r["status"] == "succeeded"
             && r["output"]["text"] == "echo: a slow start"
-            && sent.len() == 2
-            && sent[0] == sent[1]
-            && models == [own, next]
-            && r["output"]["model"] == next
-            && timing["hedged"] == true
-            && timing["won"] == "second"
-            && timing["first_ms"].as_u64().is_some_and(|ms| ms >= fragment_core::hedge::AFTER_MS && ms < slow.as_millis() as u64)
-            && took < slow,
-        json!({ "run": r, "took_ms": took.as_millis() as u64, "models": models }),
-    );
-    let charged = holds.first().map(|e| &e["entry"]["end"]);
-    s.ok(
-        "the cancelled call is charged on a hold of its own: its prompt as the answer reported it, at its own model's prices, and no output",
-        holds.len() == 1
-            && charged.is_some_and(|end| end["end"] == "settled" && end["usage"]["model"] == own && end["usage"]["output"] == 0 && end["usage"]["input"].as_u64().is_some_and(|n| n > 0) && end["charge"].as_i64().is_some_and(|c| c > 0)),
-        json!(holds),
+            && models == [flash]
+            && r["output"]["model"] == flash
+            && timing["model"] == flash
+            && timing["calls"] == 1
+            && timing["first_ms"].as_u64().is_some_and(|ms| ms >= slow.as_millis() as u64)
+            && timing["ms"].as_u64().is_some_and(|ms| ms >= timing["first_ms"].as_u64().unwrap_or(u64::MAX))
+            && timing.get("hedged").is_none()
+            && holds(&r).len() == 1,
+        json!({ "run": r, "models": models }),
     );
     let calls = s.ai.calls().len();
     s.ai.fail_next(&[503]);
-    let t0 = Instant::now();
-    let r = run("hedge-503", "ask_text", json!({ "prompt": "after a 503" }))?;
-    let took = t0.elapsed();
-    let holds = hedge_holds(&r);
+    let r = run("again-503", "ask_text", json!({ "prompt": "after a 503" }))?;
+    let held = holds(&r);
+    let models: Vec<String> = s.ai.calls().into_iter().skip(calls).map(|c| c.model).collect();
     s.ok(
-        "a call that fails for now before it begins gets its second call at once, within the step (no retry's wait), and the failed call's hold goes back",
+        "a call that fails for now before it begins is made once more at once, on the same model, within its step and under its one hold",
         r["status"] == "succeeded"
             && r["output"]["text"] == "echo: after a 503"
-            && s.ai.calls().len() == calls + 2
-            && r["output"]["timing"]["won"] == "second"
+            && models == [flash, flash]
+            && r["output"]["timing"]["calls"] == 2
             && r["output"]["timing"]["tries"] == 1
-            && took < Duration::from_millis(fragment_core::hedge::AFTER_MS)
-            && holds.len() == 1
-            && holds[0]["entry"]["end"]["end"] == "released",
-        json!({ "run": r, "took_ms": took.as_millis() as u64, "holds": holds }),
-    );
-    let calls = s.ai.calls().len();
-    let r = run("hedge-none", "ask_text", json!({ "prompt": "a quick one" }))?;
-    s.ok(
-        "a call that begins before the hedge's wait is the only one, and no second hold is made",
-        r["status"] == "succeeded" && s.ai.calls().len() == calls + 1 && r["output"]["timing"]["hedged"] == false && hedge_holds(&r).is_empty(),
-        &r,
-    );
-    busy_ladder(s, api, &identity, run)
-}
-
-/// A tier's call asks its model not to queue when busy (`rejectIfBusy`),
-/// and a busy one's refusal (429, error 3040) sends it down its tier's
-/// ladder (fragment_core::models::ladder) at once, unpaid; with every rung
-/// busy, it waits in its own model's queue. The model that answered is the
-/// step's, and its usage is charged at that model's prices.
-fn busy_ladder(s: &mut Suite, api: &Api, identity: &str, run: &dyn Fn(&str, &str, Value) -> Result<Value>) -> Result<()> {
-    use fragment_core::models::{ladder, CHEAP_MODEL};
-    let rungs = ladder(CHEAP_MODEL);
-    let calls = s.ai.calls().len();
-    s.ai.busy_next(CHEAP_MODEL, 1);
-    let r = run("busy-one", "ask_text", json!({ "prompt": "when it is busy" }))?;
-    let sent: Vec<_> = s.ai.calls().into_iter().skip(calls).collect();
-    let marker = format!("/run/{}/attempt/", r["id"]);
-    let step = super::ledger::entries(api, identity, "step:").into_iter().find(|e| e["ref"].as_str().is_some_and(|x| x.contains(&marker) && !x.contains("/hedge/")));
-    s.ok(
-        "a busy model refuses the call at once, and the step answers on its tier's next model, charged at that model's prices",
-        r["status"] == "succeeded"
-            && r["output"]["text"] == "echo: when it is busy"
-            && r["output"]["model"] == rungs[0]
-            && r["output"]["timing"]["passed"] == json!([CHEAP_MODEL])
-            && sent.len() == 2
-            && sent.iter().all(|c| c.reject_if_busy)
-            && sent[0].model == CHEAP_MODEL
-            && sent[1].model == rungs[0]
-            && sent[0].body == sent[1].body
-            && step.as_ref().is_some_and(|e| e["entry"]["end"]["usage"]["model"] == rungs[0] && e["entry"]["end"]["basis"] == "usage"),
-        json!({ "run": r, "calls": sent.iter().map(|c| json!([c.model, c.reject_if_busy])).collect::<Vec<_>>(), "step": step }),
-    );
-    let calls = s.ai.calls().len();
-    s.ai.busy_next(CHEAP_MODEL, 1);
-    for m in rungs {
-        s.ai.busy_next(m, 1);
-    }
-    let r = run("busy-all", "ask_text", json!({ "prompt": "when all are busy" }))?;
-    let sent: Vec<_> = s.ai.calls().into_iter().skip(calls).map(|c| (c.model, c.reject_if_busy)).collect();
-    let mut asked: Vec<(String, bool)> = std::iter::once(CHEAP_MODEL).chain(rungs.iter().copied()).map(|m| (m.to_string(), true)).collect();
-    asked.push((CHEAP_MODEL.to_string(), false));
-    s.ok(
-        "with every rung busy, the call waits in its own model's queue, and answers there",
-        r["status"] == "succeeded" && r["output"]["model"] == CHEAP_MODEL && sent == asked && r["output"]["timing"]["passed"].as_array().is_some_and(|p| p.len() == 1 + rungs.len()),
-        json!({ "run": r, "calls": sent }),
+            && held.len() == 1
+            && held[0]["entry"]["end"]["end"] == "settled",
+        json!({ "run": r, "holds": held }),
     );
     Ok(())
 }

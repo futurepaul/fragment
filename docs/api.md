@@ -1259,8 +1259,8 @@ The steps:
   is its owner's alone) runs it, the owner's choice for that role runs it
   instead (Models, "A person's own models": another tier, or their own
   provider, whose answer adds `provider`, its `model` the provider's, its
-  `usage` that provider's counts, its `timing` one call's, never hedged
-  nor laddered, and is charged nothing); `max_tokens` is at most 16384;
+  `usage` that provider's counts, its `timing` that call's, and is
+  charged nothing); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
   - `messages` reach the model as given, an assistant's `tool_calls` and
@@ -1287,22 +1287,16 @@ The steps:
     second while the model reasons. A stream that breaks, or ends before
     its answer says why it stopped, is called again under the same
     reservation.
-  - Every call streams from the model, and is hedged
-    (fragment_core::hedge): one whose first data line has not come 3.5 s
-    after it was made, or that fails for now (a 429, a 5xx, no answer)
-    before it, gets one second call, the same request on its tier's next
-    model (fragment_core::models::plan), under a reservation of its
-    own (`<step's reference>/hedge/<hex>`). The first to stream is the
-    answer, and the other is aborted: the second's reservation is charged
-    the answer's prompt, split as the answer's was between cached and not,
-    and no output (it reports nothing, and wrote nothing that was read), or
-    released when the call that was not the answer failed before it began.
-    A step tried again after its answer was kept calls nothing.
-  - `timing` is how long it took: `first_ms` (its first data line),
-    `ms` (its whole answer), `hedged` and `won` (`first` or `second`),
-    `thought` (characters of reasoning, none kept), `tries` and
-    `since_ms` (this instance's count of its tries, and since the first
-    began), and `at` (when it ended, ms).
+  - Every call streams from the model: one call on its tier's model,
+    waiting in the model's queue when it is busy. One that fails for now
+    (a 429, a 5xx, no answer) before its first data line is made once more
+    at once, under the same reservation, which it never used. A step tried
+    again after its answer was kept calls nothing.
+  - `timing` is how long it took: `first_ms` (its first data line), `ms`
+    (its whole answer), `model` (the one that answered), `calls` (2 when
+    its first failed before it began), `thought` (characters of reasoning,
+    none kept), `tries` and `since_ms` (this instance's count of its
+    tries, and since the first began), and `at` (when it ended, ms).
 - `job.ai.decide({model, state, questions, images?})` → `{answers, model,
   usage}`: Clef's input and answers, as its catalog's schemas say.
   `model` is `clef` or `clef-flash` (`model` answers its catalog id);
@@ -1349,25 +1343,11 @@ docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
 
 A tier's streamed call (a job's text step, or the route's with `stream:
-true`) is made to answer soon (fragment_core::models::ladder,
-fragment_core::hedge; docs/optchat.md, "Latency"):
-- **Busy models are passed over.** It asks its model not to queue when it
-  is busy (Workers AI's `rejectIfBusy`), and a busy model's refusal (429,
-  error 3040) is unpaid and sends it on, at once, to the next model of its
-  tier's ladder: `cheap` is GLM-5.3 Flash, then DeepSeek V4 Flash
-  (`@cf/deepseek-ai/deepseek-v4-flash-0731`), then Gemma 4 26B A4B
-  (`@cf/google/gemma-4-26b-a4b-it`); `medium` is GLM-5.3, then GLM-5.3
-  Flash, then DeepSeek V4 Flash. A fallback that refuses the call is passed
-  over too. With every rung busy, it waits in its own model's queue. The
-  model that answered is the step's `model` (its usage row names it), at
-  that model's prices: each is in the default price book.
-- **A slow one is hedged.** One whose first data line has not come 3.5 s
-  after it was made, or that fails for now before it, gets one second
-  call, the same request down its ladder from the next model (an agent's
-  on a prefix-cache session of its own), under a reservation of its own;
-  the first to stream answers, and the other is aborted and charged, at
-  its own model's prices, the answer's prompt, split as the answer's was,
-  with no output (or released, when it failed before it began).
+true`) is one call on its tier's model, waiting in its queue when the
+model is busy; one that fails for now (a 429, a 5xx, no answer) before
+its first data line is made once more at once, under the same
+reservation (docs/optchat.md, "Latency": a race of a second call and a
+ladder of fallback models were measured and removed).
 
 | method & path | who | body → answer |
 | --- | --- | --- |

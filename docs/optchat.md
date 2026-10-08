@@ -1333,8 +1333,8 @@ hand-off spend, measured on the preview with real models by the hosted
 - **A turn's** `turn` record on `log` carries `timing` once it ends:
   `asked` (its first message logged), `begun`, `view` (its wait for the
   compactor, and the view rendered), and for each model call the step's
-  own `timing` (`first` data line, `ms` whole, `hedged` and `won`, the
-  `model` that answered and the busy ones it `passed`, `thought`
+  own `timing` (`first` data line, `ms` whole, the `model` that answered,
+  its `calls` (2 when the first failed before it began), `thought`
   characters of reasoning, its `tries`, and `tokens` in, cached, out), its
   tools, and when its log `logged`; then `end`.
 - **A hand-off's**: the ask logged; the task's record on `chat` (`tasks`
@@ -1345,29 +1345,17 @@ hand-off spend, measured on the preview with real models by the hosted
   first step; its reply on `chat`; the report logged (the task's `ended`);
   the follow-up `talk`.
 - **goose's model calls** are also the model route's `model.settled` log
-  lines (`first_ms`, `ms`, `hedge`, `tokens` and the model), which
+  lines (`first_ms`, `ms`, `tokens` and the model), which
   `wrangler tail` shows; the lane reads them from goose's steps.
 
 **What cut it:**
-- (A call on a person's own provider, "Your own models", is one call:
-  never hedged nor laddered across Workers AI's models. Its step's
-  `timing` has the same shape, `hedged` false and its `provider` named.)
-- **Busy models are passed over** (docs/api.md, Models): Workers AI
-  holds a call in a capacity queue while its model is busy; a call asks
-  `rejectIfBusy`, and a busy model's refusal sends it down its tier's
-  ladder at once (GLM-5.3 Flash, DeepSeek V4 Flash, Gemma 4 26B A4B), and
-  with every rung busy it waits in its own model's queue.
-- **Slow calls are hedged** (fragment_core::hedge): no first data line in
-  3.5 s, or a failure for now before it, makes one second call: the same
-  request on its tier's next model, an agent's on a prefix-cache session
-  of its own (the slowest calls were slow on both calls of one model at
-  once: 15 and 30 s); the first to stream answers, the other is aborted,
-  and charged at its own model's prices the answer's prompt split as the
-  answer's was and no output (it reports
-  nothing; every token uncached would be its dearest reading, up to five
-  times the price for a cached prefix: decision for Paul). A failure
-  before the first line is so retried within its step, not after the
-  Workflow's 10 s wait.
+- **A failure before the first data line is retried within its step**
+  (models.rs `streamed`): a call that fails for now (a 429, a 5xx, a
+  stream that broke or ended) before its first line is made once more at
+  once, on the same model, under the same reservation (it used nothing),
+  not after the Workflow's 10 s wait. A call on a person's own provider
+  ("Your own models") is one call; its step's `timing` has the same
+  shape, its `provider` named.
 - **GLM-5.3 Flash everywhere** (Paul, 2026-10-08), turns and goose: one
   model's prefix cache for turns and compactions.
 - **Fewer steps a turn.** Each job step is two Workflow steps (about a
@@ -1392,6 +1380,31 @@ hand-off spend, measured on the preview with real models by the hosted
   `thinking` (its milliseconds) as its call is made, and once a second
   while it reasons with no words yet; the page shows "Thinking… 4s".
 
+**Measured and removed: the race and the ladder** (Paul, 2026-10-08: "I
+think that adds unnecessary complexity and won't be relevant when using
+codex or claude. I just really like glm-5.3 flash (and finite has a
+private endpoint for it we might use in the future)"). Runs A to C below
+had both:
+- a **hedge**: a call with no first data line in 3.5 s (4.5 s in A), or
+  that failed for now before it, got one second call, the same request on
+  its tier's next model (on the same model in A) and, for an agent, on a
+  prefix-cache session of its own; the first to stream answered, the other
+  was aborted and charged its prompt on a reservation of its own;
+- a **ladder**: each call asked Workers AI's `rejectIfBusy`, and a busy
+  model's refusal (429, error 3040) sent it at once down its tier's
+  fallbacks (GLM-5.3 Flash, then DeepSeek V4 Flash, then Gemma 4 26B
+  A4B), waiting in its own model's queue only with every one busy.
+
+They bounded a slow first data line at about 3.5 s plus the next model's
+second or so (a quarter to a half of the mind's first calls were raced),
+and no call was refused as busy for the mind in A, B or C (one of goose's
+answered on DeepSeek after a busy refusal, in A). Now a call is one call
+on GLM-5.3 Flash, waiting in its queue when it is busy, and a slow first
+line is the model's own: the price of one model, one prefix cache and one
+call's charge. DeepSeek V4 Flash's and Gemma 4 26B A4B's rows stay in
+the default price book (data the preview's ledgers hold at version 3);
+no call names them.
+
 **Measured** (the preview, 2026-10-08, each column one whole run of the
 hosted lane; p50 / p90, or each sample):
 - **before**: GLM-5.3 (`medium`) for turns and goose, none of the above;
@@ -1399,7 +1412,8 @@ hosted lane; p50 / p90, or each sample):
   hedge at 4.5 s on the same model;
 - **B**: A with the hedge at 3.5 s, an agent's on a session of its own;
 - **C**, **C again**: B with the hedge's second call on the tier's next
-  model (what runs now), two runs.
+  model, two runs. (What runs now is A to C less the hedge and the
+  ladder: not yet measured as a whole run.)
 
 | | before | A | B | C | C again |
 | --- | --- | --- | --- | --- | --- |
@@ -1425,8 +1439,8 @@ goose's answered on DeepSeek V4 Flash after a busy refusal (A).
 **What is left:** a message's trigger and the steps before its turn
 (about 1.3 s: a run's Workflow made, `members`, then `hear`); each job
 step's two Workflow steps (about a quarter of a second each); GLM-5.3
-Flash's own first data line when it is slow (a hedge bounds it at 3.5 s
-plus the next model's second or so); and goose's first hand-off after a
+Flash's own first data line when it is slow (no hedge bounds it now:
+see above); and goose's first hand-off after a
 wake (its skills and its session, 2.5 s).
 
 ## Deploy
@@ -1445,18 +1459,18 @@ wake (its skills and its session, 2.5 s).
     so a turn's and a compaction's cached prefix is one model's;
   - topics run on `clef-flash`;
   - goose runs on `cheap`;
-  - a busy model falls back down its tier's ladder ("Latency", below);
   - each of these but topics runs instead on the person's own choice
     for its role, when they made one ("Your own models": turns and
     research are chat, the compactor and suggestions memory, goose
-    hands; one call, never hedged nor laddered). Paul, to try Claude on
+    hands; one call on their own provider). Paul, to try Claude on
     the preview: paste a Claude API key in Settings, Models (or `PUT
     /api/connections/anthropic/key`), then pick it for chat, memory and
     hands; for ChatGPT, run `fragment host
     https://claude-optchat.finite.place && fragment login`, then `fragment
     connect chatgpt`, and pick its models.
 - **The price book:** the config names `price_book_version` 3 (2026-10-08),
-  so every ledger takes the ladder's fallbacks' rows ("Latency").
+  whose rows for the removed ladder's fallbacks stay ("Latency": no call
+  names them).
 - **The live check:** `cargo xtask e2e --hosted --config … --branch
   claude-optchat --only mind-live --max-paid-calls 120`
   (crates/e2e/src/lanes/mind_live.rs).
@@ -1473,8 +1487,8 @@ wake (its skills and its session, 2.5 s).
   it measures, and checks nothing of: six short asks answered in words
   (thread E) and two simple shell hand-offs with the computer awake
   (thread F), and two from asleep (thread G), cold and pre-woken. It
-  takes up to 45 minutes, lends its person 120 paid calls
-  (a hedge's second call is one), and prints each latency, each turn's
+  takes up to 45 minutes, lends its person 120 paid calls,
+  and prints each latency, each turn's
   and hand-off's breakdown ("Latency"), their percentiles, the recall's
   zoom and search calls, the browser calls, and the paid calls made.
 

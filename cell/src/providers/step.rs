@@ -159,10 +159,10 @@ impl FragmentCell {
         }
         let counted = tr.counted();
         super::record(&self.env, payer, &own, role, counted).await;
-        // its timing, in a hedged step's shape (ai.rs; docs/optchat.md, "Latency"): one call, never hedged nor laddered
+        // its timing, in any text step's shape (ai.rs; docs/optchat.md, "Latency"), its provider named
         let now = crate::js::now_ms();
         let timing = json!({
-            "first_ms": first_ms, "ms": now - t0, "hedged": false, "won": null, "model": own.model, "passed": [], "thought": 0,
+            "first_ms": first_ms, "ms": now - t0, "model": own.model, "calls": 1, "thought": 0,
             "tries": tries, "since_ms": now - began, "at": now, "provider": own.vendor,
         });
         let result = json!({

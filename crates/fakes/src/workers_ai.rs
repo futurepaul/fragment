@@ -37,11 +37,6 @@
 //! output schema says, decided from the words of its input (`clef_answer`),
 //! its usage in input and output tokens.
 //!
-//! A model the test made busy (`busy_next`) refuses a call that asks
-//! `rejectIfBusy` (the cell sends it as `x-fragment-ai-options`, the
-//! binding's third argument) with Workers AI's 429, error 3040, at once;
-//! one that does not ask waits in its queue and is answered.
-//!
 //! Levers: the calls made (with the gateway metadata the cell would send),
 //! failures queued for the next calls, a delay, the usage the next answers
 //! report (`set_usage`), a stream cut before its usage (`break_next`), and
@@ -81,10 +76,6 @@ pub const TOOL_SAID: &str = "the tool said: ";
 pub const TOOL_SAID_CHARS: usize = 200;
 /// Clef's two sizes, as the catalog names them.
 pub const CLEF_MODELS: [&str; 2] = [fragment_core::decide::CLEF_MODEL, fragment_core::decide::CLEF_FLASH_MODEL];
-/// What a busy model answers a call that asked `rejectIfBusy` (Workers AI's
-/// "Reject busy requests": 429, error 3040).
-pub const BUSY: &str = "Capacity temporarily exceeded, please try again.";
-pub const BUSY_CODE: u32 = 3040;
 /// A tool call's arguments stream in pieces of at most this many characters.
 const ARGS_PIECE_CHARS: usize = 1024;
 
@@ -99,8 +90,6 @@ pub struct AiCall {
     pub metadata: Value,
     /// GLM's prefix-cache key (`x-session-affinity`).
     pub affinity: Option<String>,
-    /// It asked not to wait in a busy model's queue (`rejectIfBusy`).
-    pub reject_if_busy: bool,
 }
 
 /// What an answer reports it used, when a test says (`set_usage`).
@@ -124,8 +113,6 @@ struct State {
     breaks: VecDeque<bool>,
     delays: VecDeque<u64>,
     sleep_ms: u64,
-    /// Models busy for their next calls that ask `rejectIfBusy` (`busy_next`).
-    busy: Vec<(String, u32)>,
     tool_calls: u64,
     answers: u64,
     /// Calls being answered now, and the most there were at once.
@@ -444,14 +431,7 @@ fn answer(s: &mut State, req: &Request) -> Response {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     let metadata = req.header("x-fragment-ai-metadata").and_then(|m| serde_json::from_str(m).ok()).unwrap_or(Value::Null);
     let affinity = req.header("x-session-affinity").map(str::to_string);
-    let reject_if_busy = req.header("x-fragment-ai-options").and_then(|o| serde_json::from_str::<Value>(o).ok()).is_some_and(|o| o["rejectIfBusy"] == true);
-    s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity, reject_if_busy });
-    // busy: one that asked refuses at once (Workers AI's 429, error 3040);
-    // one that did not waits in the queue, and is answered
-    if let Some(b) = s.busy.iter_mut().find(|(m, n)| *m == model && *n > 0).filter(|_| reject_if_busy) {
-        b.1 -= 1;
-        return Response::json(429, &json!({ "errors": [{ "message": BUSY, "code": BUSY_CODE }], "success": false, "result": null, "messages": [] }));
-    }
+    s.calls.push(AiCall { model: model.clone(), body: body.clone(), metadata, affinity });
     if let Some(Some(status)) = s.failures.pop_front() {
         return problem(status, "a failure the test asked for");
     }
@@ -562,11 +542,6 @@ impl WorkersAi {
     /// The next streamed answer ends before its usage (a dropped stream).
     pub fn break_next(&self) {
         self.state().breaks.push_back(true);
-    }
-
-    /// `model` is busy for its next `n` calls that ask `rejectIfBusy`.
-    pub fn busy_next(&self, model: &str, n: u32) {
-        self.state().busy.push((model.to_string(), n));
     }
 
     /// Holds the next answers back this long (ms), in order.

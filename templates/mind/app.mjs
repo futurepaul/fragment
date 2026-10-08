@@ -1805,7 +1805,7 @@ export class App extends DurableObject {
         // the call's own timing (the platform's), its tools, and when its log landed
         const t = a?.timing && typeof a.timing === "object" ? a.timing : {};
         const u = a?.usage ?? {};
-        const timed = { first: t.first_ms ?? null, ms: t.ms ?? null, model: a?.model ?? null, passed: Array.isArray(t.passed) ? t.passed : [], thought: t.thought ?? null, tokens: [u.prompt_tokens ?? null, u.prompt_tokens_details?.cached_tokens ?? null, u.completion_tokens ?? null], tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, hedged: t.hedged ?? null, won: t.won ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: null };
+        const timed = { first: t.first_ms ?? null, ms: t.ms ?? null, model: a?.model ?? null, calls: t.calls ?? null, thought: t.thought ?? null, tokens: [u.prompt_tokens ?? null, u.prompt_tokens_details?.cached_tokens ?? null, u.completion_tokens ?? null], tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: null };
         if (timing.calls.length < CALLS_MAX) timing.calls.push(timed);
         // the last call (no tools): its log ends the turn in the same step
         const end = asked.length ? null : { state: "done", timing, profile: h.fresh };

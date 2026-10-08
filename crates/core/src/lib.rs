@@ -20,7 +20,6 @@ pub mod facet;
 pub mod form;
 pub mod frames;
 pub mod glob;
-pub mod hedge;
 pub mod ledger;
 pub mod levers;
 pub mod live;

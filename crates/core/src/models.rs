@@ -36,58 +36,27 @@ use crate::steps::{AiText, ToolChoice};
 /// The tiers' models (decision 23), as Workers AI's catalog names them.
 pub const CHEAP_MODEL: &str = "@cf/zai-org/glm-5.3-flash";
 pub const MEDIUM_MODEL: &str = "@cf/zai-org/glm-5.3";
-/// The fallbacks a tier's call takes when its model is busy (`ladder`).
-pub const DEEPSEEK_FLASH_MODEL: &str = "@cf/deepseek-ai/deepseek-v4-flash-0731";
-pub const GEMMA_MODEL: &str = "@cf/google/gemma-4-26b-a4b-it";
 /// The route's name for the deployment's vision model.
 pub const VISION: &str = "vision";
+/// A streamed answer's head is read this far for its first data line, at
+/// most (`began`): past it the call is taken to have begun (a vendor sends
+/// no comments this long before its data).
+pub const HEAD_MAX_BYTES: usize = 64 * 1024;
 
-/// The models after a tier's own that its call may answer on, in order,
-/// when each before is busy (docs/optchat.md, "Latency"): Workers AI holds
-/// a call in a capacity queue while its model is busy, unless it asks
-/// `rejectIfBusy` (its 429, error 3040: changelog 2026-09-17). Each is on
-/// Workers AI, calls tools and streams, and is priced in the default book.
-/// A call asks each rung with `rejectIfBusy`, and when every one is busy,
-/// waits in its own model's queue. Any other model (the vision model's,
-/// an image's, Clef's) has none.
-pub fn ladder(model: &str) -> &'static [&'static str] {
-    match model {
-        // GLM-5.3 Flash, the default everywhere (Paul, 2026-10-08), then
-        // DeepSeek V4 Flash (1M context, agentic) and Gemma 4 26B A4B
-        CHEAP_MODEL => &[DEEPSEEK_FLASH_MODEL, GEMMA_MODEL],
-        MEDIUM_MODEL => &[CHEAP_MODEL, DEEPSEEK_FLASH_MODEL],
-        _ => &[],
+/// Whether a streamed answer's head (its first bytes) shows it began: a
+/// whole `data:` line, or `HEAD_MAX_BYTES` read. Its first data line is a
+/// step's `timing.first_ms`; a call that failed before it is made once more
+/// within its step, having used nothing (docs/optchat.md, "Latency").
+pub fn began(head: &[u8]) -> bool {
+    if head.len() >= HEAD_MAX_BYTES {
+        return true;
     }
+    let mut lines = head.split(|b| *b == b'\n');
+    // the last piece has no newline yet: not whole
+    let _partial = lines.next_back();
+    lines.any(|line| line.starts_with(b"data:"))
 }
 
-/// The models one call of a hedged pair asks, in order, each with whether
-/// it asks `rejectIfBusy`: the first call its own model and then its
-/// ladder, each not to queue, then its own model's queue; the second (the
-/// hedge, crate::hedge) starts at its ladder's next model, a model of its
-/// own: the preview's slowest calls were slow on both calls of one model
-/// at once (2026-10-08: 15 and 30 s, neither busy). A model with no
-/// ladder waits in its queue, in both.
-pub fn plan(model: &'static str, arm: crate::hedge::Arm) -> Vec<(&'static str, bool)> {
-    let rungs = ladder(model);
-    if rungs.is_empty() {
-        return vec![(model, false)];
-    }
-    let own = match arm {
-        crate::hedge::Arm::First => Some((model, true)),
-        crate::hedge::Arm::Second => None,
-    };
-    own.into_iter().chain(rungs.iter().map(|m| (*m, true))).chain(std::iter::once((model, false))).collect()
-}
-
-/// Whether a model's refusal says it is busy: `rejectIfBusy`'s 429 with
-/// Workers AI's error 3040 ("Capacity temporarily exceeded").
-pub fn busy(status: u16, body: &[u8]) -> bool {
-    if status != 429 {
-        return false;
-    }
-    let text = String::from_utf8_lossy(body);
-    text.contains("3040") || text.contains("Capacity temporarily exceeded")
-}
 /// The vision model unless the deployment names another
 /// (`FRAGMENT_VISION_MODEL`; Paul, 2026-10-05): GLM-5.3 Flash, the cheap
 /// tier's own, "Vision: Yes" in Workers AI's catalog
@@ -632,34 +601,22 @@ mod tests {
         model_of(t).unwrap()
     }
 
+    /// Goal: an answer begins at its first whole data line, however its
+    /// chunks split, and not at a comment, an event name, or half a line.
+    #[test]
+    fn an_answer_begins_at_its_first_whole_data_line() {
+        assert!(!began(b""));
+        assert!(!began(b": keepalive\n\nevent: message\n"));
+        assert!(!began(b"data: {\"choices\":[{\"delta\":{\"role\""), "half a line");
+        assert!(began(b"data: {\"choices\":[]}\n"));
+        assert!(began(b": hi\n\ndata: {}\n\n"));
+        assert!(began(&vec![b':'; HEAD_MAX_BYTES]), "past the head's bound it is taken to have begun");
+    }
+
     /// Goal: the route's `vision` runs the deployment's vision model, at
     /// the tiers' cap, and is no tier (an agent, a job's step and a
     /// manifest name only tiers). Method: the route's names, the tiers'
     /// names, and a call bounded on it.
-    /// Goal: a tier's ladder is its fallbacks after its own model, each
-    /// priced in the default book (a call it answers is charged its usage,
-    /// not its reservation), none twice; other models have none; a busy
-    /// refusal is `rejectIfBusy`'s 429 with error 3040 alone.
-    #[test]
-    fn a_tiers_ladder_is_priced() {
-        let book = PriceBook::defaults();
-        for model in [CHEAP_MODEL, MEDIUM_MODEL] {
-            let rungs = ladder(model);
-            assert!(!rungs.is_empty() && !rungs.contains(&model), "{model}");
-            for r in rungs {
-                assert!(book.models.iter().any(|m| m.model == *r), "{r} is priced");
-            }
-        }
-        assert!(ladder(crate::decide::CLEF_MODEL).is_empty());
-        use crate::hedge::Arm;
-        assert_eq!(plan(CHEAP_MODEL, Arm::First), vec![(CHEAP_MODEL, true), (DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)]);
-        assert_eq!(plan(CHEAP_MODEL, Arm::Second), vec![(DEEPSEEK_FLASH_MODEL, true), (GEMMA_MODEL, true), (CHEAP_MODEL, false)], "a hedge starts on another model");
-        assert_eq!(plan("@cf/example/seeing", Arm::Second), vec![("@cf/example/seeing", false)]);
-        assert!(busy(429, br#"{"errors":[{"message":"Capacity temporarily exceeded, please try again.","code":3040}],"success":false}"#));
-        assert!(!busy(429, br#"{"errors":[{"message":"rate limited","code":3036}]}"#));
-        assert!(!busy(503, b"3040"));
-    }
-
     #[test]
     fn vision_is_the_routes_and_no_tier() {
         assert_eq!(route_named(Some("vision")), Ok(Named::Vision));

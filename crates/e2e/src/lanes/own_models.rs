@@ -136,13 +136,13 @@ pub(super) fn ai(s: &mut Suite, api: &Api) -> Result<()> {
     let r = run(&owner, "own-1", "tool_turn", json!({ "ask": "what is a shard? [[call lookup {\"word\":\"shard\"}]]", "role": "chat" }))?;
     let (first, second) = (&r["output"]["first"], &r["output"]["second"]);
     s.ok(
-        "a job's tool turn naming chat runs on the person's Claude: it calls the tool, and answers from its result, its timing one call's (never hedged nor laddered)",
+        "a job's tool turn naming chat runs on the person's Claude: it calls the tool, and answers from its result, its timing one call's on that model (first data line, whole answer)",
         r["status"] == "succeeded"
             && first["provider"] == "anthropic" && first["model"] == SONNET
             && first["message"]["tool_calls"][0]["function"]["name"] == "lookup"
             && first["finish_reason"] == "tool_calls"
             && second["text"] == "the tool said: shard: a small piece broken off"
-            && first["timing"]["hedged"] == false && first["timing"]["model"] == SONNET && first["timing"]["first_ms"].is_i64() && first["timing"]["ms"].is_i64(),
+            && first["timing"]["calls"] == 1 && first["timing"]["provider"] == "anthropic" && first["timing"]["model"] == SONNET && first["timing"]["first_ms"].is_i64() && first["timing"]["ms"].is_i64(),
         &r,
     );
     let sent = calls_since(s, from, key, "/v1/messages");

@@ -1,7 +1,7 @@
 //! The mind's latency, as the hosted `mind-live` lane reads it
 //! (docs/optchat.md, "Latency"): each turn's timing (its `turn` record on
 //! `log`: when its message was logged, when it began, its view, and each
-//! model call's first data line, whole answer, tries and hedge, and when
+//! model call's first data line, whole answer, model, calls and tries, and when
 //! its log landed), each hand-off's marks (the ask, the task's record on
 //! `chat`, goose's claim, its `turn.timing` and steps on `work`, its reply,
 //! the report logged, the follow-up), and percentiles over them. Pure: the
@@ -36,19 +36,13 @@ fn secs(ms: i64) -> String {
     format!("{:.1}", ms as f64 / 1000.0)
 }
 
-/// How many of the turns' calls answered on a rung of their ladder (their
-/// own model busy), of all.
-pub fn fell_back(timings: &[&Value]) -> (usize, usize) {
-    let calls: Vec<&Value> = timings.iter().flat_map(|t| t["calls"].as_array().into_iter().flatten()).collect();
-    (calls.iter().filter(|c| c["passed"].as_array().is_some_and(|p| !p.is_empty())).count(), calls.len())
-}
-
 /// A turn's model calls as `(first data line, whole answer)` in seconds,
-/// and whether each was hedged, from its timing.
+/// and whether each was made twice (its first failed before it began),
+/// from its timing.
 pub fn calls(timing: &Value) -> Vec<(Option<f64>, Option<f64>, bool)> {
     timing["calls"]
         .as_array()
-        .map(|c| c.iter().map(|c| (ms(&c["first"]).map(|m| m as f64 / 1000.0), ms(&c["ms"]).map(|m| m as f64 / 1000.0), c["hedged"] == true)).collect())
+        .map(|c| c.iter().map(|c| (ms(&c["first"]).map(|m| m as f64 / 1000.0), ms(&c["ms"]).map(|m| m as f64 / 1000.0), c["calls"].as_u64().is_some_and(|n| n > 1))).collect())
         .unwrap_or_default()
 }
 
@@ -64,7 +58,7 @@ pub fn in_words(timing: &Value) -> bool {
 
 /// A turn's timing as one line: its message logged → begun, its wait
 /// (settling and the view), each call (the gap before it, its first data
-/// line, its whole answer, tries and hedge, then its tools and log), and
+/// line, its whole answer, its model, calls and tries, then its tools and log), and
 /// the end.
 pub fn turn_line(timing: &Value) -> String {
     let (Some(asked), Some(begun)) = (ms(&timing["asked"]), ms(&timing["begun"])) else { return "no timing".into() };
@@ -82,12 +76,6 @@ pub fn turn_line(timing: &Value) -> String {
             call += &format!("gap {} ", secs(s - last));
         }
         call += &format!("first {} whole {}", first.map_or("?".into(), secs), whole.map_or("?".into(), secs));
-        // the model that answered, when its own was busy
-        let short = |m: &Value| m.as_str().map(|m| m.rsplit('/').next().unwrap_or(m).to_string());
-        if let Some(passed) = c["passed"].as_array().filter(|p| !p.is_empty()) {
-            let passed: Vec<String> = passed.iter().filter_map(short).collect();
-            call += &format!(" on {} ({} busy)", short(&c["model"]).unwrap_or_default(), passed.join(", "));
-        }
         if let Some(n) = c["thought"].as_u64().filter(|n| *n > 0) {
             call += &format!(" ({n} chars of reasoning)");
         }
@@ -97,8 +85,8 @@ pub fn turn_line(timing: &Value) -> String {
         if c["tries"].as_i64().is_some_and(|t| t > 1) {
             call += &format!(" ({} tries over {})", c["tries"], ms(&c["since"]).map_or("?".into(), secs));
         }
-        if c["hedged"] == true {
-            call += if c["won"] == "second" { " hedged, the second won" } else { " hedged, the first won" };
+        if c["calls"].as_u64().is_some_and(|n| n > 1) {
+            call += " made twice";
         }
         let tools: Vec<&str> = c["tools"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         if let (Some(a), Some(l)) = (at, ms(&c["logged"])) {
@@ -203,20 +191,21 @@ mod tests {
     }
 
     /// Goal: a turn's line names each phase from its timing. Method: a turn
-    /// of two calls, the first a tool call that was hedged.
+    /// of two calls, the first a tool call made twice (its first call
+    /// failed before it began).
     #[test]
     fn a_turns_line() {
         let t = json!({
             "asked": 1000, "begun": 1400, "view": 1700,
             "calls": [
-                { "first": 4600, "ms": 5200, "tries": 1, "at": 7100, "hedged": true, "won": "second", "tools": ["zoom"], "logged": 7500 },
+                { "first": 4600, "ms": 5200, "tries": 1, "calls": 2, "at": 7100, "tools": ["zoom"], "logged": 7500 },
                 { "first": 900, "ms": 1500, "tries": 1, "at": 9200, "tools": [], "logged": 9400 }
             ],
             "end": 9600
         });
         assert_eq!(
             turn_line(&t),
-            "logged→begun 0.4, wait+view 0.3; call 1: gap 0.2 first 4.6 whole 5.2 hedged, the second won, zoom+log 0.4; call 2: gap 0.2 first 0.9 whole 1.5, no tools+log 0.2; end 0.2 (total 8.6)"
+            "logged→begun 0.4, wait+view 0.3; call 1: gap 0.2 first 4.6 whole 5.2 made twice, zoom+log 0.4; call 2: gap 0.2 first 0.9 whole 1.5, no tools+log 0.2; end 0.2 (total 8.6)"
         );
         assert_eq!(turn_total(&t), Some(8.6));
         assert!(!in_words(&t));
