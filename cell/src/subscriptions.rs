@@ -109,11 +109,22 @@ impl FragmentCell {
     pub(crate) fn outbox_record(&self, record: &ChannelRecord) -> CellResult<bool> {
         self.test_countdown(MetaKey::TestFailOutbox, "the record's outbox write failed after its append")?;
         // a computer is never woken by what its own agents post (its poster
-        // holds a wake subscription to the same computer): it was awake to post
+        // holds a wake subscription to the same computer): it was awake to
+        // post. The poster is the record's as stored, not as answered: the
+        // fragment's own key (its cron's, the platform's records) is shown
+        // as its npub, which on an agent's fragment is its agent's identity,
+        // yet it is no agent posting, and wakes it.
         let rows = self.rows(
             "INSERT INTO delivery_outbox (kind, sub, channel, seq, next_at) SELECT 'record', id, channel, ?, ? FROM subs WHERE channel = ? \
-             AND NOT (url LIKE 'computer:%' AND url IN (SELECT url FROM subs WHERE principal = ? AND url LIKE 'computer:%')) RETURNING id",
-            vec![SqlStorageValue::Integer(record.seq), SqlStorageValue::Integer(crate::js::now_ms()), record.channel.as_str().into(), record.principal.as_str().into()],
+             AND NOT (url LIKE 'computer:%' AND url IN (SELECT url FROM subs WHERE url LIKE 'computer:%' \
+               AND principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?))) RETURNING id",
+            vec![
+                SqlStorageValue::Integer(record.seq),
+                SqlStorageValue::Integer(crate::js::now_ms()),
+                record.channel.as_str().into(),
+                record.channel.as_str().into(),
+                SqlStorageValue::Integer(record.seq),
+            ],
         )?;
         self.exec(
             "UPDATE records SET outboxed = 1 WHERE channel = ? AND seq = ?",
