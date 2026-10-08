@@ -98,7 +98,7 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     let chat_name = chat.body["name"].as_str().unwrap_or("").to_string();
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
-    let set_up = made.status == 200 && agent.status == 200 && identity.starts_with("id:") && wrote.status == 200 && deployed.status == 200 && chat.status == 200 && joined.status == 200;
+    let set_up = made.status == 200 && agent.status == 200 && identity.starts_with("npub1") && wrote.status == 200 && deployed.status == 200 && chat.status == 200 && joined.status == 200;
     s.ok("a person's computer, an agent on it, and its chat", set_up, json!({ "computer": made.body, "agent": agent.body, "chat": chat.body }));
     if !set_up {
         return Ok(());

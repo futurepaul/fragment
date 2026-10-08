@@ -37,7 +37,7 @@ pub async fn send(env: &Env, cfg: &Config, mail: &Mail) -> CellResult<String> {
     if cfg.mail_url.is_none() && cfg.test_hooks && fragment_core::levers::valid_e2e_email(&mail.to) {
         return Ok(format!("e2e-unsent-{}", js::random_hex::<8>()));
     }
-    let from = cfg.mail_from.as_deref().ok_or_else(|| CellError::host("this deployment sends no mail: set its mail_from (FRAGMENT_MAIL_FROM)"))?;
+    let from = cfg.mail_from.as_ref().ok_or_else(|| CellError::host("this deployment sends no mail: set its mail_from (FRAGMENT_MAIL_FROM)"))?;
     let message = mail::message(from, mail);
     let Some(url) = &cfg.mail_url else {
         return js::email_send(env.as_ref(), &message).await.map_err(|(code, why)| refused(&code, &why));

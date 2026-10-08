@@ -18,6 +18,76 @@ pub const SUBJECT_MAX_CHARS: usize = 200;
 /// the platform sends is a few lines and a link.
 pub const TEXT_MAX_BYTES: usize = 16 * 1024;
 
+/// A sender's display name, at most: the platform's name is a few words.
+pub const SENDER_NAME_MAX_CHARS: usize = 200;
+
+/// The deployment's sender, checked once when its config is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sender {
+    email: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SenderError {
+    Format,
+    Address,
+    Name,
+}
+
+impl std::fmt::Display for SenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Format => f.write_str("use one bare email address or an unquoted Name <address>, with no control characters"),
+            Self::Address => f.write_str("the sender's address must be one plain email address"),
+            Self::Name => write!(f, "the sender's unquoted name must be 1 to {SENDER_NAME_MAX_CHARS} characters, without <>,;\"()[]\\@ or control characters"),
+        }
+    }
+}
+
+impl std::error::Error for SenderError {}
+
+impl Sender {
+    /// A bare address or `Name <address>`. This is a config format, not
+    /// an RFC mailbox parser: quoted names, comments and lists are refused.
+    pub fn parse(from: &str) -> Result<Self, SenderError> {
+        if from.chars().any(char::is_control) {
+            return Err(SenderError::Format);
+        }
+        let from = from.trim();
+        let (email, name) = match from.split_once('<') {
+            None => (from, None),
+            Some((name, address)) => {
+                let email = address.strip_suffix('>').ok_or(SenderError::Format)?;
+                let name = name.trim();
+                if name.is_empty()
+                    || name.chars().count() > SENDER_NAME_MAX_CHARS
+                    || name.chars().any(|c| "<>,;\"()[]\\@".contains(c))
+                {
+                    return Err(SenderError::Name);
+                }
+                (email, Some(name.to_string()))
+            }
+        };
+        if !valid_address(email) {
+            return Err(SenderError::Address);
+        }
+        Ok(Self {
+            email: email.to_string(),
+            name,
+        })
+    }
+
+    /// Cloudflare's Workers binding uses `email` (not the REST API's
+    /// `address`): https://developers.cloudflare.com/email-service/api/send-emails/workers-api/
+    pub fn binding_value(&self) -> Value {
+        match &self.name {
+            Some(name) => json!({ "email": self.email, "name": name }),
+            None => json!(self.email),
+        }
+    }
+}
+
 /// One message to one person.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mail {
@@ -57,9 +127,9 @@ pub fn refusal(mail: &Mail) -> Option<String> {
 
 /// The Email Sending binding's input for `mail` from `from` (the
 /// deployment's address), which the fake takes as it is.
-pub fn message(from: &str, mail: &Mail) -> Value {
+pub fn message(from: &Sender, mail: &Mail) -> Value {
     assert!(refusal(mail).is_none(), "a message is checked before it is built");
-    json!({ "to": mail.to, "from": from, "subject": mail.subject, "text": mail.text })
+    json!({ "to": mail.to, "from": from.binding_value(), "subject": mail.subject, "text": mail.text })
 }
 
 /// A subject's longest title and sharer, in characters.
@@ -120,10 +190,79 @@ mod tests {
         assert!(refusal(&mail("bob@example.com", &"s".repeat(SUBJECT_MAX_CHARS), "t")).is_none());
         assert!(refusal(&mail("bob@example.com", "s", "")).is_some());
         assert!(refusal(&mail("bob@example.com", "s", &"t".repeat(TEXT_MAX_BYTES + 1))).is_some());
-        assert_eq!(
-            message("fragment <mail@fragment.club>", &mail("bob@example.com", "s", "t")),
-            json!({ "to": "bob@example.com", "from": "fragment <mail@fragment.club>", "subject": "s", "text": "t" })
-        );
+    }
+
+    /// Goal: bare senders stay strings, and named senders use the binding's
+    /// documented object. Method: both forms, with config padding and Unicode.
+    #[test]
+    fn a_sender_is_bare_or_named_in_the_binding() {
+        for (from, expected) in [
+            ("mail@finite.place", json!("mail@finite.place")),
+            ("  mail@finite.place  ", json!("mail@finite.place")),
+            (
+                "Fragment <mail@finite.place>",
+                json!({ "email": "mail@finite.place", "name": "Fragment" }),
+            ),
+            (
+                "  Fragment Team <mail@finite.place>  ",
+                json!({ "email": "mail@finite.place", "name": "Fragment Team" }),
+            ),
+            (
+                "François' Team <mail@finite.place>",
+                json!({ "email": "mail@finite.place", "name": "François' Team" }),
+            ),
+        ] {
+            let sender = Sender::parse(from).unwrap();
+            assert_eq!(
+                message(&sender, &mail("bob@example.com", "s", "t")),
+                json!({ "to": "bob@example.com", "from": expected, "subject": "s", "text": "t" }),
+                "{from:?}"
+            );
+        }
+        assert!(Sender::parse(&format!(
+            "{} <mail@finite.place>",
+            "é".repeat(SENDER_NAME_MAX_CHARS)
+        ))
+        .is_ok());
+    }
+
+    /// Goal: config refuses malformed mailboxes, lists, quoted names and
+    /// header injection. Method: invalid forms and the display name's limit.
+    #[test]
+    fn invalid_senders_are_refused() {
+        for from in [
+            "",
+            " ",
+            "mail",
+            "mail@",
+            "@finite.place",
+            "mail@finite",
+            "mail@a@finite.place",
+            "mail @finite.place",
+            "mail@finite.place,other@finite.place",
+            "<mail@finite.place>",
+            "Fragment <mail@finite.place",
+            "Fragment mail@finite.place>",
+            "Fragment <mail@finite.place> trailing",
+            "Fragment <<mail@finite.place>>",
+            "Fragment < mail@finite.place>",
+            "Fragment <mail@finite.place >",
+            "Fragment <mail@finite.place>, Other <other@finite.place>",
+            "\"Fragment\" <mail@finite.place>",
+            "Fragment (team) <mail@finite.place>",
+            "Fragment; Team <mail@finite.place>",
+            "Fragment, Team <mail@finite.place>",
+            "Fragment\r\nBcc: other@finite.place <mail@finite.place>",
+            "mail@finite.place\n",
+            "Fragment\tTeam <mail@finite.place>",
+            &format!(
+                "{} <mail@finite.place>",
+                "n".repeat(SENDER_NAME_MAX_CHARS + 1)
+            ),
+            &format!("{}@finite.place", "m".repeat(ADDRESS_MAX_BYTES)),
+        ] {
+            assert!(Sender::parse(from).is_err(), "{from:?}");
+        }
     }
 
     /// Goal: an invite's mail says who shares what, as which role, and

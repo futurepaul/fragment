@@ -98,10 +98,10 @@ pub struct Config {
     /// AI binding's input to `<url>/run/<model>` instead (a fake at the
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
-    /// `FRAGMENT_MAIL_FROM`: the address the platform's mail comes from
+    /// `FRAGMENT_MAIL_FROM`: a bare address or unquoted `Name <address>`
     /// (the deploy config's `mail_from`), on a domain onboarded to Email
     /// Sending; none: the deployment sends no mail (mail.rs).
-    pub mail_from: Option<String>,
+    pub mail_from: Option<fragment_core::mail::Sender>,
     /// `FRAGMENT_MAIL_URL`: dev and the e2e only. Mail is POSTed to
     /// `<url>/send` (the binding's input) instead: a fake at the vendor
     /// boundary, which never sends it.
@@ -288,7 +288,9 @@ impl Config {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
-            mail_from: var(env, "FRAGMENT_MAIL_FROM").map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+            mail_from: env.var("FRAGMENT_MAIL_FROM").ok().map(|f| {
+                fragment_core::mail::Sender::parse(&f.to_string()).unwrap_or_else(|e| panic!("FRAGMENT_MAIL_FROM: {e}"))
+            }),
             mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")

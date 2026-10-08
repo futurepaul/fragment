@@ -205,7 +205,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "they are mailed, from the deployment's address: who shares it, on the platform the shell names, and the fragment's own address, which holds no secret",
         mailed.len() == 1
-            && mailed[0].from == crate::MAIL_FROM
+            && mailed[0].from == json!({ "email": "mail@fragment.localhost", "name": "fragment" })
             && mailed[0].subject.starts_with(&format!("{owner_name} shared "))
             && mailed[0].text.contains(&format!(" on {}.\n", fragment_core::mail::PRODUCT))
             && mailed[0].text.contains(&format!("Open it: {link}\n"))
