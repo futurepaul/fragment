@@ -34,6 +34,7 @@ mod signin;
 mod site;
 mod sync;
 mod templates;
+mod when;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -63,6 +64,7 @@ const LANES: &[Lane] = &[
     plane::files,
     plane::deploy,
     templates::templates,
+    when::when,
     share::share,
     mcp::mcp,
     isolation::isolation,
@@ -127,7 +129,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
     &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
-    &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
+    &["when", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",
