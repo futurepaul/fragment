@@ -563,7 +563,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let mind_host = format!("{}.", fragment_proto::flat_name(&mind).unwrap_or_default());
     // the mind's page tells the shell its personas, which the sidebar lists
     let home = format!(
-        "location.pathname === '/' && !document.getElementById('layout').hidden && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment === {}) && document.querySelectorAll('#personas .persona-row').length === 3",
+        "location.pathname === '/' && !document.getElementById('layout').hidden && [...document.querySelectorAll('#frames iframe')].some((f) => !f.hidden && f.dataset.fragment === {}) && document.querySelectorAll('#personas .persona-row').length === 4 && document.querySelector(\"#personas [data-key='persona:mind'] .meta\")?.textContent === 'default'",
         js(&mind)
     );
     let landed = b.until(&page, &home, agent_wait);
@@ -577,7 +577,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let members = shell(api, &session, "GET", &format!("/api/f/{mind}/members"), None, &[])?;
     let editor = members.body["members"].as_array().is_some_and(|l| l.iter().any(|m| m["principal"] == agent["identity"] && m["role"] == "editor"));
     s.ok(
-        "the shell opens at / with their mind in its middle column and its three personas in the sidebar: their agent is on their computer and an editor of the mind, and no chat is made",
+        "the shell opens at / with their mind in its middle column and its four personas in the sidebar, Mind the default: their agent is on their computer and an editor of the mind, and no chat is made",
         landed && rows.iter().any(|f| f["name"] == mind.as_str() && f["kind"] == "mind" && f["role"] == "owner") && rows.iter().all(|f| f["kind"] != "chat") && editor,
         json!({ "at": b.eval(&page, "location.href")?, "fragments": rows, "agent": agent, "members": members.body, "sidebar": b.eval(&page, "[...document.querySelectorAll('#personas .row, #mind-links .row')].map((r) => r.textContent)")? }),
     );
