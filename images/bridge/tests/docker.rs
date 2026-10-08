@@ -1827,3 +1827,44 @@ async fn a_catalog_refresh_forced_under_the_hold_writes_nothing() {
     assert_eq!(woke["catalog"], json!({}), "woken, its catalog is still off, the torn caches unread: {woke}");
     fake.with(|w| assert!(x.reply(w, &next).is_some_and(|r| r["text"].as_str().unwrap_or("").contains("good morning")), "good morning is answered: {:?}", x.reply(w, &next)));
 }
+
+// ---- a voice memo (decision 9: a voice memo is one the agent transcribes
+// itself, through the platform's model route) ----
+
+/// Goal (decision 9; Paul, 2026-10-07): a voice note a person attaches in
+/// the chat reaches Hermes, which transcribes it through the model route's
+/// `whisper` (OpenAI's transcription shape, its agent named by its key,
+/// `agent:<name>`, since Hermes' STT client sends no header of ours; no
+/// language forced, so Whisper detects it), and answers once, having heard
+/// it: no transcript echoed as a message of its own, and no local Whisper
+/// installed for it. Method: a memo (a WAV that says its words, as the
+/// scripted model reads them) put in the chat's blobs and said as an
+/// attachment; the scripted model's calls, the turn's reply, and `/data`.
+#[tokio::test]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn a_voice_memo_is_transcribed_through_the_route() {
+    use sha2::Digest;
+    let (fake, model, chat, c) = hermes_running().await;
+    let words = "please remember the blue door";
+    let audio = support::model::memo(words);
+    let sha = fragment_bridge::records::hex(&sha2::Sha256::digest(&audio));
+    fake.with(|w| w.fragments.get_mut(&chat).expect("the chat").blobs.insert(sha.clone(), ("audio/wav".into(), bytes::Bytes::from(audio.clone()))));
+    let calls_before = model.calls.lock().unwrap().len();
+    let said = fake.say(&chat, &person("paul"), json!({ "attachments": [{ "sha256": sha, "size": audio.len(), "type": "audio/wav", "name": "memo.wav" }] }));
+    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(180_000, "the memo's turn to end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
+    let calls: Vec<support::model::Call> = model.calls.lock().unwrap()[calls_before..].to_vec();
+    let heard: Vec<&support::model::Call> = calls.iter().filter(|c| c.path.ends_with("/audio/transcriptions")).collect();
+    eprintln!("memo: transcriptions {:?}", heard.iter().map(|c| (&c.body, &c.authorization)).collect::<Vec<_>>());
+    assert_eq!(heard.len(), 1, "one transcription through the route: {:?}", calls.iter().map(|c| &c.path).collect::<Vec<_>>());
+    let h = heard[0];
+    assert_eq!(h.authorization.as_deref(), Some("Bearer agent:juniper.paul"), "its key names its agent");
+    assert_eq!((h.body["model"].clone(), h.body["language"].clone(), h.body["audio_bytes"].clone()), (json!("whisper"), serde_json::Value::Null, json!(audio.len())), "the route's whisper, the memo whole, no language forced");
+    let asked = calls.iter().filter(|c| c.path.ends_with("/chat/completions")).any(|c| c.body["messages"].to_string().contains(words));
+    assert!(asked, "the turn's model call carries what the memo said: {:#?}", calls.iter().map(|c| c.body["messages"].to_string().chars().take(400).collect::<String>()).collect::<Vec<_>>());
+    let replies = fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().filter(|r| r["turn"] == t).collect::<Vec<_>>());
+    eprintln!("memo: replies {replies:?}");
+    assert_eq!(replies.len(), 1, "one reply, no transcript echoed as a message of its own: {replies:?}");
+    assert!(!replies[0]["text"].as_str().unwrap_or("").contains('🎙'), "{replies:?}");
+    assert_eq!(c.exec_out(&["sh", "-c", "find /data -iname '*faster_whisper*' -o -iname 'ctranslate2*' | head -3"]).trim(), "", "no local Whisper installed for it");
+}
