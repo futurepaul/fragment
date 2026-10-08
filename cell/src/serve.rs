@@ -95,7 +95,7 @@ fn script(req: &Request, body: &'static str, hash: u64) -> CellResult<Response> 
 }
 
 /// A file compiled into the cell, revalidated by its build-time hash.
-fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
+pub(crate) fn compiled_in(req: &Request, body: &'static str, hash: u64, content_type: &str) -> CellResult<Response> {
     let etag = site::hash_etag(hash);
     if let Some(resp) = not_modified(req, &etag, "no-cache")? {
         return Ok(resp);

@@ -663,6 +663,17 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let home = s.dir("cli-home");
+    // the agent docs on the platform's origin are the CLI's own, for an agent without it
+    for (path, command) in [("/llms.txt", "skill"), ("/llms-full.txt", "guide")] {
+        let printed = String::from_utf8_lossy(&s.cli(api, &home, &[command]).stdout).into_owned();
+        let r = api.unsigned("GET", path, None)?;
+        let again = api.call(Call { method: "GET", url: format!("{}{path}", api.base), extra: vec![("if-none-match", r.header("etag"))], ..Call::default() })?;
+        s.ok(
+            &format!("{path} is `fragment {command}`'s text, as plain text, revalidated by its hash"),
+            r.status == 200 && r.header("content-type") == "text/plain; charset=utf-8" && !printed.is_empty() && r.text == printed && again.status == 304,
+            format!("{} {}: {} bytes, the CLI's {}; again {}", r.status, r.header("content-type"), r.text.len(), printed.len(), again.status),
+        );
+    }
     s.login(api, &home);
     let keys = s.cli_keys(&home).expect("the CLI logged in");
     let (name, c) = chat(s, api, &keys, "cli")?;

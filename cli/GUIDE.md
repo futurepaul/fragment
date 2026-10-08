@@ -15,8 +15,9 @@ sudo (the same command updates it):
 mkdir -p ~/.local/bin && curl -fsSL https://github.com/futurepaul/fragment/releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz | tar -xzf - -C ~/.local/bin
 ```
 
-If `fragment` is then not found, put `~/.local/bin` on your PATH:
-`export PATH="$HOME/.local/bin:$PATH"`, in `~/.zshrc` or `~/.bashrc`.
+If `fragment` is then not found, run it as `~/.local/bin/fragment`, or
+put `~/.local/bin` on your PATH: `export PATH="$HOME/.local/bin:$PATH"`,
+in `~/.zshrc` or `~/.bashrc`.
 `fragment skill` prints a SKILL.md for a coding agent (Claude Code,
 Codex) that points it here.
 
