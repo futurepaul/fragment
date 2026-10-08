@@ -279,7 +279,10 @@ a.file-chip:hover { color: var(--text); background: var(--active); }
 
 /* the steps of a turn, folded */
 .steps { margin: 0 0 12px 35px; align-self: flex-start; max-width: calc(100% - 35px); }
-.steps-head { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 9px; margin-left: -9px; border-radius: 999px; color: var(--text-2); font-size: 13px; font-weight: 600; transition: background .12s, color .12s; }
+.steps-head { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px 0 9px; margin-left: -9px; border-radius: 999px; color: var(--text-2); font-size: 13px; font-weight: 600; transition: background .12s, color .12s; cursor: pointer; user-select: none; }
+/* one of the person's apps, named where the mind used it */
+.app-link { color: var(--accent); text-decoration: none; }
+.app-link:hover { text-decoration: underline; }
 .steps-head:hover { background: var(--hover); color: var(--text); }
 .steps-head .i { width: 15px; height: 15px; }
 .steps-head .chev { width: 13px; height: 13px; transition: transform .2s var(--ease); opacity: .7; }
@@ -299,6 +302,7 @@ a.file-chip:hover { color: var(--text); background: var(--active); }
 .echo-lines { display: flex; flex-direction: column; gap: 3px; }
 .echo-pre { margin: 0; padding: 10px 12px; max-height: 220px; overflow: auto; border-radius: 10px; background: var(--code); font: 500 12px/1.5 var(--font-mono); color: var(--text-2); white-space: pre-wrap; }
 .echo-note { padding: 0 0 0 22px; font-size: 13px; color: var(--text-3); }
+.echo-app { display: flex; flex-direction: column; gap: 6px; }
 /* a web search's results: each a link, its host, its snippet */
 .web-hits { display: flex; flex-direction: column; gap: 2px; }
 .web-hit { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 10px; padding: 6px 10px; border-radius: 8px; }

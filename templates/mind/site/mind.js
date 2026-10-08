@@ -355,10 +355,11 @@ export function mount(root, fragment) {
   if (EMBED) {
     // the computer's screen is the shell's to show
     document.addEventListener("mind:screen", () => toShell({ screen: true }));
-    // a link in what was said to one of the person's fragments (its host's
-    // first label is `<label>--<user>`) opens in the shell, beside the chat
+    // a link in what was said, or an app a turn used (thread.js), to one of
+    // the person's fragments (its host's first label is `<label>--<user>`)
+    // opens in the shell, beside the chat
     document.addEventListener("click", (e) => {
-      const a = e.target.closest?.(".md a[href]");
+      const a = e.target.closest?.(".md a[href], a.app-link[href]");
       if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       let url;
       try {
