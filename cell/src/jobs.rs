@@ -820,7 +820,7 @@ impl FragmentCell {
     /// outside and pays for nothing (drafts.rs): its fetch and AI steps
     /// fail for good, and a replay after its claim takes them.
     async fn perform(&self, run: &RunRow, index: u32, step: Step) -> Result<Value, StepFail> {
-        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiImage(_) | Step::AiVideo {}) {
+        if matches!(step, Step::Fetch(_) | Step::AiText(_) | Step::AiDecide(_) | Step::AiImage(_) | Step::AiVideo {}) {
             self.draft_refuses("fetches nothing and runs no AI step").map_err(|e| match e.code {
                 ErrorCode::Forbidden => permanent(e.message),
                 _ => StepFail::Retry(e.message),

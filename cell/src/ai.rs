@@ -397,7 +397,7 @@ impl FragmentCell {
             let text = &stream.answer().expect("an answering stream keeps its answer").content;
             let now = crate::js::now_ms();
             if text.len() > sent && sent_at.is_none_or(|at| now - at >= DRAFT_EVERY_MS) {
-                sent = self.draft(d, text).unwrap_or(sent);
+                sent = self.put_draft(d, text).unwrap_or(sent);
                 sent_at = Some(now);
             }
             // the answer is whole at `[DONE]`: the gateway can hold the
@@ -412,7 +412,7 @@ impl FragmentCell {
             return Err(StepFail::Retry("the model's stream ended before its answer did".into()));
         }
         if answer.content.len() > sent {
-            self.draft(d, &answer.content);
+            self.put_draft(d, &answer.content);
         }
         Ok((answer, stream.usage().cloned().unwrap_or(Value::Null), log_id))
     }
@@ -420,7 +420,7 @@ impl FragmentCell {
     /// One draft of the text so far, to the channel's live readers: its
     /// length, when it went (none past a record's size, or past the
     /// fragment's pace).
-    fn draft(&self, d: &Drafting, text: &str) -> Option<usize> {
+    fn put_draft(&self, d: &Drafting, text: &str) -> Option<usize> {
         (text.len() <= limits::RECORD_BODY_MAX_BYTES && self.broadcast_draft(&d.channel, &d.principal, &d.turn, Some(text))).then_some(text.len())
     }
 
