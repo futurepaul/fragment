@@ -40,15 +40,10 @@ pub const TOOLS_DIR: &str = "target/tools";
 pub const CACHE_DIR: &str = "target/cache";
 
 /// What a branch deployment's name may be (`cargo xtask deploy --branch`,
-/// and the hosted e2e's): a DNS label short enough that
-/// `<label>--<username>--<branch>` fits in one (63 bytes).
-pub fn valid_branch(b: &str) -> bool {
-    (1..=16).contains(&b.len())
-        && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        && !b.starts_with('-')
-        && !b.ends_with('-')
-        && !b.contains("--")
-}
+/// and the hosted e2e's): the wire contract's, which the cell checks its
+/// mark (`--<branch>`) against as it starts, and whose length every
+/// username's room for labels allows for (`fragment_proto::username_max`).
+pub use fragment_proto::valid_branch;
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));

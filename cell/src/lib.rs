@@ -422,6 +422,8 @@ pub(crate) async fn create_fragment(env: &Env, cfg: &Config, url: &Url, mut crea
     assert_eq!(maker.kind, IdentityKind::Person, "a fragment is a person's: an agent's maker is its owner");
     let username = maker.username.clone().ok_or_else(|| CellError::invalid(format!("choose a username first (sign in at {}/)", cfg.platform())))?;
     create.name = qualify(&create.name, &username)?;
+    // its host is one DNS label, its mark included: refused, never cut
+    fragment_core::names::host_fits(&create.name, cfg.host_label_suffix()).map_err(CellError::invalid)?;
     may_create(env, &maker.id).await?;
     let body = serde_json::to_vec(&create).map_err(|e| CellError::host(e.to_string()))?;
     // a fresh request: nothing of the caller's but what the router decided
@@ -503,7 +505,7 @@ fn qualify(name: &str, username: &str) -> CellResult<String> {
         Some((_, u)) if u == username => Ok(name.to_string()),
         Some(_) => Err(CellError::new(ErrorCode::Forbidden, format!("you make fragments under your own username ({username})"))),
         None => Err(CellError::invalid(
-            "a fragment's name is a label (lowercase letters, digits, and single dashes, at most 63), optionally followed by .<your username>",
+            "a fragment's name is a label (lowercase letters, digits, and single dashes inside; at most 63 bytes, and fewer with your username: docs/api.md, Names), optionally followed by .<your username>",
         )),
     }
 }
