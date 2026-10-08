@@ -452,7 +452,15 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
 
     if p.as_slice() == ["api", "fragments"] {
         let w = world.lock().unwrap();
-        let list: Vec<Value> = w.fragments.iter().filter_map(|(n, f)| World::role_in(f, &me, acting_for.as_deref()).map(|role| json!({ "name": n, "role": role, "kind": f.kind }))).collect();
+        // an agent's list `for` someone marks what that someone owns
+        // (`owned`), as the platform's does: Hermes finds its owner's
+        // skills fragment by it
+        let owns = |f: &Frag| acting_for.as_deref().is_some_and(|p| f.members.iter().any(|m| m.principal == p && m.role == "owner"));
+        let list: Vec<Value> = w
+            .fragments
+            .iter()
+            .filter_map(|(n, f)| World::role_in(f, &me, acting_for.as_deref()).map(|role| json!({ "name": n, "role": role, "kind": f.kind, "owned": owns(f) })))
+            .collect();
         return answer(StatusCode::OK, json!({ "fragments": list }));
     }
     if p.len() < 4 || p[0] != "api" || p[1] != "f" {
