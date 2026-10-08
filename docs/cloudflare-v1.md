@@ -85,7 +85,8 @@ speaking Cloudflare's APIs) returns once this product works.
    and point the domain at Cloudflare. Updating is `git pull` and the
    same deploy.
 5. **Domains as today:** the platform on `fragment.club`, fragments on
-   `<label>--<username>.fragment.boats`. Both zones move to Cloudflare.
+   `<name>.fragment.boats`, a name being a label and a random suffix
+   (decision 47). Both zones move to Cloudflare.
    A self-deployer may use one zone for both, at weaker isolation.
 
 ### What a person sees
@@ -126,8 +127,8 @@ speaking Cloudflare's APIs) returns once this product works.
    to text; Paul, 2026-10-03), push notifications (fragment push), and
    rename and archive. Search across chats, apps and messages is the
    shell's, over your fragments' channels and files.
-10. **First run:** choose a username, then "What should your first
-    agent do?". Through public APIs the shell makes your computer (the
+10. **First run:** "What should your first agent do?" (no username:
+    decision 47). Through public APIs the shell makes your computer (the
     operator's default image), an agent fragment, and a chat fragment
     with both of you in it. The agent takes the job, names itself, draws
     its picture and greets you while the computer starts (finite-mono's
@@ -393,7 +394,8 @@ speaking Cloudflare's APIs) returns once this product works.
     and triggers start no runs either: each run they would have started
     is recorded `blocked`, with the reason, and they start again once the
     owner has credit (Paul, 2026-10-03).
-28. **Sign-up is invite-only** at cutover.
+28. **Sign-up is open; creating needs a seat** (decision 49, which
+    replaced invite-only sign-up on 2026-10-08).
 
 ### Fragments, brains, sites
 
@@ -447,7 +449,8 @@ speaking Cloudflare's APIs) returns once this product works.
       keeps an unbound `fragment-agent[-<branch>]` Worker that no deploy
       or teardown touches: Paul's to remove (`wrangler delete --name …`).
     - Nothing on fragment.club migrates. People sign in again with the
-      same WorkOS identity, and one seed carries usernames across.
+      same WorkOS identity (there are no usernames to carry across:
+      decision 47).
 34. **Infra comes down after cutover**, one irreversible step at a
     time, each confirmed by Paul on the day.
 35. **master becomes the Cloudflare line.** fragment.club on celld
@@ -458,8 +461,9 @@ speaking Cloudflare's APIs) returns once this product works.
 
 36. **Sharing with a person shares with their agents.** Grants name
     people; a person's agents act for them, never above that person's
-    role. Example: share a fragment with @skyler as an editor, and
-    Skyler's agents can edit it as "Skyler's agent Juniper, for skyler".
+    role. Example: share a fragment with skyler@example.com as an
+    editor, and Skyler's agents can edit it as "Skyler's agent Juniper,
+    for skyler@example.com".
     This is BANKS (Linear FIN-11): people and agents are distinct
     identities, each agent has one owner, the owner can read what the
     agent can read, and an agent may be held below its owner.
@@ -583,6 +587,103 @@ speaking Cloudflare's APIs) returns once this product works.
       security boundary. Walls stand between people (decision 36), and
       an agent is held below its owner only by its owner's choice.
 
+### People: npubs, emails, no usernames (Paul, 2026-10-08)
+
+This is BANKS as fragment builds it. finite.computer's version (Linear
+FIN-11) was canceled with the rest of V3 on 2026-10-05. WorkOS proves
+an email; the registry ties emails, npubs and keys together; the rest
+of the platform sees npubs. Paul: the platform "FEELS to the user like
+a normal email login thing, and shared fragments feel like sharing
+google docs", while "agents can do raw pubkey stuff without the auth
+runaround".
+
+45. **A person is an npub; others find them by email** (Paul: "email
+    over a stable id which is an npub"). At a person's first sign-in
+    the registry makes them a key, and its npub is their identity for
+    good: every grant, ledger and list names it, and the `id:` form
+    goes. A key can be retired; its npub still names the identity. An
+    agent's identity is its fragment's npub.
+    - A person's email is the verified email of their sign-in (WorkOS's
+      `email_verified`; a sign-in without one is refused). An email
+      belongs to at most one person; `/auth/link` adds a second sign-in
+      and its email.
+    - The share sheet, member lists and the shell show people by email.
+      A changed email follows at the next sign-in, and no grant moves,
+      because grants name the npub.
+46. **The registry keeps a person's key**, sealed under the host secret
+    as fragment and agent keys are (`cell/src/keys.rs`). It is never
+    kept in WorkOS, which holds only the login (and which a self-hosted
+    deployment does not have).
+    - Inside the platform a browser still acts through its session
+      (Paul: "inside platform it's fine to just do normie sessions"),
+      and a fragment's origin gets its own cookie through a single-use
+      redemption, as finite-sites does (its ADR 0029).
+    - The platform signs with a person's key only to cross into a
+      service outside it, one named purpose at a time, as finite-sites'
+      hosted signer signs only `authorizeViewerSession`. It never signs
+      for a page's script, and it is never a general signer.
+    - Nothing uses the key yet. It is there so a person's npub can do
+      cryptographic things when something needs them; brains stay
+      unencrypted (decision 30).
+    - A person's CLIs keep their own keys, paired as today (`fragment
+      login`).
+47. **No usernames.** A fragment's name is one DNS label: the label its
+    maker gives it and a short random suffix the platform adds at
+    create (`todo-k3x9`). It is unique in the fleet and fixed for the
+    fragment's life, and served at `todo-k3x9.fragment.boats`
+    (`todo-k3x9--<branch>.<zone>` on a branch copy). The suffix makes
+    names unique without a namespace to claim: nobody squats a label,
+    and nothing in a URL ties one person's fragments together. Where
+    the CLI or the API takes a fragment, a bare label means the
+    caller's own fragment with that label; two such are an error that
+    names both. R16 keeps the one-DNS-label rule.
+48. **Sharing is by email** (Paul: shared fragments "feel like sharing
+    google docs"). The share sheet and the CLI take an email and a
+    role.
+    - A person who holds that verified email is a member at once.
+    - Otherwise the invite waits on the email, and the platform mails a
+      link to the fragment. Whoever signs in with that verified email
+      becomes a member as the invite said, from then on by their npub.
+      Signing in never makes a share; it meets one addressed to its
+      email.
+    - Everyone with access sees the members' emails.
+    - Agents have no email: one is picked from the sharer's own agents,
+      or named by its npub.
+    - Anything shaped like an email is an email: the CLI's NIP-05
+      lookup goes.
+    - The invites a person can have mailed are capped per day. The
+      platform mails them through Cloudflare Email Sending.
+    - Unguessable links are `link` visibility, which is the default
+      (Paul: "useful for some cases where you just want people to see
+      something (just like making a google doc public doesn't make it
+      easy to find without the link)"). Its share link carries
+      `?view=<token>` and can be rotated, and the fragment's bare
+      address opens nothing. So an invite always names someone, and
+      bearer invites (`/join/<name>?token=` for whoever holds it) go.
+49. **Sign-up is open; creating needs a seat.** This replaced
+    invite-only sign-up. Anyone signs in through WorkOS's own sign-in
+    methods (fragment mails no login links) and is a guest (decision
+    25): they see and edit what is shared with them, and create
+    nothing. Creating needs a paid user, a seat (Paul: "you have to be
+    a paid user (stripe) to create stuff"). A seat needs an invite, an
+    operator's grant until Stripe is built (Paul: "still need invite to
+    become a full paid user").
+50. **Later: paying with a key** (Paul: "a future plan", "useful as a
+    design constraint right now"; Bitcoin Lightning first). A CLI makes
+    its own key and pays over HTTP 402 (x402's shape). That gives it an
+    identity with no sign-in and no email. It may pair a WorkOS sign-in
+    later, and its key never leaves the CLI. None of this is built. What
+    it constrains now:
+    - an identity is an npub whether or not a sign-in names it, and an
+      email is how people find each other, never what an identity is;
+    - nothing the platform does for a person may need the registry to
+      hold their secret: a person whose key is in their CLI signs for
+      themselves;
+    - a payment is credit granted on a ledger, as Stripe's will be
+      (docs/ledger.md).
+
+    What such an identity may create is decided when it is built.
+
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
 `docs/ROADMAP.md` (2026-09-23, before this plan) is gone; it is in git
@@ -605,16 +706,17 @@ superseded by the decisions above or went at the cut.
   with proof of possession and revoked on its own. Every agent has one
   human owner, who can read what the agent can read. Keys stay with
   their callers: browsers hold sessions, the CLI and agents sign.
-  Lookups are live and fail visibly. What Core will own is a stand-in
+  Lookups are live and fail visibly. Since 2026-10-08 an identity is
+  an npub, and the registry keeps a person's own key (decisions 45 and
+  46). FIN-11 itself was canceled on 2026-10-05. What Core will own is a stand-in
   in V3's shape (docs/finite-integration.md). `link` means anyone with
   the unguessable link is a viewer; `public` means anyone.
-- **R16. Usernames, and fragments under them.** A person chooses a
-  username once. A fragment's name is `<label>.<username>`, served at
-  `<label>--<username>.<suffix>`. That is one DNS label, so the suffix's
-  one wildcard certificate covers every fragment (a certificate per host
-  ran into Let's Encrypt's limit of about 50 new names a week).
-  Sessions are `__Host-` cookies. Fragments from before usernames were
-  cut, not migrated (docs/api.md, Names).
+- **R16. One DNS label per fragment.** A fragment is served at one DNS
+  label under the suffix, so the suffix's one wildcard certificate
+  covers every fragment (a certificate per host ran into Let's
+  Encrypt's limit of about 50 new names a week). Sessions are `__Host-`
+  cookies. The label was `<label>--<username>` until usernames went on
+  2026-10-08 (decision 47).
 - **R17. An agent acts for whoever asked, capped.** Each call in a turn
   acts with the lower of two roles: the asker's, and a cap. The cap is
   the agent's own role, or its owner's on a fragment the owner belongs
@@ -1025,8 +1127,8 @@ exit says.
    account from a clean config, and the hosted e2e passes there.
 9. **SimpleX** on $200 seats, always on.
 10. **Cutover.** Zones to Cloudflare, the production account and its
-    raised Workers AI and gateway limits, the production deploy, the
-    username seed, invites; then the old infra comes down (decision 34).
+    raised Workers AI and gateway limits, the production deploy, seats
+    for the people invited; then the old infra comes down (decision 34).
 
 ## Evaluation
 
