@@ -4,70 +4,65 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>When</title>
+  <link rel="stylesheet" href="./__fragment.css">
   <style>
-    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7c766a; --line: #e4dfd4; --soft: #efebe2; --accent: #2d5b8a; --on-accent: #fff; --tint: #dfe8f1; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1d1c16; --fg: #eeeae0; --muted: #9a9384; --line: #2f2d26; --soft: #26241e; --accent: #8fb6e0; --on-accent: #16150f; --tint: #24303c; } }
-    * { box-sizing: border-box; }
-    [hidden] { display: none !important; }
-    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
-    main { max-width: 60rem; margin: 0 auto; padding: 2rem 1.1rem 4rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem 3rem; }
-    @media (min-width: 52rem) { main { grid-template-columns: minmax(0, 1fr) 15rem; padding-top: 3.5rem; } header { grid-column: 1 / -1; } #empty, #board, #setup { grid-column: 1; } aside { grid-column: 2; grid-row: 2 / span 3; } }
-    .kicker { margin: 0 0 .4rem; color: var(--muted); font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; }
-    h1 { font: 600 clamp(1.6rem, 5vw, 2.3rem)/1.15 Georgia, serif; margin: 0; max-width: 34ch; }
-    h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 0 .6rem; }
-    #status { margin: .6rem 0 0; color: var(--muted); font-size: .92rem; }
-    #settled { max-width: 40rem; margin-top: 1rem; padding: .9rem 1rem; border: 1px solid var(--accent); border-radius: .6rem; background: var(--tint); }
-    #settled strong { display: block; font: 600 1.15rem/1.3 Georgia, serif; }
+    :root { --tint: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+    main { max-width: 60rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem 3rem; }
+    @media (min-width: 52rem) { main { grid-template-columns: minmax(0, 1fr) 15rem; } header { grid-column: 1 / -1; } #empty, #board, #setup { grid-column: 1; } aside { grid-column: 2; grid-row: 2 / span 3; } }
+    .kicker { margin: 0 0 .3rem; color: var(--muted); font-size: .75rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    h1 { margin: 0; max-width: 34ch; overflow-wrap: anywhere; }
+    h2 { margin: 0 0 .6rem; color: var(--muted); font-size: .75rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    #status { margin: .4rem 0 0; color: var(--muted); font-size: var(--text-sm); }
+    #settled { max-width: 40rem; margin-top: 1rem; padding: .8rem 1rem; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--tint); }
+    #settled strong { display: block; font-size: var(--text-lg); }
     .name { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
-    .name span { color: var(--muted); font-size: .9rem; white-space: nowrap; }
-    input[type=text], input[type=date], input[type=time] { width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--card); color: inherit; font: inherit; }
-    input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    button { font: inherit; color: inherit; cursor: pointer; }
+    .name span { color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
+    input[type=text], input[type=date], input[type=time] { width: 100%; }
+    button { color: inherit; font-weight: 500; }
     ol { list-style: none; margin: 0; padding: 0; display: grid; gap: .6rem; }
-    .option { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: .85rem 1rem; }
+    .option { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .8rem .9rem; }
     .option.best { border-color: var(--accent); }
-    .top { display: flex; align-items: baseline; gap: .75rem; }
+    .top { display: flex; align-items: baseline; gap: .6rem; }
     .label { flex: 1; font-weight: 600; overflow-wrap: anywhere; }
     .tag { font-size: .75rem; color: var(--accent); font-weight: 600; white-space: nowrap; }
-    .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .9rem; white-space: nowrap; }
-    .bar { display: flex; height: .4rem; margin: .55rem 0 .45rem; border-radius: 1rem; background: var(--soft); overflow: hidden; }
+    .count { font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--text-sm); white-space: nowrap; }
+    .bar { display: flex; height: .35rem; margin: .5rem 0 .4rem; border-radius: 1rem; background: var(--soft); overflow: hidden; }
     .bar i { display: block; transition: width .3s ease; }
     .bar .y { background: var(--accent); }
     .bar .m { background: var(--accent); opacity: .35; }
-    .who { color: var(--muted); font-size: .85rem; min-height: 1.3em; overflow-wrap: anywhere; }
-    .mine { display: flex; gap: .5rem; margin-top: .65rem; }
-    .mine button, .pick { border: 1px solid var(--line); background: transparent; border-radius: 2rem; padding: .4rem .95rem; font-size: .9rem; }
-    .mine button[aria-pressed=true], .pick[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
-    .mine .maybe[aria-pressed=true] { background: var(--tint); color: var(--fg); }
+    .who { color: var(--muted); font-size: var(--text-sm); min-height: 1.3em; overflow-wrap: anywhere; }
+    .mine { display: flex; gap: .5rem; margin-top: .6rem; }
+    .mine button { border: 1px solid var(--line-strong); background: transparent; padding: 0 .95rem; font-size: .875rem; }
+    .mine button[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .mine .maybe[aria-pressed=true] { background: var(--tint); border-color: var(--accent); color: var(--fg); }
     .choice .option { padding: 0; }
-    .pick { display: block; width: 100%; text-align: left; border: 0; border-radius: .75rem; padding: .85rem 1rem; }
+    .pick { display: block; width: 100%; min-height: 0; text-align: left; border: 0; border-radius: 12px; padding: .8rem .9rem; background: none; }
     .pick[aria-pressed=true] { background: var(--tint); color: var(--fg); }
     .pick[aria-pressed=true] .label::after { content: " · your pick"; color: var(--accent); font-weight: 600; font-size: .85rem; }
-    button:disabled { cursor: default; opacity: .55; }
-    #error { color: #b3261e; min-height: 1.4rem; font-size: .9rem; margin: .75rem 0 0; }
+    #error { color: var(--danger); min-height: 1.4rem; font-size: var(--text-sm); margin: .75rem 0 0; }
     #empty { color: var(--muted); }
     aside { display: grid; gap: 1.5rem; align-content: start; }
     .people { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
-    .people li { display: flex; align-items: center; gap: .55rem; font-size: .93rem; }
-    .people .n { margin-left: auto; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+    .people li { display: flex; align-items: center; gap: .55rem; font-size: .9rem; }
+    .people .n { margin-left: auto; color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
     .dot { width: 1.7rem; height: 1.7rem; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: .72rem; font-weight: 600; background: var(--soft); color: var(--muted); }
     .here .dot { background: var(--tint); color: var(--accent); }
-    .quiet { color: var(--muted); font-size: .9rem; margin: 0; }
+    .quiet { color: var(--muted); font-size: var(--text-sm); margin: 0; }
     .tools { display: flex; flex-wrap: wrap; gap: .5rem; }
-    .tools button, #setup button { border: 1px solid var(--line); background: var(--card); border-radius: .5rem; padding: .45rem .8rem; font-size: .9rem; }
-    #setup { background: var(--card); border: 1px solid var(--line); border-radius: .75rem; padding: 1.1rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: .9rem; }
-    #setup label > span { display: block; font-size: .85rem; color: var(--muted); margin-bottom: .3rem; }
+    .tools button, #setup button { border: 1px solid var(--line-strong); background: transparent; padding: 0 .9rem; font-size: .875rem; }
+    #setup { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 1rem; display: grid; grid-template-columns: minmax(0, 1fr); gap: .9rem; }
+    #setup label > span { display: block; font-size: var(--text-sm); color: var(--muted); margin-bottom: .3rem; }
     .modes { display: flex; gap: .5rem; }
-    .modes label { flex: 1; display: flex; gap: .5rem; align-items: center; border: 1px solid var(--line); border-radius: .5rem; padding: .55rem .7rem; cursor: pointer; }
+    .modes label { flex: 1; display: flex; gap: .5rem; align-items: center; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: .5rem .7rem; cursor: pointer; }
     .modes label:has(input:checked) { border-color: var(--accent); background: var(--tint); }
     #drafts { list-style: none; margin: 0; padding: 0; display: grid; gap: .35rem; }
-    #drafts li { display: flex; align-items: center; gap: .5rem; padding: .4rem .2rem .4rem .7rem; border: 1px solid var(--line); border-radius: .5rem; }
+    #drafts li { display: flex; align-items: center; gap: .5rem; padding: .2rem .2rem .2rem .7rem; border: 1px solid var(--line); border-radius: var(--radius); }
     #drafts li span { flex: 1; overflow-wrap: anywhere; }
-    #drafts li button { border: 0; background: none; color: var(--muted); padding: 0 .5rem; font-size: 1.1rem; }
+    #drafts li button { border: 0; background: none; color: var(--muted); padding: 0 .6rem; font-size: 1.1rem; font-weight: 400; }
     .adder { display: flex; gap: .5rem; }
     .adder input { min-width: 0; }
     .adder input[type=date] { flex: 1 1 0; } .adder input[type=time] { flex: 0 0 7.5rem; }
-    #setup .save { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    #setup .save { background: var(--fg); border-color: var(--fg); color: var(--bg); font-weight: 600; }
   </style>
 </head>
 <body>

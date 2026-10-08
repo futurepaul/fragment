@@ -4,43 +4,37 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Wall</title>
+  <link rel="stylesheet" href="./__fragment.css">
   <style>
-    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7c766a; --line: #e4dfd4; --soft: #efebe2; --accent: #a4452c; --on-accent: #fff; --bad: #b3261e; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1e1d17; --fg: #eeeae0; --muted: #9a9384; --line: #2f2d26; --soft: #26241e; --accent: #e59a7f; --on-accent: #16150f; --bad: #f2a49b; } }
-    * { box-sizing: border-box; }
-    [hidden] { display: none !important; }
-    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
-    main { max-width: 72rem; margin: 0 auto; padding: 2.2rem 1.1rem 4rem; }
-    header { max-width: 40rem; margin-bottom: 1.6rem; }
-    h1 { font: 600 clamp(1.9rem, 6vw, 3rem)/1.1 Georgia, serif; margin: 0; overflow-wrap: anywhere; }
-    #intro { margin: .6rem 0 0; font-size: 1.05rem; white-space: pre-wrap; overflow-wrap: anywhere; }
-    #here { margin: .7rem 0 0; color: var(--muted); font-size: .9rem; }
-    .link { border: 0; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
-    a { color: var(--accent); }
-    input, textarea { width: 100%; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--card); color: inherit; font: inherit; }
-    textarea { resize: vertical; min-height: 5.5rem; }
-    input:focus-visible, textarea:focus-visible, button:focus-visible, label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+    main { max-width: 72rem; }
+    header { max-width: 40rem; margin-bottom: 1.25rem; }
+    h1 { margin: 0 0 .3rem; overflow-wrap: anywhere; }
+    #intro { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    #intro:empty { display: none; }
+    #here { margin: .4rem 0 0; color: var(--muted); font-size: var(--text-sm); }
+    .link { min-height: 0; border: 0; background: none; padding: 0; color: var(--accent); font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+    input, textarea { width: 100%; }
+    textarea { min-height: 5.5rem; }
+    label:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
     #about { display: grid; gap: .6rem; margin-top: 1rem; }
-    #compose { max-width: 40rem; background: var(--card); border: 1px solid var(--line); border-radius: .8rem; padding: 1rem; display: grid; gap: .7rem; margin-bottom: 2rem; }
-    #compose textarea { border: 0; padding: 0; background: transparent; min-height: 4.5rem; }
+    #compose { max-width: 40rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: .9rem 1rem; display: grid; gap: .7rem; margin-bottom: 1.5rem; }
+    #compose textarea { border: 0; border-radius: 0; padding: 0; background: transparent; min-height: 4.5rem; }
     #compose textarea:focus-visible { outline: 0; }
     .row { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; border-top: 1px solid var(--line); padding-top: .75rem; }
     .row #name { flex: 1 1 9rem; width: auto; }
-    #as { flex: 1 1 9rem; color: var(--muted); font-size: .92rem; }
-    .photo { border: 1px solid var(--line); border-radius: .5rem; padding: .55rem .8rem; font-size: .92rem; cursor: pointer; color: var(--muted); }
-    .send { border: 0; border-radius: .5rem; padding: .6rem 1.2rem; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
-    .send:disabled { opacity: .6; cursor: default; }
-    #preview { max-width: 9rem; max-height: 9rem; border-radius: .5rem; object-fit: cover; }
-    #note { margin: 0; min-height: 1.2em; font-size: .9rem; color: var(--muted); }
+    #as { flex: 1 1 9rem; color: var(--muted); font-size: var(--text-sm); }
+    .photo { display: inline-flex; align-items: center; min-height: 2.25rem; padding: 0 .9rem; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); font-size: .875rem; font-weight: 500; cursor: pointer; }
+    #preview { max-width: 9rem; max-height: 9rem; border-radius: var(--radius); object-fit: cover; }
+    #note { margin: 0; min-height: 1.2em; font-size: var(--text-sm); color: var(--muted); }
     #note:empty { display: none; }
-    #note.bad { color: var(--bad); }
+    #note.bad { color: var(--danger); }
     #wall { columns: 18rem; column-gap: 1rem; }
-    .post { break-inside: avoid; margin: 0 0 1rem; background: var(--card); border: 1px solid var(--line); border-radius: .8rem; overflow: hidden; }
+    .post { break-inside: avoid; margin: 0 0 1rem; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
     .post > img { display: block; width: 100%; height: auto; background: var(--soft); }
-    .post p { margin: 0; padding: .9rem 1rem 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 1.02rem; }
-    .post footer { display: flex; align-items: center; gap: .5rem; padding: .7rem 1rem .85rem; font-size: .85rem; color: var(--muted); }
+    .post p { margin: 0; padding: .8rem 1rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .post footer { display: flex; align-items: center; gap: .5rem; padding: .6rem 1rem .8rem; font-size: var(--text-sm); color: var(--muted); }
     .post footer strong { color: var(--fg); font-weight: 600; overflow-wrap: anywhere; }
-    .post footer .hide { margin-left: auto; font-size: .82rem; color: var(--muted); }
+    .post footer .hide { margin-left: auto; font-size: .8rem; color: var(--muted); }
     .face { width: 1.5rem; height: 1.5rem; border-radius: 50%; object-fit: cover; flex: none; background: var(--soft); }
     #empty { color: var(--muted); }
   </style>
@@ -48,7 +42,7 @@
 <body>
   <main>
     <header>
-      <h1 id="title">Wall</h1>
+      <h1 id="title" hidden></h1>
       <p id="intro"></p>
       <p id="here">connecting…</p>
       <form id="about" hidden>
@@ -154,7 +148,9 @@
     }
 
     fragment.live("wall", {}, (w) => {
-      $("title").textContent = w.title || "Wall";
+      // the wall's own title, when it has one: the window it opens in names the app
+      $("title").textContent = w.title;
+      $("title").hidden = !w.title;
       document.title = w.title || "Wall";
       $("intro").textContent = w.intro || (editor ? "" : "Leave a note. Everyone here sees it as it lands.");
       if (editor && !w.title) { $("intro").replaceChildren(el("button", { className: "link", textContent: "Give the wall a title", onclick: openAbout })); }

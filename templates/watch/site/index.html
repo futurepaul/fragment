@@ -4,51 +4,43 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Watch</title>
+  <link rel="stylesheet" href="./__fragment.css">
   <style>
-    :root { --bg: #f7f5f0; --card: #fffdf8; --fg: #1d1b16; --muted: #7d776a; --line: #e4dfd3; --accent: #b4441c; --on-accent: #fff; --bad: #9b2c2c; }
-    @media (prefers-color-scheme: dark) { :root { --bg: #16150f; --card: #1e1c16; --fg: #eeeae0; --muted: #9a9384; --line: #2f2c24; --accent: #f08a5d; --on-accent: #16150f; --bad: #f19a8f; } }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 ui-sans-serif, system-ui, sans-serif; }
-    main { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
-    header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
-    h1 { font: 600 2rem/1.1 Georgia, serif; margin: 0; }
-    h2 { font: 600 1.1rem/1.2 Georgia, serif; margin: 2.5rem 0 .75rem; }
-    .sub { color: var(--muted); margin: .35rem 0 0; font-size: .9rem; }
-    button { font: inherit; cursor: pointer; border-radius: .5rem; }
-    .primary { padding: .6rem 1rem; border: 0; background: var(--accent); color: var(--on-accent); }
-    .quiet { padding: .45rem .8rem; border: 1px solid var(--line); background: transparent; color: inherit; }
-    .link { padding: 0; border: 0; background: none; color: var(--muted); font-size: .85rem; text-decoration: underline; text-underline-offset: 2px; }
-    #notify-note { color: var(--muted); font-size: .85rem; margin-top: .35rem; max-width: 22rem; }
-    form { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; padding: 1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--card); margin-bottom: .5rem; }
-    form[hidden] { display: none; }
-    input { width: 100%; padding: .6rem .75rem; border: 1px solid var(--line); border-radius: .5rem; background: var(--bg); color: inherit; font: inherit; min-width: 0; }
-    details { grid-column: 1 / -1; color: var(--muted); font-size: .9rem; }
+    main { max-width: 60rem; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; margin-bottom: 1rem; }
+    h2 { margin: 2rem 0 .6rem; color: var(--muted); font-size: .75rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+    .sub { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+    .quiet { border: 1px solid var(--line-strong); background: transparent; color: inherit; padding: 0 .9rem; font-size: .875rem; font-weight: 500; }
+    .link { min-height: 0; padding: 0; border: 0; background: none; color: var(--muted); font-size: var(--text-sm); font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+    #notify-note { color: var(--muted); font-size: var(--text-sm); margin-top: .35rem; max-width: 22rem; }
+    #notify-note:empty { display: none; }
+    form { display: grid; grid-template-columns: 1fr 1fr auto; gap: .5rem; padding: .9rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); margin-bottom: .5rem; }
+    input { width: 100%; }
+    details { grid-column: 1 / -1; color: var(--muted); font-size: var(--text-sm); }
     details > div { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-top: .5rem; }
     details small { grid-column: 1 / -1; }
-    code { font: .85em ui-monospace, Menlo, monospace; background: var(--line); padding: .05rem .3rem; border-radius: .25rem; }
-    #error { color: var(--bad); min-height: 1.5rem; font-size: .9rem; }
-    #watches { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 1rem; }
-    .watch { display: flex; flex-direction: column; gap: .35rem; padding: 1rem 1.1rem; border: 1px solid var(--line); border-radius: .75rem; background: var(--card); min-width: 0; }
-    .watch h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+    #error { color: var(--danger); min-height: 1.5rem; font-size: var(--text-sm); }
+    #watches { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: .75rem; }
+    .watch { display: flex; flex-direction: column; gap: .3rem; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); min-width: 0; }
+    .watch h3 { margin: 0; overflow-wrap: anywhere; }
     .where { color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; text-decoration: none; }
-    .value { font: 600 1.5rem/1.25 Georgia, serif; font-variant-numeric: tabular-nums; margin: .4rem 0 .1rem; overflow-wrap: anywhere; }
-    .value.long { font: 400 .95rem/1.45 ui-sans-serif, system-ui, sans-serif; max-height: 6.5em; overflow: hidden; }
-    .value.none { color: var(--muted); font: italic 400 1rem/1.4 Georgia, serif; }
-    .was { font-size: .85rem; color: var(--muted); }
+    .value { margin: .3rem 0 .1rem; font-size: 1.375rem; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .value.long { font-size: .9375rem; font-weight: 400; line-height: 1.45; max-height: 6.5em; overflow: hidden; }
+    .value.none { color: var(--faint); font-size: 1rem; font-weight: 400; }
+    .was { font-size: var(--text-sm); color: var(--muted); }
     .was.fresh { color: var(--accent); }
-    .status { font-size: .8rem; color: var(--muted); }
-    .problem { font-size: .85rem; color: var(--bad); }
+    .status { font-size: .8rem; color: var(--faint); }
+    .problem { font-size: var(--text-sm); color: var(--danger); }
     .actions { display: flex; gap: 1rem; margin-top: auto; padding-top: .5rem; }
-    .empty { color: var(--muted); padding: 2rem 0; }
+    .empty { color: var(--muted); padding: 1rem 0; }
     #history { list-style: none; padding: 0; margin: 0; }
-    #history li { display: grid; grid-template-columns: 6rem 1fr; gap: .75rem; padding: .55rem 0; border-bottom: 1px solid var(--line); font-size: .9rem; }
+    #history li { display: grid; grid-template-columns: 6rem 1fr; gap: .75rem; padding: .55rem 0; border-bottom: 1px solid var(--line); font-size: .9rem; overflow-wrap: anywhere; }
     #history time { color: var(--muted); font-size: .8rem; padding-top: .1rem; }
     #history b { font-weight: 600; }
     #history .arrow { color: var(--accent); }
     .new { animation: flash 1.5s ease-out; }
-    @keyframes flash { from { background: color-mix(in srgb, var(--accent) 18%, var(--card)); } }
+    @keyframes flash { from { background: color-mix(in srgb, var(--accent) 18%, var(--surface)); } }
     @media (max-width: 40rem) {
-      main { padding-top: 1.5rem; }
       form { grid-template-columns: 1fr; }
       details > div { grid-template-columns: 1fr; }
       #history li { grid-template-columns: 1fr; gap: .1rem; }
@@ -58,10 +50,7 @@
 <body>
   <main>
     <header>
-      <div>
-        <h1>Watch</h1>
-        <p class="sub" id="summary">connecting…</p>
-      </div>
+      <p class="sub" id="summary">connecting…</p>
       <div>
         <button class="quiet" id="notify">Notify me of changes</button>
         <div id="notify-note"></div>
