@@ -141,8 +141,9 @@ fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
 
 `fragment create <name> --template T` makes one on the platform with no
 folder: a blessed template (`chat`, `agent`, `skills`, …) runs the
-platform's current release and names it in `fragment.json`, and `--title`
-gives it its own title; any other is copied in as its first commit.
+platform's current release and names it in `fragment.json`; any other is
+copied in as its first commit. Either way `--title` gives it its own
+title, its `fragment.json`'s `meta.title`, over the template's.
 `fragment new <dir> --template T` scaffolds without creating;
 `fragment new --list` lists the templates:
 

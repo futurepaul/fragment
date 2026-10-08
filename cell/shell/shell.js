@@ -41,13 +41,13 @@ const COLORS = ["#a88bea", "#62c8af", "#eda978", "#80afe9", "#dc91b6", "#b7c878"
 // beige boxes of an alternate 1990s, never a real one's.
 const NAMES = ["XBT-2000", "Starfire 40K", "Turbo Quasar 486", "Novatron DX", "Hyperion 9000", "Cobalt Prism 66", "Megastation LX", "Orbitron 3D", "Datastar Pro", "Pulsar 360", "Zephyr XL", "Titan MX", "Vortex 7", "Nimbus 4K", "Galaxion SE", "Powerframe 99"];
 const CURRENT = "shell.chat.v1";
-// the templates an app starts from (the platform's catalog: publish.rs)
+// the templates an app starts from (the platform's catalog: publish.rs),
+// each made with a title: the name its maker gives it, or the template's
 const CATALOG = [
   { template: "todo", name: "Todo", about: "A list, live for everyone who has it open." },
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
   { template: "blank", name: "Blank", about: "One page to start from." },
-  // blessed (decision 40): named, not copied, and made with a title, as a chat is
-  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
+  { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search." },
 ];
 
 // me: the signed-in person; fragments: their list (name, role, kind,
@@ -851,7 +851,7 @@ function showCatalog() {
       error.textContent = "";
       try {
         const label = input.value.trim();
-        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
+        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, title: label || t.name });
         await load();
         viewer.close("catalog");
         openApp(made.name);

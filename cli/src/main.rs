@@ -90,7 +90,7 @@ enum Cmd {
         /// other is copied in as its first commit
         #[arg(long)]
         template: Option<String>,
-        /// Its title (a blessed template's fragment only)
+        /// Its title, over its template's
         #[arg(long, requires = "template")]
         title: Option<String>,
         /// Show the share link and the webhook URL (they

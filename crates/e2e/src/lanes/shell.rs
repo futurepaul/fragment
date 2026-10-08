@@ -165,9 +165,22 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "POST", "/api/connections/notion/authorize", Some(&json!({})), &[])?;
     s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
 
-    // a template that is not blessed is copied, and its kind is what it says
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "garden", "template": "todo", "title": "x" })), &[])?;
-    s.ok("a title is a blessed template's alone", r.status == 400, &r);
+    // a template that is not blessed is copied, and the title its maker
+    // gives it is its fragment.json's, over the template's: the face every
+    // member's list shows
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "orchard", "template": "todo", "title": "Orchard rota" })), &[])?;
+    let todo = r.body["name"].as_str().unwrap_or("").to_string();
+    let titled = s.eventually(std::time::Duration::from_secs(30), || {
+        shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == todo.as_str() && f["title"] == "Orchard rota")))
+    });
+    let manifest = shell(api, &session, "GET", &format!("/api/f/{todo}/manifest"), None, &[])?;
+    s.ok(
+        "a copied template's fragment takes the title its maker gives it, over the template's, and its list says so",
+        r.status == 200 && titled && manifest.body["meta"]["title"] == "Orchard rota" && manifest.body["meta"]["description"].as_str().is_some_and(|d| d.contains("todo")) && manifest.body["operations"]["add"].is_object(),
+        &manifest,
+    );
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "bare", "title": "Bare" })), &[])?;
+    s.ok("a title needs a template: a fragment made bare says its own in fragment.json (400)", r.status == 400, &r);
     let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
     search_and_archive(s, api, &session)?;
@@ -634,6 +647,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&page, "#add-app")?;
     let catalog = b.until(&page, "document.querySelector('.catalog form')", wait);
     s.ok("Add an app opens the catalog in the viewer", catalog, "");
+    // named by its maker: its label, and its title
+    b.eval(&page, &fill(".catalog form input[name=label]", "groceries"))?;
     b.eval(&page, "document.querySelector('.catalog form')?.requestSubmit()")?;
     let window = b.until(&page, "document.querySelectorAll('#apps .row[data-key]').length === 1 && document.querySelector('.viewer iframe')", wait);
     s.ok("an app from the catalog opens in a window beside the chat", window, "");
@@ -649,6 +664,9 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
         carded,
         b.eval(&page, "[...document.querySelectorAll('#apps .row')].map((r) => r.querySelector('.app-card')?.outerHTML.slice(0, 160))")?,
     );
+    // deployed (its card is shot after), its face is the name it was given, not its template's
+    let named = b.eval(&page, "document.querySelector('#apps .row[data-key] .label')?.textContent ?? null")?;
+    s.ok("and its row is titled with the name its maker gave it, not its template's", named == "groceries", &named);
     let peeked = b.eval(
         &page,
         "(() => { const r = document.querySelector('#apps .row.app-row'); r?.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' })); const p = document.querySelector('.card-peek'); return !!p && !p.hidden && p.querySelector('img').src.startsWith('blob:') && p.getBoundingClientRect().width === 320; })()",

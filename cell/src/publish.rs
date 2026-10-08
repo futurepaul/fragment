@@ -33,11 +33,22 @@ pub(crate) fn template(name: &str) -> Option<Template> {
     TEMPLATES.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
 }
 
-/// The template's fragment.json with the fragment's own name in it.
-fn stamp(bytes: &[u8], name: &str) -> Vec<u8> {
+/// The template's fragment.json with the fragment's own name in it, and
+/// the title its maker gave it, if any, over the template's.
+fn stamp(bytes: &[u8], name: &str, title: Option<&str>) -> Vec<u8> {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Object(mut o)) => {
             o.insert("name".into(), name.into());
+            if let Some(title) = title {
+                match o.get_mut("meta") {
+                    Some(Value::Object(meta)) => {
+                        meta.insert("title".into(), title.into());
+                    }
+                    _ => {
+                        o.insert("meta".into(), json!({ "title": title }));
+                    }
+                }
+            }
             serde_json::to_vec_pretty(&Value::Object(o)).expect("a manifest serializes")
         }
         _ => bytes.to_vec(),
@@ -45,9 +56,9 @@ fn stamp(bytes: &[u8], name: &str) -> Vec<u8> {
 }
 
 /// A template's files as the fragment `name` holds them: its fragment.json
-/// stamped with that name.
-fn stamped(t: Template, name: &str) -> Vec<FileWrite> {
-    t.iter().map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name) } else { bytes.to_vec() }) }).collect()
+/// stamped with that name and title.
+fn stamped(t: Template, name: &str, title: Option<&str>) -> Vec<FileWrite> {
+    t.iter().map(|(path, bytes)| FileWrite { path: path.to_string(), bytes: Some(if *path == "fragment.json" { stamp(bytes, name, title) } else { bytes.to_vec() }) }).collect()
 }
 
 impl FragmentCell {
@@ -66,12 +77,13 @@ impl FragmentCell {
         let Some(which) = self.meta(MetaKey::TemplatePending)? else { return Ok(()) };
         let (name, owner) = (self.name()?, self.must(MetaKey::Owner)?);
         let key = format!("template:{}", self.must(MetaKey::CreatedAt)?);
+        let title = self.meta(MetaKey::TemplateTitle)?;
         let files = match (template(&which), blessed::template(&which)) {
-            (Some(t), _) => stamped(t, &name),
+            (Some(t), _) => stamped(t, &name, title.as_deref()),
             // a blessed template is named, not copied: the release serves it
             (None, Some(_)) => {
                 let mut manifest = json!({ "template": which });
-                if let Some(title) = self.meta(MetaKey::TemplateTitle)? {
+                if let Some(title) = title {
                     manifest["meta"] = json!({ "title": title });
                 }
                 let bytes = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
