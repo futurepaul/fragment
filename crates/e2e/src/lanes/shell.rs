@@ -766,6 +766,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     add_skills_ui(s, api, &mut b, &page, &session)?;
     skills_ui(s, api, &mut b, &page, &session)?;
     connections_ui(s, api, &mut b, &page, &session, &email, &chat)?;
+    super::own_models::ui(s, api, &mut b, &page, &session)?;
     mind_settings_ui(s, api, &mut b, &page, &session, &mind, &shots)?;
     b.color_scheme(&page, "dark")?;
     let _ = b.screenshot(&page, &shots.join("desktop-settings-dark.png"));

@@ -35,15 +35,16 @@ export class App extends DurableObject {
 
   // a tool turn: the model calls a tool, the job runs it, and the model
   // answers from its result, the conversation passed back as it came
-  async tool_turn({ ask }, job) {
+  // (`role`, when named, is whose model its payer chose runs it: chat or memory)
+  async tool_turn({ ask, role }, job) {
     const tools = [{ type: "function", function: { name: "lookup", description: "Looks a word up.", parameters: { type: "object", properties: { word: { type: "string" } }, required: ["word"] } } }];
     const messages = [{ role: "user", content: ask }];
-    const first = await job.ai.text({ messages, tools, tool_choice: "auto" });
+    const first = await job.ai.text({ messages, tools, tool_choice: "auto", role });
     const call = first.message.tool_calls?.[0];
     if (!call) return { first };
     const { word } = JSON.parse(call.function.arguments);
     messages.push(first.message, { role: "tool", tool_call_id: call.id, content: `${word}: a small piece broken off` });
-    const second = await job.ai.text({ messages, tools });
+    const second = await job.ai.text({ messages, tools, role });
     return { first, second };
   }
 

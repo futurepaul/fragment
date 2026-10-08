@@ -777,7 +777,8 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
         r["rotated"] == json!(["inbox", "view"]) && r["viewToken"] != c["viewToken"] && r["inboxToken"] != c["inboxToken"],
         json!({ "rotated": r["rotated"], "view_changed": r["viewToken"] != c["viewToken"], "inbox_changed": r["inboxToken"] != c["inboxToken"] }),
     );
-    mcp(s, api, &home, &keys, &name)
+    mcp(s, api, &home, &keys, &name)?;
+    super::own_models::cli(s, api, &home, &keys)
 }
 
 /// `fragment mcp` in `home`, given `args`, sent `messages` one per line and

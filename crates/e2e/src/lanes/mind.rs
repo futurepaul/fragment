@@ -554,7 +554,8 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
     );
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
-    Ok(())
+    // a mind on the person's own models (Claude, the vendors' fake)
+    super::own_models::mind(s, api)
 }
 
 /// A fragment with its own code that asks for the `owner` capability.

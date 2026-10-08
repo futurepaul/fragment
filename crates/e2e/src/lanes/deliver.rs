@@ -289,7 +289,9 @@ pub fn ai(s: &mut Suite, api: &Api) -> Result<()> {
         r["status"] == "held" && r["error"].as_str().is_some_and(|e| e.contains("not a JPEG")) && s.fake.file_at(&repo, "main", "art/junk.jpg").is_none() && cost(&r) > 0,
         &r,
     );
-    calories(s, api, wait)
+    calories(s, api, wait)?;
+    // a person's own models: steps on Claude and ChatGPT (the vendors' fake)
+    super::own_models::ai(s, api)
 }
 
 /// A text step's tools, as a turn uses them: the model's tool call is the

@@ -859,8 +859,9 @@ mod tests {
     }
 
     /// The example and the hosted e2e's configs parse and check, each with
-    /// the platform's catalog: Google, and the four operator keys at their
-    /// list prices, each key's store secret named; and every name they give
+    /// the platform's catalog: Google, the four operator keys at their
+    /// list prices, each key's store secret named, and the own keys of a
+    /// person's own models (Anthropic's, OpenAI's); and every name they give
     /// a secret is the one dev and the e2e bind locally
     /// (`store::Bound::conventional`), so the three never drift apart.
     #[test]
@@ -872,7 +873,7 @@ mod tests {
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("goose"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
             let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
+            assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs", "anthropic", "openai"], "{file}");
             assert_eq!(keys.len(), 4, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
             let conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);

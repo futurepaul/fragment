@@ -28,6 +28,7 @@ mod members;
 mod mind;
 mod mind_live;
 mod notes;
+mod own_models;
 mod plane;
 mod posts;
 mod restart;
