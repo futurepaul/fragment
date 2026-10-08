@@ -8,8 +8,13 @@
 //! what the image runs.
 //!
 //! - **Its owner** (`/api/computers…`, the router: `route`) makes it, wakes
-//!   it, puts it to sleep, assigns agent fragments to it, and mints the
-//!   one-time tickets that sign a browser in to its ports.
+//!   it, puts it to sleep, restarts it, assigns agent fragments to it, and
+//!   mints the one-time tickets that sign a browser in to its ports. Its
+//!   view tells them what they should know of it (`notices`: it won't
+//!   start, its saves are failing and when that stops it, a start went
+//!   back to an older save), and when that changes the computer tells
+//!   their open pages (`principal::tell_changed`), so the shell shows it
+//!   while there is still time.
 //! - **Its origin** (`<24 hex>--computer.<suffix>`: `serve_host`) serves
 //!   its ports to its owner, cross-site from the platform, so a page the
 //!   guest serves can act as no one; in a tab of its own, or in a frame of
@@ -44,11 +49,11 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, Kind};
-use fragment_core::computer::{Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
+use fragment_core::computer::{notices, Action, Event, Lifecycle, Phase, Plan as Restore, Rules, Save, SaveNote, Saves, Socket, Step, Wake, HOLD_WAIT_MS};
 use fragment_core::ledger::{Meter, MeterRow, Month, Release, Reserve, Settle, Spend};
 use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
-use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerPhase, ComputerUses, ComputerView, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestoreSource, PORT_PATH_MAX_BYTES};
+use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerUses, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, ProviderUse, RestartAsk, RestoreSource, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -549,6 +554,31 @@ impl ComputerCell {
     /// wake while a start is under way) applies its own event between, and
     /// the generations keep a late report from changing anything.
     async fn drive(&self, first: Event) -> CellResult<Option<String>> {
+        let told = self.notices()?;
+        let refused = self.drive_events(first).await;
+        // what its owner is told changed: their open pages read it again
+        // (whatever the events did, a step that failed half way included)
+        if self.notices().is_ok_and(|now| now != told) {
+            self.tell_owner().await;
+        }
+        refused
+    }
+
+    /// What its owner is told of it now (`fragment_core::computer::notices`).
+    fn notices(&self) -> CellResult<Vec<ComputerNotice>> {
+        Ok(notices(&self.lifecycle()?, &self.saves()?, &self.rules()))
+    }
+
+    /// Tells its owner's open pages to read it again. One that did not hear
+    /// reads it as it reconnects, or at its next change: logged, never failed.
+    async fn tell_owner(&self) {
+        let Ok(Some(owner)) = self.meta(MetaKey::Owner) else { return };
+        if let Err(e) = crate::principal::tell_changed(&self.env, &owner).await {
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "told": "owner", "error": e.message }));
+        }
+    }
+
+    async fn drive_events(&self, first: Event) -> CellResult<Option<String>> {
         let mut queue = vec![first];
         if let Some(exited) = self.take_over().await? {
             // the event that brought this isolate up applies after the exit
@@ -651,23 +681,61 @@ impl ComputerCell {
     /// credit, no wakes). A computer already up is not asked about. A
     /// ledger that does not answer lets it wake (docs/ledger.md).
     async fn wake(&self, why: Wake) -> CellResult<()> {
-        let owner = self.must(MetaKey::Owner)?;
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. } | Phase::Starting { .. }) {
-            let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
-            if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
-                if e.refused.is_some() {
-                    self.set_meta(MetaKey::Note, &e.message)?;
-                    console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "refused": e.message }));
-                    return Err(CellError::new(e.code, e.message));
-                }
-                console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": why, "ledger": e.message }));
-            }
-            self.flush_awake().await;
+            self.may_start(json!(why)).await?;
         }
         // a wake that started nothing says why
         if let Some(why) = self.drive(Event::Wake { why }).await? {
             return Err(CellError::new(ErrorCode::WontWake, why));
         }
+        Ok(())
+    }
+
+    /// Whether its owner's ledger lets it start (decision 27: at zero
+    /// credit, no wakes; `asked` names what asked, for the log). A refusal
+    /// is kept as its view's `why` until a start comes up. A ledger that
+    /// does not answer lets it (docs/ledger.md).
+    async fn may_start(&self, asked: Value) -> CellResult<()> {
+        let owner = self.must(MetaKey::Owner)?;
+        let may = crate::ledger::MaySpend { spend: Spend::Wake, fragment: None, by_owner: true };
+        if let Err(e) = crate::ledger::ask(&self.env, &owner, &may).await {
+            if e.refused.is_some() {
+                self.set_meta(MetaKey::Note, &e.message)?;
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "refused": e.message }));
+                return Err(CellError::new(e.code, e.message));
+            }
+            console_error!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "wake": asked, "ledger": e.message }));
+        }
+        self.flush_awake().await;
+        Ok(())
+    }
+
+    /// Its owner's restart (`POST /api/computers/{id}/restart`): the way
+    /// back to working (docs/computers.md, "What its owner is told"). Of the
+    /// start their view named (`asked`, 0 for whatever runs): one already
+    /// restarted is nothing, so the same press twice restarts once. Running,
+    /// it saves if it can and starts again whether or not it did; asleep or
+    /// won't wake, it starts. Either way the start is fresh: from the image
+    /// and the newest good save (or, past one that fails its check, an older
+    /// one), never a snapshot, which could carry what broke it outside
+    /// `/data`. A restart starts a container, so the ledger is asked first,
+    /// as for a wake, whatever runs now: at zero credit it is refused, and
+    /// what runs runs on (decision 27).
+    async fn restart(&self, asked: u64) -> CellResult<()> {
+        let life = self.lifecycle()?;
+        if !life.restarts(asked) {
+            console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": asked, "made": "already", "generation": life.generation() }));
+            return Ok(());
+        }
+        if matches!(life.phase, Phase::Starting { .. }) {
+            // the start under way is the restart's
+            self.drive(Event::Restart { generation: asked }).await?;
+            return Ok(());
+        }
+        self.may_start(json!("restart")).await?;
+        self.update_saves(|s| s.restart_fresh())?;
+        console_log!("{}", json!({ "computer": self.meta(MetaKey::Id)?, "restart": life.generation(), "phase": life.phase }));
+        self.drive(Event::Restart { generation: asked }).await?;
         Ok(())
     }
 
@@ -754,6 +822,10 @@ impl ComputerCell {
                     Ok(Some((restored, rollbacks))) => console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "restored": restored, "rollbacks": rollbacks })),
                     Ok(None) => {}
                     Err(e) => console_error!("{}", json!({ "computer": "restored", "generation": generation, "error": e.message })),
+                }
+                // a wake refused before (the ledger's why) is no longer so
+                if let Err(e) = self.delete_meta(MetaKey::Note) {
+                    console_error!("{}", json!({ "computer": "note", "generation": generation, "error": e.message }));
                 }
                 Event::Ready { generation }
             }
@@ -1076,8 +1148,11 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if self.container_running().await {
-            let newest = self.saves().ok().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
-            if let (true, true, Some(save)) = (saved, self.cfg.computer_snapshots, newest) {
+            let saves = self.saves().ok();
+            let newest = saves.as_ref().and_then(|s| s.all().first().cloned()).filter(|s| s.generation == generation);
+            // a restart's start is fresh from the image: no snapshot for it
+            let fresh = saves.as_ref().is_some_and(Saves::fresh);
+            if let (true, true, false, Some(save)) = (saved, self.cfg.computer_snapshots, fresh, newest) {
                 self.snapshot(generation, &save.id).await;
             }
             let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
@@ -1144,6 +1219,8 @@ impl ComputerCell {
     /// its owner narrowed it from), each a placeholder naming the agent.
     async fn guest_view(&self) -> CellResult<ComputerView> {
         let mut view = self.view()?;
+        // what its owner is told is theirs (its guest reads `restored`)
+        view.notices = vec![];
         let catalog = &self.cfg.providers;
         view.credential_env = catalog.env_names();
         if catalog.is_empty() || view.agents.is_empty() {
@@ -1315,7 +1392,9 @@ impl ComputerCell {
             owner: self.must(MetaKey::Owner)?,
             image: self.must(MetaKey::Image)?,
             phase,
+            generation: life.generation(),
             why,
+            notices: notices(&life, &saves, &self.rules()),
             agents: self.agents()?,
             origin,
             credential_env: vec![],
@@ -1390,16 +1469,20 @@ impl ComputerCell {
     /// docs/api.md): `kill` sends SIGKILL to the guest's PID 1, so its
     /// container exits as a crash does and its real exit is reported;
     /// `saves` answers what it keeps of its saves and what its last start
-    /// restored; `fail-saves {times}` fails its next saves; `always-on {on}`
-    /// is its owner's plan changing (the plan itself does not reach a
-    /// computer yet).
+    /// restored; `fail-saves {times}` fails its next saves (0: none more);
+    /// `always-on {on}` is its owner's plan changing (the plan itself does
+    /// not reach a computer yet).
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         let id = self.must(MetaKey::Id)?;
         match b.op.as_str() {
             "fail-saves" => {
-                let times = b.times.filter(|t| (1..=FAIL_SAVES_MAX).contains(t)).ok_or_else(|| CellError::invalid(format!("fail-saves names its times, 1 to {FAIL_SAVES_MAX}")))?;
-                self.set_meta(MetaKey::FailSaves, &times.to_string())?;
+                // 0 clears it: the saves after it fail no more
+                let times = b.times.filter(|t| *t <= FAIL_SAVES_MAX).ok_or_else(|| CellError::invalid(format!("fail-saves names its times, 0 to {FAIL_SAVES_MAX}")))?;
+                match times {
+                    0 => self.delete_meta(MetaKey::FailSaves)?,
+                    n => self.set_meta(MetaKey::FailSaves, &n.to_string())?,
+                }
                 console_log!("{}", json!({ "computer": id, "lever": "fail-saves", "times": times }));
                 Ok(json!({ "computer": id, "failSaves": times }))
             }
@@ -1431,6 +1514,7 @@ impl ComputerCell {
                 v["generation"] = json!(life.generation());
                 v["saving"] = json!(life.saving());
                 v["unsavedSince"] = json!(life.unsaved_since_ms());
+                v["keepalives"] = json!(life.keepalives());
                 v["failSaves"] = json!(self.meta(MetaKey::FailSaves)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0));
                 Ok(v)
             }
@@ -1483,6 +1567,22 @@ impl ComputerCell {
             "computer/sleep" => {
                 self.must(MetaKey::Id)?;
                 self.drive(Event::Sleep).await?;
+                json_response(&self.view()?)
+            }
+            "computer/restart" => {
+                let b: RestartAsk = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                self.restart(b.generation.unwrap_or(0)).await?;
+                json_response(&self.view()?)
+            }
+            "computer/notices-seen" => {
+                let b: NoticeSeen = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                if !self.update_saves(|s| s.saw(b.life))? {
+                    return Err(CellError::invalid(format!("no notice told here names start {}: read the computer again", b.life)));
+                }
+                // its owner's other pages read it again, and tell it no more
+                self.tell_owner().await;
                 json_response(&self.view()?)
             }
             "computer/assign" => {
@@ -1857,8 +1957,10 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
                 Err(e) if e.code == ErrorCode::NotFound => vec![],
                 Err(e) => return Err(e),
             };
-            // the image a new computer gets: one pinned to another may update to it
-            json_response(&json!({ "computers": list, "defaultImage": Config::from_env(env).computer_image }))
+            // the image a new computer gets: one pinned to another may update
+            // to it; and where its owner gets help when it will not start
+            let cfg = Config::from_env(env);
+            json_response(&json!({ "computers": list, "defaultImage": cfg.computer_image, "support": cfg.support_url }))
         }
         (Method::Get, [id]) => json_response(&owned(env, who, id).await?),
         (Method::Post, [id, "wake"]) => {
@@ -1868,6 +1970,17 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
         (Method::Post, [id, "sleep"]) => {
             owned(env, who, id).await?;
             json_response(&view_of(ask(env, id, "computer/sleep", &json!({})).await?)?)
+        }
+        (Method::Post, [id, "restart"]) => {
+            owned(env, who, id).await?;
+            // no body restarts whatever runs; a start named is restarted once
+            let asked: RestartAsk = if body.iter().all(u8::is_ascii_whitespace) { RestartAsk::default() } else { serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))? };
+            json_response(&view_of(ask(env, id, "computer/restart", &json!(asked)).await?)?)
+        }
+        (Method::Post, [id, "notices", "seen"]) => {
+            owned(env, who, id).await?;
+            let seen: NoticeSeen = serde_json::from_slice(body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            json_response(&view_of(ask(env, id, "computer/notices-seen", &json!(seen)).await?)?)
         }
         (Method::Put, [id, "image"]) => {
             owned(env, who, id).await?;

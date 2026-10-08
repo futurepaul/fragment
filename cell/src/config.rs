@@ -52,9 +52,14 @@ pub struct Config {
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
     /// keeps failing stays awake before it sleeps unsaved (I5 of
-    /// docs/explorations/pi-durable.md). Thirty minutes by default, a
-    /// default for Paul to confirm (`fragment_core::computer`).
+    /// docs/explorations/pi-durable.md). Thirty minutes by default, Paul's
+    /// (2026-10-08; `fragment_core::computer`).
     pub computer_unsaved_max_ms: i64,
+    /// `FRAGMENT_SUPPORT_URL` (the deploy config's `support_url`): where a
+    /// person whose computer will not start gets help, an `https:` page or
+    /// a `mailto:` address (`fragment_core::computer::support_url_ok`).
+    /// Unset, the shell shows them what to tell whoever runs it.
+    pub support_url: Option<String>,
     /// `FRAGMENT_POLL_INTERVAL_S`: a busy fragment's pass, and the poll backstop (default 300).
     pub poll_interval_ms: i64,
     /// `FRAGMENT_EGRESS_LOCAL=allow`: jobs may fetch private and loopback
@@ -230,6 +235,10 @@ impl Config {
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))
                 .unwrap_or(fragment_core::computer::UNSAVED_MAX_MS_DEFAULT),
+            support_url: var(env, "FRAGMENT_SUPPORT_URL").map(|u| {
+                assert!(fragment_core::computer::support_url_ok(&u), "FRAGMENT_SUPPORT_URL is an https: page or a mailto: address, not {u:?}");
+                u
+            }),
             poll_interval_ms: var(env, "FRAGMENT_POLL_INTERVAL_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(300) * 1000,
             egress_local,
             blob_grace_ms: var(env, "FRAGMENT_BLOB_GRACE_S").and_then(|s| s.parse::<i64>().ok()).filter(|s| *s >= 1).unwrap_or(7 * 24 * 3600) * 1000,

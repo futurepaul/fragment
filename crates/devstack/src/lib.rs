@@ -310,6 +310,11 @@ pub struct Fleet {
     /// `containers` images), and whether they sleep with a snapshot.
     pub computer_image: Option<String>,
     pub computer_snapshots: bool,
+    /// How long a computer whose sleep's save keeps failing stays awake
+    /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
+    /// the cell's thirty minutes). The e2e's is short, so its lane sees the
+    /// bound run out.
+    pub computer_unsaved_max_ms: Option<u64>,
     /// What a computer's swap offers: the provider catalog
     /// (`FRAGMENT_PROVIDERS`, `fragment_core::catalog`'s JSON: connections,
     /// operator keys and own keys, each with its hosts, placements,
@@ -405,6 +410,10 @@ impl Fleet {
         }
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
+        }
+        let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
+        if let Some(ms) = &unsaved {
+            vars.push(("FRAGMENT_COMPUTER_UNSAVED_MAX_MS", ms.as_str()));
         }
         if let Some(p) = &self.providers {
             vars.push(("FRAGMENT_PROVIDERS", p.as_str()));

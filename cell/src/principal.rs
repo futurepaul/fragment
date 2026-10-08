@@ -41,6 +41,10 @@
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 //!
+//!   Their computer tells the same sockets when what its owner is told of
+//!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
+//!   page reads it again with the list.
+//!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person (or of the
 //! person who owns its agent) closes its sockets and empties it in one
 //! step, leaving one row that says so (`wiped`). From then it takes
@@ -311,6 +315,13 @@ impl PrincipalCell {
                 Ok(Response::from_json(&self.search(&q)?)?)
             }
             (Method::Get, "/watch") => self.watch(&req),
+            // something of theirs the list does not hold changed (their
+            // computer: what its owner is told of it), so their pages read
+            // again; only the Worker's own code reaches here
+            (Method::Post, "/changed") => {
+                self.tell();
+                Ok(Response::from_json(&json!({ "ok": true }))?)
+            }
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
         }
     }
@@ -596,6 +607,21 @@ impl PrincipalCell {
         }
         Ok(SearchAnswer { fragments, messages })
     }
+}
+
+/// Tells `identity`'s open pages that something of theirs their list does
+/// not hold changed (their computer's notices, docs/computers.md): each
+/// reads the list, and their computer, again. A page that missed it reads
+/// again as it reconnects.
+pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    let req = Request::new_with_init("https://principal.internal/changed", &init)?;
+    let resp = env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(req).await?;
+    if resp.status_code() != 200 {
+        return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));
+    }
+    Ok(())
 }
 
 /// A row as a list shows it.
