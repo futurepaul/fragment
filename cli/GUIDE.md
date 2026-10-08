@@ -136,7 +136,7 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | blank
+fragment init my-inbox --template inbox   # or: todo | notes | wiki | calories | blank
 ```
 
 `fragment create <name> --template T` makes one on the platform with no
@@ -149,6 +149,9 @@ gives it its own title; any other is copied in as its first commit.
 - `todo`: mutations over SQLite, a public activity channel, a live page.
 - `inbox`: webhook deliveries start a job that fetches and records.
 - `notes`: a folder of markdown as a live site; the files are the state.
+- `wiki`: a team's wiki, its pages the files under `wiki/`: edited on
+  the page (a mutation's commit) or in a synced folder, followed live
+  through a file trigger.
 - `calories`: a food log you tell what you ate; a text step logs it.
 - `blank`: one page, to build on.
 
