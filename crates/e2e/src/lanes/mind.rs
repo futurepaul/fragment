@@ -790,6 +790,10 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
         .collect();
     let r = api.op(&keys, &mind, "import", &format!("import-pumps-{}", crate::api::now_ms()), json!({ "source": "claude-code", "conversation": { "id": "e2e-pumps", "title": "Pumps" }, "from": 0, "messages": messages }))?;
     anyhow::ensure!(r.status == 200, "importing the pumps' conversation: {r}");
+    // an import starts the compactor at most once a minute (the triggered
+    // runs' hourly breaker): started as the CLI's follower starts it
+    let r = api.op(&keys, &mind, "pump", &format!("pump-pumps-{}", crate::api::now_ms()), json!({}))?;
+    anyhow::ensure!(r.status == 200, "starting a pump: {r}");
     let done = s.eventually(TURN, || {
         let st = op(api, &keys, &mind, "status", json!({}));
         st["T"] == 5 + PUMP_MESSAGES && st["unbuilt"] == 0 && st["ready"] == false
@@ -810,7 +814,6 @@ fn imports(s: &mut Suite, api: &Api) -> Result<()> {
         .collect();
     let r = api.op(&keys, &mind, "import", &format!("import-quick-{}", crate::api::now_ms()), json!({ "source": "claude-code", "conversation": { "id": "e2e-quick", "title": "Quick" }, "from": 0, "messages": messages }))?;
     anyhow::ensure!(r.status == 200, "importing the quick conversation: {r}");
-    // an import starts the compactor at most once a minute: started as the CLI's follower starts it
     let r = api.op(&keys, &mind, "pump", &format!("pump-quick-{}", crate::api::now_ms()), json!({}))?;
     anyhow::ensure!(r.status == 200, "starting a pump: {r}");
     let quick = s.eventually(TURN, || {
