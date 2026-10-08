@@ -166,7 +166,7 @@ fn mail(s: &mut Suite, api: &Api) -> Result<()> {
     let sent = s.mail.sent_to(&to);
     s.ok(
         "the platform's mail reaches Email Sending (the fake) from the deployment's address, as it was asked",
-        r.status == 200 && r.body["messageId"].as_str().is_some_and(|id| !id.is_empty()) && sent.len() == 1 && sent[0].from == crate::MAIL_FROM && sent[0].subject == "Paul shared a thing with you",
+        r.status == 200 && r.body["messageId"].as_str().is_some_and(|id| !id.is_empty()) && sent.len() == 1 && sent[0].from == json!({ "email": "mail@fragment.localhost", "name": "fragment" }) && sent[0].subject == "Paul shared a thing with you",
         &r,
     );
     let before = s.mail.sent().len();

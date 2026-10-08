@@ -29,7 +29,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_DELIVERY_RETRY_S` | test fleets: every wait before a delivery, or a preview card's failed shot, is tried again, pinned. Unset, a delivery's wait is 10 s growing with its age to an hour, and a shot's 10 s doubling to an hour (Cards, below) |
 | `AI_GATEWAY_ID` | the AI Gateway the model route and image steps call through (Models, below): the deployment's own, named (`default` is refused: it makes one that logs); unset, models and images are off |
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
-| `FRAGMENT_MAIL_FROM` | the address the platform's mail comes from (Mail, below; the deploy config's `mail_from`), on a domain onboarded to Email Sending; unset, the deployment sends no mail |
+| `FRAGMENT_MAIL_FROM` | the sender the platform's mail comes from: a bare address or unquoted `Name <address>` (Mail, below; the deploy config's `mail_from`), on a domain onboarded to Email Sending; unset, the deployment sends no mail |
 | `FRAGMENT_MAIL_URL` | dev and the e2e only: the platform's mail is POSTed to `<url>/send` (the `EMAIL` binding's input) instead of sent (the mail fake, a lower rung, which keeps it; `cargo xtask dev` prints it) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
@@ -116,9 +116,16 @@ Cloudflare's browsers.
 ## Mail
 
 The platform's own mail (cell/src/mail.rs): transactional only, one
-plain-text message to one person, from the deployment's address
+plain-text message to one person, from the deployment's sender
 (`FRAGMENT_MAIL_FROM`), through Cloudflare Email Sending's `EMAIL`
-binding. A message goes to one plain address (no second recipient, no
+binding. `mail_from` accepts a bare address (`mail@finite.place`) or an
+unquoted name and address (`Fragment <mail@finite.place>`). A name is 1
+to 200 characters, without `<>,;"()[]\@` or control characters; quoted
+names, comments and lists are refused. Invalid senders are refused at
+config read (the node's first request), and before a deploy. A bare
+sender stays a string; a named sender becomes `{email, name}`, as the
+[Workers API documents](https://developers.cloudflare.com/email-service/api/send-emails/workers-api/).
+A message goes to one plain address (no second recipient, no
 display name), with a subject of 1 to 200 characters on one line and a
 text of at most 16 KiB (`fragment_core::mail`); anything else is 400 and
 nothing is sent. The service's refusals keep its code (`E_…`) in the
