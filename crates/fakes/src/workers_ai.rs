@@ -176,7 +176,7 @@ fn last_words(content: &Value) -> String {
 
 /// A tool call a message asks for: `[[call NAME {json}]]`, its arguments
 /// the one JSON value after the name.
-fn directive(text: &str) -> Option<(String, Value)> {
+pub fn directive(text: &str) -> Option<(String, Value)> {
     let rest = &text[text.find("[[call ")? + "[[call ".len()..];
     let (name, rest) = rest.split_once(' ')?;
     let mut values = serde_json::Deserializer::from_str(rest).into_iter::<Value>();

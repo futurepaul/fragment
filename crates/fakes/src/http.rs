@@ -22,6 +22,19 @@ impl Request {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
+
+    /// A request as a fake's handler takes one, for its unit tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(method: &str, path: &str, headers: &[(&str, &str)], body: Vec<u8>) -> Request {
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: HashMap::new(),
+            pairs: Vec::new(),
+            headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            body,
+        }
+    }
 }
 
 pub struct Response {
