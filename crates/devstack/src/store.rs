@@ -408,7 +408,9 @@ pub struct Bound {
     pub workos: Option<(String, String)>,
     /// Stripe's restricted key and the deployment's webhook signing secret:
     /// seats sold (docs/billing.md; without them, seats are comped only).
-    pub stripe: Option<(String, String)>,
+    /// A branch deployment whose deploy makes its endpoint binds no store
+    /// secret for it: its deploy uploads the endpoint's (decision 58).
+    pub stripe: Option<(String, Option<String>)>,
     /// Each operator key's provider and its secret's name.
     pub operator_keys: Vec<(String, String)>,
 }
@@ -422,7 +424,7 @@ impl Bound {
             host_secret_previous: None,
             codestorage_key: "fragment-codestorage-private-key".into(),
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
-            stripe: stripe.then(|| ("fragment-stripe-key".into(), "fragment-stripe-webhook-secret".into())),
+            stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
         }
     }
@@ -440,7 +442,9 @@ impl Bound {
         }
         if let Some((key, webhook)) = &self.stripe {
             bound.push((bindings::STRIPE_KEY.to_string(), key.as_str()));
-            bound.push((bindings::STRIPE_WEBHOOK.to_string(), webhook.as_str()));
+            if let Some(w) = webhook {
+                bound.push((bindings::STRIPE_WEBHOOK.to_string(), w.as_str()));
+            }
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));

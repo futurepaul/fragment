@@ -43,6 +43,10 @@
 //!                    <branch>.<zone> (xtask/src/deploy.rs)
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
+//!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
+//!                    the deployment's Stripe as docs/billing.md wants it, on the
+//!                    account its stripe.key_file names: check reads and says what
+//!                    is wrong; setup makes what is missing (xtask/src/stripe.rs)
 //!
 //! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
@@ -64,6 +68,7 @@ mod deploy;
 mod dns;
 mod js_syntax;
 mod secret;
+mod stripe;
 
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
@@ -430,6 +435,7 @@ fn main() -> Result<()> {
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
+        Some("stripe") => deploy::stripe(&args[1..]),
         _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }

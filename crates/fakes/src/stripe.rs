@@ -74,6 +74,13 @@ struct State {
     customers: BTreeMap<String, BTreeMap<String, String>>,
     /// lookup key → (price id, unit amount)
     prices: BTreeMap<String, (String, i64)>,
+    /// lookup key → a price's other fields as made (`POST /v1/prices`):
+    /// recurring, tax behavior, product
+    price_extra: BTreeMap<String, Value>,
+    products: BTreeMap<String, Value>,
+    portals: BTreeMap<String, Value>,
+    /// id → the endpoint as made (its secret given once, at its making)
+    endpoints: BTreeMap<String, Value>,
     sessions: BTreeMap<String, Session>,
     subs: BTreeMap<String, Sub>,
     idempotent: HashMap<String, (u16, Value)>,
@@ -97,8 +104,16 @@ impl State {
 
     fn price_json(&self, key: &str) -> Value {
         let (id, amount) = self.prices.get(key).cloned().unwrap_or_default();
-        json!({ "id": id, "object": "price", "lookup_key": key, "unit_amount": amount, "currency": "usd", "active": true,
-                "recurring": { "interval": "month", "interval_count": 1 }, "tax_behavior": "exclusive" })
+        // seeded: as setup makes them (a pack's is once, the seats' monthly)
+        let recurring = if key == stripe::PACK_LOOKUP_KEY { Value::Null } else { json!({ "interval": "month", "interval_count": 1 }) };
+        let mut v = json!({ "id": id, "object": "price", "lookup_key": key, "unit_amount": amount, "currency": "usd", "active": true,
+                "recurring": recurring, "tax_behavior": "exclusive" });
+        if let Some(extra) = self.price_extra.get(key).and_then(Value::as_object) {
+            for (k, x) in extra {
+                v[k] = x.clone();
+            }
+        }
+        v
     }
 
     fn sub_json(&self, s: &Sub) -> Value {
@@ -203,10 +218,17 @@ fn rows(f: &BTreeMap<String, String>, prefix: &str) -> Vec<BTreeMap<String, Stri
 }
 
 impl Stripe {
-    /// Serves on `port` (0: any) for one account's secret key.
+    /// Serves on `port` (0: any) for one account's secret key, its seats'
+    /// and pack's prices made already (as `xtask stripe setup` makes them).
     pub fn start(port: u16, key: &str) -> std::io::Result<Stripe> {
+        Stripe::start_with(port, key, true)
+    }
+
+    /// An account with nothing of fragment's in it yet (`seeded` false):
+    /// what `xtask stripe setup` starts from.
+    pub fn start_with(port: u16, key: &str, seeded: bool) -> std::io::Result<Stripe> {
         let state: Arc<Mutex<State>> = Arc::default();
-        {
+        if seeded {
             let mut s = state.lock().expect("stripe state");
             for (key, amount) in [(stripe::lookup_key(fragment_proto::org::SeatKind::Seat), 10_000), (stripe::lookup_key(fragment_proto::org::SeatKind::SeatAlwaysOn), 20_000)] {
                 let id = s.next("price");
@@ -214,7 +236,10 @@ impl Stripe {
             }
             let id = s.next("price");
             s.prices.insert(stripe::PACK_LOOKUP_KEY.into(), (id, stripe::PACK_CENTS));
+        }
+        {
             // finite-mono's, on the same account
+            let mut s = state.lock().expect("stripe state");
             let id = s.next("price");
             s.prices.insert("finite_standard".into(), (id, 20_000));
         }
@@ -359,6 +384,11 @@ impl Stripe {
         s.subs.get(id).map(|sb| s.sub_json(sb))
     }
 
+    /// The webhook endpoints made, as listed (no secret).
+    pub fn endpoints(&self) -> Vec<Value> {
+        self.state.lock().expect("stripe state").endpoints.values().cloned().collect()
+    }
+
     /// Every request the platform made, oldest first.
     pub fn requests(&self) -> Vec<Asked> {
         self.state.lock().expect("stripe state").asked.clone()
@@ -483,6 +513,72 @@ fn answer(s: &mut State, req: &Request, f: &BTreeMap<String, String>, base: &str
             s.pending.push(event);
             (200, v)
         }
+        ("POST", "/v1/products") => {
+            let id = s.next("prod");
+            let v = json!({ "id": id, "object": "product", "name": f.get("name"), "tax_code": f.get("tax_code"), "metadata": nested(f, "metadata") });
+            s.products.insert(id, v.clone());
+            (200, v)
+        }
+        ("POST", "/v1/prices") => {
+            let key = f.get("lookup_key").cloned().unwrap_or_default();
+            if s.prices.contains_key(&key) && f.get("transfer_lookup_key").map(String::as_str) != Some("true") {
+                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("A price with lookup key {key} exists") } }));
+            }
+            let product = f.get("product").cloned().unwrap_or_default();
+            if !s.products.contains_key(&product) {
+                return (400, json!({ "error": { "type": "invalid_request_error", "message": format!("No such product: '{product}'") } }));
+            }
+            let id = s.next("price");
+            let amount = f.get("unit_amount").and_then(|a| a.parse().ok()).unwrap_or(0);
+            let recurring = match f.get("recurring[interval]") {
+                Some(i) => json!({ "interval": i, "interval_count": 1 }),
+                None => Value::Null,
+            };
+            s.prices.insert(key.clone(), (id, amount));
+            s.price_extra.insert(key.clone(), json!({ "recurring": recurring, "tax_behavior": f.get("tax_behavior"), "product": product, "currency": f.get("currency") }));
+            (200, s.price_json(&key))
+        }
+        ("GET", p) if p.starts_with("/v1/billing_portal/configurations/") => match s.portals.get(&p["/v1/billing_portal/configurations/".len()..]) {
+            Some(v) => (200, v.clone()),
+            None => (404, json!({ "error": { "type": "invalid_request_error", "message": "No such configuration" } })),
+        },
+        ("POST", "/v1/billing_portal/configurations") => {
+            let on = |k: &str| f.get(&format!("features[{k}][enabled]")).map(String::as_str) == Some("true");
+            let id = s.next("bpc");
+            let v = json!({
+                "id": id, "object": "billing_portal.configuration", "active": true, "is_default": false,
+                "default_return_url": f.get("default_return_url"),
+                "features": {
+                    "subscription_update": { "enabled": on("subscription_update") },
+                    "subscription_cancel": { "enabled": on("subscription_cancel"), "mode": f.get("features[subscription_cancel][mode]") },
+                    "payment_method_update": { "enabled": on("payment_method_update") },
+                    "invoice_history": { "enabled": on("invoice_history") },
+                    "customer_update": { "enabled": on("customer_update") },
+                },
+                "metadata": nested(f, "metadata"),
+            });
+            s.portals.insert(id, v.clone());
+            (200, v)
+        }
+        ("GET", "/v1/webhook_endpoints") => {
+            let data: Vec<Value> = s.endpoints.values().map(|e| { let mut e = e.clone(); e.as_object_mut().map(|o| o.remove("secret")); e }).collect();
+            (200, json!({ "object": "list", "data": data, "has_more": false }))
+        }
+        ("POST", "/v1/webhook_endpoints") => {
+            let id = s.next("we");
+            let events: Vec<String> = url::form_urlencoded::parse(&req.body).into_owned().filter(|(k, _)| k == "enabled_events[]").map(|(_, v)| v).collect();
+            let secret = format!("whsec_{}", s.next("secret"));
+            let v = json!({
+                "id": id, "object": "webhook_endpoint", "url": f.get("url"), "enabled_events": events, "api_version": f.get("api_version"),
+                "status": "enabled", "metadata": nested(f, "metadata"), "secret": secret,
+            });
+            s.endpoints.insert(id, v.clone());
+            (200, v)
+        }
+        ("DELETE", p) if p.starts_with("/v1/webhook_endpoints/") => match s.endpoints.remove(&p["/v1/webhook_endpoints/".len()..]) {
+            Some(e) => (200, json!({ "id": e["id"], "object": "webhook_endpoint", "deleted": true })),
+            None => (404, json!({ "error": { "type": "invalid_request_error", "message": "No such webhook endpoint" } })),
+        },
         ("POST", "/v1/billing_portal/sessions") => {
             let id = s.next("bps");
             (200, json!({ "id": id, "object": "billing_portal.session", "url": format!("{base}/portal/{id}"), "return_url": f.get("return_url"), "configuration": f.get("configuration") }))

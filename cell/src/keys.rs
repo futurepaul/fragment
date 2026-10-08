@@ -193,9 +193,20 @@ pub async fn stripe_key(env: &Env) -> CellResult<String> {
     required(env, store::STRIPE_KEY).await
 }
 
-/// This deployment's webhook endpoint's signing secret (bound as `STRIPE_WEBHOOK`).
+/// This deployment's webhook endpoint's signing secret: bound as
+/// `STRIPE_WEBHOOK`, or, on a branch deployment, the Worker secret its
+/// deploy uploads with its own endpoint's (`FRAGMENT_STRIPE_WEBHOOK`;
+/// decision 58), as it does the test secret.
 pub async fn stripe_webhook_secret(env: &Env) -> CellResult<String> {
-    required(env, store::STRIPE_WEBHOOK).await
+    if let Some(s) = secret(env, store::STRIPE_WEBHOOK).await? {
+        return Ok(s);
+    }
+    let branch = !crate::config::Config::from_env(env).host_label_suffix().is_empty();
+    let worker = env.secret("FRAGMENT_STRIPE_WEBHOOK").ok().map(|s| s.to_string().trim().to_string()).filter(|s| !s.is_empty());
+    match (branch, worker) {
+        (true, Some(s)) => Ok(s),
+        _ => Err(CellError::host(format!("no secret is bound as {} (cargo xtask deploy binds it from the config)", store::STRIPE_WEBHOOK))),
+    }
 }
 
 /// The fleet's WorkOS environment, when sign-in is configured (`cfg.workos`).
