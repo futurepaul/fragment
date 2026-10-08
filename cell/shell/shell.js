@@ -99,6 +99,13 @@ const titleOf = (name) => byName(name)?.title || labelOf(name);
 const own = (f) => f.role === "owner";
 // the person's own mind (docs/optchat.md), if they have one: the middle column's home
 const mindOf = () => state.fragments.find((f) => f.kind === "mind" && own(f)) ?? null;
+// the agent the mind hands its computer work to (an agent member of it),
+// else the computer's first: whose screen the mind's "screen" opens
+const mindHands = () => {
+  const m = mindOf();
+  const theirs = (m ? agentsOf(m.name) : []).map((id) => state.agents.get(id)?.fragment).find(Boolean);
+  return theirs ?? [...state.agents.values()][0]?.fragment ?? null;
+};
 const isMind = (name) => !!name && name === mindOf()?.name;
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
 const apps = () => state.fragments.filter((f) => f.kind === "app" || f.kind === "brain");
@@ -762,7 +769,7 @@ addEventListener("message", async (event) => {
       mirror();
     }
   }
-  if (d.screen === true) openScreen();
+  if (d.screen === true) openScreen(mindHands());
   if (typeof d.app === "string") openLink(d.app);
 });
 // A link in the mind's words: one of the person's fragments opens here (a
@@ -847,7 +854,7 @@ function renderMind() {
 function mindMenu() {
   openMenu($("agent-heading"), [
     ...(mind.said?.screen === "thread" ? [{ icon: "panel", text: "What it did here", onClick: () => tellMind({ panel: "toggle" }) }] : []),
-    ...(state.computer ? [{ icon: "screen", text: "Its computer's screen", onClick: () => openScreen() }] : []),
+    ...(state.computer && mindHands() ? [{ icon: "screen", text: "Its computer's screen", onClick: () => openScreen(mindHands()) }] : []),
     { icon: "gear", text: "Mind settings", onClick: () => tellMind({ sheet: "settings" }) },
   ]);
 }
