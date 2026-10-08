@@ -26,6 +26,35 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## Objects made before a column of their table refuse what writes it
+
+- **Observed:** 2026-10-08, p5: a wipe's cleanup never finished. #197
+  (2026-10-07) removed every migration as state "from before
+  Cloudflare", among them three made for Cloudflare-era columns: a list's
+  `memberships.searched` (#186, 11 minutes before), a fragment's
+  `runs.code` (#178, 9 minutes before) and `code_triggers.from_kind`
+  (#117, 10-03). `CREATE TABLE IF NOT EXISTS` never adds a column, so an
+  object made before each refuses every statement that names it (a 500):
+  a list made before #186 takes no change (its fragments' rows freeze), a
+  fragment made before #178 launches and advances no job run, one made
+  before #117 installs no deploy and fires no channel trigger. Two more
+  columns never had a migration (#116): the Registry's
+  `identities.held` (a Registry made before it, one object for the whole
+  deployment, refuses every sign-in and key) and a fragment's
+  `members.people_only`. A wipe no longer waits on its person's own lists
+  (ended.rs), so this holds no wipe; everything else of such an object
+  stays refused.
+- **Risk:** p5's (and the e2e preview's) objects made before those
+  columns stay broken until they are made again. A fragment its owner's
+  frozen list never took is one a wipe does not find (the entry above).
+- **First proof:** a list that refuses an index change with `no column
+  named searched` (the wipe's report names it; `POST /api/test/list
+  {op: before-searched}` makes one).
+- **Delete when:** the deployments that hold such objects are reset (or
+  those objects deleted: Paul's call, a hard cut), and a check refuses a
+  column added to an existing table without a migration or a reset the
+  deploy enforces.
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end
