@@ -5,7 +5,7 @@
 // opens to its messages (`thread`), each without leaving the screen.
 
 import { F, S, blobUrl, filesOf, persona, putThread, titleOf } from "./store.js";
-import { ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, size, when } from "./ui.js";
+import { WEB_TOOLS, ago, cleanSummary, clock, firstLine, h, highlight, icon, markIn, md, parseTool, plural, reportOf, size, when } from "./ui.js";
 
 /// The widest `context` asks on either side (fragment.json).
 const CONTEXT_MAX = 50;
@@ -95,9 +95,11 @@ export function miniMessage(m, { focus = false, q = "" } = {}) {
 export function excerpt(msgs, { focus = null, q = "" } = {}) {
   const out = [];
   let looked = 0;
+  let web = false;
   const flush = () => {
-    if (looked) out.push(h("div.mini-looked", null, icon("layers"), `Looked through memory ×${looked}`));
+    if (looked) out.push(h("div.mini-looked", null, icon(web ? "globe" : "layers"), `${web ? "Looked things up" : "Looked through memory"} ×${looked}`));
     looked = 0;
+    web = false;
   };
   for (const m of msgs) {
     if (m.kind === "tool" || m.kind === "echo") {
@@ -105,7 +107,10 @@ export function excerpt(msgs, { focus = null, q = "" } = {}) {
       if (call?.name === "computer") {
         flush();
         out.push(h("div.mini-looked.hands", null, icon("monitor"), `Handed to the computer: ${firstLine(call.args?.task ?? "", 70)}`));
-      } else if (call) looked++;
+      } else if (call) {
+        looked++;
+        web ||= WEB_TOOLS.has(call.name);
+      }
       continue;
     }
     flush();

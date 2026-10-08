@@ -32,11 +32,13 @@ import {
   say,
   stop,
 } from "./store.js";
-import { clock, dayLabel, firstLine, greeting, h, icon, iconButton, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
+import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconButton, md, parseTool, plural, reconcile, reportOf, size, threadId, viewLines, when, copyButton } from "./ui.js";
 
 /// A message's longest text (the log caps at 30 000 characters).
 const TEXT_MAX = 30_000;
 const MEMORY_TOOLS = new Set(["zoom", "search", "date"]);
+/// The most of a web page or a research answer a step shows.
+const WEB_SHOWN = 6000;
 /// Steps a hand-off card shows before "N earlier".
 const CARD_STEPS = 4;
 
@@ -86,9 +88,6 @@ function personaMenu(anchor, current, onPick) {
   anchor.parentElement.append(menu);
   menu.querySelector("[aria-checked=true]")?.focus();
 }
-
-/// What a message of files alone says: their names (the log holds words).
-const namesOf = (files) => files.map((f) => f.name || "a file").join(", ");
 
 /// The composer: a thread's (`thread` an id), or New chat's (null), which
 /// makes the thread with its first message. Files come from its paperclip,
@@ -186,13 +185,13 @@ export function composer(thread, { onSent } = {}) {
     e.preventDefault();
     if (!ready()) return;
     const sending = files.splice(0);
-    // files alone say their names: the log holds words
-    const text = ta.value.trim() || namesOf(sending);
+    const text = ta.value.trim();
     const pid = personaId();
     let id = thread;
     if (!id) {
       id = threadId();
-      putThread({ id, title: firstLine(text, 80), persona: pid, started: Date.now(), last: Date.now(), count: 0, topics: [] });
+      // titled as the mind titles it: its first line, else its first file's name
+      putThread({ id, title: firstLine(text || sending[0]?.name || "", 80), persona: pid, started: Date.now(), last: Date.now(), count: 0, topics: [] });
       S.msgs.set(id, { byI: new Map(), more: false, loaded: true, loading: false });
       S.recent = [id, ...S.recent];
     }
@@ -245,12 +244,8 @@ function droppable(target, comp) {
   });
 }
 
-/// A message's words and files: files alone said only their names, which
-/// the files themselves show.
-function said(text, files) {
-  const words = files.length && text === namesOf(files) ? null : md(text);
-  return [words, files.length ? filesNode(files) : null];
-}
+/// A message's words and its files (a message may be files alone).
+const said = (text, files) => [text ? md(text) : null, files.length ? filesNode(files) : null];
 
 /// A message's files before they are sent: an image's own preview, or a
 /// chip, turning while it uploads.
@@ -279,15 +274,35 @@ function stepTitle(call) {
       return `Searched for “${a.q ?? a.query ?? ""}”`;
     case "date":
       return `Checked the date of #${a.id}`;
+    case "web_search":
+      return `Searched the web for “${a.q ?? ""}”`;
+    case "web_fetch":
+      return `Read ${hostOf(a.url) || "a page"}`;
+    case "research":
+      return `Researched “${firstLine(a.question ?? "", 70)}”`;
     default:
       return `${call.name}${a && Object.keys(a).length ? ` ${firstLine(JSON.stringify(a), 80)}` : ""}`;
   }
 }
 
-const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar" };
+const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar", web_search: "globe", web_fetch: "link", research: "sparkles" };
 
-/// A tool's result, readable: search hits and memory lines open in place.
+/// A web search's results (applib/web.mjs `searchText`): `N. title`, then
+/// its URL and its snippet, each on a line indented three spaces.
+function webHits(text) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(/^\d+\. (.+)\n {3}(https?:\/\/\S+)(?:\n {3}(.+))?/gm)) out.push({ title: m[1], url: m[2], snippet: m[3] ?? "" });
+  return out.slice(0, 20);
+}
+
+/// A tool's result, readable: search hits and memory lines open in place;
+/// the web's results are links, its pages and answers markdown.
 function echoView(call, text) {
+  if (call?.name === "web_search") {
+    const hits = webHits(text);
+    if (hits.length) return h("div.web-hits", null, hits.map((x) => h("a.web-hit", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, h("span.web-title", { text: x.title }), h("span.web-host", { text: hostOf(x.url) }), x.snippet ? h("span.web-snippet", { text: x.snippet }) : null)));
+  }
+  if (call && WEB_TOOLS.has(call.name)) return md(text.length > WEB_SHOWN ? `${text.slice(0, WEB_SHOWN)}…` : text, "echo-md");
   if (call?.name === "search") {
     const lines = viewLines(text);
     if (lines.length) {
@@ -328,13 +343,21 @@ function stepsNode(key, items, live) {
   for (const m of items) (m.kind === "tool" ? calls : results).push(m);
   const parsed = calls.map((m) => parseTool(m.text));
   const memory = parsed.every((c) => MEMORY_TOOLS.has(c.name));
-  const label = memory ? (live ? "Looking through memory" : "Looked through memory") : live ? "Working" : "Used tools";
+  const web = parsed.every((c) => WEB_TOOLS.has(c.name));
+  const looked = parsed.every((c) => MEMORY_TOOLS.has(c.name) || WEB_TOOLS.has(c.name));
+  const label = memory
+    ? live ? "Looking through memory" : "Looked through memory"
+    : web
+      ? live ? "Searching the web" : "Searched the web"
+      : looked
+        ? live ? "Looking through memory and the web" : "Looked through memory and the web"
+        : live ? "Working" : "Used tools";
   const isOpen = opened.has(key);
   const node = h(`div.steps${isOpen ? ".open" : ""}${live ? ".live" : ""}`);
   const head = h(
     "button.steps-head",
     { type: "button", "aria-expanded": String(isOpen) },
-    live ? icon("loader", "spin") : icon("layers"),
+    live ? icon("loader", "spin") : icon(web ? "globe" : "layers"),
     h("span", { text: label }),
     parsed.length > 1 ? h("span.times", { text: `×${parsed.length}` }) : null,
     icon("chevron", "chev"),
@@ -672,7 +695,7 @@ function items(id) {
         h(
           `div.msg.you.pending${pnd.failed ? ".failed" : ""}`,
           null,
-          pnd.files.length && pnd.text === namesOf(pnd.files) ? null : md(pnd.text),
+          pnd.text ? md(pnd.text) : null,
           pnd.files.length ? pendingFiles(pnd) : null,
           pnd.failed ? h("div.failed-note", null, icon("alert"), `Not sent (${pnd.failed}). `, h("button.linkish", { type: "button", onclick: () => resend(id, pnd) }, "Try again")) : null,
         ),

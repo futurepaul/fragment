@@ -32,7 +32,7 @@ import { avatar, go } from "./pieces.js";
 import { personaSheet, platformOrigin, settingsSheet } from "./sheets.js";
 import { EMBED, S, busy, changed, currentPersona, handOff, handRunning, onChange, persona, start } from "./store.js";
 import { newScreen, threadScreen } from "./thread.js";
-import { ago, cleanSummary, firstLine, h, icon, iconButton, parseTool, plural, reconcile } from "./ui.js";
+import { WEB_TOOLS, ago, cleanSummary, firstLine, h, icon, iconButton, parseTool, plural, reconcile } from "./ui.js";
 
 const WIDE = "(min-width: 1280px)";
 const PANEL_KEY = "mind.panel";
@@ -216,13 +216,15 @@ export function mount(root, fragment) {
     const p = persona(t?.persona) ?? currentPersona();
     const box = S.msgs.get(r.id);
     const msgs = box ? [...box.byI.values()] : [];
-    const looks = msgs.filter((m) => m.kind === "tool" && parseTool(m.text).name !== "computer").length;
+    const named = msgs.filter((m) => m.kind === "tool").map((m) => parseTool(m.text).name).filter((n) => n !== "computer");
+    const webLooks = named.filter((n) => WEB_TOOLS.has(n)).length;
+    const looks = named.length - webLooks;
     const tasks = [...S.tasks.values()].filter((k) => k.thread === r.id).sort((a, b) => (a.started ?? 0) - (b.started ?? 0));
     const turn = S.turns.get(r.id);
     const state = busy(r.id) ? (turn?.state === "settling" ? "Gathering memory" : "Thinking") : tasks.some(handRunning) ? "Waiting on the computer" : "Ready";
     const st = S.status;
     const topics = (t?.topics ?? []).map((x) => ({ x, t: (S.topics ?? []).find((y) => y.id === x.id) })).filter((o) => o.t);
-    const sig = [r.id, p.id, p.name, p.emoji, p.hands, msgs.length, looks, state, busy(r.id), tasks.map((k) => [k.id, handOff(k).state, k.text]), topics.map((o) => [o.x.id, o.x.p, o.t.name]), st?.hands, st?.T, st?.unbuilt];
+    const sig = [r.id, p.id, p.name, p.emoji, p.hands, msgs.length, looks, webLooks, state, busy(r.id), tasks.map((k) => [k.id, handOff(k).state, k.text]), topics.map((o) => [o.x.id, o.x.p, o.t.name]), st?.hands, st?.T, st?.unbuilt];
     once(panel, sig, () => [
       h("div.panel-head", null, h("span", { text: "What it did here" }), h("span.grow"), iconButton("x", "Close", () => setPanel(false))),
       h("div.panel-persona", null, avatar(p, "xxl"), h("div.panel-name", { text: p.name }), h(`div.panel-state${busy(r.id) ? ".live" : ""}`, null, busy(r.id) ? h("span.pulse-dot") : null, state)),
@@ -236,7 +238,7 @@ export function mount(root, fragment) {
         "section.panel-sec",
         null,
         h("h3", { text: "Done here" }),
-        tasks.length || looks
+        tasks.length || looks || webLooks
           ? h(
               "div.did",
               null,
@@ -249,6 +251,7 @@ export function mount(root, fragment) {
                 ),
               ),
               looks ? h("div.did-row.quiet", null, icon("layers"), h("span", { text: `Looked through memory ${plural(looks, "time")}` })) : null,
+              webLooks ? h("div.did-row.quiet", null, icon("globe"), h("span", { text: `Looked on the web ${plural(webLooks, "time")}` })) : null,
             )
           : h("p.quiet", { text: "Nothing yet." }),
       ),

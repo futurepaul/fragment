@@ -134,8 +134,9 @@ const fullName = () => {
 };
 
 /// Export memory: the whole log (`export {after?, limit}` → `{entries,
-/// next}`, paged until `next` is null) as one JSON file, downloaded.
-const EXPORT_PAGE = 200;
+/// next}`, oldest first, paged until `next` is null) as one JSON file,
+/// downloaded.
+const EXPORT_PAGE = 1000;
 /// The most pages read: 16 MiB of log is far fewer entries.
 const EXPORT_PAGES_MAX = 10_000;
 async function exportMemory(button, note) {
@@ -185,6 +186,15 @@ export function settingsSheet() {
   const exportNote = h("span.quiet", { "aria-live": "polite" });
   const exportBtn = h("button.pill", { type: "button" }, icon("download"), "Export memory");
   exportBtn.addEventListener("click", () => exportMemory(exportBtn, exportNote));
+  // importing chats from elsewhere: ./import.js's, where the page has one
+  const importing = h("section.import-slot", { hidden: true });
+  import("./import.js")
+    .then((m) => {
+      if (typeof m.mountImport !== "function" || !importing.isConnected) return;
+      importing.hidden = false;
+      m.mountImport(importing);
+    })
+    .catch(() => importing.remove());
   const body = h(
     "div.settings",
     null,
@@ -196,6 +206,7 @@ export function settingsSheet() {
       h("p.quiet", { text: st ? `${plural(st.T ?? 0, "message")}${st.unbuilt ? `, ${st.unbuilt} still being summarized` : ", all summarized"}. ${st.hands ? "Your computer is connected." : "No computer is connected."}` : "…" }),
       h("div.row", null, exportBtn, exportNote),
     ),
+    importing,
     h(
       "section",
       null,

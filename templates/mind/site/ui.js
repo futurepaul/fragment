@@ -201,6 +201,18 @@ export function parseTool(text) {
   return { name: m[1], args: args && typeof args === "object" ? args : { text: m[2] } };
 }
 
+/// The mind's tools that look things up on the web (applib/web.mjs).
+export const WEB_TOOLS = new Set(["web_search", "web_fetch", "research"]);
+
+/// A URL's host as a person reads it ("example.com"), or "".
+export function hostOf(url) {
+  try {
+    return new URL(String(url)).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
 /// The `id+n|text` lines of a view, a zoom or a search answer.
 export function viewLines(text) {
   const out = [];
