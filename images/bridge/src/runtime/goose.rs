@@ -102,9 +102,9 @@ pub const VIEW_DOC: &str = "The view: the whole chat between Mind and the user, 
 
 A summary tags each item with its kind: user (the user's words), talk
 (Mind's replies), tool (Mind's tool calls), echo (their results), note
-(memories from before this chat), or work (the report of a subagent or
-a computer task, which the log holds as a user message starting
-\"[id] \"). A short message is its own line, word for word. Recent lines
+(notes from the user's other agents), or work (a computer task's report,
+starting \"[id] \"). A short message is its own line, word for word. A
+text too long for one message is split over several in a row. Recent lines
 cover one message each; the older the messages, the more a line covers.
 A message not summarized yet shows as \"(not summarized yet: zoom it)\".
 No message appears in full, not even the last ones.
