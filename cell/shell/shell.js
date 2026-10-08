@@ -662,7 +662,11 @@ async function openScreen(agent) {
 }
 
 // ---- making an agent: its fragment, its computer, its chat (decision 10, 16) ----
-const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "agent";
+// A label from a name, short enough that with freeLabel's `-<n>` and a
+// chat's `-chat` its address fits under any username (docs/api.md, Names:
+// every username leaves 29 bytes for labels); never ending in a dash.
+const LABEL_ROOM = 29;
+const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, LABEL_ROOM - "-99-chat".length).replace(/-+$/, "") || "agent";
 function freeLabel(base) {
   const taken = new Set(state.fragments.map((f) => labelOf(f.name)));
   for (let i = 1; ; i++) {

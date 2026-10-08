@@ -26,9 +26,6 @@ use serde_json::{json, Value};
 
 use crate::api::{Client, Code, CodedError};
 
-/// A DNS label's longest: a fragment's host is one, `<label>--<username>`,
-/// so a chat's label made here leaves room for its owner's username.
-pub const HOST_LABEL_MAX: usize = 63;
 /// `--wait`'s longest wait, in seconds. Its default, main.rs's flag's, is
 /// 150: under Hermes' terminal tool's own default of 180 s, so an agent's
 /// call says "no answer yet" rather than being cut; a longer wait needs the
@@ -77,9 +74,11 @@ fn cut_label(s: &str, max: usize) -> String {
 }
 
 /// How long a label of `owner`'s may be: its host, `<label>--<owner>`, is
-/// one DNS label.
+/// one DNS label. A branch deployment's mark (`--<branch>`), which the CLI
+/// does not know, takes more: there the cell refuses a chat whose host
+/// would pass 63 bytes, saying why (docs/api.md, Names).
 fn label_max(owner: &str) -> usize {
-    HOST_LABEL_MAX.saturating_sub(2 + owner.len()).min(fragment_proto::limits::NAME_MAX_BYTES)
+    fragment_proto::label_room(owner, "")
 }
 
 /// The chat of two agents (fragment names, one owner's) and their owner:
@@ -406,7 +405,7 @@ mod tests {
     fn two_agents_name_one_chat() {
         assert_eq!(pair_label("juniper.paul", "fred.paul"), "fred-juniper");
         assert_eq!(pair_label("fred.paul", "juniper.paul"), "fred-juniper", "either way round");
-        let host_fits = |l: &str, owner: &str| fragment_proto::valid_label(l) && l.len() + 2 + owner.len() <= HOST_LABEL_MAX;
+        let host_fits = |l: &str, owner: &str| fragment_proto::valid_label(l) && l.len() + 2 + owner.len() <= fragment_proto::limits::HOST_LABEL_MAX_BYTES;
         let owner = "a-rather-long-username-of-thirty";
         for (a, b) in [
             ("a".repeat(32), format!("{}-b", "b".repeat(29))),

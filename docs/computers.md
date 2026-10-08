@@ -535,6 +535,25 @@ expires within 30 days. The container application is the deployment's
   too. Before, a capture went to the agent's own tier's model, which on
   the medium tier reads no images. DeepSeek Flash's vision build is only
   on DeepSeek's own API (decision 23, its status).
+- **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
+  - **Config.** Each profile has `stt: {provider: openai, language: "",
+    openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
+    whisper}}`.
+  - **When it runs.** A voice note a person attaches is transcribed
+    before its turn, and the agent is given the words. Hermes does this
+    under the routed profile's scope for every inbound message, even
+    one that answers a question or arrives while the agent works.
+  - **No language is forced.** Whisper detects it; Hermes' default,
+    `en`, mangles the rest.
+  - **No transcript of its own.** The managed overlay's
+    `stt.echo_transcripts: false` keeps a memo to one reply a turn, with
+    no 🎙️ message before it.
+  - **Before (2026-10-07).** Hermes tried local Whisper first: a
+    person's first voice note installed faster-whisper and its model
+    into `/data`.
+
+  The Docker lane's `a_voice_memo_is_transcribed_through_the_route`
+  proves it.
 - A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
@@ -543,10 +562,33 @@ expires within 30 days. The container application is the deployment's
   so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
   GLM-5.3 Flash's price, the fee and the margin) until it settles at what
   the model counted; a payer with less is refused it (402).
-- A call without `x-fragment-agent` is refused (401: no one to bill).
-  Our Hermes image sets it on every call of an agent's profile (its
-  `model.default_headers`), the main model's and the auxiliary ones'
-  (titles, the smart-approval guardian, vision).
+- `POST http://model.fragment.internal/v1/audio/transcriptions`,
+  OpenAI's multipart shape with `model` `whisper`: a voice memo
+  transcribed (decision 9, its status). It is the platform's
+  transcription route as the agent: Workers AI's Whisper, at most 10 MiB
+  of audio, metered to the agent's owner at 46.63 neurons a minute of
+  audio (docs/api.md, Models).
+- **Whose call it is**, one rule for both paths
+  (`fragment_core::models::agent_named`):
+  - its `x-fragment-agent`; or
+  - from a client that sends no header of its own (OpenAI's SDKs take a
+    base URL and a key, nothing more), its key: `Authorization: Bearer
+    agent:<label>.<username>`. Any other key (Hermes' `fragment-model`)
+    is the guest's own placeholder and names no one.
+
+  Named both ways, the two must agree. Refusals:
+  - none named, a malformed name, or two that disagree: 401;
+  - an agent that does not run on this computer: 403 (the computer signs
+    only for its own).
+
+  The guest's auth headers, its key among them, go no further than the
+  computer: only the agent's name, the content type and `accept` are
+  sent on, and nothing of them reaches the gateway, Workers AI or a log.
+- Our Hermes image sets `x-fragment-agent` on every call of an agent's
+  profile (its `model.default_headers`), the main model's and the
+  auxiliary ones' (titles, the smart-approval guardian, vision). Its
+  speech-to-text, whose client takes no header, names the agent by its
+  key (each profile's `stt.openai.api_key`, `agent:<name>`).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -733,8 +775,15 @@ settings and state):
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
-  bridge as Hermes' Relay connector, the screen. One Hermes
+- `images/hermes`: Hermes v0.21.6's desktop image, `hermes-boot`, the
+  bridge as Hermes' Relay connector, the screen. The base is pinned by
+  digest to the build upstream's `stable-desktop` named on 2026-10-08
+  (its versioned tag `rc.4-v0.21.6-desktop`; its install stamp says
+  0.21.6, commit `818c13be`); the tag named `v0.21.6-desktop` is an
+  earlier attempt's build, not that release. Hermes there is Python
+  3.14.7 in a venv its own package manager (PM) builds, its tools (its
+  Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
+  store at `/opt/hermes/tools`. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
@@ -909,12 +958,18 @@ settings and state):
   described by the route's vision model: Models), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
-  with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Its browser, and the desktop's Browser icon a
+  with no backend named, Hermes would offer Browser Use's one
+  `browser_exec` tool instead), which drive `agent-browser` (Hermes'
+  image has none: the image installs the one Hermes' lock pins, through
+  Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
-  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
+  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
+  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
+  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  (`TMPDIR`: a headless one's temporary profile, and its shared memory)
+  the container's `/tmp`, never Hermes' home's `cache/scratch` under
+  `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
@@ -963,14 +1018,23 @@ and how a runtime finds them, is the image's.
   description for Hermes' skills index.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
-  agents), so it is always the binary's in the image, and costs a boot
-  nothing; the build fails if `fragment skill` is no skill named
-  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
-- **Every profile** names the managed directory, then the platform skill's,
-  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
-  synced both ways: an agent's own skills are versioned in its fragment).
-  Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. An agent's profile has
+  agents), so it is always the binary's in the image; the build fails if
+  `fragment skill` is no skill named `fragment`. A missing `fragment
+  skill` instruction belongs in cli/SKILL.md. The profiles find it in its
+  view, `/var/lib/fragment-run/platform-skills` (the boot's, read-only to
+  the agents, never saved): a copy `hermes-boot` makes at each start and
+  after each install of the managed set, unless a managed skill takes its
+  name (`fragment`), when it leaves the view (`skills.installed`'s
+  `platform`).
+- **Every profile** names the managed directory and the platform skill's
+  view in `skills.external_dirs`, below its own `skills/` (its agent
+  fragment's, synced both ways: an agent's own skills are versioned in its
+  fragment). Hermes ranks a profile's own skills above its external dirs,
+  so an agent's own wins over a managed one or the platform's; its
+  external dirs are one rank, in which two skills of one name are
+  ambiguous and Hermes finds neither by it (since v0.21.6; v0.21.5 took
+  the first dir's), so a managed `fragment` wins over the
+  platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, and the platform skill. The image carries none of Hermes' bundled
   skills: Hermes copies them only into the home its sync runs in, the
@@ -1039,9 +1103,18 @@ persisted)".
   terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
   only them, not the terminal: defense in depth, as Hermes says), for the
   scratch an install is made from; they run as its user, so `/usr/local`
-  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  is not theirs. Lazy installs are off (upstream's image turns them on;
+  `security.allow_lazy_installs: false` in the managed overlay): they are
   Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of.
+  computer configures none of. What its agents use is in the image:
+  Edge's speech SDK, `text_to_speech`'s default provider, which Hermes'
+  image leaves to a first-use install (without it, with installs off,
+  Hermes offers no `text_to_speech`), is installed at build at its
+  `uv.lock` pins; local Whisper, a voice note's fallback, is never
+  installed. Nothing is installed under `/data` at run time (the Docker
+  lane's `nothing_is_installed_at_run_time`). npm's global prefix is `/usr/local`
+  (`npm_config_prefix`, which sudo keeps): npm's own, since Hermes' PM
+  ships Node, is its Node's directory in Hermes' tool store, on no PATH.
 - **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer

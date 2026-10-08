@@ -1,5 +1,5 @@
 //! The real-Hermes lane (docs/cloudflare-v1.md, phase 4's exit): our Hermes
-//! image (`images/hermes`: Hermes v0.21.5, the bridge as its Relay
+//! image (`images/hermes`: Hermes' desktop image, the bridge as its Relay
 //! connector) on the platform's computers, under `wrangler dev` with
 //! Docker, its model the platform's model route through the computer's
 //! intercept, answered by the Workers AI fake from each call's transcript
@@ -429,13 +429,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
 
     // The platform skill where its config says, and the managed skills and
     // its own, where its profile looks: its own `skills/` (its fragment's),
-    // then the managed set and the platform skill its config names (the
-    // images' Docker lane checks Hermes' own view of the three, the first of
-    // a name winning); and its terminal runs the fragment CLI as itself,
-    // acting for its owner, with no key: it lists its owner's fragments
-    // (their skills fragment, which it is no member of, among them).
-    let platform = "/opt/fragment/skills/platform/fragment/SKILL.md";
-    let r = say(39, &format!("run: grep -q /opt/fragment/skills \"$HERMES_HOME/config.yaml\" && sed -n 2p {platform} | sed 's/^/platform-/'"))?;
+    // then the managed set and the platform skill's view its config names
+    // (the images' Docker lane checks Hermes' own view of the three: its own
+    // wins a name, and a managed one the platform skill's); and its terminal
+    // runs the fragment CLI as itself, acting for its owner, with no key: it
+    // lists its owner's fragments (their skills fragment, which it is no
+    // member of, among them).
+    let view = "/var/lib/fragment-run/platform-skills";
+    let r = say(39, &format!("run: grep -q {view} \"$HERMES_HOME/config.yaml\" && sed -n 2p {view}/platform/fragment/SKILL.md | sed 's/^/platform-/'"))?;
     let asked = turn_for(&r);
     s.eventually(TURN, || ended(&asked).is_some());
     s.ok("its config names the platform skill, which is in the image, named `fragment`", reply_of(&asked).is_some_and(|t| t.contains("platform-name: fragment")), json!(reply_of(&asked)));

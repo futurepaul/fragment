@@ -478,7 +478,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     );
     // a turn of this life: its end's save fails (the lever), so the stop
     // below loses it, and its agent's runtime will not remember it
-    let zebra = say(71, "remember the zebra")?;
+    let zebra = say(91, "remember the zebra")?;
     let zebra_seq = zebra.body["record"]["seq"].as_i64().unwrap_or(0);
     let zebra_ran = s.eventually(c.wake, || replied(zebra_seq).is_some());
     // the bound runs out: no save works, and nothing uses it
@@ -529,7 +529,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
     let r = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
     let told = notice(&r.body, "went_back");
-    let said = say(70, "after going back")?;
+    let said = say(90, "after going back")?;
     let seq = said.body["record"]["seq"].as_i64().unwrap_or(0);
     let answered = s.eventually(c.wake, || replied(seq).is_some());
     let after_back = replied(seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
@@ -548,7 +548,7 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
     );
     // the stub echoes what its turn was told: the zebra turn, which the life
     // the stop ended ran, is in no memory of this one's; once
-    let once = say(72, "once more after going back")?;
+    let once = say(92, "once more after going back")?;
     let once_seq = once.body["record"]["seq"].as_i64().unwrap_or(0);
     let answered_once = s.eventually(c.wake, || replied(once_seq).is_some());
     let then = replied(once_seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
@@ -573,6 +573,46 @@ fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Key
         format!("{r} / {woke}"),
     );
     Ok(3)
+}
+
+/// The intercept's one rule for whose a model call is (decision 9's
+/// transcriptions; docs/computers.md, Models): an OpenAI SDK, which sends
+/// no header of its own, names its agent by its key, `agent:<name>`, for a
+/// voice memo's transcription and a chat call alike. The key goes no
+/// further than the computer: Workers AI (the fake) never sees it. A key
+/// naming a fragment that does not run on this computer is refused (403),
+/// a malformed one and one that disagrees with `x-fragment-agent` too
+/// (401), each before anything is reserved or sent. The replies it adds.
+fn intercept_names_by_key(s: &mut Suite, api: &Api, owner_id: &str, agent: &str, chat: &str, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>) -> Result<usize> {
+    use fragment_fakes::workers_ai::TRANSCRIBE_MODEL;
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let said = fetched(s, 70, "transcribe hello from a voice memo")?;
+    let sent = s.ai.calls().get(calls).cloned();
+    let aig = entries(api, owner_id, "aig:");
+    s.ok(
+        "a voice memo through the intercept, its agent named by its key (agent:<name>), is transcribed by Whisper and metered to the agent's owner",
+        said == "heard: hello from a voice memo" && aig.len() == before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig.len(),
+        json!({ "said": said, "aig": aig }),
+    );
+    s.ok(
+        "the guest's key goes no further than the computer: the vendor sees no authorization and no agent: in its input",
+        sent.as_ref().is_some_and(|c| c.model == TRANSCRIBE_MODEL && c.authorization.is_none() && !c.body.to_string().contains("agent:") && !c.metadata.to_string().contains(agent)),
+        json!(sent.map(|c| json!({ "model": c.model, "authorization": c.authorization, "metadata": c.metadata }))),
+    );
+    let said = fetched(s, 71, &format!("think as agent:{agent} hello by key"))?;
+    s.ok("a chat call names its agent the same way, by its key alone", said == "thought: echo: hello by key", &said);
+    let (calls, before) = (s.ai.calls().len(), entries(api, owner_id, "aig:").len());
+    let elsewhere = fetched(s, 72, &format!("transcribe hi as agent:{chat}"))?;
+    let malformed = fetched(s, 73, "transcribe hi as agent:not-a-name")?;
+    let disagree = fetched(s, 74, &format!("transcribe hi as agent:{chat} header {agent}"))?;
+    let missing = fetched(s, 75, "transcribe hi as fragment-model")?;
+    s.ok(
+        "a key naming a fragment that does not run on this computer is refused (403); a malformed one, one that disagrees with x-fragment-agent, and a key that names no agent (401); nothing reserved or sent",
+        elsewhere.starts_with("transcribe refused: 403") && malformed.starts_with("transcribe refused: 401") && disagree.starts_with("transcribe refused: 401") && missing.starts_with("transcribe refused: 401")
+            && s.ai.calls().len() == calls && entries(api, owner_id, "aig:").len() == before,
+        json!({ "elsewhere": elsewhere, "malformed": malformed, "disagree": disagree, "missing": missing }),
+    );
+    Ok(6)
 }
 
 pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
@@ -833,6 +873,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             aig.len() == aig_before + 1 && aig.iter().filter(|e| end_of(e) == "settled").count() == aig_before + 1,
             json!(aig),
         );
+        if fakes {
+            replies_so_far += intercept_names_by_key(s, api, &owner_id, &agent_name, &chat_name, &fetched)?;
+        }
     } else {
         // a real runtime called its model to answer at all: each call went
         // through the intercept, reserved and settled on its owner's ledger.

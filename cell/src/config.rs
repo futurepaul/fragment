@@ -206,7 +206,8 @@ impl Config {
         let host_label_suffix = var(env, "FRAGMENT_HOST_LABEL_SUFFIX").map(|s| s.to_ascii_lowercase());
         assert!(
             host_label_suffix.as_deref().is_none_or(valid_label_suffix),
-            "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (^--[a-z0-9][a-z0-9-]{{0,30}}$)"
+            "FRAGMENT_HOST_LABEL_SUFFIX is `--` and a branch name (1-{} of a-z, 0-9 and single dashes inside)",
+            fragment_proto::limits::BRANCH_MAX_BYTES
         );
         // the platform's origin is named in frames' `frame-ancestors` and
         // messages' targets (fragment_core::frames), so it is one exactly
@@ -392,16 +393,13 @@ fn default_plan(env: &Env) -> Plan {
     }
 }
 
-/// A branch's mark on its fragments' labels: `--` and its name, so
-/// `<label>--<username>--<branch>.<suffix>` stays one DNS label under the
-/// zone's one wildcard certificate (docs/cloudflare-v1.md, decision 20).
+/// A branch's mark on its fragments' labels: `--` and its name (a branch
+/// `xtask deploy` makes), so `<label>--<username>--<branch>.<suffix>`
+/// stays one DNS label under the zone's one wildcard certificate
+/// (docs/cloudflare-v1.md, decision 20), and a computer's
+/// `<24 hex>--computer--<branch>` fits in one.
 fn valid_label_suffix(s: &str) -> bool {
-    s.strip_prefix("--").is_some_and(|b| {
-        (1..=31).contains(&b.len())
-            && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-            && b.as_bytes()[0] != b'-'
-            && !b.contains("--")
-    })
+    s.strip_prefix("--").is_some_and(fragment_proto::valid_branch)
 }
 
 /// The label `host` has under `suffix` (`x` of `x.<suffix>`), if it is one.

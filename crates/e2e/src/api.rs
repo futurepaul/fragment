@@ -364,6 +364,15 @@ impl Api {
         self.run.levers_sign_in
     }
 
+    /// The mark a branch deployment's fragments' hosts carry
+    /// (`--<branch>`), or nothing: the end of their host label.
+    pub fn host_mark(&self) -> String {
+        match &self.target {
+            Target::Hosted(preview) => format!("--{}", preview.branch),
+            Target::Local => self.label_suffix.clone(),
+        }
+    }
+
     /// The URL of `path` on a fragment's own host (`<label>--<username>.<suffix>`).
     pub fn site_url(&self, name: &str, path: &str) -> String {
         let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
