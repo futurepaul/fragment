@@ -128,6 +128,16 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&app);
     let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(PNG.to_vec()), keys: Some(&paul), ..Call::default() })?;
     s.ok("a picture", r.status == 200, &r);
+    // a seat an operator comped them, in an org of their own (docs/billing.md)
+    let org = if s.hosted() {
+        None
+    } else {
+        let op_session = api.sign_in("operator@e2e.test")?;
+        let _ = api.approve(&op_session, &s.operator);
+        let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat" })))?;
+        s.ok("a comped seat, in an org of their own", r.status == 200 && r.body["seat"]["person"] == paul_id.as_str(), &r);
+        r.body["org"]["id"].as_str().map(str::to_string)
+    };
     // their memberships elsewhere, and someone else's agent in theirs
     let joined = [
         api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{paul_id}"), Some(&json!({ "role": "editor" })))?,
@@ -278,6 +288,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("someone else's agent keeps its key and its list, less the wiped app", theirs.status == 200 && listed.contains(&shared) && !listed.contains(&app_name), &theirs);
     let r = api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{agent_id}"), Some(&json!({ "role": "viewer" })))?;
     s.ok("their agent's identity names no one", r.status == 404, &r);
+    if let Some(org) = &org {
+        let r = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}"), None)?;
+        s.ok("their seat is gone, and the org it left empty", r.status == 404, &r);
+    }
 
     // ---- the same sign-in again: a new person
     let session = api.sign_in(&email)?;

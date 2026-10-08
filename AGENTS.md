@@ -91,7 +91,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, push, ai, ledger, orgs, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the

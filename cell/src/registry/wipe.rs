@@ -275,6 +275,7 @@ impl RegistryCell {
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM usernames WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
+        self.wipe_orgs(identity)?;
         self.exec("DELETE FROM identities WHERE id IN (SELECT agent FROM wiped_agents WHERE identity = ?) OR id = ?", twice())?;
         let left = self.count(
             "SELECT (SELECT COUNT(*) FROM identities WHERE id = ? OR owner = ?) + (SELECT COUNT(*) FROM subjects WHERE identity = ?)

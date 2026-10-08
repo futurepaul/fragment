@@ -116,7 +116,7 @@ struct WorkOsUser {
 
 /// An email as the registry keeps it: trimmed and lower case, with an `@`
 /// inside, at most `EMAIL_MAX` bytes.
-fn email_of(raw: &str) -> Option<String> {
+pub(super) fn email_of(raw: &str) -> Option<String> {
     let email = raw.trim().to_ascii_lowercase();
     let at = email.find('@')?;
     (at > 0 && at + 1 < email.len() && email.len() <= EMAIL_MAX).then_some(email)
@@ -223,7 +223,7 @@ struct EarliestRow {
     session: Option<i64>,
 }
 
-fn alarm_at(at_ms: i64) -> ScheduledTime {
+pub(super) fn alarm_at(at_ms: i64) -> ScheduledTime {
     ScheduledTime::new(js_sys::Date::new(&worker::wasm_bindgen::JsValue::from_f64(at_ms as f64)))
 }
 
@@ -432,7 +432,9 @@ impl RegistryCell {
         let key = PersonKey::make(&self.env).await?;
         self.sweep_by(js::now_ms() + SESSION_TTL_MS).await?;
         let sid = signed_in.access_token.as_deref().and_then(sid_of);
-        self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)
+        let done = self.finish(&b.state, &b.issuer, &signed_in.user.id, &email, sid.as_deref(), key)?;
+        self.arm_syncs().await?;
+        Ok(done)
     }
 
     fn finish(&self, state: &str, issuer: &str, subject: &str, email: &str, sid: Option<&str>, key: PersonKey) -> CellResult<Exchanged> {
@@ -446,6 +448,7 @@ impl RegistryCell {
             )?
             .ok_or_else(|| CellError::invalid("this sign-in expired or was used; start again"))?;
         let (id, _) = self.person_for(issuer, subject, email, login.link_to.as_deref(), key)?;
+        self.claim_seats(&id, email)?;
         let token = self.new_session(&id, None, None, sid, None, js::now_ms() + SESSION_TTL_MS)?;
         Ok(Exchanged { token, return_to: login.return_to })
     }
@@ -533,7 +536,9 @@ impl RegistryCell {
             self.count_e2e_day(!known, paid_calls)?;
         }
         let (identity, created) = self.person_for(levers::E2E_ISSUER, email, email, None, key)?;
+        self.claim_seats(&identity, email)?;
         let token = self.new_session(&identity, None, None, None, None, js::now_ms() + SESSION_TTL_MS)?;
+        self.arm_syncs().await?;
         Ok(E2eSignedIn { token, identity, created })
     }
 
