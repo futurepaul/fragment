@@ -84,7 +84,7 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their fragments of one run (`e2e-<run>-…`), or with `--sweep-all` every `e2e-…` one at least an hour old (crates/e2e/src/hosted/sweep.rs) |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
-| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `abort-app` ends its app's instance as an eviction does (the next call starts a fresh one on the same database: the mind's e2e proves its memory is loaded, not rebuilt), `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `expire-draft` makes an unclaimed draft's end now (`{until}`: its alarm ends it; Drafts, below), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
+| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `here {principal}` answers `{here}`: whether that principal has a live socket open on it now (a job's `members` step's `here`; an agent's bridge opens one once it has caught up on a channel it follows), `abort-app` ends its app's instance as an eviction does (the next call starts a fresh one on the same database: the mind's e2e proves its memory is loaded, not rebuilt), `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `expire-draft` makes an unclaimed draft's end now (`{until}`: its alarm ends it; Drafts, below), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
 | `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (1 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
 
@@ -1252,7 +1252,7 @@ The steps:
 
 - `job.ai.text({model?, prompt | messages, max_tokens?, reasoning_effort?,
   tools?, tool_choice?, draft?})` → `{text, message, finish_reason, model,
-  tier, usage}`: `model` is a tier, `cheap` (the default) or `medium`
+  tier, usage, timing}`: `model` is a tier, `cheap` (the default) or `medium`
   (`high` is refused: Models); `max_tokens` is at most 16384;
   `reasoning_effort` is GLM's, `low` (the default) or `high` (anything
   else is `low`, since GLM takes an unknown one as `max`).
@@ -1274,9 +1274,27 @@ The steps:
     (its npub): at most 4 a second, and its whole text once more at its
     end; none past 64 KiB, or past the fragment's pace for drafts. The
     channel is one the app declares (it needs no post role; whoever may
-    read it sees the drafts), the turn `^[A-Za-z0-9._:-]{1,128}$`. A
-    stream that breaks, or ends before its answer says why it stopped, is
-    called again under the same reservation.
+    read it sees the drafts), the turn `^[A-Za-z0-9._:-]{1,128}$`. While
+    the call has no words yet, its draft is `""` with `thinking` (the
+    milliseconds so far): once as the call is made, then at most once a
+    second while the model reasons. A stream that breaks, or ends before
+    its answer says why it stopped, is called again under the same
+    reservation.
+  - Every call streams from the model, and is hedged
+    (fragment_core::hedge): one whose first data line has not come 4.5 s
+    after it was made, or that fails for now (a 429, a 5xx, no answer)
+    before it, gets one second, identical call, under a reservation of its
+    own (`<step's reference>/hedge/<hex>`). The first to stream is the
+    answer, and the other is aborted: the second's reservation is charged
+    the answer's prompt, split as the answer's was between cached and not,
+    and no output (it reports nothing, and wrote nothing that was read), or
+    released when the call that was not the answer failed before it began.
+    A step tried again after its answer was kept calls nothing.
+  - `timing` is how long it took: `first_ms` (its first data line),
+    `ms` (its whole answer), `hedged` and `won` (`first` or `second`),
+    `thought` (characters of reasoning, none kept), `tries` and
+    `since_ms` (this instance's count of its tries, and since the first
+    began), and `at` (when it ended, ms).
 - `job.ai.decide({model, state, questions, images?})` → `{answers, model,
   usage}`: Clef's input and answers, as its catalog's schemas say.
   `model` is `clef` or `clef-flash` (`model` answers its catalog id);
@@ -1321,6 +1339,26 @@ config's `vision_model`, GLM-5.3 Flash unless named, one the price book
 prices), for a runtime's calls about an image (a screenshot:
 docs/computers.md, Models); it is metered as a tier's call, and is no
 tier an agent or a job's step may name.
+
+A tier's streamed call (a job's text step, or the route's with `stream:
+true`) is made to answer soon (fragment_core::models::ladder,
+fragment_core::hedge; docs/optchat.md, "Latency"):
+- **Busy models are passed over.** It asks its model not to queue when it
+  is busy (Workers AI's `rejectIfBusy`), and a busy model's refusal (429,
+  error 3040) is unpaid and sends it on, at once, to the next model of its
+  tier's ladder: `cheap` is GLM-5.3 Flash, then DeepSeek V4 Flash
+  (`@cf/deepseek-ai/deepseek-v4-flash-0731`), then Gemma 4 26B A4B
+  (`@cf/google/gemma-4-26b-a4b-it`); `medium` is GLM-5.3, then GLM-5.3
+  Flash, then DeepSeek V4 Flash. A fallback that refuses the call is passed
+  over too. With every rung busy, it waits in its own model's queue. The
+  model that answered is the step's `model` (its usage row names it), at
+  that model's prices: each is in the default price book.
+- **A slow one is hedged.** One whose first data line has not come 4.5 s
+  after it was made, or that fails for now before it, gets one second,
+  identical call under a reservation of its own; the first to stream
+  answers, and the other is aborted and charged the answer's prompt, split
+  as the answer's was, with no output (or released, when it failed before
+  it began).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
@@ -1638,10 +1676,12 @@ the upgrade, as a call does.
   [{id, principal, data}]}` (everyone sharing presence as it opens),
   `{type: "record", channel, seq, at, principal, kind, body}`,
   `{type: "subscribed", channel, next, more}` (after each page),
-  `{type: "draft", channel, principal, turn, text, at}` (a record its
-  poster is writing, to the sockets following its channel; `text: null`
-  once they stopped; never stored, so a page that joins late sees the
-  next),
+  `{type: "draft", channel, principal, turn, text, at, thinking?}` (a
+  record its poster is writing, to the sockets following its channel;
+  `text: null` once they stopped; never stored, so a page that joins late
+  sees the next; `thinking`, with `text: ""`: a job's model call has no
+  words yet, this many milliseconds so far, which a page may count on
+  from),
   `{type: "presence", id, principal, data}` (one socket's change, to
   every socket, its own too; `data: null` once it cleared or left),
   `{type: "changed", op}` (after every applied mutation),
@@ -1974,7 +2014,8 @@ script, fetch or form; a socket from any page but the origin's own is
 A computer is woken by a record on a channel one of its agents
 subscribed to with `{channel, wake: true}` (only its egress asks for
 one: from anywhere else it names no URL, 400), by a page opening such a
-fragment (a pre-wake, at most every 30 s), by a request to one of its
+fragment or sharing presence there (someone typing: a pre-wake, at most
+every 30 s), by a request to one of its
 ports, by one of its agents becoming a member of any fragment, and by
 its owner. Records its own agents post wake nothing, and neither do
 their own sockets: its guest following a fragment pre-wakes no

@@ -110,7 +110,8 @@ each with its reason. Everything else in the gist holds as it says.
    every log and node so far uses; a `note` is another agent's, written
    through MCP (the gist's are memories from before the chat).
 6. **Files, not images:** a message carries files, named in it, a small
-   text one read whole; the medium tier reads no image, so `zoom(id, 1)`
+   text one read whole; a job's step sends no image (the medium tier, the
+   turns' until 2026-10-08, reads none), so `zoom(id, 1)`
    gives a message "with its files".
 7. **Imports are ours:** Claude Code's, claude.ai's, Codex's and
    Hermes's conversations are played in as `user` and `talk` messages
@@ -391,7 +392,7 @@ The gist's §6, as a job:
    turn sees them), then the chat's view rendered up to `tail`, frozen as
    the step's answer so every call of the turn sees the same one. Then
    the calls, at most 40 a turn:
-   - `job.ai.text({model: "medium", messages, tools: CALL_TOOLS,
+   - `job.ai.text({model: "cheap", messages, tools: CALL_TOOLS,
      draft: {channel: "log", turn: "turn:<thread>"}})`. The messages are
      `[system: PROMPT + about-me, user: [the view, the turn's state, its
      messages joined]]`, then the turn's steps.
@@ -1052,7 +1053,8 @@ beside the mind; opened on its own origin the page shows its own rail.
   - Fresh context per turn: no session is ever loaded again. goose's
     state lives in `/tmp/goose/<agent>`, outside `/data` and its saves.
 - **Model:** goose's OpenAI provider, pointed at `FRAGMENT_MODEL`, model
-  `medium`, with `OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`.
+  `cheap` (`BRIDGE_GOOSE_TIER`; GLM-5.3 Flash, Paul, 2026-10-08), with
+  `OPENAI_CUSTOM_HEADERS=x-fragment-agent=<agent>`.
   Compaction is off (`GOOSE_AUTO_COMPACT_THRESHOLD=0`,
   `GOOSE_NO_COMPACTION=1`), and `GOOSE_STABLE_SYSTEM_PROMPT=1` keeps the
   system prompt fixed.
@@ -1187,6 +1189,81 @@ refused) and then allowed changes (`note`, then `search` finding it,
 `zoom` opening it whole, `date` dating it, `threads` no tool), and the
 mind's events naming Claude.
 
+## Latency
+
+Paul (2026-10-08): "even 15s sounds too slow". What a turn and a
+hand-off spend, measured on the preview with real models by the hosted
+`mind-live` lane, and what cut it.
+
+**What is measured** (each mark on the platform's clock):
+- **A turn's** `turn` record on `log` carries `timing` once it ends:
+  `asked` (its first message logged), `begun`, `view` (its wait for the
+  compactor, and the view rendered), and for each model call the step's
+  own `timing` (`first` data line, `ms` whole, `hedged` and `won`, the
+  `model` that answered and the busy ones it `passed`, `thought`
+  characters of reasoning, its `tries`, and `tokens` in, cached, out), its
+  tools, and when its log `logged`; then `end`.
+- **A hand-off's**: the ask logged; the task's record on `chat` (`tasks`
+  names its `seq`); goose's claim (`turn.start` on `work`); goose's
+  `turn.timing` (docs/chat-records.md: its view and skills, its goose
+  started, its session and MCP servers, its first word, each step's wait
+  before it, which is its model call, and its run, its last call); its
+  first step; its reply on `chat`; the report logged (the task's `ended`);
+  the follow-up `talk`.
+- **goose's model calls** are also the model route's `model.settled` log
+  lines (`first_ms`, `ms`, `hedge`, `tokens` and the model), which
+  `wrangler tail` shows; the lane reads them from goose's steps.
+
+**What cut it:**
+- **Busy models are passed over** (docs/api.md, Models): Workers AI
+  holds a call in a capacity queue while its model is busy; a call asks
+  `rejectIfBusy`, and a busy model's refusal sends it down its tier's
+  ladder at once (GLM-5.3 Flash, DeepSeek V4 Flash, Gemma 4 26B A4B), and
+  with every rung busy it waits in its own model's queue.
+- **Slow calls are hedged** (fragment_core::hedge): no first data line in
+  4.5 s, or a failure for now before it, makes one second, identical call;
+  the first to stream answers, the other is aborted, and charged the
+  answer's prompt split as the answer's was and no output (it reports
+  nothing; every token uncached would be its dearest reading, up to five
+  times the price for a cached prefix: decision for Paul). A failure
+  before the first line is so retried within its step, not after the
+  Workflow's 10 s wait.
+- **GLM-5.3 Flash everywhere** (Paul, 2026-10-08), turns and goose: one
+  model's prefix cache for turns and compactions.
+- **Fewer steps a turn.** Each job step is two Workflow steps (about a
+  quarter of a second): a word's turn was eight (`hear`, `members`,
+  `people`, `turn_begin`, `turn_view`, the call, `logged`, `turn_end`),
+  1.6 s of a 4 s turn. Now `hear` (or `hands_reply`, a report) begins the
+  turn when none runs, `turn_begin` renders the view when nothing is left
+  to wait for, the hands' profile is kept (`people` once), and the last
+  call's `logged` ends the turn: four (`members`, `hear`, the call,
+  `logged`).
+- **goose's session is made ahead.** Its `session/new` starts the
+  session's MCP servers (Playwright's Node, cua-driver, `fragment mcp`):
+  1.3 to 1.8 s a hand-off. Once a turn ends, the next turn's session in
+  that fragment is made (`Spare`, images/bridge goose.rs), its system
+  prompt set; nothing is said in it, so it is as fresh as one made at
+  the turn.
+- **The computer starts as the person types** to a persona with hands:
+  the page shares presence (`typing`), and presence pre-wakes the
+  computers its channels wake, as opening the page does (at most every
+  30 s; docs/computers.md, Wakes).
+- **A thinking model says so.** A text step's draft is `""` with
+  `thinking` (its milliseconds) as its call is made, and once a second
+  while it reasons with no words yet; the page shows "Thinking… 4s".
+
+**Measured** (the preview, each the hosted lane's whole run; p50 / p90):
+
+| | before (2026-10-08, medium) | after |
+| --- | --- | --- |
+| a turn in words, logged → answered | 5.2 s / 13.7 s (n=12) | |
+| the mind's model calls, first data line | 3.6 s / 10.3 s (n=20, none hedged) | |
+| platform steps a turn in words | ~1.6 s | |
+| a simple hand-off (computer awake), ask → report | 22.2 s / 27.7 s (n=3) | |
+| a follow-up, report → talk | 3.1 s / 25.4 s (n=4) | |
+| goose's model calls | 4.8 s / 15.5 s (n=10) | |
+| goose's session and MCP servers | 1.3 to 1.8 s | |
+
 ## Deploy
 
 - **Config:** `~/.config/fragment/finite-place-optchat.jsonc`. It is
@@ -1195,13 +1272,17 @@ mind's events naming Claude.
 - **Deploy:** `cargo xtask deploy --config … --branch claude-optchat`.
   The mind of a person `paul` is at
   `https://mind--paul--claude-optchat.finite.place/`.
-- **Models:**
-  - turns run on `medium` (GLM-5.3);
-  - the compactor and suggestions run on `cheap` (GLM-5.3 Flash);
+- **Models** (Paul, 2026-10-08: GLM-5.3 Flash is the default everywhere;
+  GLM-5.3, `medium`, is for whoever names it):
+  - turns, the compactor and suggestions run on `cheap` (GLM-5.3 Flash),
+    so a turn's and a compaction's cached prefix is one model's;
   - topics run on `clef-flash`;
-  - goose runs on `medium`.
+  - goose runs on `cheap`;
+  - a busy model falls back down its tier's ladder ("Latency", below).
+- **The price book:** the config names `price_book_version` 3 (2026-10-08),
+  so every ledger takes the ladder's fallbacks' rows ("Latency").
 - **The live check:** `cargo xtask e2e --hosted --config … --branch
-  claude-optchat --only mind-live --max-paid-calls 60`
+  claude-optchat --only mind-live --max-paid-calls 90`
   (crates/e2e/src/lanes/mind_live.rs).
   It runs only by name, and only on a preview (`Need::RealModels`): a
   local run's `mind` section checks the same loop on the fakes. An e2e
@@ -1212,9 +1293,13 @@ mind's events naming Claude.
   agent's desktop, at least two of them among the front page's top ten
   as the test fetches it); and, measured but not checked, a click of the
   page's "More" link by `screen_click` (Clef), whose landing and
-  coordinates it prints. It takes up to 45 minutes, lends its person 60
-  paid calls (the run before the browsing steps spent 11), and prints each latency, the recall's zoom
-  and search calls, the browser calls, and the paid calls made.
+  coordinates it prints. Between the shell hand-off and the browsing one
+  it measures, and checks nothing of: six short asks answered in words
+  (thread E) and two simple shell hand-offs with the computer awake
+  (thread F). It takes up to 45 minutes, lends its person 90 paid calls
+  (a hedge's second call is one), and prints each latency, each turn's
+  and hand-off's breakdown ("Latency"), their percentiles, the recall's
+  zoom and search calls, the browser calls, and the paid calls made.
 
 ## Merged from issue #232 (agent-friendly fragment)
 
