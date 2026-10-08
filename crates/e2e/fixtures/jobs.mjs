@@ -110,6 +110,30 @@ export class App extends DurableObject {
     }
   }
 
+  // Records naming turns, on a channel only editors read.
+  mark({ turns }, call) {
+    turns.forEach((turn, n) => call.publish("turns", { turn, n }, "mark"));
+    return { marked: turns.length };
+  }
+
+  // A channel's records, page after page (job.records) to its end (at most
+  // 8 pages), each page's seqs and next, and why a step failed, caught.
+  async tail({ channel, after, limit, turn }, job) {
+    const pages = [];
+    try {
+      let at = after;
+      for (let k = 0; k < 8; k++) {
+        const page = await job.records(channel, { after: at, limit, turn });
+        pages.push({ seqs: page.records.map((r) => r.seq), next: page.next, records: page.records });
+        if (page.next === null) break;
+        at = page.next;
+      }
+      return { pages };
+    } catch (e) {
+      return { pages, caught: true, name: e.name, message: e.message };
+    }
+  }
+
   ping(_input, call) {
     call.publish("loop", { ping: true }, "ping");
     return { ok: true };

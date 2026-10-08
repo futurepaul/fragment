@@ -1460,6 +1460,22 @@ and the AI steps (`job.ai.*`), all above:
   split, or `null` when they are not text (not UTF-8, or a NUL); `cut`
   says the blob goes on past them. A hash the fragment has no bytes for
   fails the step.
+- `job.records(channel, {after?, limit?, turn?})` → `{records: [{seq,
+  at, principal, kind, body}], next}`: a page of the fragment's own
+  records on one of the channels its fragment.json declares (`events` and
+  `ops` are the platform's, and refused), as a reader with the run's role
+  reads them (a role below the channel's `read` fails the step): the
+  records after `after` (from the first the channel still keeps, unless
+  named), oldest first, at most `limit` (1 to 200; 200 unless named) and
+  512 KiB of them, a page's first record always whole. With `turn`, only
+  those whose body's `turn` is that string (an agent's records on a chat's
+  `work`: docs/chat-records.md). `next` is the next page's `after`, `null`
+  when the page reached the channel's newest record. A page looks over at
+  most 10 000 seqs past `after` (`steps::RECORDS_SCAN_MAX`, what a
+  channel people post to keeps), so a `turn` that matches few records may
+  answer a page with fewer than `limit`, even none, and a `next`: read on
+  until it is `null`. A step like any other: its answer is kept, so a run
+  reads what was there when it first took it.
 - What the fragment's own page reads, read for its code:
   `job.members()` → its members as `__members` lists them (`[{principal,
   role, kind, addedAt, …}]`, the first added first), each with `here`:

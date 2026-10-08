@@ -75,6 +75,11 @@ pub enum Step {
     /// text when they are UTF-8 (`blob_read`).
     #[serde(rename = "blob")]
     Blob { sha256: String },
+    /// `job.records(channel, {after, limit, turn})`: a page of the
+    /// fragment's own records on one of the channels its fragment.json
+    /// declares (`Records`).
+    #[serde(rename = "records")]
+    Records(Records),
     /// `job.owner.fragments()`: the fragment's owner's other fragments,
     /// each with the described operations its owner may call there. Only a
     /// blessed template that declares the `owner` capability takes the
@@ -137,6 +142,176 @@ pub fn blob_read(sha256: &str, size: u64, head: &[u8]) -> Value {
     };
     let text = text.filter(|t| !t.contains('\0'));
     serde_json::json!({ "sha256": sha256, "size": size, "text": text, "cut": cut })
+}
+
+/// The records one `job.records` page answers, at most (and unless it asks
+/// for fewer).
+pub const RECORDS_PAGE_MAX: usize = 200;
+/// What one page's records take, at most, about (`PageRecord::size`): the
+/// record past it starts the next page. A record's body is at most
+/// `limits::RECORD_BODY_MAX_BYTES`, so every page holds one.
+pub const RECORDS_PAGE_MAX_BYTES: usize = 512 * 1024;
+/// The seqs one page looks at past `after`, at most (`records_window`).
+/// With a `turn`, the records it passes over count too, so a page reads a
+/// bounded stretch of the channel however few match; a channel people post
+/// to keeps this many records, so one page looks over all of it.
+pub const RECORDS_SCAN_MAX: i64 = fragment_proto::limits::POSTED_KEPT;
+/// A `turn` to match, at most (an agent's turn id is 24 hex).
+pub const RECORDS_TURN_MAX_BYTES: usize = 128;
+
+const _: () = assert!(fragment_proto::limits::RECORD_BODY_MAX_BYTES < RECORDS_PAGE_MAX_BYTES);
+
+/// `job.records(channel, {after, limit, turn})`, as the job gave it
+/// (`Records::checked` reads it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Records {
+    pub channel: String,
+    /// The records after this seq (the channel's first kept one on, unless named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+    /// At most this many (`RECORDS_PAGE_MAX` unless named).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Only the records whose body's `turn` is this string (an agent's turn
+    /// on a chat's `work`: docs/chat-records.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+}
+
+/// A `records` step's ask, checked: a channel's name (one fragment.json
+/// declares: the cell asks), where to start, how many, and the turn to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordsAsk {
+    pub channel: String,
+    pub after: i64,
+    pub limit: usize,
+    pub turn: Option<String>,
+}
+
+impl Records {
+    /// What it asks, or why it does not fit: a channel's name that is not
+    /// the platform's own (`events`, `ops`), a seq of 0 or more, a limit of
+    /// 1 to `RECORDS_PAGE_MAX`, a turn of 1 to `RECORDS_TURN_MAX_BYTES`.
+    pub fn checked(self) -> Result<RecordsAsk, String> {
+        if !fragment_proto::valid_channel_name(&self.channel) {
+            return Err(format!("{:?} is not a channel's name (^[a-z][a-z0-9_-]{{0,63}}$)", self.channel));
+        }
+        if fragment_proto::BUILTIN_CHANNELS.contains(&self.channel.as_str()) {
+            return Err(format!("{} is the platform's: a job reads the channels its fragment.json declares", self.channel));
+        }
+        let after = self.after.unwrap_or(0);
+        if after < 0 {
+            return Err(format!("after is a record's seq, 0 or more, not {after}"));
+        }
+        let limit = self.limit.unwrap_or(RECORDS_PAGE_MAX);
+        if !(1..=RECORDS_PAGE_MAX).contains(&limit) {
+            return Err(format!("limit is 1 to {RECORDS_PAGE_MAX}, not {limit}"));
+        }
+        if let Some(turn) = &self.turn {
+            if turn.is_empty() || turn.len() > RECORDS_TURN_MAX_BYTES {
+                return Err(format!("turn is 1 to {RECORDS_TURN_MAX_BYTES} bytes"));
+            }
+        }
+        Ok(RecordsAsk { channel: self.channel, after, limit, turn: self.turn })
+    }
+}
+
+/// The seqs a `records` page looks at, `(from, to]`: past `after`, and past
+/// what the channel no longer keeps (its oldest go first, so the rest run on
+/// from its first kept record), at most `RECORDS_SCAN_MAX` of them, up to
+/// its newest. `kept` is the channel's first and last kept seq, `None` when
+/// it keeps none; the answer is `None` when no record is past `after`.
+pub fn records_window(after: i64, kept: Option<(i64, i64)>) -> Option<(i64, i64)> {
+    assert!(after >= 0, "a page starts at a seq: {after}");
+    let (first, last) = kept?;
+    assert!(0 < first && first <= last, "a channel's records number from 1, in order: {first}..{last}");
+    let from = after.max(first - 1);
+    (from < last).then(|| (from, last.min(from.saturating_add(RECORDS_SCAN_MAX))))
+}
+
+/// One record of a `records` page: `{seq, at, principal, kind, body}`, its
+/// body the JSON the cell stored, as a channel's reader gets it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PageRecord {
+    pub seq: i64,
+    pub at: i64,
+    pub principal: String,
+    pub kind: String,
+    pub body: Box<serde_json::value::RawValue>,
+}
+
+impl PageRecord {
+    /// About what it takes of its page's JSON.
+    fn size(&self) -> usize {
+        self.body.get().len() + self.principal.len() + self.kind.len() + 64
+    }
+}
+
+/// `job.records`' answer: `{records, next}`, where `next` is the next
+/// page's `after`, or `null` when this page reached the channel's newest
+/// record.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordsPage {
+    pub records: Vec<PageRecord>,
+    pub next: Option<i64>,
+}
+
+impl RecordsPage {
+    /// A page past the channel's newest record (or of a channel with none).
+    pub fn end() -> RecordsPage {
+        RecordsPage { records: vec![], next: None }
+    }
+}
+
+/// Fills a page from the records of a window `(_, to]` that match its ask,
+/// taken one at a time in seq order (`take`), so a reader stops reading
+/// where the page is full: at `limit` records, or at the record that would
+/// take it past `RECORDS_PAGE_MAX_BYTES`. `last` is the channel's newest seq.
+#[derive(Debug)]
+pub struct Pager {
+    limit: usize,
+    to: i64,
+    last: i64,
+    records: Vec<PageRecord>,
+    bytes: usize,
+    full: bool,
+}
+
+impl Pager {
+    pub fn new(limit: usize, to: i64, last: i64) -> Pager {
+        assert!((1..=RECORDS_PAGE_MAX).contains(&limit), "a page holds 1 to {RECORDS_PAGE_MAX} records: {limit}");
+        assert!(to <= last, "a window ends at the channel's newest record at the latest: {to} > {last}");
+        Pager { limit, to, last, records: Vec::new(), bytes: 0, full: false }
+    }
+
+    /// Takes the next record; `false` once the page is full, this record
+    /// left for the next.
+    pub fn take(&mut self, record: PageRecord) -> bool {
+        assert!(!self.full, "a full page takes no more records");
+        assert!(record.seq <= self.to, "record {} is past its window's end {}", record.seq, self.to);
+        assert!(self.records.last().is_none_or(|r| r.seq < record.seq), "a page's records come in seq order");
+        let size = record.size();
+        // its first record always fits (a body is at most RECORD_BODY_MAX_BYTES)
+        if self.records.len() == self.limit || (!self.records.is_empty() && self.bytes + size > RECORDS_PAGE_MAX_BYTES) {
+            self.full = true;
+            return false;
+        }
+        self.bytes += size;
+        self.records.push(record);
+        true
+    }
+
+    /// The page: the next one starts after its last record when it filled
+    /// (a record was left for it), else after the window it looked over.
+    pub fn page(self) -> RecordsPage {
+        let read_to = match self.records.last() {
+            Some(r) if self.full => r.seq,
+            _ => self.to,
+        };
+        assert!(!self.full || read_to < self.last, "a page that filled left a record for the next");
+        RecordsPage { next: (read_to < self.last).then_some(read_to), records: self.records }
+    }
 }
 
 /// `job.fetch`'s request. Header values may name secrets as `{{NAME}}`.
@@ -386,6 +561,7 @@ impl Step {
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
             Step::Blob { .. } => "blob",
+            Step::Records(_) => "records",
             Step::OwnerFragments {} => "owner.fragments",
             Step::OwnerCall { .. } => "owner.call",
         }
@@ -468,6 +644,7 @@ mod tests {
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
             ("blob", json!({ "sha256": "ab".repeat(32) })),
+            ("records", json!({ "channel": "work", "after": 12, "limit": 50, "turn": "0123456789abcdef01234567" })),
             ("owner.fragments", json!({})),
             ("owner.call", json!({ "fragment": "todo.paul", "op": "add", "input": { "text": "milk" } })),
         ]
@@ -476,7 +653,7 @@ mod tests {
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 21, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 22, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -547,6 +724,12 @@ mod tests {
         refused("owner.call", json!({ "op": "add", "input": {} }), "missing field `fragment`");
         refused("owner.call", json!({ "fragment": "todo.paul", "op": "add" }), "missing field `input`");
         refused("owner.call", json!({ "fragment": 7, "op": "add", "input": {} }), "invalid type");
+        refused("records", json!({ "after": 1 }), "missing field `channel`");
+        refused("records", json!({ "channel": "work", "after": "1" }), "invalid type");
+        refused("records", json!({ "channel": "work", "after": 1.5 }), "invalid type");
+        refused("records", json!({ "channel": "work", "limit": -1 }), "invalid value");
+        refused("records", json!({ "channel": "work", "turn": 7 }), "invalid type");
+        refused("records", json!({ "channel": "work", "before": 9 }), "unknown field `before`");
     }
 
     /// Goal: an owner call names a fragment and an operation as the API
@@ -638,5 +821,126 @@ mod tests {
         assert_eq!(read(4, &[0x61, 0xff, 0x62, 0x63])["text"], Value::Null, "bytes that are not UTF-8");
         assert_eq!(read(3, b"a\0b")["text"], Value::Null, "a NUL is binary's");
         assert_eq!(read(0, b""), json!({ "sha256": sha, "size": 0, "text": "", "cut": false }));
+    }
+
+    fn ask(args: Value) -> Result<RecordsAsk, String> {
+        match step("records", args)? {
+            Step::Records(r) => r.checked(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Goal: a records step names one of the app's channels by a name the
+    /// API takes, starts at a seq, asks for at most a page, and matches a
+    /// turn of a turn id's size; what it leaves out is the first page, whole.
+    /// Method: valid asks, each default, and each way an ask is refused.
+    #[test]
+    fn a_records_step_asks_for_an_app_channels_page() {
+        assert_eq!(ask(json!({ "channel": "work" })), Ok(RecordsAsk { channel: "work".into(), after: 0, limit: RECORDS_PAGE_MAX, turn: None }));
+        assert_eq!(
+            ask(json!({ "channel": "work", "after": 41, "limit": 1, "turn": "ab12" })),
+            Ok(RecordsAsk { channel: "work".into(), after: 41, limit: 1, turn: Some("ab12".into()) })
+        );
+        assert_eq!(ask(json!({ "channel": "work", "after": null, "limit": null, "turn": null })).unwrap().limit, RECORDS_PAGE_MAX, "null is unnamed");
+        assert_eq!(ask(json!({ "channel": "work", "limit": RECORDS_PAGE_MAX })).unwrap().limit, RECORDS_PAGE_MAX);
+        let long = "a".repeat(RECORDS_TURN_MAX_BYTES);
+        assert_eq!(ask(json!({ "channel": "work", "turn": long })).unwrap().turn.map(|t| t.len()), Some(RECORDS_TURN_MAX_BYTES));
+        for (args, says) in [
+            (json!({ "channel": "Work" }), "not a channel's name"),
+            (json!({ "channel": "" }), "not a channel's name"),
+            (json!({ "channel": "../work" }), "not a channel's name"),
+            (json!({ "channel": "events" }), "the platform's"),
+            (json!({ "channel": "ops" }), "the platform's"),
+            (json!({ "channel": "work", "after": -1 }), "0 or more"),
+            (json!({ "channel": "work", "limit": 0 }), "limit is 1 to 200"),
+            (json!({ "channel": "work", "limit": RECORDS_PAGE_MAX + 1 }), "limit is 1 to 200"),
+            (json!({ "channel": "work", "turn": "" }), "turn is 1 to"),
+            (json!({ "channel": "work", "turn": "a".repeat(RECORDS_TURN_MAX_BYTES + 1) }), "turn is 1 to"),
+        ] {
+            let e = ask(args.clone()).expect_err(&args.to_string());
+            assert!(e.contains(says), "{args}: {e}");
+        }
+    }
+
+    /// Goal: a page looks at a bounded stretch of seqs, from where it was
+    /// asked or the channel's first kept record, whichever is later, up to
+    /// its newest. Method: windows of an empty channel, one that dropped its
+    /// oldest records, one longer than a scan, and an ask past the end.
+    #[test]
+    fn a_records_page_looks_over_a_bounded_window() {
+        assert_eq!(records_window(0, None), None, "a channel with no records");
+        assert_eq!(records_window(0, Some((1, 5))), Some((0, 5)));
+        assert_eq!(records_window(3, Some((1, 5))), Some((3, 5)));
+        assert_eq!(records_window(5, Some((1, 5))), None, "nothing past the newest");
+        assert_eq!(records_window(9, Some((1, 5))), None);
+        assert_eq!(records_window(0, Some((40_001, 50_000))), Some((40_000, 50_000)), "the dropped seqs are not looked at");
+        assert_eq!(records_window(45_000, Some((40_001, 50_000))), Some((45_000, 50_000)));
+        assert_eq!(records_window(0, Some((1, 25_000))), Some((0, RECORDS_SCAN_MAX)), "at most a scan's worth");
+        assert_eq!(records_window(RECORDS_SCAN_MAX, Some((1, 25_000))), Some((RECORDS_SCAN_MAX, 2 * RECORDS_SCAN_MAX)));
+        assert_eq!(records_window(i64::MAX - 1, Some((1, i64::MAX))), Some((i64::MAX - 1, i64::MAX)), "no overflow at the end");
+    }
+
+    fn record(seq: i64, body: Value) -> PageRecord {
+        PageRecord {
+            seq,
+            at: 1_700_000_000_000 + seq,
+            principal: "id:00112233445566778899aabbccddeeff".into(),
+            kind: "message".into(),
+            body: serde_json::value::to_raw_value(&body).unwrap(),
+        }
+    }
+
+    fn fill(limit: usize, to: i64, last: i64, records: impl IntoIterator<Item = PageRecord>) -> Value {
+        let mut pager = Pager::new(limit, to, last);
+        for r in records {
+            if !pager.take(r) {
+                break;
+            }
+        }
+        serde_json::to_value(pager.page()).unwrap()
+    }
+
+    fn seqs(page: &Value) -> Vec<i64> {
+        page["records"].as_array().unwrap().iter().map(|r| r["seq"].as_i64().unwrap()).collect()
+    }
+
+    /// Goal: a page is the records it was given, in their shape, up to its
+    /// limit and its bytes; the next page starts after its last record when
+    /// it filled, after its window when it did not, and there is none past
+    /// the channel's newest record. Method: pages that end at the channel's
+    /// end, at the window's, at the limit, and at the bytes, and the page of
+    /// one record as large as a record may be.
+    #[test]
+    fn a_records_page_fills_to_its_limit_and_says_where_the_next_starts() {
+        let page = fill(200, 5, 5, [record(2, json!({ "turn": "t", "n": 1 })), record(4, json!("x"))]);
+        assert_eq!(
+            page,
+            json!({ "records": [
+                { "seq": 2, "at": 1_700_000_000_002_i64, "principal": "id:00112233445566778899aabbccddeeff", "kind": "message", "body": { "turn": "t", "n": 1 } },
+                { "seq": 4, "at": 1_700_000_000_004_i64, "principal": "id:00112233445566778899aabbccddeeff", "kind": "message", "body": "x" },
+            ], "next": null }),
+            "the window reached the channel's end"
+        );
+        assert_eq!(fill(200, 10_000, 25_000, [record(7, json!(1))])["next"], 10_000, "the next page looks past this one's window, even with nothing matched");
+        assert_eq!(fill(200, 10_000, 25_000, []), json!({ "records": [], "next": 10_000 }));
+        assert_eq!(fill(200, 9, 9, []), json!({ "records": [], "next": null }));
+        let page = fill(2, 100, 100, (1..=5).map(|s| record(s, json!(s))));
+        assert_eq!((seqs(&page), &page["next"]), (vec![1, 2], &json!(2)), "at the limit, the next page starts after its last record");
+        let page = fill(3, 3, 3, (1..=3).map(|s| record(s, json!(s))));
+        assert_eq!((seqs(&page), &page["next"]), (vec![1, 2, 3], &Value::Null), "exactly the limit, and nothing left");
+        // records of 64 KiB: a page takes as many as its bytes hold, and the next takes the rest
+        let big = |s: i64| record(s, json!("x".repeat(fragment_proto::limits::RECORD_BODY_MAX_BYTES - 2)));
+        let page = fill(200, 20, 20, (1..=20).map(big));
+        let held = seqs(&page);
+        assert_eq!(held, (1..=7).collect::<Vec<_>>(), "seven 64 KiB records fit 512 KiB with their keys; an eighth does not");
+        assert_eq!(page["next"], 7);
+        let page = fill(1, 1, 1, [big(1)]);
+        assert_eq!(seqs(&page), vec![1], "a page always holds its first record");
+    }
+
+    #[test]
+    #[should_panic(expected = "seq order")]
+    fn a_page_refuses_records_out_of_order() {
+        fill(200, 10, 10, [record(5, json!(1)), record(3, json!(1))]);
     }
 }
