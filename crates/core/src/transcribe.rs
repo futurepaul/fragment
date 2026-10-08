@@ -156,38 +156,47 @@ impl Bounded {
     }
 }
 
-/// Whether Whisper's answer came inside `result`, as Workers AI's REST API
-/// wraps an answer, rather than as its catalog's output schema says, as the
-/// binding answers it raw (crate::media reads an image's either way too).
-/// The cell logs which (`model.transcribed`): the hosted lane's to settle.
-pub fn wrapped(answer: &Value) -> bool {
-    answer.get("result").is_some() && answer.get("text").is_none() && answer.get("transcription_info").is_none()
-}
-
-fn unwrapped(answer: &Value) -> &Value {
-    if wrapped(answer) {
-        &answer["result"]
-    } else {
-        answer
-    }
-}
+// Whisper's answer, as the AI binding gives it (the hosted lane, on
+// e2e.finite.place, 2026-10-08): its catalog's output schema, unwrapped
+// (`text`, `transcription_info`, `segments`, `vtt`, `word_count`), and a
+// `usage` the schema does not name. Read as it is: an answer in any other
+// shape (inside `result`, as Workers AI's REST API wraps one) has no text
+// and no length, so it is answered 502 and settled at its reservation.
 
 /// What a call cost, from Whisper's answer: its audio's length
-/// (`transcription_info.duration`, seconds). An answer that does not say,
-/// or says what no audio is, is `None`, which the ledger settles at the
-/// reservation: the money path fails closed.
+/// (`transcription_info.duration`, seconds, the catalog's own field;
+/// measured hosted, 2 s of audio settled at 1,555 thousandths of a neuron).
+/// Its undocumented `usage` is not read: what it holds is shown by
+/// `shape` until it is known. An answer that does not say, or says what no
+/// audio is, is `None`, which the ledger settles at the reservation: the
+/// money path fails closed.
 pub fn usage_of(answer: &Value) -> Option<Usage> {
-    let seconds = unwrapped(answer)["transcription_info"]["duration"].as_f64()?;
+    let seconds = answer["transcription_info"]["duration"].as_f64()?;
     if !seconds.is_finite() || !(0.0..=DURATION_MAX_SECONDS).contains(&seconds) {
         return None;
     }
     Some(neurons((seconds * 1_000.0).ceil() as u64))
 }
 
+/// What a transcription's answer says of Whisper's (the route's
+/// `x-fragment-answer-shape`), never its words: its top-level keys, and its
+/// `usage` when that is a small object of numbers, booleans and short
+/// strings (else `null`), so a hosted run shows what Workers AI meters it
+/// by.
+pub fn shape(whisper: &Value) -> Value {
+    let keys: Vec<&str> = whisper.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
+    let scalar = |v: &Value| v.is_number() || v.is_boolean() || v.as_str().is_some_and(|s| s.len() <= 32);
+    let usage = match whisper.get("usage") {
+        Some(Value::Object(u)) if u.len() <= 8 && u.values().all(scalar) => Value::Object(u.clone()),
+        _ => Value::Null,
+    };
+    json!({ "keys": keys, "usage": usage })
+}
+
 /// The client's answer from Whisper's: its content type and body, or
 /// `None` when the answer carries no text.
 pub fn answer(format: Format, whisper: &Value) -> Option<(&'static str, Vec<u8>)> {
-    let text = unwrapped(whisper)["text"].as_str()?.trim();
+    let text = whisper["text"].as_str()?.trim();
     Some(match format {
         Format::Json => ("application/json", json!({ "text": text }).to_string().into_bytes()),
         Format::Text => ("text/plain; charset=utf-8", text.as_bytes().to_vec()),
@@ -276,10 +285,23 @@ mod tests {
         assert_eq!(answer(Format::Json, &w), Some(("application/json", br#"{"text":"hello there"}"#.to_vec())));
         assert_eq!(answer(Format::Text, &w), Some(("text/plain; charset=utf-8", b"hello there".to_vec())));
         assert_eq!(answer(Format::Json, &json!({ "transcription_info": {} })), None);
-        // the REST API's wrapping reads the same
+        // an answer in another shape (the REST API's wrapping) has no text
+        // and no length: answered 502, settled at its reservation
         let wrapped = json!({ "result": w, "success": true });
-        assert_eq!(answer(Format::Text, &wrapped), Some(("text/plain; charset=utf-8", b"hello there".to_vec())));
-        assert_eq!(usage_of(&wrapped), usage_of(&w));
-        assert!(super::wrapped(&wrapped) && !super::wrapped(&w));
+        assert_eq!((answer(Format::Text, &wrapped), usage_of(&wrapped)), (None, None));
+    }
+
+    /// The shape a transcription's answer names: the keys, and a `usage` of
+    /// scalars as it came, never the words or anything that could carry
+    /// them. Method: the hosted answer's keys, with a usage shown and ones
+    /// not.
+    #[test]
+    fn the_shape_shows_keys_and_a_scalar_usage() {
+        let hosted = json!({ "text": "Thank you.", "transcription_info": { "duration": 2.0 }, "segments": [], "vtt": "WEBVTT", "word_count": 2, "usage": { "type": "duration", "seconds": 2 } });
+        assert_eq!(shape(&hosted), json!({ "keys": ["segments", "text", "transcription_info", "usage", "vtt", "word_count"], "usage": { "type": "duration", "seconds": 2 } }));
+        assert!(!shape(&hosted).to_string().contains("Thank you"), "never its words");
+        for not_shown in [json!({ "usage": { "said": "x".repeat(33) } }), json!({ "usage": { "nested": { "a": 1 } } }), json!({ "usage": [1, 2] }), json!({})] {
+            assert_eq!(shape(&not_shown)["usage"], Value::Null, "{not_shown}");
+        }
     }
 }

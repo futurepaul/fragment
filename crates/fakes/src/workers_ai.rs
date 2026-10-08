@@ -25,7 +25,10 @@
 //! WAV `spoken_wav` makes carries its words in a chunk of its own (`said`),
 //! which is the text, and its length is its samples'; any other audio is
 //! heard as `NO_WORDS`, its length its bytes at 16 kbps. Workers AI prices
-//! it by that length, which the cell meters itself.
+//! it by that length, which the cell meters itself. The real answer also
+//! carries a `usage` its schema does not name (the hosted lane, 2026-10-08),
+//! whose contents are not recorded yet, so the fake sends none: the cell
+//! reads none of it.
 //!
 //! A chat call may carry images (`image_url` parts, OpenAI's shape) to a
 //! model that reads them (`TAKES_IMAGES`, as Workers AI's catalog marks

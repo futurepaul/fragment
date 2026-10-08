@@ -826,8 +826,8 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
 /// minute: about 1,555 thousandths for 2 s), never at its reservation.
 /// Hosted, it is the proof that Workers AI's own answer reads as the route
 /// reads it: it prints that answer's shape (the route's
-/// `x-fragment-answer-shape`: its keys, and whether it came inside
-/// `result`) and the settle, pass or fail. One paid call.
+/// `x-fragment-answer-shape`: its keys, and its `usage`) and the settle,
+/// pass or fail. One paid call.
 pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
         return Ok(());

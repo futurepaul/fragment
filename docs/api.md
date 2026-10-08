@@ -1026,10 +1026,16 @@ memo is one the agent transcribes itself, through this route):
 - **What is kept.** Only the usage, on the ledger. Whisper's refusal is
   released and passed through, as a chat call's is.
 - **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
-  the model's own answer's top-level keys, and whether it came inside
-  `result` (`{"keys": […], "wrapped": false}`), never its words. The
-  e2e's `transcribe` section prints it, so a hosted run shows what
-  Workers AI answers.
+  the model's own answer's top-level keys, and its `usage` when that is
+  a small object of numbers and short strings (`{"keys": […], "usage":
+  …}`), never its words. The e2e's `transcribe` section prints it, so a
+  hosted run shows what Workers AI answers.
+- **What Workers AI answers.** Read on the e2e preview, 2026-10-08: the
+  catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
+  `vtt`, `word_count`), plus a `usage` the schema does not name. The
+  route reads `text` and `transcription_info.duration` (the catalog's own
+  field). An answer in any other shape is answered 502 and settled at its
+  reservation.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
