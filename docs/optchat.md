@@ -1282,7 +1282,7 @@ hand-off spend, measured on the preview with real models by the hosted
 - **The price book:** the config names `price_book_version` 3 (2026-10-08),
   so every ledger takes the ladder's fallbacks' rows ("Latency").
 - **The live check:** `cargo xtask e2e --hosted --config … --branch
-  claude-optchat --only mind-live --max-paid-calls 90`
+  claude-optchat --only mind-live --max-paid-calls 120`
   (crates/e2e/src/lanes/mind_live.rs).
   It runs only by name, and only on a preview (`Need::RealModels`): a
   local run's `mind` section checks the same loop on the fakes. An e2e
@@ -1296,7 +1296,8 @@ hand-off spend, measured on the preview with real models by the hosted
   coordinates it prints. Between the shell hand-off and the browsing one
   it measures, and checks nothing of: six short asks answered in words
   (thread E) and two simple shell hand-offs with the computer awake
-  (thread F). It takes up to 45 minutes, lends its person 90 paid calls
+  (thread F), and two from asleep (thread G), cold and pre-woken. It
+  takes up to 45 minutes, lends its person 120 paid calls
   (a hedge's second call is one), and prints each latency, each turn's
   and hand-off's breakdown ("Latency"), their percentiles, the recall's
   zoom and search calls, the browser calls, and the paid calls made.

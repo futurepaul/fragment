@@ -62,10 +62,12 @@ pub const SECTION: &str = "mind-live";
 /// calls (one a tool round), the compactor's, Clef's sorts and goose's
 /// calls (its screen tools' Clef and vision calls among them), and a hedged
 /// call's second (each its own reservation); about 40 through the shell
-/// hand-off, about 20 for the latency measures, about 30 more for the
+/// hand-off, about 30 for the latency measures (thread G's from asleep
+/// among them), about 30 more for the
 /// browsing two. Above the run's default budget (60): run it with
-/// `--max-paid-calls 90`. Most are cheap: a run costs about $0.3.
-const PAID_CALLS: u64 = 90;
+/// `--max-paid-calls 120`. Most are cheap: a run costs about $0.1 on
+/// GLM-5.3 Flash.
+const PAID_CALLS: u64 = 120;
 /// The mind's code installed from the release.
 const INSTALL: Duration = Duration::from_secs(90);
 /// A turn answered in words (each real model call takes 3–40 s).
