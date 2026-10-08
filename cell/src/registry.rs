@@ -47,6 +47,7 @@ pub(crate) mod billing;
 pub(crate) mod calls;
 mod invites;
 pub(crate) mod orgs;
+pub(crate) mod seats;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
@@ -105,6 +106,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
         state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
         state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
+        state.storage().sql().exec(seats::SCHEMA, None).expect("the seats' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -131,6 +133,9 @@ impl DurableObject for RegistryCell {
         }
         if let Err(e) = self.arm_reconcile().await {
             console_error!("the registry's next reconcile was not armed ({:?}): {}", e.code, e.message);
+        }
+        if let Err(e) = self.quantity_alarm().await {
+            console_error!("the registry's pushes of seat counts to Stripe failed ({:?}): {}", e.code, e.message);
         }
         if let Err(e) = self.sync_alarm().await {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
@@ -675,6 +680,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.billing_route(&path, &bytes).await {
+            return answer;
+        }
+        if let Some(answer) = self.seats_route(&path, &bytes).await {
             return answer;
         }
         match path.as_str() {
