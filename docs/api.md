@@ -1646,12 +1646,20 @@ or 4004 (the fragment was deleted) ends it, and `closed` handlers get
 
 The stylesheet (`<link rel="stylesheet" href="./__fragment.css">`,
 `cell/fragment.css`) is for a page that links it: the platform adds it
-to no page. It holds theme variables, light and dark by
-`prefers-color-scheme` (`--bg`, `--fg`, `--muted`, `--line`, `--accent`,
-`--danger`; `--font`, `--font-display`, `--font-mono`; `--text-sm`,
-`--text-lg`, `--text-xl`; `--radius`), and base styles for the body,
-`main`, headings, `small`, links, `code`, media, form controls, buttons
-(the accent), and the focus ring. The variables' names hold across
+to no page. It is the shell's look: Funnel Sans and JetBrains Mono
+(from Google Fonts), warm greys, one blue, pill buttons. It holds theme
+variables, light and dark as the page's color scheme is (the system's,
+unless the page sets `color-scheme` on its root, or `data-theme="light"`
+or `"dark"`): `--bg`, `--fg`, `--muted`, `--faint`, `--line`,
+`--line-strong`, `--surface` (cards, fields), `--soft` (a quiet fill),
+`--accent`, `--on-accent`, `--success`, `--danger`; `--font`,
+`--font-display`, `--font-mono`; `--text-sm`, `--text-lg`, `--text-xl`;
+`--radius`. Its base styles are each of zero specificity, so any rule of
+the page's wins: the body, `main` (a column that starts at the top: a
+page is mostly seen in the shell's narrow side pane, under a titlebar
+that names it), modest headings, `small`, links, `code` and `pre`,
+media, form controls, buttons (a pill of the text's color), the focus
+ring; and `[hidden]` stays hidden. The variables' names hold across
 releases; their values, and the base styles, may change with one.
 
 CLI: `fragment call <name> <op> --input '{...}' | @file | - [--id ID]`
