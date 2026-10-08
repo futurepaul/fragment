@@ -143,8 +143,8 @@ each with its reason. Everything else in the gist holds as it says.
 
 ```
  you (any device) ──say──▶ mind.<you>  (a fragment, blessed template `mind`)
-                            │  SQLite: log, tree, threads, topics, personas
-                            │  job `heard`: settle → turn loop (ai.text + tools)
+                            │  SQLite: log, tree, views, ready queue, threads, topics, personas
+                            │  job `heard`: wait → view → turn loop (ai.text + tools)
                             │  jobs `pump`: the compactor (ai.text, cheap tier), 8 at once
                             │  job `classify`: topics (ai.decide, Clef)
                             │
@@ -634,8 +634,11 @@ the cache. Measured and estimated for Paul's archive (15 437 messages:
 retries): at GLM-5.3 Flash's 3 to 8 s a call, 8 at once, 2.5 to 6.6
 hours; the batched path's estimate was 6.6 hours at 8 s for each of its
 2 950 calls one at a time, a call that writes 8 lines (8 times the
-output) being the slower one. At the fake's latency the e2e prints what
-64 imported messages took.
+output) being the slower one. The e2e (2026-10-08, on the build box):
+24 calls the fake held 1.5 s each took 5.2 to 6.4 s, 8 at once (36 s one
+at a time); 64 imported messages at the fake's own latency took 2.5 to
+3.4 s, 19 to 26 calls a second, the platform's steps being the cost
+there (the batched path's 24-odd steps in a row would be about as long).
 
 ### Importing chats (`import`, `fragment mind import`, the page's upload)
 
