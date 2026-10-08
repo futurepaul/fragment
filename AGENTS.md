@@ -159,7 +159,11 @@ prebuilt bundle is in the debt ledger).
   real model, `Need::RealAgent`) and Chrome, through the flows a person
   uses (a first reply, the CLI, an app, the desktop and its screen, an
   approval, a sleep and a wake), for about half an hour and up to 50 paid
-  calls (crates/e2e/src/lanes/agent_smoke.rs). `--dry-run` prints the plan (base URL,
+  calls (crates/e2e/src/lanes/agent_smoke.rs). `agent-restart` runs only
+  here too, by name: its owner's Restart of a real Hermes computer awake
+  after a reply (its newest save restored, fresh from the image, asked
+  twice made once), then a reply after it; up to 10 paid calls
+  (crates/e2e/src/lanes/agent_restart.rs). `--dry-run` prints the plan (base URL,
   what runs, what is skipped and why) and calls nothing. A preview is
   shared (several sessions run on it at once), so a sweep is one run's
   unless told otherwise: `--sweep` deletes the fragments of the last run

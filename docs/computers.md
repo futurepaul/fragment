@@ -62,10 +62,15 @@ container starts until someone asks again).
   awake, and the hold is let go (its owner's sleep goes on). A sleep whose
   save fails keeps its container: it is awake again, held no more, its
   view's `why` says so, and its sleep is tried again after a pause (a
-  minute, doubled each time, at most 15); after
-  `computers.unsaved_max_ms` (30 minutes by default) of failed tries it
-  sleeps unsaved, says so, and its next wake is a rollback. An idle stop
-  by the runtime is only the safety net.
+  minute, doubled each time, at most 15, the last try at the bound
+  itself); after `computers.unsaved_max_ms` (30 minutes, Paul's,
+  2026-10-08) of failed tries it sleeps unsaved, says so, and its next
+  wake is a rollback. An idle stop by the runtime is only the safety net.
+- **Restart** (its owner's: below, "What its owner is told"): running,
+  its sleep (the hold, the save, the stop) then a start at once; a save
+  that fails keeps no container, since its owner asked. Asleep or won't
+  wake, a start. Either way the start is fresh: from the image and the
+  newest good save, never the snapshot.
 - **Wake from a snapshot** when it caches the current save for the pinned
   image (`start({containerSnapshot})`; below, "Saves and what a wake
   restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
@@ -80,13 +85,132 @@ container starts until someone asks again).
   none left, it is a strike like any.
 - **A crash** (the container stopped on its own while starting or awake)
   counts against its starts, and the computer starts again while
-  something wants it. A guest that died holding its keepalive (busy) is
+  something wants it. One that went while its sleep held or saved it,
+  before the sleep stopped it, ended on its own too: its life's end is an
+  exit, not a sleep. A guest that died holding its keepalive (busy) is
   held as a record holds it, so it starts again however long its turn
   ran, and its next life ends what was cut.
 - **A new isolate** that finds the container running attaches its
   monitor, timeout and intercepts again and never destroys it (lesson 6).
   After any `destroy()` it waits for `running` to be false before
   `start()`.
+
+## What its owner is told
+
+Paul, 2026-10-08, on the unsaved bound: "a user will be still using it and
+then it will die and they won't know why. need user-facing recovery so they
+can get back to working." Each way a computer stops, starts again, goes
+back to an older save or will not start, read from the code
+(`fragment_core::computer`, `cell/src/computer.rs`, `cell/shell/shell.js`,
+the bridge), what its person saw before 2026-10-08, and what they see now:
+
+| What happens | When | Before: the shell / the chat | Now |
+|---|---|---|---|
+| **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
+| **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
+| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, up to the bound, is free |
+| **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
+| **Won't wake**: three failed starts in a row, three crashes, or no save left to fall back to | `Phase::Failed` | Settings' "State: wont wake" and the platform's words / messages go unanswered, nothing said; and the shell's own presence wake (an owner's) silently tried it again every minute the person was there | a `wont_wake` notice in plain words, the platform's beside them, and Restart; the shell no longer wakes it on presence; after a restart that fails again, "still won't start", and the deployment's support link, or the details to give whoever runs it |
+| **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
+| **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
+| **An image update** | its owner's pin, sleep, wake | the update pill | the same |
+
+**The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
+proto's `ComputerNotice`), the most pressing first, each derived from the
+Computer DO's own state with no clock, so the same state tells the same
+whoever reads it:
+
+- `wont_wake {why}`: its starts kept failing.
+- `unsaved {since, save, failingSince, failures, why, stopsAt}`: this
+  life's saves are failing (a sleep's at once; awake ones from the second
+  in a row, `UNSAVED_NOTICE_FAILURES`, since one is retried a minute later).
+  `since` is this life's newest save, or its start; `save` what a stop
+  goes back to; `stopsAt` when the bound puts it to sleep unsaved if no
+  save works first and nothing holds it, none while a port tab or a
+  keepalive is open (in use) or for an always-on computer.
+- `went_back {life, cause, endedAt, pending, save, savedAt, at}`: a start
+  went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
+  or will as it next starts (`pending`). Told until its owner says they
+  saw it (`POST …/notices/seen {life}`), whatever starts come after; the
+  newest loss only.
+
+When they change, the Computer DO tells its owner's open pages through
+their list's socket (`/api/fragments/watch`'s `changed`), so the shell
+reads the computer again and the warning is shown while there is still
+time, with no reload. The shell shows them in a band over the open chat
+and Settings, in plain words, the times in the person's own clock:
+"Your computer can't save right now. It hasn't saved since 14:05, so what
+its agents did after that isn't kept yet. It keeps trying. If it still
+can't by 14:35, it stops and starts again from that save." Its chats keep
+everything said (their records are the chat's own), so a notice says the
+work on the computer after the save is what went.
+
+**Not in the chat.** The chat's records are its agents' and people's: the
+platform posts none there (the rule; docs/chat-records.md), and a notice
+in it would need a new platform record kind every template is to show.
+Every chat is shown in the shell, under its band; a chat opened in a tab
+of its own shows the turn a crash cut, as before. Notices in a chat
+outside the shell are parked (Paul, 2026-10-08).
+
+**One way back: Restart** (`POST /api/computers/{id}/restart
+{generation}`; Settings' "Restart computer", asked once more, and every
+notice's Restart). Running, it is a sleep that saves if it can and stops
+whether or not it did (a failed save keeps no container: its owner
+asked), then a start at once; asleep, or won't wake, a start (lifting
+won't wake, as its owner's wake does). Its start is fresh: from the image
+and the newest good save, or past one that fails its check an older one,
+never the snapshot, which could carry what broke it outside `/data`; no
+snapshot is kept until a start comes up. It names the start its owner saw
+(`generation`, in the view): a restart of a start already restarted is
+nothing, so pressed twice, or in two tabs, it restarts once. It starts a
+container, so the ledger is asked first, as for a wake: at zero credit it
+is refused, and what runs runs on (decision 27). A restart asked as the
+computer starts is that start.
+
+**Does use extend the bound? No: it never stops a computer in use.** A
+computer is stopped for its bound only at a sleep, and a sleep is tried
+only when nothing holds it: no screen or other port tab open, no keepalive
+(a turn running, or waiting on its card), no record or page's presence
+within its hold (20 minutes after the last message), and no always-on
+plan. While anything holds it the sleep waits, and `stopsAt` moves past
+the hold or says none. So what the bound limits is the time a failing
+computer is kept, to `unsaved_max_ms` past its first failed sleep: a hard
+cap, which is also the cost's. Re-arming the bound after use would keep
+an idle container longer for a person who is not there, and could not
+save their work: a stop never saves, so a longer window only postpones
+the loss unless saves recover by then. So the bound is kept as decision
+18 has it.
+
+**The window is free** (Paul, 2026-10-08: the time a computer is kept
+for saves the platform failed is the platform's). Its awake time from a
+sleep's failed save to the bound is not metered: the lifecycle meters up
+to the failure, then passes the window over (`Lifecycle::unmetered`, its
+meters at most two intervals, before it and after it), so nothing is
+charged and nothing refunded. The window ends early when a save works,
+its owner restarts it, or its container goes; what comes after it, and
+whatever holds it past the bound (its person using it), is metered as
+any.
+
+**The agent.** A turn a restart cut ends as lost, and the agent's next
+turn there is told what was cut (docs/bridge.md, "The turn after a cut one
+is told"). After a rollback, the turns another life ran since the save its
+`/data` came from are in no memory of its runtime: our bridge finds them
+(their claims answer 409) and tells the agent's next turn in each chat what
+they were, from the chat's journal (docs/bridge.md, "What a rollback
+forgot"). The guest's own view also names what its last start restored
+(`restored`, `rollback`), for any image to use.
+
+**Getting help.** A deployment may name where a person whose computer will
+not start gets help (`support_url`: an `https:` page or a `mailto:`
+address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
+`support`). The shell links it once a restart has failed too; without
+one, the notice shows the computer's id and the platform's words, to give
+whoever runs it.
 
 ## The guest's contract
 
@@ -225,11 +349,13 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   crash loses what its life did since its last save, at most a turn and
   its settle, or 15 minutes of one.
 - **A sleep whose save fails** keeps its container (I5): it is awake
-  again, held no more, and its view's `why` says so; its sleep is tried
-  again after the same pause. Only after `computers.unsaved_max_ms` (30
-  minutes by default: a default for Paul to confirm) of failed tries does
-  it sleep unsaved, its `why` saying so until a save works, and its next
-  wake is a rollback.
+  again, held no more, and its view's `why` and its owner's notice say so
+  (above, "What its owner is told"); its sleep is tried again after the
+  same pause, the last try at the bound itself, so the time its owner is
+  told is the time it stops. Only after `computers.unsaved_max_ms` (30
+  minutes; Paul confirmed it on 2026-10-08) of failed tries does it sleep
+  unsaved, its `why` saying so until a save works, and its next wake is a
+  rollback. Its owner's restart keeps no container for a failed save.
 - **A wake restores the current save:** the newest one not found
   unusable. A start whose save will never restore (its archive gone or
   altered) marks it unusable and starts again at once from the save before
@@ -262,10 +388,12 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   logs one line (`"restored"`) and shows it in its owner's view
   (`restored`, docs/api.md). A start that went back in time is a
   **rollback**, counted in the view's `rollbacks`: the life before it
-  ended by a crash, or by a sleep that slept unsaved, or its start fell
-  back to a save older than that life's newest, so what that life did
-  since some save is in none. A start from the save its life's sleep took
-  is none. Nothing's correctness depends on the guest reading either.
+  ended by a crash, or by a sleep that slept unsaved (a restart's
+  included), or its start fell back to a save older than that life's
+  newest, so what that life did since some save is in none. A start from
+  the save its life's sleep took is none. Its owner is told of the newest
+  until they say they saw it (`went_back`: "What its owner is told").
+  Nothing's correctness depends on the guest reading either.
 
 ### Deleted with its owner
 
@@ -1083,7 +1211,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   an interval every five minutes awake and one at each sleep, kept by the
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
-  charged.
+  charged. Nor is the time a computer is kept for its failed saves: from
+  a sleep's failed save to `computers.unsaved_max_ms` after it, or to the
+  save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
   route. Each operator key's call is held on the agent's owner's ledger
   before it is made, and settled once the provider answered, at the key's
@@ -1111,7 +1241,23 @@ for a host) and finds the same `HOME`, `~` and modes.
   its rollbacks), under seeded interleavings with crashes, holds the
   guest answers or not, and saves that fail; among their invariants, a
   computer is never asleep with work newer than its newest save unless a
-  crash or the bounded failure put it there.
+  crash or the bounded failure put it there. What its owner is told
+  (`notices`): saves failing told from the second awake failure and a
+  sleep's first, with the stop at the bound itself, later while a record
+  holds it, never while in use or always on; a start that went back told
+  with its cause and save, pending while asleep, once until seen, a seen
+  older one hiding only itself, across a restart of the DO; won't wake
+  told until a restart. The restart: a sleep that saves then a start,
+  held as an owner's wake, never cancelled by a keepalive, asked twice
+  made once, an earlier start's nothing, an owner's sleep after it
+  winning; its failed save stopping unsaved and told as the restart's;
+  its start fresh from the image, no snapshot kept until one comes up.
+  The simulation restarts too, and checks every notice against the state
+  (a loss told is unseen and a life it had; never a stop before the bound),
+  and that no meter falls in a free window. The free window: nothing
+  metered from a sleep's failed save to its bound, before and after it as
+  any, a late report or an alarm again metering nothing twice, the same
+  across a restart of the DO.
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker. A crash is the
   lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
@@ -1119,7 +1265,21 @@ for a host) and finds the same `HOME`, `~` and modes.
   save its last turn's end took; a failed save is the lever's
   (`fail-saves`), and so is an always-on plan (`always-on`). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
-  computer's `uses`), never records, which a second run replays.
+  computer's `uses`), never records, which a second run replays. The
+  e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
+  lane's recovery checks see it run out: a failed sleep told at once with
+  its stop time, a restart asked twice (its save failing too) going back
+  once and saying so until seen, the unsaved stop at the time it said and
+  the wake after told once, a restart of a sleeping computer, one
+  refused at zero credit, and no awake time on its owner's ledger in
+  either free window. The `shell-ui` lane sees the same in Chrome:
+  the warning on Settings with no reload, its Restart, the notice of what
+  it went back to and its OK (gone after a reload), and Settings' Restart
+  computer. On a preview, the hosted `agent-restart` section (by name)
+  restarts a real Hermes computer awake after a reply: it comes back
+  running from its newest save, the restart's own and held, from the image
+  and not a snapshot, with no rollback; the same press again restarts
+  nothing; and its agent answers after it, nothing left to tell its owner.
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer

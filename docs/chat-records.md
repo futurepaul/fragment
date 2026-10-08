@@ -243,6 +243,12 @@ agent's `tasks`, for a routine), its cause's text and the replies it had
 posted (`rp:<turn>:<n>`). Nothing records the note itself: at the turn
 after, the turn before is the noted one, which did not end as lost.
 
+**After a rollback.** Turns of the agent's that another life ran after the
+save its computer went back to (their `turn.start` names that life, so the
+claim of a life reading them again is a 409) are in no memory of its
+runtime. Its next turn in the chat is told what each was asked and replied,
+from these records too (docs/bridge.md, "What a rollback forgot").
+
 ## Attachments
 
 ```json

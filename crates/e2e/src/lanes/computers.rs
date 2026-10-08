@@ -120,7 +120,7 @@ pub(super) fn lever(api: &Api, id: &str, op: &str) -> Result<crate::api::Reply> 
 }
 
 /// A lever with its arguments (`{op, times?, on?}`).
-fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply> {
+pub(super) fn lever_with(api: &Api, id: &str, mut body: Value) -> Result<crate::api::Reply> {
     body["computer"] = json!(id);
     api.unsigned("POST", "/api/test/computer", Some(&body))
 }
@@ -375,6 +375,204 @@ fn crash_checks(s: &mut Suite, api: &Api, c: &Crashing, say: &dyn Fn(u32, &str) 
     // one after (and the cut turn's, where a crash's restore ran it again)
     let added = [&think, &fetch, &after, &cut, &next, &once_more].iter().filter(|r| replied(seq_of(r)).is_some()).count();
     Ok(added)
+}
+
+/// The recovery checks (docs/computers.md, "What its owner is told"), each
+/// skipped off the stub and the fakes (the lever fails saves, and the
+/// node's bound is short: `crate::UNSAVED_MAX_MS`).
+const RECOVERY_CHECKS: [&str; 11] = [
+    "a sleep whose save fails tells its owner at once: since when its work is in no save, the save a stop goes back to, and when the bound stops it",
+    "no one else restarts it",
+    "its owner's restart, its save failing too: it starts again at once, from its last save",
+    "the same restart asked again (the same start named) restarts nothing more",
+    "its owner is told what the restart went back to: which save, and when it was taken",
+    "seen, it is told no more; seen again, the same; a notice never told is refused",
+    "when no save works for the bound, it is put to sleep unsaved at the time it said, and told it will go back",
+    "its next wake goes back to that save, told once, the same notice; and its agent answers",
+    "and its agent is told, once, what it no longer remembers of the chat: the turn the stop lost, from the journal",
+    "asleep, its owner's restart starts it, fresh from its save",
+    "the time it was kept for failed saves is free (Paul, 2026-10-08): nothing is charged from a sleep's failed save to its bound, or to the restart that ended it; the time before and after is",
+];
+
+/// What its owner is told, and the way back to working (rung 4 of
+/// docs/explorations/pi-durable.md, with the platform's notices): a sleep
+/// whose save fails tells them at once, a restart (asked twice) goes back to
+/// the last save and says so until seen, the bound puts it to sleep unsaved
+/// when it said, and the wake after is told once. Starts and ends awake.
+/// Answers how many replies of its agent it added.
+fn recovery_checks(s: &mut Suite, api: &Api, c: &Crashing, stranger: &crate::Keys, say: &dyn Fn(u32, &str) -> Result<crate::api::Reply>) -> Result<usize> {
+    let path = |rest: &str| format!("/api/computers/{}{rest}", c.id);
+    let view = || api.signed(c.owner, "GET", &path(""), None).map(|r| r.body).unwrap_or(Value::Null);
+    let notice = |v: &Value, kind: &str| v["notices"].as_array().and_then(|l| l.iter().find(|n| n["kind"] == kind).cloned()).unwrap_or(Value::Null);
+    let replied = |seq: i64| {
+        let turn = turn_of(c.agent, c.chat, "chat", seq);
+        agent_replies(&records(api, c.owner, c.chat, "chat"), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str())
+    };
+    let bound = crate::UNSAVED_MAX_MS as i64;
+    // its owner's sleep, its save failing, once the guest's last turn has
+    // let go of its keepalive: a keepalive that closes after the sleep
+    // holds it as a record does (its work ended), and its stop with it
+    let failing_sleep = |s: &Suite| -> Result<crate::api::Reply> {
+        s.eventually(Duration::from_secs(15), || lever(api, c.id, "saves").is_ok_and(|r| r.body["keepalives"] == 0));
+        std::thread::sleep(Duration::from_secs(1));
+        api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))
+    };
+    // a sleep whose save fails: told at once, the bound's stop with it
+    std::thread::sleep(QUEUE_DRAIN);
+    let before = view();
+    let g = before["generation"].as_u64().unwrap_or(0);
+    let newest = newest_save(api, c.id);
+    // its work is in no save since this life's newest save, or its start
+    let since = if newest["generation"] == g { newest["atMs"].clone() } else { before["restored"]["at"].clone() };
+    let failing = lever_with(api, c.id, json!({ "op": "fail-saves", "times": 100 }))?;
+    let t0 = crate::api::now_ms();
+    let r = failing_sleep(s)?;
+    let t1 = crate::api::now_ms();
+    // its free window opens at the failure (the lever says when)
+    let unsaved_since = || lever(api, c.id, "saves").ok().and_then(|r| r.body["unsavedSince"].as_i64());
+    let first_free = unsaved_since();
+    let unsaved = notice(&r.body, "unsaved");
+    let stops = unsaved["stopsAt"].as_i64().unwrap_or(0);
+    s.ok(
+        RECOVERY_CHECKS[0],
+        failing.status == 200
+            && r.body["phase"] == "awake"
+            && unsaved["since"] == since
+            && unsaved["save"] == newest["number"]
+            && unsaved["why"].as_str().is_some_and(|w| w.contains("the test lever failed it"))
+            && (t0 + bound..=t1 + bound).contains(&stops),
+        format!("since {since}, save {}; {r}", newest["number"]),
+    );
+    let r = api.signed(stranger, "POST", &path("/restart"), Some(&json!({ "generation": g })))?;
+    s.ok(RECOVERY_CHECKS[1], r.status == 404, &r);
+    // its owner restarts it: the restart's own save fails, so it goes back
+    let restart = || api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": g })));
+    let restarted_at = crate::api::now_ms();
+    let r = restart()?;
+    let restored = r.body["restored"].clone();
+    s.ok(
+        RECOVERY_CHECKS[2],
+        r.status == 200 && r.body["phase"] == "awake" && r.body["generation"].as_u64() == Some(g + 1) && restored["rollback"] == true && restored["from"] == "backup" && restored["save"] == newest["id"],
+        &r,
+    );
+    let again = restart()?;
+    s.ok(RECOVERY_CHECKS[3], again.status == 200 && again.body["generation"].as_u64() == Some(g + 1) && again.body["restored"] == restored, &again);
+    let went_back = notice(&again.body, "went_back");
+    s.ok(
+        RECOVERY_CHECKS[4],
+        went_back["life"].as_u64() == Some(g)
+            && went_back["cause"] == "restart"
+            && went_back["pending"] == false
+            && went_back["save"] == newest["number"]
+            && went_back["savedAt"] == newest["atMs"]
+            && went_back["at"] == restored["at"]
+            && notice(&again.body, "unsaved").is_null(),
+        &again,
+    );
+    let seen = |life: u64| api.signed(c.owner, "POST", &path("/notices/seen"), Some(&json!({ "life": life })));
+    let (once, twice, never) = (seen(g)?, seen(g)?, seen(g + 100)?);
+    s.ok(
+        RECOVERY_CHECKS[5],
+        once.status == 200 && notice(&once.body, "went_back").is_null() && twice.status == 200 && twice.body["notices"] == once.body["notices"] && never.status == 400 && notice(&view(), "went_back").is_null(),
+        format!("{once} / {twice} / {never}"),
+    );
+    // a turn of this life: its end's save fails (the lever), so the stop
+    // below loses it, and its agent's runtime will not remember it
+    let zebra = say(91, "remember the zebra")?;
+    let zebra_seq = zebra.body["record"]["seq"].as_i64().unwrap_or(0);
+    let zebra_ran = s.eventually(c.wake, || replied(zebra_seq).is_some());
+    // the bound runs out: no save works, and nothing uses it
+    let r = failing_sleep(s)?;
+    let second_free = unsaved_since();
+    let stops = notice(&r.body, "unsaved")["stopsAt"].as_i64().unwrap_or(i64::MAX);
+    let wait = Duration::from_millis((stops - crate::api::now_ms()).clamp(0, bound + 5_000) as u64) + Duration::from_secs(30);
+    let slept = s.eventually(wait, || view()["phase"] == "asleep");
+    let asleep_at = crate::api::now_ms();
+    let v = view();
+    let pending = notice(&v, "went_back");
+    s.ok(
+        RECOVERY_CHECKS[6],
+        r.body["phase"] == "awake"
+            && slept
+            && asleep_at >= stops - 1_000
+            && v["why"].as_str().is_some_and(|w| w.contains("slept unsaved"))
+            && pending["life"].as_u64() == Some(g + 1)
+            && pending["cause"] == "unsaved"
+            && pending["pending"] == true
+            && pending["save"] == newest["number"]
+            && pending["endedAt"].as_i64().is_some_and(|at| at >= stops - 1_000),
+        format!("stops at {stops}, asleep by {asleep_at}; {v}"),
+    );
+    // its awake time, as its owner's ledger has it (each interval's
+    // reference ends with where it starts): none in either free window
+    let awake = || -> Vec<(i64, i64)> {
+        entries(api, c.owner_id, &format!("awake:{}:", c.id))
+            .iter()
+            .filter_map(|e| {
+                let from = e["ref"].as_str()?.rsplit(':').next()?.parse::<i64>().ok()?;
+                Some((from, from + e["entry"]["row"]["usage"]["ms"].as_i64()?))
+            })
+            .collect()
+    };
+    let windows: Vec<(i64, i64)> = [first_free.map(|f| (f, restarted_at)), second_free.map(|f| (f, f + bound))].into_iter().flatten().collect();
+    // the stop's seconds past the bound reach the ledger as it goes to sleep
+    let after = |rows: &[(i64, i64)]| second_free.is_some_and(|f| rows.iter().any(|(from, _)| *from >= f + bound));
+    s.eventually(Duration::from_secs(15), || after(&awake()));
+    let rows = awake();
+    let overlapping: Vec<&(i64, i64)> = rows.iter().filter(|(from, to)| windows.iter().any(|(a, b)| from < b && to > a)).collect();
+    s.ok(
+        RECOVERY_CHECKS[10],
+        windows.len() == 2 && overlapping.is_empty() && second_free.is_some_and(|f| rows.iter().any(|(_, to)| *to <= f)) && after(&rows),
+        json!({ "windows": windows, "overlapping": overlapping, "rows": rows }),
+    );
+    // saves work again; its next wake goes back to that save, told once
+    lever_with(api, c.id, json!({ "op": "fail-saves", "times": 0 }))?;
+    let r = api.signed(c.owner, "POST", &path("/wake"), Some(&json!({})))?;
+    let told = notice(&r.body, "went_back");
+    let said = say(90, "after going back")?;
+    let seq = said.body["record"]["seq"].as_i64().unwrap_or(0);
+    let answered = s.eventually(c.wake, || replied(seq).is_some());
+    let after_back = replied(seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let seen_now = seen(g + 1)?;
+    s.ok(
+        RECOVERY_CHECKS[7],
+        r.body["restored"]["rollback"] == true
+            && r.body["restored"]["save"] == newest["id"]
+            && told["life"].as_u64() == Some(g + 1)
+            && told["pending"] == false
+            && told["cause"] == "unsaved"
+            && answered
+            && seen_now.status == 200
+            && notice(&seen_now.body, "went_back").is_null(),
+        format!("{r} / {seen_now}"),
+    );
+    // the stub echoes what its turn was told: the zebra turn, which the life
+    // the stop ended ran, is in no memory of this one's; once
+    let once = say(92, "once more after going back")?;
+    let once_seq = once.body["record"]["seq"].as_i64().unwrap_or(0);
+    let answered_once = s.eventually(c.wake, || replied(once_seq).is_some());
+    let then = replied(once_seq).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    s.ok(
+        RECOVERY_CHECKS[8],
+        zebra_ran && after_back.contains("(told: Your memory of this chat is behind") && after_back.contains("You were asked: “remember the zebra”") && answered_once && !then.contains("(told:"),
+        json!([after_back, then]),
+    );
+    // asleep, a restart is a start
+    std::thread::sleep(QUEUE_DRAIN);
+    let r = api.signed(c.owner, "POST", &path("/sleep"), Some(&json!({})))?;
+    let asleep = r.body["generation"].as_u64().unwrap_or(0);
+    let woke = api.signed(c.owner, "POST", &path("/restart"), Some(&json!({ "generation": asleep })))?;
+    s.ok(
+        RECOVERY_CHECKS[9],
+        r.body["phase"] == "asleep"
+            && woke.body["phase"] == "awake"
+            && woke.body["generation"].as_u64() == Some(asleep + 1)
+            && woke.body["restored"]["from"] == "backup"
+            && woke.body["restored"]["rollback"] == false
+            && woke.body["notices"].as_array().is_none_or(|l| l.is_empty()),
+        format!("{r} / {woke}"),
+    );
+    Ok(3)
 }
 
 /// The intercept's one rule for whose a model call is (decision 9's
@@ -743,8 +941,9 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let crashing = Crashing { owner: &owner, owner_id: &owner_id, id: &id, chat: &chat_name, agent: &agent_name, identity: &identity, wake };
         replies_so_far += save_checks(s, api, &crashing, &|n, text| say(n, text))?;
         replies_so_far += crash_checks(s, api, &crashing, &|n, text| say(n, text))?;
+        replies_so_far += recovery_checks(s, api, &crashing, &stranger, &|n, text| say(n, text))?;
     } else {
-        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()) {
+        for label in SAVE_CHECKS.iter().chain(CRASH_CHECKS.iter()).chain(RECOVERY_CHECKS.iter()) {
             s.skip(label, "it needs the stub's scripted runtime, and the fakes to hold a model call and count runs");
         }
     }
@@ -1025,5 +1224,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         r.body["phase"] == "asleep" && agent_replies(&records(&api, &owner, &chat_name, "chat"), &identity).len() == replies_now,
         &r,
     );
+    let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/restart"), Some(&json!({})))?;
+    let v = api.signed(&owner, "GET", &format!("/api/computers/{id}"), None)?;
+    s.ok("nor does its owner's restart: the ledger refuses it too, and it stays asleep", r.status == 403 && r.text.contains("a guest pays for nothing") && v.body["phase"] == "asleep", &r);
     Ok(())
 }

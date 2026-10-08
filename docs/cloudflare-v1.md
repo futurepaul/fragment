@@ -288,10 +288,25 @@ speaking Cloudflare's APIs) returns once this product works.
     answers `held`), three saves are kept, a wake falls back to the save
     before one that will not restore, and a sleep whose save fails keeps
     its container for at most `computers.unsaved_max_ms` (30 minutes by
-    default, Paul's to confirm). Litestream is cut from the image (P4).
+    default). Litestream is cut from the image (P4).
     Step 2, the seam:
     `/data/work` (the tools') is saved as a record of its own beside the
     rest of `/data` (the guest's own state), restored together.
+
+    *Status (2026-10-08).* Paul confirmed `computers.unsaved_max_ms` at 30
+    minutes (2026-10-08), with: "a user will be still using it and then it
+    will die and they won't know why. need user-facing recovery so they
+    can get back to working." The bound is unchanged: it stops a computer
+    only at a sleep, which waits while anything holds it (a screen, a
+    turn, a recent message), so it caps the idle time a failing computer
+    is kept, and its last try is now at the bound itself. Its owner is
+    told while there is still time (its saves failing, since when, and
+    when it stops), told afterwards what a start went back to (once), and
+    has one way back, Restart (a sleep that saves if it can, then a fresh
+    start from the newest good save; asked twice, made once): docs/computers.md,
+    "What its owner is told". The time a computer is kept for its failed
+    saves, up to the bound, is free to its owner (Paul, 2026-10-08): not
+    metered.
 19. **Image updates.** The image is pinned per computer. A new default
     image reaches a sleeping computer at its next wake, through the
     image-plus-restore path, since the snapshot is for the old image. The

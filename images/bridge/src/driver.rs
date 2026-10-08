@@ -1168,13 +1168,62 @@ async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before
     }
 }
 
-/// The note a turn carries (note.rs), from its chat's journal alone: `work`
+/// The note a turn carries (note.rs): what a restart cut of the agent's
+/// turn before it in the chat (`cut_note`), and what its runtime does not
+/// remember of the chat (`forgotten_note`), each from the chat's journal,
+/// together at most twice a note's bound. `None` when there is neither, or
+/// the journal did not answer: a turn is never held back for its note.
+async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
+    let (cut, forgot) = tokio::join!(cut_note(api, ts), forgotten_note(api, ts));
+    let note = [cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    assert!(note.len() <= 2 * limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
+    (!note.is_empty()).then_some(note)
+}
+
+/// What the agent no longer remembers of the chat (note.rs, "forgotten"):
+/// its turns there that another life ran since this life's `/data` was
+/// saved (`TurnStart::forgotten`), read from `work` back from the turn's
+/// claim to the oldest of their starts, and from `chat` back from its tail
+/// to the oldest of their causes. `None` when there are none, or the
+/// journal did not answer.
+async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
+    if ts.forgotten.is_empty() {
+        return None;
+    }
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": ts.forgotten.len(), "error": e.to_string() });
+    let started = |rs: &[Record]| ts.forgotten.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == t.as_str()));
+    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started).await.map_err(unread).ok()?;
+    // their causes in this chat: the chat read back to the oldest of them
+    let causes: Vec<u64> = work
+        .iter()
+        .filter(|r| r.principal == me && r.body["kind"] == "turn.start" && ts.forgotten.iter().any(|t| r.body["turn"] == t.as_str()))
+        .filter(|r| r.body["cause"]["fragment"] == chat && r.body["cause"]["channel"] == records::CHAT)
+        .filter_map(|r| r.body["cause"]["seq"].as_u64())
+        .collect();
+    let oldest = causes.iter().min().copied().unwrap_or(0);
+    let said = async {
+        let tail = api.channels(agent, chat).await?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq);
+        read_back(api, agent, chat, records::CHAT, tail + 1, |rs| rs.first().is_some_and(|r| r.seq <= oldest)).await
+    };
+    let said: Vec<Record> = said.await.map_err(unread).map(|(rs, _)| rs).unwrap_or_default();
+    let items = note::forgotten(&work, &said, me, &ts.forgotten);
+    if items.is_empty() {
+        crate::ev!("note.unread", { "turn": ts.turn, "why": "no forgotten turn's start among the records read", "forgotten": ts.forgotten.len() });
+        return None;
+    }
+    let text = note::forgotten_text(&items, ts.forgotten_more);
+    crate::ev!("note", { "turn": ts.turn, "forgotten": items.len(), "more": ts.forgotten_more, "bytes": text.len() });
+    Some(text)
+}
+
+/// The note of a cut turn (note.rs), from its chat's journal alone: `work`
 /// back from the turn's claim to the agent's turn before it there; when a
 /// restart cut that turn, the record it answered and what it had replied
 /// (`chat` back from its tail to that turn's cause, or its start). `None`
-/// when nothing was cut, or the journal did not answer: a turn is never held
-/// back for its note.
-async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
+/// when nothing was cut, or the journal did not answer.
+async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
     let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "error": e.to_string() });

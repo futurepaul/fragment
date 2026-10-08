@@ -963,16 +963,153 @@ function computerOf() {
 }
 async function warmComputer() {
   const c = await computerOf();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
   return c;
 }
+// A computer that won't start is not woken by the person's presence: its
+// starts kept failing, so the next is theirs to ask for (Restart, in its
+// notice), never one every visit pays for unasked.
 function prewake() {
   const c = state.computer;
-  if (!c || document.hidden || Date.now() - woke < 60_000 || c.phase === "awake" || c.phase === "starting") return;
+  if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
   woke = Date.now();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
 }
 document.addEventListener("visibilitychange", prewake);
+// The computer as the platform last answered: shown at once.
+function computerIs(v) {
+  if (!v?.computer) return;
+  state.computer = v;
+  renderComputer();
+}
+
+// ---- what the person should know of their computer (docs/computers.md,
+// "What its owner is told"): the view's notices, the most pressing first,
+// each in plain words with the one way back to working. Its computer tells
+// this page's list socket when they change, so they show while there is
+// still time. Times are the person's own clock. ----
+const clock = (ms) => {
+  const d = new Date(ms);
+  const today = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+};
+const span = (ms) => {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
+};
+// why a computer won't start, in plain words (the platform's own words
+// stay beside them, for whoever helps)
+function wontStart(why) {
+  if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
+  if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
+  if (/check/.test(why)) return "Its saved files didn't pass their check.";
+  if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
+  return "It couldn't start.";
+}
+const LOST = {
+  crash: "Your computer stopped unexpectedly",
+  unsaved: "Your computer was stopped because it couldn't save",
+  restart: "Your restart couldn't save first",
+  unusable: "Your computer's newest save couldn't be restored",
+};
+// a restart the person asked for in this page, and of which start: a
+// computer that still won't start after one says where to get help
+let restarted = 0;
+function noticeRow(n) {
+  const row = el("div", "computer-notice");
+  row.dataset.kind = n.kind;
+  const copy = el("div", "notice-copy");
+  const actions = el("div", "notice-actions");
+  const say = (title, text, detail) => {
+    copy.append(el("strong", null, title), el("p", null, text));
+    if (detail) copy.append(el("p", "notice-detail", detail));
+  };
+  const restart = (label) => {
+    const b = el("button", "primary", label);
+    b.type = "button";
+    b.dataset.action = "restart";
+    b.onclick = () => restartComputer(b);
+    actions.append(b);
+  };
+  if (n.kind === "wont_wake") {
+    row.classList.add("warn");
+    const again = restarted && state.computer?.generation > restarted;
+    say(
+      again ? "Your computer still won't start" : "Your computer won't start",
+      `${wontStart(n.why)} Your agents can't answer until it does.${again ? " If restarting again doesn't help, get help and give them the details below." : ""}`,
+      `${state.computer?.computer ?? ""}: ${n.why}`,
+    );
+    restart(again ? "Try again" : "Restart");
+    if (again && state.support) {
+      const help = el("a", null, "Get help");
+      help.href = state.support;
+      help.target = "_blank";
+      help.rel = "noopener";
+      actions.append(help);
+    }
+  } else if (n.kind === "unsaved") {
+    row.classList.add("warn");
+    const then = n.save ? "starts again from that save" : "starts again with nothing kept";
+    const stop = n.stopsAt ? ` If it still can't by ${clock(n.stopsAt)}, it stops and ${then}.` : "";
+    say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
+    restart("Restart now");
+  } else if (n.kind === "went_back") {
+    const back = n.save && n.savedAt
+      ? `${n.pending ? "It goes back" : "It went back"} to its save of ${clock(n.savedAt)}${n.endedAt ? `, ${span(n.endedAt - n.savedAt)} before it stopped` : ""}.`
+      : `${n.pending ? "It starts again" : "It started again"} with nothing kept from before.`;
+    say(LOST[n.cause] ?? "Your computer went back to an older save", `${back} Work on the computer after that is gone; your chats keep everything that was said.`);
+    const ok = el("button", null, "OK");
+    ok.type = "button";
+    ok.dataset.action = "seen";
+    ok.onclick = () => sawNotice(n.life, ok);
+    actions.append(ok);
+  } else return null;
+  row.append(copy, actions);
+  return row;
+}
+function renderComputer() {
+  const box = $("computer-notices");
+  const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
+  box.replaceChildren(...rows);
+  box.hidden = !rows.length;
+}
+// Restart: the computer saves if it can, then starts fresh from its newest
+// good save. It names the start the person saw, so pressed twice (or in two
+// tabs) it restarts once. What went wrong is said beside the button.
+async function restartComputer(button) {
+  const c = state.computer;
+  if (!c) return;
+  const buttons = [...document.querySelectorAll("[data-action=restart]")];
+  for (const b of buttons) b.disabled = true;
+  const label = button.textContent;
+  button.textContent = "Restarting…";
+  try {
+    restarted = c.generation || 0;
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
+    if (state.page === "Settings") await openSettings(false);
+  } catch (e) {
+    button.textContent = label;
+    const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
+    said.textContent = `It did not restart: ${e.message}`;
+    button.parentElement.append(said);
+  } finally {
+    for (const b of buttons) b.disabled = false;
+  }
+}
+// The person read what a start went back to: told no more, anywhere.
+async function sawNotice(life, button) {
+  const c = state.computer;
+  if (!c) return;
+  button.disabled = true;
+  try {
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
+  } catch {
+    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+  }
+}
 function renderUpdate() {
   const c = state.computer;
   const due = !!(c && state.defaultImage && c.image !== state.defaultImage);
@@ -988,7 +1125,7 @@ $("update-go").onclick = async () => {
   try {
     await api("PUT", `/api/computers/${seg(c.computer)}/image`, { image: state.defaultImage });
     await api("POST", `/api/computers/${seg(c.computer)}/sleep`, {});
-    state.computer = await api("POST", `/api/computers/${seg(c.computer)}/wake`, {});
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/wake`, {}));
     $("update-confirm").hidden = true;
     $("update-pill").hidden = false;
     renderUpdate();
@@ -1016,6 +1153,8 @@ addEventListener("popstate", () => {
 const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
 // what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
 const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fragments are read-only, and your agents are stopped" };
+// a computer's phase, as a person reads it (proto's `ComputerPhase`)
+const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 const WHY = {
   guest: "a guest has no agents",
   seat_canceled: "the seat was canceled",
@@ -1115,7 +1254,7 @@ async function openSettings(push = true) {
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [line("State", PHASE[c.phase] ?? c.phase), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
   // each agent's own desktop
@@ -1124,6 +1263,27 @@ async function openSettings(push = true) {
     screen.type = "button";
     screen.onclick = () => openScreen(a.fragment);
     computer.append(screen);
+  }
+  // the way back to working when something is wrong with it: asked once
+  // more before it cuts what its agents are doing
+  if (c) {
+    computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
+    const row = el("div", "settings-actions");
+    const go = el("button", "quiet", "Restart computer");
+    go.type = "button";
+    go.dataset.action = "restart-ask";
+    go.onclick = () => {
+      const sure = el("button", "quiet", "Restart now");
+      sure.type = "button";
+      sure.dataset.action = "restart";
+      sure.onclick = () => restartComputer(sure);
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => row.replaceChildren(go);
+      row.replaceChildren(sure, cancel);
+    };
+    row.append(go);
+    computer.append(row);
   }
   const agents = section("Agents");
   const mine = [...state.agents.values()];
@@ -1259,7 +1419,7 @@ function connectionsSection(linked, uses) {
           const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
           const list = all.every((x) => next.includes(x)) ? null : next;
           try {
-            state.computer = await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list });
+            computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
             state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
           } catch (e) {
             notice("That was not changed", e.message);
@@ -1538,11 +1698,13 @@ async function load(changed = false) {
   state.fragments = list.fragments ?? [];
   state.computer = computers.computers?.[0] ?? null;
   state.defaultImage = computers.defaultImage ?? null;
+  state.support = computers.support ?? null;
   state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   renderChats();
   renderApps();
   renderHeading();
   renderUpdate();
+  renderComputer();
   rosterChanged();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;

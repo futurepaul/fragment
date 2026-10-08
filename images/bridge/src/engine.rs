@@ -31,6 +31,10 @@
 //!   next turn in that chat is told what was cut (P5): its note is built
 //!   from the chat's journal alone, before its claim (note.rs), so it is
 //!   said once, and the same in any life.
+//! - A turn another life claimed (409) ran after this life's `/data` was
+//!   saved, so its runtime remembers none of it: the agent's next turn in
+//!   that chat is told what those turns were (`TurnStart::forgotten`,
+//!   note.rs "forgotten"), once in this life.
 //! - A turn is claimed only while the runtime can take it (`Connected`),
 //!   so a turn waits, unclaimed, for a runtime that is still starting.
 //! - Every turn gets both records: a turn refused, or stopped while it
@@ -361,6 +365,13 @@ pub struct Engine {
     /// `ENDED_HOPS_MAX`, each for `ENDED_HOPS_MS`): a reply of one read after
     /// it was let go is one hop past it (`hop_of`). Never written to `/data`.
     ended: VecDeque<EndedTurn>,
+    /// Per agent and chat, its turns there another life ran since this
+    /// life's `/data` was saved (each claim answered 409), the newest at
+    /// most `NOTE_FORGOTTEN_MAX`, and how many more: its runtime remembers
+    /// none of them, so its next turn there is told (`TurnStart::forgotten`)
+    /// and the entry goes. Never written to `/data`: a life that restores
+    /// the same old `/data` reads them again, and is told again.
+    forgotten: BTreeMap<(String, String), (VecDeque<String>, u32)>,
     // A step's scratch, cleared at each step's start.
     out: Vec<Effect>,
     dirty: bool,
@@ -403,6 +414,7 @@ impl Engine {
             views: HashMap::new(),
             keepalive: false,
             ended: VecDeque::new(),
+            forgotten: BTreeMap::new(),
             out: Vec::new(),
             dirty: false,
             now: 0,
@@ -865,6 +877,15 @@ impl Engine {
                 let (agent, fragment) = (t.agent.clone(), t.fragment.clone());
                 self.dirty = true;
                 crate::ev!("turn.lost", { "turn": id, "agent": agent, "why": "another life claimed it" });
+                // that life ran it after this /data was saved: the runtime
+                // remembers nothing of it, and its next turn here is told
+                let (newest, more) = self.forgotten.entry((agent.clone(), fragment.clone())).or_default();
+                newest.push_back(id.to_string());
+                if newest.len() > limits::NOTE_FORGOTTEN_MAX {
+                    newest.pop_front();
+                    *more = more.saturating_add(1);
+                }
+                assert!(newest.len() <= limits::NOTE_FORGOTTEN_MAX, "a note names its newest forgotten turns");
                 self.owe(&agent, &fragment, id, end);
                 self.pump(&agent, &fragment);
             }
@@ -886,6 +907,10 @@ impl Engine {
         let agent = self.state.turns[id].agent.clone();
         let a = self.agent(&agent).cloned().expect("a held turn's agent is on this computer");
         let now = self.now;
+        let fragment = self.state.turns[id].fragment.clone();
+        // what another life ran here that the runtime does not remember,
+        // told once: this turn takes it
+        let (forgotten, forgotten_more) = self.forgotten.remove(&(agent.clone(), fragment)).map(|(newest, more)| (Vec::from(newest), more)).unwrap_or_default();
         let t = self.state.turns.get_mut(id).expect("checked");
         t.phase = Phase::Running;
         t.last_ms = now;
@@ -904,6 +929,8 @@ impl Engine {
             routine: t.routine,
             claim_seq,
             note: None,
+            forgotten,
+            forgotten_more,
         };
         crate::ev!("turn.handed", { "turn": id, "agent": agent, "fragment": t.fragment });
         self.out.push(Effect::Runtime(Command::Start(Box::new(start))));
