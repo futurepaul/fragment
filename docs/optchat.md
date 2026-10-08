@@ -94,13 +94,18 @@ each with its reason. Everything else in the gist holds as it says.
    computer (its agent, the hands) instead of subagents and computer
    tasks. The computers paragraph says so: the hands and whether each
    computer is awake are in each message's block.
-4. **A hand-off's report is `work` `[<task id>] <report>`** (the gist:
-   `[Name]`), and **`zoom("<task id>")` gives what the task was given and
-   its report, not goose's steps** (the gist: an agent's whole chat).
-   goose's steps are records on the mind's `work` channel, which its code
-   cannot read: no job step reads a channel, and a trigger on `work`
-   would be a run a step, past the triggered runs' 120 an hour. A
-   `job.records` step would be the way (decision for Paul).
+4. **A hand-off is named by its task id** (the gist: a subagent's
+   `Name`): its report is `work` `[<task id>] <report>`, and a turn's
+   `zoom("<task id>")` gives its whole run, as the gist's `zoom("Name")`
+   gives an agent's whole chat, but from goose's records: what it was
+   given, goose's words and steps (tool, args, ok, excerpt; at most 300
+   characters each, as the bridge posts them) and its end, read from the
+   mind's `work` channel when the turn zooms (a `job.records` step: no
+   trigger on `work`, which would be a run a step, past the triggered
+   runs' 120 an hour), and its report. goose's session itself (its
+   messages whole, its tools' full output) stays on the computer. The
+   `zoom` query, an MCP client's and the page's, gives the task without
+   its run: a query takes no steps.
 5. **The kinds' names:** replies are `talk` (the gist's `unii`), which
    every log and node so far uses; a `note` is another agent's, written
    through MCP (the gist's are memories from before the chat).
@@ -317,8 +322,8 @@ One system prompt for every call, turns' and compactions':
 "Mind" and the replies' kind `talk`, then the person's about-me ("The
 user's instructions:"). Its few changes are the mind's (each in "Where we
 differ from the gist"): the kinds' `work` and `note` lines; zoom's lines
-(files instead of images; `zoom("<task id>")` for a computer task instead
-of an agent's chat); in Turns, the web's, the apps' and `computer` lines
+(files instead of images; `zoom("<task id>")`, a computer task's whole
+run, instead of an agent's whole chat); in Turns, the web's, the apps' and `computer` lines
 instead of "Use subagents only when the user asks for them."; a paragraph
 on what starts each message (the chat and the persona); and the computers
 paragraph, rewritten for the hands. Nothing in it changes from call to
@@ -421,9 +426,10 @@ Tools (descriptions verbatim from the gist's §6 where it has them):
   the two lines of n/2 under it; n = 1 gives the message whole.", then the
   mind's: a long message comes in pages of 24 000 characters (`page`,
   from 1, each naming the next, so a page stays within the echo's
-  30 000), and `zoom("<task id>")` gives a computer task: what it was
-  given, its state and times, and its report whole (the gist's
-  `zoom("Name")`, an agent's whole chat). A message's answer is
+  30 000), and `zoom("<task id>")` gives a computer task's whole run
+  (the gist's `zoom("Name")`, an agent's whole chat; "Hand-offs", 6):
+  what it was given, its state and times, goose's words, steps and end,
+  and its report whole, in those pages when long. A message's answer is
   `id+0|kind: text` with its files, and says when its text goes on in
   the next message or from the one before.
 - `date(id)`: "The date and time of message id."
@@ -777,8 +783,9 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
    that comes before its `task_open` is kept for it. The task's state is
    `done`, or `stopped` or `error` from an `(ended: …)` reply. The mind
    runs nothing for `work`: a page follows goose's steps there itself,
-   mapping `turn` to its task, so a hand-off is one triggered run, well
-   under the platform's 120 an hour.
+   mapping `turn` to its task, and a turn's zoom reads them when it
+   zooms (6), so a hand-off is one triggered run, well under the
+   platform's 120 an hour.
 4. **Lost.** A task with no reply 30 minutes after it opened is `lost`:
    `tasks` says so, and a turn's start records it and publishes it. A
    reply that comes later still reports.
@@ -788,6 +795,24 @@ Clef, through `job.ai.decide({model: "clef-flash", state, questions})`
    first spec's subagent framing, its view doc (goose's copy, which
    names reports `work`), the view, and then the task.
    Nothing of a session carries to the next.
+6. **Its whole run.** A turn's `zoom("<task id>")` reads the task
+   (`task`, a query), then goose's records on `work` under the task's
+   `turn` (`job.records("work", {after, turn})`, docs/api.md, Jobs: a
+   page of at most 200 records and 512 KiB, the channel's kept records
+   looked over whole), at most 2 pages while the run's answers have room
+   for one: three steps at most, like any tool's. It renders (`taskText`)
+   the head (state, times, the message that handed it off), `Given:` and
+   the task, `Its run on the computer:` (each step's words, if any, on a
+   line of their own, then `[step <n>] <tool> <args> → ok|failed:
+   <excerpt>`; each card, `[asked] <text> (<options>) → answered:
+   <option> | expired | stopped | open`; the end, `[ended] <outcome>[:
+   <error>]`; and when it was cut or could not be read, saying so), and
+   `Its report (message <i>):` and the report, in zoom's pages of 24 000
+   characters. It is read when the turn zooms, not kept: a running task
+   shows its steps so far, and a task whose turn's records the channel
+   no longer keeps (it keeps its newest 10 000) shows none. The `zoom`
+   query gives the same without the run (`Its run on the computer: read
+   by Mind's own zoom in a turn, not here.`): a query takes no steps.
 
 ### Operations (the contract for the page, the MCP server and goose)
 
@@ -798,7 +823,7 @@ membership, which only its owner and the agent hold. Operations with a
 | op | kind | input → result |
 |---|---|---|
 | `view` | query (described) | `{upto?}` → `{text, bytes, parts, T, settled}`: the rendered `<chat>…</chat>`, the parts that start before `upto` (all by default) up to the first not summarized yet (no call sees a placeholder); `settled` says none was left out |
-| `zoom` | query (described) | `{id, n?, page?}` → `{text}`: §6's zoom (`n` 1 unless named; a message in pages of 24 000 characters); `{id: "<task id>", page?}`, a computer task whole |
+| `zoom` | query (described) | `{id, n?, page?}` → `{text}`: §6's zoom (`n` 1 unless named; a message in pages of 24 000 characters); `{id: "<task id>", page?}`, a computer task whole but for goose's run, which a turn's zoom reads ("Hand-offs", 6) |
 | `date` | query (described) | `{id}` → `{text}`: ISO time of message `id`, in UTC (the mind knows no time zone) |
 | `search` | query (described) | `{q, limit?, thread?}` → `{results: [{i, kind, thread, at, snippet}]}` |
 | `note` | mutation (described) | `{text}` → `{i}`: append a `note` (an MCP client's write) |
@@ -811,6 +836,7 @@ membership, which only its owner and the agent hold. Operations with a
 | `topics` | query | `{}` → `{topics: [{id, name, description, count}]}` |
 | `personas` | query | `{}` → `{personas: [{id, name, emoji, instructions, hands}], default}` |
 | `tasks` | query | `{thread?}` → `{tasks: [{id, thread, i, turn, text, state, report, started, ended}]}`, the newest 50; `i` is the `tool` message that opened it; `turn` the agent's (its steps are on `work` under it); `state` is `running`, `done`, `stopped`, `error` or `lost`; `text` cut to 4 KiB and `report` to 16 KiB (the report whole is its message) |
+| `task` | query | `{id}` → `{task: {id, thread, i, turn, text, state, report, started, ended, reported} \| null}`: one task whole, as `tasks` says it, `reported` its report's message (a turn's zoom renders it with goose's run) |
 | `status` | query | `{}` → `{turn: {running, thread, since} \| null, queued, unbuilt, T, hands: bool, failing: [{id, n, error, tries}], ready, left, pumps, pump: {at} \| null, view, cview, nodes, import: {conversations, messages, last} \| null, instance, folds, now}`; `hands` is whether the last turn saw an agent member; `failing`, the nodes whose last build failed; `ready`, whether nodes are left to build (`left`, how many); `pumps`, the compactions at work now; `pump`, when a node was last taken; `view` and `cview`, the views' bytes; `nodes`, the tree's built nodes; `import`, what imports landed; `instance`, the App instance's (a restart is a new one); `folds`, how many times the views were built from the log (a mind made before they were saved: once) |
 | `import` | mutation | `{source, conversation: {id, title?, started?}, from, total?, messages: [{role: user \| assistant, text, at}]}` (1 to 64, each text at most 131 072 characters) → `{thread, landed, appended, T}`: "Importing chats" |
 | `imported` | query | `{conversations: [{source, id}]}` (at most 200) → `{landed: [n]}`: how many of each conversation's messages are in |
@@ -975,6 +1001,16 @@ beside the mind; opened on its own origin the page shows its own rail.
    - signed in with a mind, `/` is the shell with the mind in its
      middle column (2026-10-07: it was the mind full-screen on its own
      origin, which left the apps a link away).
+10. **`job.records(channel, {after?, limit?, turn?})`** → `{records:
+    [{seq, at, principal, kind, body}], next}` (docs/api.md, Jobs and
+    triggers; Paul, 2026-10-08): a job reads a page of its fragment's own
+    records on a channel its fragment.json declares, as a reader with
+    the run's role, at most 200 records and 512 KiB, only those whose
+    body's `turn` is `turn` when named (matched in SQL over at most
+    10 000 seqs a page, so a page is bounded however few match); `next`
+    is the next page's `after`, `null` at the channel's newest record. A
+    step like any other, its answer kept. The mind's zoom reads goose's
+    run with it ("Hand-offs", 6).
 
 ## goose on the computer (`images/goose`, bridge runtime `goose`)
 

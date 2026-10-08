@@ -1,6 +1,7 @@
 //! Jobs and triggers (slice D): job runs as Workflows with durable steps,
 //! a fetch that carries a secret it never shows, retries, held runs and
-//! replays, sleeps; triggers from the inbox, a channel, files, and cron;
+//! replays, sleeps, its own channels' records read a page at a time;
+//! triggers from the inbox, a channel, files, and cron;
 //! the hop budget, auto-pause, and the inbox cap.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -310,6 +311,46 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
             && misfit["output"]["name"] == "StepError"
             && misfit["output"]["message"].as_str().is_some_and(|m| m.contains("ai.image") && m.contains("missing field `prompt`")),
         &misfit,
+    );
+
+    // job.records: the fragment's own records, a page at a time, a turn's alone
+    let r = api.op(&owner, &name, "mark", "mark-1", json!({ "turns": ["a", "b", "a", "c", "a"] }))?;
+    s.ok("(a mutation publishes five records naming turns)", r.status == 200 && r.body["result"]["marked"] == 5, &r);
+    let tail = |who: &Keys, id: &str, input: Value| -> Result<Value> {
+        let r = api.op(who, &name, "tail", id, input)?;
+        Ok(settle(api, who, &name, started(&r), &["succeeded", "held"], long)["output"].clone())
+    };
+    let pages = |out: &Value| -> Vec<(Value, Value)> { out["pages"].as_array().into_iter().flatten().map(|p| (p["seqs"].clone(), p["next"].clone())).collect() };
+    let all = tail(&owner, "tail-all", json!({ "channel": "turns" }))?;
+    s.ok(
+        "a job reads its channel's records, oldest first, as a page holds them, and the page says it reached the end",
+        pages(&all) == [(json!([1, 2, 3, 4, 5]), Value::Null)]
+            && all["pages"][0]["records"][0]["body"] == json!({ "turn": "a", "n": 0 })
+            && all["pages"][0]["records"][0]["kind"] == "mark"
+            && all["pages"][0]["records"][0]["principal"] == owner_id.as_str()
+            && all["pages"][0]["records"][0]["at"].as_i64().is_some_and(|at| at > 0),
+        &all,
+    );
+    let turn_a = tail(&owner, "tail-a", json!({ "channel": "turns", "turn": "a", "limit": 2 }))?;
+    s.ok(
+        "a turn's records alone, in pages of a limit, each naming where the next starts",
+        pages(&turn_a) == [(json!([1, 3]), json!(3)), (json!([5]), Value::Null)],
+        &turn_a,
+    );
+    let past = tail(&owner, "tail-past", json!({ "channel": "turns", "after": 5 }))?;
+    s.ok("past its newest record, a page is empty and the last", pages(&past) == [(json!([]), Value::Null)], &past);
+    let refused = [
+        tail(&viewer, "tail-viewer", json!({ "channel": "turns" }))?,
+        tail(&owner, "tail-events", json!({ "channel": "events" }))?,
+        tail(&owner, "tail-limit", json!({ "channel": "turns", "limit": 500 }))?,
+    ];
+    let said = |out: &Value, name: &str, says: &str| out["caught"] == true && out["name"] == name && out["message"].as_str().is_some_and(|m| m.contains(says));
+    s.ok(
+        "a run reads no channel its role may not, none fragment.json does not declare, and no page past 200 records",
+        said(&refused[0], "StepError", "needs the editor role")
+            && said(&refused[1], "Error", "channel events is not declared")
+            && said(&refused[2], "StepError", "limit is 1 to 200"),
+        json!(refused),
     );
 
     // the step that kept failing: retried with backoff, then the job caught it

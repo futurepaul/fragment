@@ -53,13 +53,14 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use fragment_core::secrets::placeholders;
-use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
+use fragment_core::steps::{records_window, Fetch, NextStep, PageRecord, Pager, Records, RecordsPage, Step, StepOutcome, StepResult};
 use fragment_core::{cron::Cron, egress, glob, npub};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
 };
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use worker::wasm_bindgen::JsValue;
 use worker::*;
@@ -880,6 +881,7 @@ impl FragmentCell {
             }
             Step::Presence {} => Ok(json!({ "here": self.present() })),
             Step::Blob { sha256 } => self.step_blob(&sha256).await,
+            Step::Records(r) => self.step_records(run, r),
             // as its owner, on their other fragments (owner.rs)
             Step::OwnerFragments {} => self.step_owner_fragments().await,
             Step::OwnerCall { fragment, op, input } => self.step_owner_call(run, index, &fragment, &op, input).await,
@@ -1000,6 +1002,75 @@ impl FragmentCell {
         let mut head = resp.bytes().await.map_err(|e| StepFail::Retry(e.to_string()))?;
         head.truncate(max);
         Ok(fragment_core::steps::blob_read(sha, b.size, &head))
+    }
+
+    /// `job.records(channel, {after, limit, turn})`: a page of the
+    /// fragment's own records on a channel its fragment.json declares, as a
+    /// reader with the run's role may read them. A page looks over at most
+    /// `RECORDS_SCAN_MAX` seqs past `after` (`steps::records_window`), so a
+    /// `turn` (matched in SQL, `json_extract` over the stretch's bodies)
+    /// reads a bounded stretch however few records match, and stops at the
+    /// page's limit or bytes (`steps::Pager`).
+    fn step_records(&self, run: &RunRow, r: Records) -> Result<Value, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let ask = r.checked().map_err(permanent)?;
+        let decl = self
+            .declared_channel(&ask.channel)
+            .map_err(retry)?
+            .ok_or_else(|| permanent(format!("no channel {:?} in fragment.json: a job reads the channels its fragment declares", ask.channel)))?;
+        if run.role < decl.read {
+            return Err(permanent(format!("reading {} needs the {} role; this run acts as {}", ask.channel, decl.read.as_str(), run.role.as_str())));
+        }
+        #[derive(Deserialize)]
+        struct Kept {
+            first: Option<i64>,
+            last: Option<i64>,
+        }
+        let kept: Vec<Kept> = self
+            .typed(
+                "SELECT (SELECT MIN(seq) FROM records WHERE channel = ?) AS first, (SELECT MAX(seq) FROM records WHERE channel = ?) AS last",
+                vec![ask.channel.as_str().into(), ask.channel.as_str().into()],
+            )
+            .map_err(retry)?;
+        let kept = kept.into_iter().next().expect("a SELECT of two subqueries answers one row");
+        let bounds = match (kept.first, kept.last) {
+            (Some(first), Some(last)) => Some((first, last)),
+            (None, None) => None,
+            _ => return Err(StepFail::Retry(format!("{}: a channel's first and last records disagree", ask.channel))),
+        };
+        let Some((from, to)) = records_window(ask.after, bounds) else { return Ok(json!(RecordsPage::end())) };
+        let (_, last) = bounds.expect("a window is of a channel with records");
+        let channel = SqlStorageValue::from(ask.channel.as_str());
+        // one past the limit, so a page that fills knows a record was left for the next
+        let take = SqlStorageValue::Integer(i64::try_from(ask.limit + 1).expect("a page's limit is small"));
+        let (filter, binds) = match &ask.turn {
+            Some(turn) => (
+                " AND json_extract(body, '$.turn') = ?",
+                vec![channel, SqlStorageValue::Integer(from), SqlStorageValue::Integer(to), turn.as_str().into(), take],
+            ),
+            None => ("", vec![channel, SqlStorageValue::Integer(from), SqlStorageValue::Integer(to), take]),
+        };
+        let q = format!("SELECT seq, at, principal, kind, body FROM records WHERE channel = ? AND seq > ? AND seq <= ?{filter} ORDER BY seq LIMIT ?");
+        #[derive(Deserialize)]
+        struct Row {
+            seq: i64,
+            at: i64,
+            principal: String,
+            kind: String,
+            body: String,
+        }
+        let cursor = self.sql().exec(&q, binds).map_err(|e| StepFail::Retry(e.to_string()))?;
+        let mut pager = Pager::new(ask.limit, to, last);
+        // read one row at a time: the page stops reading where it is full
+        for row in cursor.next::<Row>() {
+            let row = row.map_err(|e| StepFail::Retry(e.to_string()))?;
+            let body = RawValue::from_string(row.body).map_err(|e| StepFail::Retry(format!("record {}#{}: its stored body is not JSON: {e}", ask.channel, row.seq)))?;
+            let record = PageRecord { seq: row.seq, at: row.at, principal: npub::display(&row.principal), kind: row.kind, body };
+            if !pager.take(record) {
+                break;
+            }
+        }
+        Ok(json!(pager.page()))
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a

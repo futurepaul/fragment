@@ -21,13 +21,15 @@
     "parent": { "kind": "job" },
     "wrong": { "kind": "job" },
     "misfit": { "kind": "job" },
+    "mark": { "kind": "mutation", "input": { "type": "object", "required": ["turns"], "properties": { "turns": { "type": "array", "items": { "type": "string" } } } } },
+    "tail": { "kind": "job", "role": "viewer" },
     "ping": { "kind": "mutation" },
     "raise": { "kind": "mutation" },
     "boom": { "kind": "job" },
     "tick": { "kind": "mutation" },
     "ticks": { "kind": "query" }
   },
-  "channels": { "feed": { "read": "viewer" }, "loop": {}, "alarms": {}, "steps": {} },
+  "channels": { "feed": { "read": "viewer" }, "loop": {}, "alarms": {}, "steps": {}, "turns": { "read": "editor" } },
   "triggers": [
     { "channel": "inbox", "run": "ingest" },
     { "channel": "loop", "run": "ping" },

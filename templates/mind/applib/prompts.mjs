@@ -39,7 +39,7 @@ long for one message is split over several in a row.
 Tools:
 - zoom(id, n) opens line id+n into the two lines it was made from;
 - zoom(id, 1) gives message id whole, with its files
-- zoom("id") gives a computer task: what it was given, and its report whole
+- zoom("id") gives a computer task's whole run: what it was given, its steps, and its report
 - date(id) gives the date and time of message id
 
 # Turns
@@ -143,7 +143,7 @@ export const TOOLS = {
   zoom: tool(
     "zoom",
     "Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole. " +
-      'A long message comes in pages (page, from 1). zoom("id"), with a computer task\'s id, gives that task: what it was given, and its report whole.',
+      'A long message comes in pages (page, from 1). zoom("id"), with a computer task\'s id, gives that task\'s whole run: what it was given, its steps on the computer, and its report, in pages when long.',
     {
       id: { type: ["integer", "string"], description: "the line's first message; or a computer task's id" },
       n: { type: "integer", description: "how many messages the line covers" },

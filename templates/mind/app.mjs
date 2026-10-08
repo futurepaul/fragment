@@ -55,6 +55,10 @@ const RESULTS_SOFT_BYTES = 3 * 1024 * 1024;
 // A web fetch's answer is kept whole (up to the 1 MiB a step's result
 // takes): one is taken only while the run's 4 MiB of answers has room for it.
 const FETCH_ROOM_BYTES = 4 * 1024 * 1024 - 1024 * 1024 - 64 * 1024;
+// A turn's zoom of a computer task reads at most this many pages of its
+// run's records (`job.records`, 200 a page: a goose turn takes at most 200
+// steps).
+const WORK_PAGES = 2;
 // A web tool keeps this many steps for its answer's log, a last call and its log.
 const WEB_KEEP_STEPS = 3;
 const TURNS_PER_RUN = 4;
@@ -255,6 +259,59 @@ function endedBy(text) {
   return m === null || m[1] === "idle" ? "done" : m[1] === "stopped" ? "stopped" : "error";
 }
 
+// A computer task whole, as zoom("<task id>") answers it (§6's
+// zoom("Name"), an agent's whole chat): what it was given, its state and
+// times, goose's run, and its report whole. `run` is what a turn's zoom
+// read of the run (`#zoomTask`: `{records, more, error}`), or null where
+// none was read: the `zoom` query (the page's, an MCP client's) takes no
+// steps, and only a job reads a channel.
+function taskText(t, run) {
+  const at = (ms) => new Date(ms).toISOString();
+  const head = `Task ${t.id} (${t.state}) on the user's computer, from ${at(t.started)}${t.ended ? ` to ${at(t.ended)}` : ""}${isInt(t.i) ? `, handed off at message ${t.i}` : ""}.`;
+  const lines = [head, "", "Given:", t.text, ""];
+  if (run === null) lines.push("Its run on the computer: read by Mind's own zoom in a turn, not here.", "");
+  else lines.push(...runLines(run), "");
+  if (t.report === null) lines.push("No report yet.");
+  else lines.push(`Its report${isInt(t.reported) ? ` (message ${t.reported})` : ""}:`, t.report);
+  return lines.join("\n");
+}
+
+// goose's run from its records on `work` (docs/chat-records.md), in order:
+// the words before each step, then the step (its tool and args, ok or
+// failed, and its result's excerpt), each card it showed and how it
+// closed, and how the turn ended.
+function runLines({ records, more, error }) {
+  const lines = ["Its run on the computer:"];
+  const closed = new Map(records.filter((r) => r.body?.kind === "turn.prompt.closed").map((r) => [r.body.prompt, r.body]));
+  for (const { body: b } of records) {
+    if (b?.kind === "turn.step") {
+      if (b.text) lines.push(String(b.text));
+      const excerpt = b.excerpt ? `: ${b.excerpt}` : "";
+      lines.push(`[step ${b.step}] ${b.tool}${b.args ? ` ${b.args}` : ""} → ${b.ok === false ? "failed" : "ok"}${excerpt}`);
+    } else if (b?.kind === "turn.prompt") {
+      const c = closed.get(b.prompt);
+      const how = !c ? "open" : c.outcome === "answered" ? `answered: ${c.option}` : c.outcome;
+      const options = Array.isArray(b.options) ? ` (${b.options.map((o) => o?.label ?? o?.id).join(" / ")})` : "";
+      lines.push(`[asked] ${b.text}${options} → ${how}`);
+    } else if (b?.kind === "turn.end") {
+      lines.push(`[ended] ${b.outcome}${b.error ? `: ${b.error}` : ""}`);
+    }
+  }
+  if (lines.length === 1 && !error) lines.push("(none yet: the computer has not taken it, or no longer keeps its records)");
+  if (more) lines.push(`(more of it is on the computer's records than a zoom reads: its first ${records.length})`);
+  if (error) lines.push(`(${records.length ? "the rest of its run was not read" : "its run could not be read"}: ${error})`);
+  return lines;
+}
+
+// A task's text in zoom's pages (M.ZOOM_PAGE characters, as a long
+// message's), each naming the next.
+function taskPage(id, text, page) {
+  const pages = M.splitText(text, M.ZOOM_PAGE);
+  if (!isInt(page) || page < 1 || page > pages.length) return `Task ${id} has ${pages.length} page${pages.length > 1 ? "s" : ""}.`;
+  const more = pages.length > 1 ? `\n[page ${page} of ${pages.length}${page < pages.length ? `: zoom("${id}", 1, ${page + 1}) gives the next` : ""}]` : "";
+  return `${pages[page - 1]}${more}`;
+}
+
 // The user's apps for the model (the `apps` tool): each by name, with its
 // title, kind, the user's role and its address, then its operations, a
 // line each.
@@ -330,6 +387,10 @@ class Steps {
 
   blob(sha256) {
     return this.#took(this.job.blob(sha256));
+  }
+
+  records(channel, opts) {
+    return this.#took(this.job.records(channel, opts));
   }
 
   sleep(ms) {
@@ -1092,34 +1153,24 @@ export class App extends DurableObject {
   }
 
   // §6: zoom(id, n) opens a line; zoom(id, 1) gives a message whole, in
-  // pages; zoom("<task id>") gives a computer task (`#taskText`), in pages.
+  // pages; zoom("<task id>") gives a computer task (`taskText`), in pages:
+  // here (the page's, an MCP client's) without goose's run, which a turn's
+  // zoom reads (`#zoomTask`).
   zoom({ id, n = 1, page = 1 }) {
     if (typeof id === "string" && !/^\d+$/.test(id)) {
-      const text = this.#taskText(id.trim());
-      if (text === null) return { text: `No task ${id}.` };
-      const pages = M.splitText(text, M.ZOOM_PAGE);
-      if (!isInt(page) || page < 1 || page > pages.length) return { text: `Task ${id} has ${pages.length} page${pages.length > 1 ? "s" : ""}.` };
-      const more = pages.length > 1 ? `\n[page ${page} of ${pages.length}${page < pages.length ? `: zoom("${id}", 1, ${page + 1}) gives the next` : ""}]` : "";
-      return { text: `${pages[page - 1]}${more}` };
+      const { task } = this.task({ id: id.trim() });
+      return { text: task ? taskPage(id, taskText(task, null), page) : `No task ${id}.` };
     }
     return { text: M.zoom(this.#memory(), Number(id), n, (i) => this.#full(i), page) };
   }
 
-  // A computer task whole, as zoom("<task id>") answers it (§6's
-  // zoom("Name"), an agent's whole chat): what it was given, its state and
-  // times, and its report whole. goose's own steps are on `work`, which the
-  // mind's code cannot read (docs/optchat.md, "Where we differ").
-  #taskText(id) {
+  // One computer task whole (a turn's zoom renders it with goose's run):
+  // its state as `tasks` says it, and `reported`, its report's message.
+  task({ id }) {
     const t = this.#task(id);
-    if (!t) return null;
-    const at = (ms) => new Date(ms).toISOString();
-    const report = this.ctx.storage.sql.exec("SELECT i FROM log WHERE task = ? AND kind IN ('work', 'user') AND cont IS NULL ORDER BY i LIMIT 1", t.id).toArray()[0]?.i;
-    const head = `Task ${t.id} (${t.state}) on the user's computer, from ${at(t.started)}${t.ended ? ` to ${at(t.ended)}` : ""}${isInt(t.i) ? `, handed off at message ${t.i}` : ""}.`;
-    const lines = [head, "", "Given:", t.text, ""];
-    if (t.report === null) lines.push("No report yet.");
-    else lines.push(`Its report${isInt(report) ? ` (message ${report})` : ""}:`, t.report);
-    lines.push("", "(Its steps on the computer are not kept in the memory: what it was given and its report are.)");
-    return lines.join("\n");
+    if (!t) return { task: null };
+    const reported = this.ctx.storage.sql.exec("SELECT i FROM log WHERE task = ? AND kind IN ('work', 'user') AND cont IS NULL ORDER BY i LIMIT 1", t.id).toArray()[0]?.i ?? null;
+    return { task: { id: t.id, thread: t.thread, i: t.i, turn: t.turn, text: t.text, state: t.state, report: t.report, started: t.started, ended: t.ended, reported } };
   }
 
   date({ id }) {
@@ -1810,6 +1861,36 @@ export class App extends DurableObject {
     }
   }
 
+  // zoom("<task id>") in a turn: the task (`task`), then goose's run, its
+  // records on `work` under the task's turn (`job.records`), read now, at
+  // most WORK_PAGES pages while the run's answers have room for one; the
+  // whole in pages as a long message's. A tool's steps: 3 at most.
+  async #zoomTask(s, id, page) {
+    const { task } = await s.call("task", { id });
+    if (!task) return `No task ${id}.`;
+    const run = { records: [], more: false, error: null };
+    try {
+      for (let after = 0, k = 0; typeof task.turn === "string"; k++) {
+        if (k === WORK_PAGES) {
+          run.more = true;
+          break;
+        }
+        // a page is at most 512 KiB: one is read where a fetch's answer would fit
+        if (s.bytes > FETCH_ROOM_BYTES) {
+          run.error = "this turn has read all its run can keep";
+          break;
+        }
+        const p = await s.records("work", { after, turn: task.turn });
+        run.records.push(...p.records);
+        if (p.next === null) break;
+        after = p.next;
+      }
+    } catch (e) {
+      run.error = describe(e);
+    }
+    return taskPage(id, taskText(task, run), page);
+  }
+
   // The owner's apps (`job.owner.fragments`), read once a turn: an answer's
   // `apps` and a later `app_ops` share one step. `{fragments}`, or the
   // tool's error (a platform that lends none, a mind shared with someone).
@@ -1834,10 +1915,10 @@ export class App extends DurableObject {
       case "zoom": {
         const page = args.page === undefined ? 1 : Number(args.page);
         if (!isInt(page) || page < 1) return { text: `No page ${args.page}.` };
-        // zoom("<task id>"): a computer task whole
+        // zoom("<task id>"): a computer task whole, with goose's run
         if (typeof args.id === "string" && !/^\s*\d+\s*$/.test(args.id)) {
           const id = args.id.trim().replace(/^\[|\]$/g, "").slice(0, 64);
-          return { text: (await s.call("zoom", { id, page })).text };
+          return { text: id ? await this.#zoomTask(s, id, page) : `No task ${JSON.stringify(args.id)}.` };
         }
         const id = Number(args.id);
         const n = args.n === undefined ? 1 : Number(args.n);

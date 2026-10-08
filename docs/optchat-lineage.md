@@ -127,10 +127,15 @@ spec, with every detail.
 
 **`zoom("Name")`**
 - **Victor:** gives a subagent's whole chat.
-- **Ours:** `zoom("<task id>")` gives what a hand-off was given, plus
-  its report.
-- **Why:** goose's steps are records on the mind's `work` channel, which
-  app code cannot read. A `job.records` step is the decision for Paul.
+- **Ours:** a turn's `zoom("<task id>")` gives a hand-off's whole run
+  too, built from goose's records: what it was given, goose's words and
+  steps (each cut to 300 characters by the bridge) and its end, then its
+  report. The steps are read when the mind zooms. The page's and MCP's
+  `zoom` give the task without its run.
+- **Why:** goose's session stays on the computer. The mind reads only
+  goose's records on its `work` channel, through a `job.records` step
+  (Paul, 2026-10-08). A trigger on `work` would cost one run per step,
+  past the platform's 120 an hour. A query takes no steps.
 
 **Files**
 - **Victor:** `zoom(id, 1)` gives a message "with its images".

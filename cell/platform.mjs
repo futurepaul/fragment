@@ -401,6 +401,21 @@ class Job {
     return this.#step("blob", { sha256 });
   }
 
+  // A page of the fragment's own records on one of its channels
+  // (fragment.json's), as a reader with the run's role reads them:
+  // { records: [{ seq, at, principal, kind, body }], next }, at most `limit`
+  // (200) after `after` (the first kept on), only those whose body's `turn`
+  // is `turn` when named; `next` is the next page's `after`, null at the
+  // channel's newest record.
+  records(channel, { after, limit, turn } = {}) {
+    if (!this.#channels.has(channel)) throw new Error(`channel ${channel} is not declared in fragment.json`);
+    const args = { channel };
+    if (after !== undefined) args.after = after;
+    if (limit !== undefined) args.limit = limit;
+    if (turn !== undefined) args.turn = turn;
+    return this.#step("records", args);
+  }
+
   // As the fragment's owner, on their other fragments: only a blessed
   // template that declares the `owner` capability, while no one but its
   // owner reads or drives it (docs/api.md, Jobs). `fragments()` → [{ name,
