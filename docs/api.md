@@ -1025,6 +1025,11 @@ memo is one the agent transcribes itself, through this route):
 - **Who pays.** The payer is the agent's owner, under no fragment's cap.
 - **What is kept.** Only the usage, on the ledger. Whisper's refusal is
   released and passed through, as a chat call's is.
+- **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
+  the model's own answer's top-level keys, and whether it came inside
+  `result` (`{"keys": […], "wrapped": false}`), never its words. The
+  e2e's `transcribe` section prints it, so a hosted run shows what
+  Workers AI answers.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`

@@ -494,14 +494,22 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url) 
     };
     let whisper: Value = serde_json::from_slice(&answer).unwrap_or(Value::Null);
     // its shape, never its words: which keys Whisper's answer has, and
-    // whether it came inside `result` (fragment_core::transcribe reads both)
+    // whether it came inside `result` (fragment_core::transcribe reads both),
+    // logged and told the client (`ANSWER_SHAPE_HEADER`)
     let keys: Vec<&str> = whisper.as_object().map(|o| o.keys().map(String::as_str).collect()).unwrap_or_default();
-    console_log!("{}", json!({ "event": "model.transcribed", "ref": held.reference, "keys": keys, "wrapped": transcribe::wrapped(&whisper), "bytes": answer.len() }));
+    let shape = json!({ "keys": keys, "wrapped": transcribe::wrapped(&whisper) });
+    console_log!("{}", json!({ "event": "model.transcribed", "ref": held.reference, "shape": shape, "bytes": answer.len() }));
     held.settle(transcribe::usage_of(&whisper), log_id).await;
     let Some((kind, out)) = transcribe::answer(bounded.format, &whisper) else {
         return Err(CellError::new(ErrorCode::UpstreamFailed, "the model's transcription carried no text"));
     };
     let mut resp = Response::from_bytes(out)?;
     resp.headers_mut().set("content-type", kind)?;
+    resp.headers_mut().set(ANSWER_SHAPE_HEADER, &shape.to_string())?;
     Ok(resp)
 }
+
+/// A transcription's answer names the shape of the model's own (its
+/// top-level keys, and whether it came inside `result`), never its words:
+/// how the hosted lane sees what Workers AI answers (docs/api.md).
+pub const ANSWER_SHAPE_HEADER: &str = "x-fragment-answer-shape";

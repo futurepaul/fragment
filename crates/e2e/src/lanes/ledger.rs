@@ -673,7 +673,7 @@ fn transcription_form(fields: &[(&str, &str)], audio: &[u8]) -> Vec<u8> {
 }
 
 /// A transcription, signed by `keys`: the form's fields and its audio.
-pub(super) fn transcribe(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
+fn transcription_call(api: &Api, keys: &Keys, fields: &[(&str, &str)], audio: &[u8]) -> Result<Reply> {
     api.call(Call {
         method: "POST",
         url: format!("{}{TRANSCRIBE_ROUTE}", api.base),
@@ -702,7 +702,7 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     let aig = || entries(api, owner_id, "aig:");
     let memo = spoken_wav("hello from a voice memo", 3);
     let (calls, before) = (s.ai.calls().len(), aig().len());
-    let r = transcribe(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
+    let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
     let call = s.ai.calls().get(calls).cloned();
     use base64::Engine;
     let sent = call.as_ref().is_some_and(|c| {
@@ -715,7 +715,7 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && sent && settled,
         json!({ "status": r.status, "answer": r.text, "model": call.as_ref().map(|c| c.model.clone()), "entries": aig() }),
     );
-    let r = transcribe(api, hand, &[("model", "whisper"), ("response_format", "text"), ("language", "de")], &memo)?;
+    let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "text"), ("language", "de")], &memo)?;
     let asked = s.ai.calls().last().map(|c| c.body["language"].clone());
     s.ok(
         "asked for text, it answers the text alone; a language it was told reaches Whisper",
@@ -724,9 +724,9 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
     );
     let (calls, before) = (s.ai.calls().len(), aig().len());
     let over = vec![0u8; fragment_core::transcribe::AUDIO_MAX_BYTES + 1];
-    let r = transcribe(api, hand, &[("model", "whisper")], &over)?;
+    let r = transcription_call(api, hand, &[("model", "whisper")], &over)?;
     s.ok("audio past 10 MiB is refused, 413, nothing reserved or sent", r.status == 413 && s.ai.calls().len() == calls && aig().len() == before, json!({ "status": r.status, "message": r.message() }));
-    let r = transcribe(api, hand, &[("model", "whisper-1")], &memo)?;
+    let r = transcription_call(api, hand, &[("model", "whisper-1")], &memo)?;
     let r2 = api.signed(hand, "POST", TRANSCRIBE_ROUTE, Some(&json!({ "model": "whisper" })))?;
     s.ok(
         "a model other than `whisper`, or a body that is no form, is refused, saying why, nothing reserved",
@@ -734,10 +734,10 @@ fn transcription(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         json!({ "model": r.message(), "json": r2.message() }),
     );
     s.ai.fail_next(&[400]);
-    let r = transcribe(api, hand, &[("model", "whisper")], &memo)?;
+    let r = transcription_call(api, hand, &[("model", "whisper")], &memo)?;
     let released = s.eventually(wait, || aig().len() == before + 1 && aig().iter().any(|e| end_of(e) == "released"));
     s.ok("Whisper's refusal is passed through, and its reservation released", r.status == 400 && released, json!({ "status": r.status, "entries": aig() }));
-    let r = transcribe(api, &owner, &[("model", "whisper")], &memo)?;
+    let r = transcription_call(api, &owner, &[("model", "whisper")], &memo)?;
     s.ok("a person does not call it (an agent does, for whom its owner pays)", r.status == 403, &r);
     Ok(())
 }
@@ -815,5 +815,45 @@ fn meters(s: &mut Suite, api: &Api, wait: Duration) -> Result<()> {
         json!({ "before": before, "after": after, "new": new }),
     );
     let _ = c;
+    Ok(())
+}
+
+/// The model route's transcription on the deployment's own Whisper
+/// (decision 9), a section of its own so it runs alone on a preview
+/// (`--only transcribe`): an agent of a person's sends a two seconds' memo
+/// (words, to the fake; silence, to Workers AI's Whisper), and is answered
+/// in OpenAI's shape, settled at the length Whisper heard (46.63 neurons a
+/// minute: about 1,555 thousandths for 2 s), never at its reservation.
+/// Hosted, it is the proof that Workers AI's own answer reads as the route
+/// reads it: it prints that answer's shape (the route's
+/// `x-fragment-answer-shape`: its keys, and whether it came inside
+/// `result`) and the settle, pass or fail. One paid call.
+pub fn transcribe_lane(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("transcribe", &[crate::Need::Models, crate::Need::Levers]) {
+        return Ok(());
+    }
+    let owner = api.person_paying(1)?;
+    let owner_id = api.identity(&owner)?;
+    let hand = &Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let memo = spoken_wav("a memo for the record", 2);
+    let r = transcription_call(api, hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
+    let shape = r.headers.get("x-fragment-answer-shape").and_then(|v| v.to_str().ok()).unwrap_or("(none)").to_string();
+    println!("      (transcribed: {} {}; Whisper's answer: {shape})", r.status, r.text.chars().take(200).collect::<String>());
+    let usage = |e: &Value| e["entry"]["end"]["usage"].clone();
+    let heard = |e: &Value| end_of(e) == "settled" && e["entry"]["end"]["basis"] == "usage" && usage(e)["kind"] == "neurons" && usage(e)["milli"].as_u64().is_some_and(|m| (1_400..=1_700).contains(&m));
+    let ended = |e: &Value| end_of(e) != "held";
+    s.eventually(Duration::from_secs(60), || entries(api, &owner_id, "aig:").iter().any(ended));
+    let aig = entries(api, &owner_id, "aig:");
+    for e in &aig {
+        println!("      (its settle: {} basis {} usage {} charge {})", end_of(e), e["entry"]["end"]["basis"], usage(e), e["entry"]["end"]["charge"]);
+    }
+    s.ok(
+        "the model route transcribes a memo on the deployment's Whisper, answered in OpenAI's shape and settled at the 2 s it heard, in neurons",
+        r.status == 200 && r.body["text"].is_string() && aig.len() == 1 && aig.iter().all(heard),
+        json!({ "status": r.status, "answer": r.text.chars().take(300).collect::<String>(), "shape": shape, "entries": aig }),
+    );
     Ok(())
 }
