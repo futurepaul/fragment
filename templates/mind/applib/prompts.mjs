@@ -1,8 +1,8 @@
 // The mind's prompts (docs/optchat.md, "Prompts"): COMPACT, MASTER,
 // VIEW_DOC and the subagent framing are OptChat's spec verbatim, with
 // "OptChat" replaced by "Mind", and MASTER's "Use subagents only when the
-// user asks for them." replaced by the web and the computer, as
-// docs/optchat.md says. Nothing here
+// user asks for them." replaced by the web, the user's apps and the
+// computer, as docs/optchat.md says. Nothing here
 // changes from turn to turn (no date, no state): the system prompt and the
 // tools are the head of every cached prefix (spec 7.2).
 
@@ -74,10 +74,12 @@ Check on the web what may have changed or what you are unsure of:
 web_search to find pages, web_fetch to read one, research for a
 question that needs several sources; say where what you found came
 from. Use computer for real computer work: files, code, running
-programs, and anything that needs the user's accounts. The computer
-has the fragment CLI and its skill: it makes and updates apps
-(fragments) for the user, so hand it any app they want made or
-changed. Answer everything else yourself.
+programs, and anything that needs the user's accounts. The user's
+apps (fragments) are yours to use directly, as the user: apps lists
+them and what each can do, app_ops shows an app's inputs, and app_call
+does it ("add milk to my todo", "what's on my board"). The computer
+has the fragment CLI and its skill: hand it only the making of an app
+or a change to an app's code. Answer everything else yourself.
 
 You keep no memory between turns. Each turn starts with the view below,
 followed by the user's new message. Summaries keep little of tool
@@ -167,9 +169,31 @@ export const TOOLS = {
     { question: { type: "string", description: "the question, whole, with what it is for" } },
     ["question"],
   ),
+  apps: tool(
+    "apps",
+    "The user's apps (fragments: small web apps, each with its own data), each with its address and what it can do: its operations, a line each (a query reads; a mutation or a job changes the app). Use one with app_call; app_ops shows an app's inputs.",
+    {},
+    [],
+  ),
+  app_ops: tool(
+    "app_ops",
+    "One of the user's apps in full: each of its operations' kind, what it does, and its input's JSON Schema. Read it before app_call when you are unsure what an operation takes.",
+    { fragment: { type: "string", description: "the app's name, as apps lists it (<label>.<username>)" } },
+    ["fragment"],
+  ),
+  app_call: tool(
+    "app_call",
+    "Use one of the user's apps, as the user: call one of its operations with its input. A query reads; a mutation or a job changes the app, once. Answers its result. To make an app or change its code, use computer.",
+    {
+      fragment: { type: "string", description: "the app's name, as apps lists it (<label>.<username>)" },
+      op: { type: "string", description: "the operation, as apps lists it" },
+      input: { type: "object", description: "the operation's input, as its schema says ({} for none)" },
+    },
+    ["fragment", "op"],
+  ),
   computer: tool(
     "computer",
-    "Hand a task to an agent on the user's computer. It has files, a shell, code tools and the internet, and the fragment CLI and its skill: it makes and updates the user's apps (fragments). " +
+    "Hand a task to an agent on the user's computer. It has files, a shell, code tools and the internet, and the fragment CLI and its skill: it makes the user's apps (fragments) and changes their code (to use an app, call app_call yourself). " +
       "It sees the view but not this turn, and gets the files attached to this turn's messages. " +
       "Say everything the task needs, and keep the user's own words about how to do it (a tool, a site, a method: \"use the browser\" stays \"use the browser\"); never suggest a method they did not ask for. " +
       'It answers "[id] started" at once; the report comes later as a message starting "[id] ".',

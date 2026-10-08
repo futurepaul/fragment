@@ -255,6 +255,7 @@
     { "channel": "compact", "run": "pump" }
   ],
   "storage": { "maxBytes": 1073741824 },
+  "capabilities": ["owner"],
   "meta": {
     "title": "Mind",
     "description": "One memory for every chat: say anything, start fresh whenever you like, and it remembers it all, sorts it into topics, and hands computer work to your agent."
