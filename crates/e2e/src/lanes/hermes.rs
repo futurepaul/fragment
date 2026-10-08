@@ -680,7 +680,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // seconds, and the lead's turn runs on, whole
     let maple_name = s.named(api, &owner, "maple")?;
     let maple = s.create(api, &owner, &maple_name)?;
-    s.commit(&maple, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n"))]);
+    s.commit(&maple, &[("fragment.json", Some(AGENT_JSON)), ("SOUL.md", Some(b"You are Maple, who tends the trees.\n")), ("agent.json", Some(br#"{"tier":"medium"}"#))]);
     s.deploy(&maple);
     let grove_name = s.named(api, &owner, "grove")?;
     let grove = s.create(api, &owner, &grove_name)?;

@@ -297,7 +297,7 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
     let (text, tool) = answer(&v);
-    let model = v["model"].as_str().unwrap_or("medium").to_string();
+    let model = v["model"].as_str().unwrap_or("cheap").to_string();
     let usage = json!({ "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 });
     let finish = if tool.is_some() { "tool_calls" } else { "stop" };
     if !stream {

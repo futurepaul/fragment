@@ -1051,7 +1051,8 @@ charged (none when nothing was).
 ### Models (docs/cloudflare-v1.md, decision 23)
 
 One OpenAI-shaped chat completion on a tier's model, metered on its
-payer's ledger (cell/src/models.rs). Tiers: `cheap` (GLM-5.3 Flash,
+payer's ledger (cell/src/models.rs). Tiers: `cheap` (the default for
+agents and calls naming no tier; GLM-5.3 Flash,
 `@cf/zai-org/glm-5.3-flash`) and `medium` (GLM-5.3, `@cf/zai-org/glm-5.3`),
 both on Workers AI through the deployment's AI Gateway (Unified Billing,
 its logs off, its metadata opaque ids: the first 16 hex of SHA-256 of the

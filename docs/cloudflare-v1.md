@@ -374,6 +374,10 @@ speaking Cloudflare's APIs) returns once this product works.
     5.5 (high). The computer's model intercept adds the gateway credential
     and reads usage for the ledger.
 
+    **Agents default to cheap, GLM-5.3 Flash** (Paul, 2026-10-08), both
+    when the shell makes one and when its profile names no tier. Medium
+    stays selectable in `agent.json`.
+
     **The high tier stays off until Cloudflare raises Unified Billing's
     Opus limit** (about 2 calls a minute per edge machine; spike S4).
     Until then GLM-5.3 is the top tier. Paul, 2026-10-02: no BYOK and no

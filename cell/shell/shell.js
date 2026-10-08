@@ -17,6 +17,8 @@ import { createViewer } from "./viewer.js";
 import { LUCIDE_ICON } from "./lucide-icons.js";
 
 const $ = (id) => document.getElementById(id);
+// New agents run on GLM-5.3 Flash (Paul, 2026-10-08).
+const DEFAULT_AGENT_TIER = "cheap";
 const ICON = {
   rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
   invite: '<circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0M19 8v6M16 11h6"/>',
@@ -694,7 +696,7 @@ async function makeAgent(job, chosen) {
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-job",
     message: "its job",
-    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
   const chat = await api("POST", "/api/fragments", { name: `${label}-chat`, template: "chat", title: name });
@@ -1610,7 +1612,7 @@ async function defaultAgent(step) {
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-default",
     message: "the default agent",
-    files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: "medium", color: colorOf(id) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
   const chatName = `${labelOf(agent.name)}-chat.${username}`;
