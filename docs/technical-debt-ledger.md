@@ -14,7 +14,7 @@ fragment.club until cutover (decisions 34–35).
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
-  No index names every fragment under a username: a wipe finds the ones a
+  No index names every fragment a person owns: a wipe finds the ones a
   person owns on their and their agents' lists (each fragment's own
   outbox delivers its rows) and the agent fragments the registry names.
 - **Risk:** a fragment whose create its owner's list never took (the
@@ -23,7 +23,7 @@ fragment.club until cutover (decisions 34–35).
   wiped, a late delivery is taken and kept nowhere.
 - **First proof:** a wiped person's fragment answering after their wipe
   said nothing was left.
-- **Delete when:** the registry (or a per-username index) records each
+- **Delete when:** the registry (or a per-person index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
 ## The browser half of web push is not driven by a test
@@ -291,7 +291,7 @@ fragment.club until cutover (decisions 34–35).
   chat away; then, if still near the line, sessions and keys move to
   objects named by what they resolve (a session by its token's hash, a
   key by itself), written by the registry as they change, which keeps
-  only what must be unique (usernames, sign-in subjects, identities).
+  only what must be unique (emails, sign-in subjects, identities).
   Each lookup stays one live round trip: no cache outlives a revocation
   (rule 7).
 

@@ -393,7 +393,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, url: &Url, after: &dyn Ba
         None => None,
         Some(name) => {
             if !valid_fragment_name(name) {
-                return Err(CellError::invalid("`fragment` is a fragment's name, <label>.<username>"));
+                return Err(CellError::invalid("`fragment` is a fragment's name, <label>--<suffix>"));
             }
             let ask = routed::internal_request("meter/whose", &json!({ "principal": agent.id }).to_string())?;
             let mut answer = env.durable_object("FRAGMENT")?.get_by_name(name)?.fetch_with_request(ask).await?;

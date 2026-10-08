@@ -10,7 +10,7 @@
 //! template and holds only its face and data. A person's list says what
 //! each fragment is (its kind) and its title.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::api::{Api, Call, Reply, Socket};
@@ -36,6 +36,20 @@ pub(super) fn shell(api: &Api, session: &str, method: &'static str, path: &str, 
     })
 }
 
+/// A fragment's label: its name before its random suffix.
+fn label_of(name: &str) -> &str {
+    fragment_proto::split_fragment_name(name).map_or("", |(label, _)| label)
+}
+
+/// The person's own fragment labelled `label` (the shell names what it
+/// makes from a label, with a random suffix), from their list.
+fn own_named(api: &Api, session: &str, label: &str) -> Result<String> {
+    let r = shell(api, session, "GET", "/api/fragments", None, &[])?;
+    let list = r.body["fragments"].as_array().cloned().unwrap_or_default();
+    let found = list.iter().find_map(|f| f["name"].as_str().filter(|n| f["role"] == "owner" && label_of(n) == label));
+    found.map(str::to_string).with_context(|| format!("no fragment of theirs labelled {label}: {r}"))
+}
+
 pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("shell", &[crate::Need::Fakes]) {
         return Ok(());
@@ -47,16 +61,14 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[])?;
     let id = r.body["id"].as_str().unwrap_or("").to_string();
     s.ok("the shell's page reads the API as its signed-in person, with no key", r.status == 200 && r.body["kind"] == "person", &r);
-    let username = format!("sh{}", &id.trim_start_matches("npub1")[..8]);
-    let r = shell(api, &session, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })), &[])?;
-    s.ok("and chooses its username", r.status == 200 && r.body["username"] == username.as_str(), &r);
+    s.ok("someone new is someone at once: their own npub, and their email", fragment_core::npub::is_identity(&id) && r.body["email"] == email.as_str(), &r);
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[("x-fragment-shell", String::new())])?;
     s.ok("a request without the shell's header is no one's (401)", r.status == 401, &r);
     let r = shell(api, &session, "GET", "/api/identities/me", None, &[("sec-fetch-site", "same-site".into())])?;
     s.ok("nor one from another origin of the site, a fragment's page (401)", r.status == 401, &r);
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "nope" })), &[("origin", String::new())])?;
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "nope" })), &[("origin", String::new())])?;
     s.ok("nor a write without the platform's Origin (401)", r.status == 401, &r);
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "nope" })), &[("origin", api.site_origin(&format!("x.{username}")))])?;
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "nope" })), &[("origin", api.site_origin("x--k3x9"))])?;
     s.ok("nor a write from a fragment's origin (401)", r.status == 401, &r);
     let r = shell(api, "f".repeat(64).as_str(), "GET", "/api/identities/me", None, &[])?;
     s.ok("a session that is not one is refused (401)", r.status == 401, &r);
@@ -64,9 +76,9 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a key is added only by a key you hold, never the shell's session", r.status == 401, &r);
 
     // a chat and an agent, on blessed templates
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "juniper", "template": "agent", "title": "Juniper" })), &[])?;
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "juniper", "template": "agent", "title": "Juniper" })), &[])?;
     let agent = r.body["name"].as_str().unwrap_or("").to_string();
-    s.ok("the shell makes an agent fragment on the agent template", r.status == 200 && agent == format!("juniper.{username}"), &r);
+    s.ok("the shell makes an agent fragment on the agent template, named from its label", r.status == 200 && label_of(&agent) == "juniper", &r);
     let landed = s.eventually(std::time::Duration::from_secs(30), || {
         shell(api, &session, "GET", "/api/fragments", None, &[]).is_ok_and(|r| {
             r.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"] == agent.as_str() && f["kind"] == "agent" && f["title"] == "Juniper"))
@@ -154,13 +166,13 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a provider the deployment does not offer is none to connect (404)", r.status == 404, &r);
 
     // a template that is not blessed is copied, and its kind is what it says
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "garden", "template": "todo", "title": "x" })), &[])?;
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "garden", "template": "todo", "title": "x" })), &[])?;
     s.ok("a title is a blessed template's alone", r.status == 400, &r);
-    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": "lab", "template": "nope" })), &[])?;
+    let r = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": "lab", "template": "nope" })), &[])?;
     s.ok("a template that is none is refused, naming the blessed ones", r.status == 400 && r.text.contains("agent"), &r);
-    search_and_archive(s, api, &session, &username)?;
+    search_and_archive(s, api, &session)?;
     search_follows_reading(s, api)?;
-    list_watch(s, api, &session, &username, &id)
+    list_watch(s, api, &session, &id)
 }
 
 /// A watch socket of a person's list, past its `hello`; or why not (the
@@ -188,7 +200,7 @@ fn told(w: &mut Result<Socket, String>) -> Value {
 /// Invalid: the session from any other page (no Origin, a fragment's), no
 /// one, or no upgrade. Its frame names nothing. Past the most sockets a
 /// list holds, one more is refused (429).
-fn list_watch(s: &mut Suite, api: &Api, session: &str, username: &str, id: &str) -> Result<()> {
+fn list_watch(s: &mut Suite, api: &Api, session: &str, id: &str) -> Result<()> {
     let url = format!("{}/api/fragments/watch", api.base);
     let cookie = format!("fragment_session={session}");
     let page = |origin: Option<&str>| Socket::connect(api, &url, None, Some(&cookie), origin).map(|(socket, _)| socket);
@@ -196,7 +208,7 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, username: &str, id: &str)
     let mut tab = watching(page(Some(&api.base)));
     let mut second = watching(page(Some(&api.base)));
     s.ok("the shell's page watches the person's list: a socket with its session, from the platform's own page", tab.is_ok() && second.is_ok(), json!([tab.as_ref().err(), second.as_ref().err()]));
-    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "name": "watched" })), &[])?;
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "watched" })), &[])?;
     let made = r.body["name"].as_str().unwrap_or("").to_string();
     let (one, two) = (told(&mut tab), told(&mut second));
     s.ok("a fragment made is told to it at once, and to a second tab's, naming nothing", r.status == 200 && one == changed && two == changed, json!([r.status, one, two]));
@@ -227,7 +239,7 @@ fn list_watch(s: &mut Suite, api: &Api, session: &str, username: &str, id: &str)
     let refused = |socket: Result<Socket>| watching(socket).err().unwrap_or_else(|| "opened".into());
     let unnamed = refused(page(None));
     s.ok("the session from an upgrade that names no page is no one's (401)", unnamed.contains("401"), &unnamed);
-    let fragment = refused(page(Some(&api.site_origin(&format!("x.{username}")))));
+    let fragment = refused(page(Some(&api.site_origin("x--k3x9"))));
     s.ok("nor from a fragment's page, one site with the platform (401)", fragment.contains("401"), &fragment);
     let nobody = refused(Socket::connect(api, &url, None, None, Some(&api.base)).map(|(socket, _)| socket));
     s.ok("and no one watches no list (401)", nobody.contains("401"), &nobody);
@@ -275,10 +287,10 @@ fn query(q: &str) -> String {
 /// projection (lesson 12). Method: three people (the shell's person, a
 /// member who is removed and comes back, and an outsider with a chat of
 /// their own), each asking their own list through the API.
-fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -> Result<()> {
-    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "name": "garden-talk", "template": "chat", "title": "Garden talk" })), &[])?;
+fn search_and_archive(s: &mut Suite, api: &Api, session: &str) -> Result<()> {
+    let r = shell(api, session, "POST", "/api/fragments", Some(&json!({ "label": "garden-talk", "template": "chat", "title": "Garden talk" })), &[])?;
     let chat = r.body["name"].as_str().unwrap_or("").to_string();
-    anyhow::ensure!(r.status == 200 && chat == format!("garden-talk.{username}"), "making the chat: {r}");
+    anyhow::ensure!(r.status == 200 && label_of(&chat) == "garden-talk", "making the chat: {r}");
     let said = "Our tomatoes need water every Tuesday";
     let post = |id: &str, channel: &str, body: Value| shell(api, session, "POST", &format!("/api/f/{chat}/channels/{channel}"), Some(&json!({ "id": id, "body": body })), &[]);
     // the template's channels are the chat's as soon as it installs
@@ -428,11 +440,10 @@ fn search_and_archive(s: &mut Suite, api: &Api, session: &str, username: &str) -
         json!({ "mine": archived(&mine, &chat), "member's": archived(&member_list, &chat) }),
     );
     let r = archive("garden-talk", json!({ "archived": true }))?;
-    let undone = archive("garden-talk", json!({ "archived": false }))?;
-    s.ok("a bare label names the person's own", r.status == 200 && r.body["name"] == chat.as_str() && undone.status == 200, &r);
+    s.ok("a bare label names nothing here (404): a fragment is named in full", r.status == 404 && r.message().contains("in full"), &r);
     let r = archive(&own, json!({ "archived": true }))?;
     s.ok("a fragment they are not in is none of theirs to archive (404)", r.status == 404, &r);
-    let r = archive(&format!("nothing-here.{username}"), json!({ "archived": true }))?;
+    let r = archive("nothing-here--k3x9", json!({ "archived": true }))?;
     s.ok("nor one that does not exist (404)", r.status == 404, &r);
     let r = archive("Not A Name", json!({ "archived": true }))?;
     s.ok("a name that is none is refused (400)", r.status == 400, &r);
@@ -518,7 +529,7 @@ fn fill(selector: &str, value: &str) -> String {
 }
 
 /// The shell in a browser (phase 5's exit, at desktop and phone sizes):
-/// first run (a username, the first agent), the agent's chat framed and
+/// first run (the first agent), the agent's chat framed and
 /// signed in on its own origin with the agent's answer in it, a second
 /// agent, an app's window, settings (at `/settings`, which the address
 /// keeps), and the phone's layout. The agents run on the stub image
@@ -546,15 +557,10 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     let page = b.open(&format!("{}/", api.base))?;
     b.viewport(&page, 1280, 800, false)?;
 
-    // first run: a username, then the default agent, made while the shell
-    // waits with no question asked (Paul, 2026-10-03)
-    let asked = b.until(&page, "document.querySelector('#first-run-card input[name=username]')", wait);
-    s.ok("signed in with no username, the shell asks for one", asked, "");
-    let username = format!("ui{}", &crate::api::now_s().to_string()[4..]);
-    b.eval(&page, &fill("#first-run-card input[name=username]", &username))?;
-    b.eval(&page, "document.querySelector('#first-run-card form').requestSubmit()")?;
+    // first run: the default agent, made while the shell waits with no
+    // question asked (Paul, 2026-10-03), and nothing to choose before it
     let creating = b.until(&page, "document.querySelector('#first-run-card .creating-steps')", wait);
-    s.ok("then the shell makes their default agent, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
+    s.ok("signed in, the shell makes their default agent at once, asking nothing, and says so", creating, b.eval(&page, "document.getElementById('first-run-card').innerText.slice(0, 200)")?);
     let _ = b.screenshot(&page, &shots.join("creating.png"));
     let opened = b.until(&page, "!document.getElementById('layout').hidden && document.querySelectorAll('#chats .agent-row').length === 1 && document.querySelector('#frames iframe')", agent_wait);
     let row = b.eval(&page, "document.querySelector('#chats .agent-row .label')?.textContent")?;
@@ -567,8 +573,8 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // is labelled starfire-40k, so it is read, never guessed
     let key = b.eval(&page, "document.querySelector('#chats .agent-row')?.dataset.key ?? ''")?;
     let chat = key.as_str().and_then(|k| k.strip_prefix("chat:")).unwrap_or("").to_string();
-    let first_label = chat.split('.').next().unwrap_or("").trim_end_matches("-chat").to_string();
-    let host = fragment_proto::flat_name(&chat).unwrap_or_default();
+    let first_label = label_of(&chat).trim_end_matches("-chat").to_string();
+    let host = chat.clone();
     // ready is ready: its computer awake, and the agent following its chat
     let computers = shell(api, &session, "GET", "/api/computers", None, &[])?;
     let subs = shell(api, &session, "GET", &format!("/api/f/{chat}/subscriptions"), None, &[])?;
@@ -614,7 +620,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
 
     // both agents in one chat, search, and archiving, as the person uses them
     let first_title = row.as_str().unwrap_or("").to_string();
-    let me = Person { session: &session, username: &username, first: &first_label, first_title: &first_title };
+    let me = Person { session: &session, first: &first_label, first_title: &first_title };
     groups_ui(s, api, &mut b, &page, &me, &shots)?;
     // the person's agents in any chat's @, and one asking another
     roster_ui(s, api, &mut b, &page, &me, &shots)?;
@@ -659,7 +665,6 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "settings, at /settings: the account (who they are, their identity, another sign-in, signing out), credit, computer, connections, and the CLI",
         settings
-            && text.contains(&format!("@{username}"))
             && text.contains(&email)
             && text.contains(&id)
             && has("#settings-page a[href='/auth/link?return=%2Fsettings']")
@@ -703,7 +708,7 @@ pub fn shell_ui(s: &mut Suite, api: &Api) -> Result<()> {
     // and the picture waits for it; the frame the shell shows names its
     // fragment (`data-fragment`), whose flat host its page is on
     let open = b.eval(&page, "[...document.querySelectorAll('#frames iframe')].find((f) => !f.hidden)?.dataset.fragment ?? null")?;
-    let host = open.as_str().and_then(fragment_proto::flat_name).unwrap_or_default();
+    let host = open.as_str().unwrap_or_default().to_string();
     let names = |p: &Value| p.as_str().is_some_and(|p| p.len() > "Message ".len() && p.starts_with("Message "));
     let t0 = std::time::Instant::now();
     let mut placeholder = Value::Null;
@@ -840,7 +845,7 @@ fn sidebar_live(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session:
     let as_agent = |method: &str, path: &str, body: Value| api.signed(&agent, method, &format!("{path}?for={me}"), Some(&body));
     // the first tab is the one the person looks at
     b.front(page)?;
-    let made = as_agent("POST", "/api/fragments", json!({ "name": "meals", "template": "blank" }))?;
+    let made = as_agent("POST", "/api/fragments", json!({ "label": "meals", "template": "blank" }))?;
     let t0 = std::time::Instant::now();
     let name = made.body["name"].as_str().unwrap_or("").to_string();
     let first = b.until(page, &row(&name), SIDEBAR_LIVE_WAIT);
@@ -995,11 +1000,10 @@ fn skills_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     Ok(())
 }
 
-/// The shell's person in its browser lane: their platform session, their
-/// username, and their first agent's label (its fragment's, as the sidebar holds it).
+/// The shell's person in its browser lane: their platform session, and
+/// their first agent's label (its fragment's, as the sidebar holds it).
 struct Person<'a> {
     session: &'a str,
-    username: &'a str,
     first: &'a str,
     /// Its title, as the shell shows it ("Novatron DX").
     first_title: &'a str,
@@ -1047,7 +1051,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let agent_wait = std::time::Duration::from_secs(120);
     let r = shell(api, me.session, "GET", "/api/computers", None, &[])?;
     let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
-    let id_of = |label: &str| agents.iter().find(|a| a["fragment"] == format!("{label}.{}", me.username).as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
+    let id_of = |label: &str| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(label)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
     let first_label = me.first;
     let (lead, other) = (id_of("reader"), id_of(first_label));
     anyhow::ensure!(fragment_core::npub::is_identity(&lead) && fragment_core::npub::is_identity(&other), "the two agents' identities: {r}");
@@ -1106,7 +1110,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     say("g3", "hello both of you")?;
     let answered = s.eventually(agent_wait, || replies(api, me.session, &group, &lead, "hello both of you") == 1);
     s.ok("a message that @mentions no one, the lead answers", answered && replies(api, me.session, &group, &other, "hello both of you") == 0, "");
-    let host = fragment_proto::flat_name(&group).unwrap_or_default();
+    let host = group.clone();
     let shown = s.eventually(wait, || {
         b.eval_in_frame(page, &host, "document.body.innerText").ok().and_then(|v| v.as_str().map(|t| t.matches("echo:").count() >= 3 && t.contains("are you there") && t.contains("and you"))).unwrap_or(false)
     });
@@ -1116,7 +1120,8 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     // each agent's own screen (its own desktop): from the group's menu the
     // person picks whose, and its frame lands on the computer's screen port
     // at `?agent=<that agent>`, the image's to read (the platform carries it)
-    let (reader, first) = (format!("reader.{}", me.username), format!("{first_label}.{}", me.username));
+    let fragment_of = |label: &str| agents.iter().find_map(|a| a["fragment"].as_str().filter(|f| label_of(f) == label)).unwrap_or("").to_string();
+    let (reader, first) = (fragment_of("reader"), fragment_of(first_label));
     b.click(page, "#agent-heading")?;
     let items = b.eval(page, "[...document.querySelectorAll('#menu button')].map((b) => b.textContent)")?;
     let mine = format!("{}'s screen", me.first_title);
@@ -1128,7 +1133,7 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("picking one opens that agent's screen: its frame lands on the computer's screen port at ?agent=<that agent>", landed, &frames);
 
     // search: a message's words, and clicking one opens its chat
-    let first_chat = format!("{first_label}-chat.{}", me.username);
+    let first_chat = own_named(api, me.session, &format!("{first_label}-chat"))?;
     b.click(page, "#search-agents")?;
     b.eval(page, &fill("#workspace-search", "water garden"))?;
     let hit = format!("#search-results .search-message[data-fragment={}]", js(&first_chat));
@@ -1164,17 +1169,17 @@ fn groups_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     s.ok("Unarchive, from its menu, brings it back", unarchived && back, "");
 
     // the phone's picture below is of the Reader's chat
-    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:reader-chat.{}", me.username))))?;
+    b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{}", own_named(api, me.session, "reader-chat")?))))?;
     Ok(())
 }
 
 /// The person's agents (the computer's), by fragment label: their identities.
-fn agent_ids(api: &Api, session: &str, username: &str, labels: &[&str]) -> Result<Vec<String>> {
+fn agent_ids(api: &Api, session: &str, labels: &[&str]) -> Result<Vec<String>> {
     let r = shell(api, session, "GET", "/api/computers", None, &[])?;
     let agents = r.body["computers"][0]["agents"].as_array().cloned().unwrap_or_default();
     let ids: Vec<String> = labels
         .iter()
-        .map(|l| agents.iter().find(|a| a["fragment"] == format!("{l}.{username}").as_str()).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
+        .map(|l| agents.iter().find(|a| a["fragment"].as_str().map(label_of) == Some(*l)).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string())
         .collect();
     anyhow::ensure!(ids.iter().all(|i| fragment_core::npub::is_identity(i)), "the agents' identities: {r}");
     Ok(ids)
@@ -1213,10 +1218,10 @@ fn mentions_until(s: &Suite, b: &mut Browser, page: &Page, host: &str, typed: &s
 fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person, shots: &std::path::Path) -> Result<()> {
     let wait = std::time::Duration::from_secs(30);
     let agent_wait = std::time::Duration::from_secs(120);
-    let ids = agent_ids(api, me.session, me.username, &["reader", me.first])?;
+    let ids = agent_ids(api, me.session, &["reader", me.first])?;
     let (reader, first) = (ids[0].clone(), ids[1].clone());
-    let chat = format!("reader-chat.{}", me.username);
-    let host = fragment_proto::flat_name(&chat).unwrap_or_default();
+    let chat = own_named(api, me.session, "reader-chat")?;
+    let host = chat.clone();
     b.click(page, &format!("#chats [data-key={}]", js(&format!("chat:{chat}"))))?;
     let want = json!([{ "agent": reader, "outside": false }, { "agent": first, "outside": true }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
@@ -1322,7 +1327,7 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     let row = format!("#chats [data-key={}]", js(&format!("chat:{theirs}")));
     let there = b.until(page, &format!("document.querySelector({})", js(&row)), wait);
     b.click(page, &row)?;
-    let host = fragment_proto::flat_name(&theirs).unwrap_or_default();
+    let host = theirs.clone();
     let want = json!([{ "agent": first, "outside": false }]);
     let listed = mentions_until(s, b, page, &host, "@", &want, wait);
     // the roster would have come by now (it is asked as the page mounts)
@@ -1349,7 +1354,7 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
     let config = home.join(if cfg!(target_os = "macos") { "Library/Application Support" } else { ".config" }).join("fragment");
     std::fs::create_dir_all(&config)?;
     std::fs::write(config.join("config.json"), json!({ "secret_key": keys.secret_hex() }).to_string())?;
-    let ids = agent_ids(api, me.session, me.username, &["reader"])?;
+    let ids = agent_ids(api, me.session, &["reader"])?;
     let reader = ids[0].clone();
     let said = "hello from the cli";
     let args = ["ask", "reader", said, "--wait", "60", "--id", "ask-e2e-1", "--json"];
@@ -1357,7 +1362,7 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
     let answer = |r: &Value| r["answer"]["replies"].as_array().into_iter().flatten().filter_map(|x| x["text"].as_str()).collect::<Vec<_>>().join("\n");
     s.ok(
         "fragment ask, as a person: their direct chat with the agent, the question to it, its answer waited for",
-        r["chat"] == format!("reader-chat.{}", me.username).as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
+        r["chat"] == own_named(api, me.session, "reader-chat")?.as_str() && r["asked"]["identity"] == reader.as_str() && r["record"]["body"]["to"] == json!([reader]) && r["answer"]["outcome"] == "idle" && answer(&r).contains(said) && answer(&r).starts_with("echo:"),
         &r,
     );
     let again = s.cli_json(api, &home, &args)?;
@@ -1366,7 +1371,7 @@ fn ask_cli(s: &mut Suite, api: &Api, me: &Person) -> Result<()> {
         again["replayed"] == true && again["record"]["seq"] == r["record"]["seq"] && again["answer"]["turn"] == r["answer"]["turn"] && !again["answer"]["turn"].is_null(),
         &again,
     );
-    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "name": "ask-here", "template": "chat", "title": "Ask here" })), &[])?;
+    let made = shell(api, me.session, "POST", "/api/fragments", Some(&json!({ "label": "ask-here", "template": "chat", "title": "Ask here" })), &[])?;
     let here = made.body["name"].as_str().unwrap_or("").to_string();
     let r = s.cli_json(api, &home, &["ask", "reader", "and here?", "--chat", &here, "--wait", "60", "--json"])?;
     s.ok(

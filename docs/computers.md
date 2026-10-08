@@ -607,7 +607,7 @@ settings and state):
   against it.
 - `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
   bridge as Hermes' Relay connector, the screen. One Hermes
-  profile per agent (`juniper.paul` is `juniper-paul`), its agent
+  profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
   session's turn, a compression) before the gateway takes a turn: a
@@ -805,7 +805,7 @@ and how a runtime finds them, is the image's.
   the platform release's managed set as its files (templates/skills/README.md),
   beneath any file of its own. `hermes-boot` finds it as the computer's
   first agent acting for the computer's owner (`GET /api/fragments?for=`:
-  of kind `skills`, named under the owner's username, `skills.<username>`
+  of kind `skills` the owner owns (the `?for=` list's `owned`), one labelled `skills`
   first), lists it (`GET /api/f/{skills}/files?for=`) and fetches what is
   new or changed (`…/file?path=&for=`, eight at once), each file by its
   listed version. It installs them read-only (the boot's, mode 0644) at

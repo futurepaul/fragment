@@ -12,7 +12,7 @@ pub fn valid_computer_id(id: &str) -> bool {
 
 /// A computer's host label under the fragments' suffix: its own origin,
 /// cross-site from the platform, for its ports (`<24 hex>--computer`;
-/// `computer` is a reserved username, so no fragment's host is one).
+/// no fragment's name has `--`, so no fragment's host is one).
 pub fn computer_label(id: &str) -> Option<String> {
     valid_computer_id(id).then(|| format!("{}--computer", &id["computer:".len()..]))
 }
@@ -40,7 +40,7 @@ pub enum ComputerPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerAgent {
-    /// The agent fragment's name (`<label>.<username>`).
+    /// The agent fragment's name (`<label>--<suffix>`).
     pub fragment: String,
     /// The agent's identity (its fragment's npub): it acts as this.
     pub identity: String,
@@ -348,9 +348,9 @@ mod tests {
         for bad in ["computer:", "computer:0123456789ABCDEF01234567", "computer:0123", "id:0123456789abcdef01234567"] {
             assert!(!valid_computer_id(bad), "{bad}");
         }
-        assert_eq!(computer_of_label("todo--paul"), None);
-        // a computer's label is never a fragment's host: `computer` is reserved
-        assert_eq!(crate::from_flat_name("0123456789abcdef01234567--computer"), None);
+        assert_eq!(computer_of_label("todo--k3x9"), None);
+        // a computer's label is never a fragment's name: a name has no `--`
+        assert!(!crate::valid_fragment_name("0123456789abcdef01234567--computer"));
     }
 
     /// Goal: an agent's connections are every one its owner has unless a

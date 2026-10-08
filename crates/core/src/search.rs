@@ -109,14 +109,14 @@ impl Query {
         Some(fts)
     }
 
-    /// Whether a fragment's title or label (its name before the username,
-    /// which every one of a person's own fragments shares) holds every
-    /// word, ignoring case. An empty query matches nothing.
+    /// Whether a fragment's title or label (its name before the random
+    /// suffix) holds every word, ignoring case. An empty query matches
+    /// nothing.
     pub fn names(&self, name: &str, title: Option<&str>) -> bool {
         if self.words.is_empty() {
             return false;
         }
-        let label = name.split('.').next().unwrap_or(name);
+        let label = fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label);
         let haystack = format!("{} {label}", title.unwrap_or("")).to_lowercase();
         self.words.iter().all(|w| haystack.contains(w.as_str()))
     }
@@ -218,16 +218,16 @@ mod tests {
         assert!(Query::parse(&format!("{} * * *", words(limits::SEARCH_QUERY_WORDS_MAX))).is_ok());
     }
 
-    /// Goal: a fragment's title or label match every word, not its
-    /// owner's username. Method: names and titles against queries.
+    /// Goal: a fragment's title or label match every word, not its name's
+    /// random suffix. Method: names and titles against queries.
     #[test]
     fn names_match_title_or_label() {
         let q = |q: &str| Query::parse(q).unwrap();
-        assert!(q("garden").names("garden-chat.ann", None));
-        assert!(q("Garden Crew").names("group.ann", Some("The garden crew")));
-        assert!(q("crew grou").names("group.ann", Some("The garden crew")));
-        assert!(!q("garden zucchini").names("group.ann", Some("The garden crew")));
-        assert!(!q("ann").names("group.ann", Some("The garden crew")));
-        assert!(!q("").names("group.ann", Some("anything")));
+        assert!(q("garden").names("garden-chat--k3x9", None));
+        assert!(q("Garden Crew").names("group--k3x9", Some("The garden crew")));
+        assert!(q("crew grou").names("group--k3x9", Some("The garden crew")));
+        assert!(!q("garden zucchini").names("group--k3x9", Some("The garden crew")));
+        assert!(!q("k3x9").names("group--k3x9", Some("The garden crew")));
+        assert!(!q("").names("group--k3x9", Some("anything")));
     }
 }

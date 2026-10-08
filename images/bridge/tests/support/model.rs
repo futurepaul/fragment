@@ -235,8 +235,8 @@ fn answers_are_the_transcripts() {
     // `run:` runs its command, and the answer quotes what it printed
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list --json" }], "tools": tools }));
     assert!(call.is_some_and(|c| c["function"]["arguments"].as_str().unwrap().contains("fragment list --json")));
-    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "skills.paul (editor)" }], "tools": tools }));
-    assert_eq!(t, "scripted: the tool said: skills.paul (editor)");
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] run: fragment list" }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "skills--k3x9 (editor)" }], "tools": tools }));
+    assert_eq!(t, "scripted: the tool said: skills--k3x9 (editor)");
     // the browser, and computer_use directly or behind Hermes' tool_search
     let browser = json!([{ "type": "function", "function": { "name": "browser_navigate" } }]);
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "[paul] browse: https://example.com" }], "tools": browser }));

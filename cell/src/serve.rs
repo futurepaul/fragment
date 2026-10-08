@@ -200,10 +200,17 @@ impl FragmentCell {
             };
             json_response(&answer)?
         } else if path == "__people" {
-            // names for a page: a person's username and picture, or whose agent
+            // names for a page: a person's picture, and their email to a
+            // member asking of a member (decision 48), or that it is an agent
             self.reader(&mut facts, caller, link, Role::Public).await?;
             let ids: Vec<String> = url.query_pairs().filter(|(k, _)| k == "id").map(|(_, v)| v.into_owned()).collect();
-            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids }).await?;
+            // who asks decides the emails: resolved, though the page is anyone's
+            let asker = self.identified(caller, &facts.name).await?;
+            let emails_of = match asker.principal() {
+                Some(p) if self.member_role(p)?.is_some() => self.members_among(&ids)?,
+                _ => vec![],
+            };
+            let mut answer = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids, emails_of }).await?;
             let platform = self.cfg.platform();
             // bounded: the registry answers at most 64 profiles
             for p in answer.profiles.values_mut() {

@@ -227,7 +227,7 @@ async fn the_hermes_image() {
     eprintln!("hermes: built in {:.1} s, {} MB", built.as_secs_f64(), size(&tag) / 1_000_000);
     let fake = Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
-        let f = w.fragments.get_mut("juniper.paul").unwrap();
+        let f = w.fragments.get_mut("juniper--k3x9").unwrap();
         f.files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Juniper, a careful gardener.\n"));
         f.files.insert("memories/MEMORY.md".into(), bytes::Bytes::from_static(b"Paul likes tomatoes.\n"));
         f.files.insert("agent.json".into(), bytes::Bytes::from_static(br#"{"tier":"cheap"}"#));
@@ -259,7 +259,7 @@ async fn the_hermes_image() {
 
     // Ready means Hermes answers: the first message waits for its gateway.
     let first = fake.say(&chat, &person("paul"), json!({ "text": "hello hermes" }));
-    let t1 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    let t1 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", first["seq"].as_u64().unwrap());
     let asked = Instant::now();
     let answered = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn);
     let replied = tokio::time::timeout(Duration::from_secs(180), fake.until(600_000, "Hermes' reply", |w| answered(w, &t1).is_some()));
@@ -286,7 +286,7 @@ async fn the_hermes_image() {
         // and Hermes falls back to its configured context length.
         let calls: Vec<_> = model.calls.lock().unwrap().iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect();
         assert!(!calls.is_empty());
-        assert!(calls.iter().all(|c| c.agent.as_deref() == Some("juniper.paul")), "every model call names its agent: {calls:?}");
+        assert!(calls.iter().all(|c| c.agent.as_deref() == Some("juniper--k3x9")), "every model call names its agent: {calls:?}");
         assert!(calls.iter().any(|c| c.model == "cheap"), "the agent's tier from agent.json: {calls:?}");
     }
     // The screen: its viewer page, noVNC, and the socket's refusal of a
@@ -294,15 +294,15 @@ async fn the_hermes_image() {
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
     assert!(c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/novnc/core/rfb.js"]));
     assert!(!c.exec(&["curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:6080/websockify"]));
-    assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper-paul/SOUL.md"]), "the agent's repo is in its profile");
+    assert!(c.exec(&["test", "-f", "/data/hermes/profiles/juniper--k3x9/SOUL.md"]), "the agent's repo is in its profile");
     // the seam (step 2 of docs/durable-computers.md): its work is its own
-    assert!(c.exec(&["test", "-d", "/data/work/juniper-paul/browser-profile"]), "its work directory, with its browser's profile");
-    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile", "Hermes' browser profile is a link into its work");
-    assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper-paul/SOUL.md"]));
+    assert!(c.exec(&["test", "-d", "/data/work/juniper--k3x9/browser-profile"]), "its work directory, with its browser's profile");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper--k3x9/bot-desktop/browser-profile"]).trim(), "/data/work/juniper--k3x9/browser-profile", "Hermes' browser profile is a link into its work");
+    assert!(c.exec(&["grep", "-q", "Juniper", "/data/hermes/profiles/juniper--k3x9/SOUL.md"]));
     // What Hermes writes in its profile is committed back to the agent's
     // fragment, as the agent.
-    assert!(c.exec(&["sh", "-c", "printf 'Paul likes tomatoes.\\nAnd basil.\\n' > /data/hermes/profiles/juniper-paul/memories/MEMORY.md"]));
-    fake.until(30_000, "the memory committed back", |w| w.fragments["juniper.paul"].files.get("memories/MEMORY.md").is_some_and(|b| b.as_ref() == b"Paul likes tomatoes.\nAnd basil.\n")).await;
+    assert!(c.exec(&["sh", "-c", "printf 'Paul likes tomatoes.\\nAnd basil.\\n' > /data/hermes/profiles/juniper--k3x9/memories/MEMORY.md"]));
+    fake.until(30_000, "the memory committed back", |w| w.fragments["juniper--k3x9"].files.get("memories/MEMORY.md").is_some_and(|b| b.as_ref() == b"Paul likes tomatoes.\nAnd basil.\n")).await;
 
     // The managed skills (decision 17): paul's skills fragment's `skills/`,
     // installed read-only where every profile looks after its own, read as
@@ -318,18 +318,18 @@ async fn the_hermes_image() {
     assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "true"]), "a command runs as Hermes' user");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo x > {managed}/research/arxiv-finite/SKILL.md")]), "the managed set is read-only to the agents");
     fake.with(|w| {
-        let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills.paul/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
-        assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=npub1paul") && r.2.as_deref() == Some("juniper.paul") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
+        let reads: Vec<_> = w.requests.iter().filter(|r| r.0.starts_with("GET /api/f/skills--k3x9/") || r.0 == "GET /api/fragments" && r.1.contains("for=")).collect();
+        assert!(!reads.is_empty() && reads.iter().all(|r| r.1.contains("for=npub1paul") && r.2.as_deref() == Some("juniper--k3x9") && !r.3), "read as the agent acting for its owner, unsigned: {reads:?}");
     });
     assert!(
-        c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"/opt/fragment/skills\"]")),
+        c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]).contains(&format!("external_dirs: [\"{managed}\", \"/opt/fragment/skills\"]")),
         "its profile names the managed skills, then the platform skill"
     );
     // what Hermes itself finds for the profile: its own first, then the
     // managed set, then the platform skill (the image's: its CLI's own)
     let hermes_finds = || {
         let found = c.exec_out(&[
-            "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper-paul", "HOME=/data/hermes/profiles/juniper-paul/home",
+            "/command/s6-setuidgid", "hermes", "env", "HERMES_HOME=/data/hermes/profiles/juniper--k3x9", "HOME=/data/hermes/profiles/juniper--k3x9/home",
             "/opt/hermes/.venv/bin/python", "-c", "import json, os; os.chdir('/opt/hermes'); from tools.skills_tool import _find_all_skills; print(json.dumps({s['name']: s['description'] for s in _find_all_skills(skip_disabled=True)}))",
         ]);
         serde_json::from_str::<serde_json::Value>(found.trim().lines().last().unwrap_or("{}")).unwrap_or_else(|e| panic!("Hermes' skills: {e}: {found}"))
@@ -346,7 +346,7 @@ async fn the_hermes_image() {
     assert!(platform.contains("# Your computer") && !cli_body.is_empty() && platform.contains(cli_body), "the platform skill is the image's CLI's own, after the computer's page:\n{platform}");
     assert!(!c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", "echo x > /opt/fragment/skills/platform/fragment/SKILL.md"]), "the platform skill is read-only to the agents");
 
-    let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=npub1paul fragment login 2>&1; echo exit=$?"]);
+    let login = c.exec_out(&["sh", "-c", "env FRAGMENT_AS_AGENT=juniper--k3x9 FRAGMENT_FOR=npub1paul fragment login 2>&1; echo exit=$?"]);
     assert!(login.contains("needs no login") && login.contains("exit=2"), "an agent logs in to nothing: {login}");
 
     // a change to the managed set is followed while it runs: one skill
@@ -368,7 +368,7 @@ async fn the_hermes_image() {
 
     // A second message, warm.
     let second = fake.say(&chat, &person("paul"), json!({ "text": "again" }));
-    let t2 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", second["seq"].as_u64().unwrap());
+    let t2 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", second["seq"].as_u64().unwrap());
     let warm = Instant::now();
     fake.until(120_000, "the second reply", |w| answered(w, &t2).is_some()).await;
     eprintln!("hermes: warm message to reply: {} ms", warm.elapsed().as_millis());
@@ -379,7 +379,7 @@ async fn the_hermes_image() {
     // progress line (the debt ledger, "A quick tool's step can be lost in
     // Hermes").
     let third = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal" }));
-    let t3 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", third["seq"].as_u64().unwrap());
+    let t3 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", third["seq"].as_u64().unwrap());
     fake.until(120_000, "the tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t3)).await;
     // what the model was given last: each message's role and the start of its text
     let model_saw = || {
@@ -398,7 +398,7 @@ async fn the_hermes_image() {
     // second line until a newer one came, and none did (the image's patch
     // of `send_progress_messages`, images/hermes/Dockerfile).
     let twice = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal twice" }));
-    let t_twice = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", twice["seq"].as_u64().unwrap());
+    let t_twice = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", twice["seq"].as_u64().unwrap());
     fake.until(120_000, "the two-tool turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t_twice)).await;
     fake.with(|w| {
         let steps: Vec<_> = w.bodies(&chat, "work", "turn.step").into_iter().filter(|s| s["turn"] == t_twice).collect();
@@ -410,7 +410,7 @@ async fn the_hermes_image() {
     // An approval: Hermes flags `rm -rf`, its guardian escalates, the card
     // is the owner's, the owner's answer runs it.
     let fourth = fake.say(&chat, &person("paul"), json!({ "text": "do the risky thing" }));
-    let t4 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", fourth["seq"].as_u64().unwrap());
+    let t4 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", fourth["seq"].as_u64().unwrap());
     fake.until(120_000, "Hermes' approval card", |w| w.bodies(&chat, "work", "turn.prompt").iter().any(|p| p["turn"] == t4)).await;
     let card = fake.with(|w| w.bodies(&chat, "work", "turn.prompt").into_iter().find(|p| p["turn"] == t4).unwrap());
     eprintln!("hermes: approval card options {}", card["options"]);
@@ -426,17 +426,17 @@ async fn the_hermes_image() {
     // the gateway serves it, and it answers in its own chat as itself,
     // within seconds, while the other agent's slow turn runs on, whole.
     let fifth = fake.say(&chat, &person("paul"), json!({ "text": "please use the terminal slowly" }));
-    let t5 = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", fifth["seq"].as_u64().unwrap());
+    let t5 = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", fifth["seq"].as_u64().unwrap());
     fake.until(60_000, "juniper's slow turn running", |w| w.keepalive_open == 1 && w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t5)).await;
     let calls_before = model.calls.lock().unwrap().len();
     let assigned = Instant::now();
     fake.add_agent("maple");
     fake.with(|w| {
-        w.fragments.get_mut("maple.paul").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Maple, who tends the trees.\n"));
+        w.fragments.get_mut("maple--k3x9").unwrap().files.insert("SOUL.md".into(), bytes::Bytes::from_static(b"You are Maple, who tends the trees.\n"));
     });
     let grove = fake.chat("grove", &["maple"]);
     let hello = fake.say(&grove, &person("paul"), json!({ "text": "hello maple" }));
-    let tm = fragment_bridge::records::turn_id("maple.paul", &grove, "chat", hello["seq"].as_u64().unwrap());
+    let tm = fragment_bridge::records::turn_id("maple--k3x9", &grove, "chat", hello["seq"].as_u64().unwrap());
     let maple_replied = |w: &support::fake::World| w.bodies(&grove, "chat", "reply").into_iter().find(|r| r["turn"] == tm);
     if tokio::time::timeout(Duration::from_secs(60), fake.until(60_000, "maple's reply", |w| maple_replied(w).is_some())).await.is_err() {
         panic!("maple never answered; the container said:\n{}", c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
@@ -452,25 +452,25 @@ async fn the_hermes_image() {
     });
     {
         let calls: Vec<_> = model.calls.lock().unwrap()[calls_before..].iter().filter(|c| c.path.ends_with("/chat/completions")).cloned().collect();
-        assert!(calls.iter().any(|c| c.agent.as_deref() == Some("maple.paul")), "Maple's calls name Maple: {calls:?}");
+        assert!(calls.iter().any(|c| c.agent.as_deref() == Some("maple--k3x9")), "Maple's calls name Maple: {calls:?}");
         assert!(calls.iter().all(|c| c.agent.is_some()), "no call without its agent (the 401 of a profile that does not exist): {calls:?}");
     }
-    assert!(c.exec(&["grep", "-q", "Maple", "/data/hermes/profiles/maple-paul/SOUL.md"]), "its repo in its own profile");
-    assert!(c.exec(&["grep", "-q", "maple.paul", "/var/lib/fragment-run/agents.json"]), "the bridge's ready file names it");
+    assert!(c.exec(&["grep", "-q", "Maple", "/data/hermes/profiles/maple--k3x9/SOUL.md"]), "its repo in its own profile");
+    assert!(c.exec(&["grep", "-q", "maple--k3x9", "/var/lib/fragment-run/agents.json"]), "the bridge's ready file names it");
 
     // Its terminal runs the fragment CLI as itself, acting for paul: the
     // computer's API (here the fake) sees the agent named, no signature,
     // and `for` its owner; the answer is paul's fragments.
     let requests_before = fake.with(|w| w.requests.len());
     let listed = fake.say(&chat, &person("paul"), json!({ "text": "run: fragment list --json" }));
-    let tl = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", listed["seq"].as_u64().unwrap());
+    let tl = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", listed["seq"].as_u64().unwrap());
     fake.until(120_000, "the fragment CLI's answer", |w| answered(w, &tl).is_some()).await;
     fake.with(|w| {
         let reply = answered(w, &tl).unwrap();
         let text = reply["text"].as_str().unwrap_or("");
-        assert!(text.contains("the tool said") && text.contains("skills.paul") && text.contains("talk.paul"), "paul's fragments, from the CLI: {reply}");
+        assert!(text.contains("the tool said") && text.contains("skills--k3x9") && text.contains("talk--k3x9"), "paul's fragments, from the CLI: {reply}");
         let cli: Vec<_> = w.requests[requests_before..].iter().filter(|r| r.0 == "GET /api/fragments").collect();
-        assert!(cli.iter().any(|r| r.2.as_deref() == Some("juniper.paul") && r.1 == "for=npub1paul" && !r.3), "as juniper, for paul, unsigned: {cli:?}");
+        assert!(cli.iter().any(|r| r.2.as_deref() == Some("juniper--k3x9") && r.1 == "for=npub1paul" && !r.3), "as juniper, for paul, unsigned: {cli:?}");
     });
 
     // Root for the session (docs/computers.md, "Root in our Hermes image"):
@@ -478,7 +478,7 @@ async fn the_hermes_image() {
     // program into /usr/local/bin, both with passwordless sudo, and runs
     // them.
     let install = fake.say(&chat, &person("paul"), json!({ "text": format!("run: {INSTALL}") }));
-    let ti = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", install["seq"].as_u64().unwrap());
+    let ti = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", install["seq"].as_u64().unwrap());
     fake.until(120_000, "the install's answer", |w| answered(w, &ti).is_some()).await;
     fake.with(|w| {
         let reply = answered(w, &ti).unwrap();
@@ -493,8 +493,8 @@ async fn the_hermes_image() {
         let check = format!("from agent.file_safety import is_write_denied; import sys; sys.exit(1 if is_write_denied({path:?}) else 0)");
         !c.exec(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", &check])
     };
-    assert!(!denied("/data/work/juniper-paul/notes.txt"), "its file tools write its work directory");
-    assert!(!denied("/data/hermes/profiles/juniper-paul/notes.txt") && !denied("/tmp/notes.txt"), "and its home and /tmp");
+    assert!(!denied("/data/work/juniper--k3x9/notes.txt"), "its file tools write its work directory");
+    assert!(!denied("/data/hermes/profiles/juniper--k3x9/notes.txt") && !denied("/tmp/notes.txt"), "and its home and /tmp");
     assert!(denied("/usr/local/bin/notes"), "and not the system's directories");
 
     let (took, code) = c.sigterm();
@@ -571,7 +571,7 @@ async fn hermes_running() -> (Fake, Model, String, Container) {
     let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let first = fake.say(&chat, &person("paul"), json!({ "text": "hello" }));
-    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", first["seq"].as_u64().unwrap());
+    let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", first["seq"].as_u64().unwrap());
     fake.until(180_000, "Hermes' first reply", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     (fake, model, chat, c)
 }
@@ -607,7 +607,7 @@ async fn a_save_taken_while_it_writes_opens() {
     let mut saves = vec![];
     for round in 0..ROUNDS {
         let said = fake.say(&chat, &person("paul"), json!({ "text": WRITING }));
-        let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+        let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
         fake.until(120_000, "the writing turn's tool asked for", |w| w.bodies(&chat, "work", "turn.step").iter().any(|s| s["turn"] == t)).await;
         // Hermes asks its owner before a script runs from `-c` ("script
         // execution via -e/-c flag"): allowed for the session, once
@@ -633,7 +633,7 @@ async fn a_save_taken_while_it_writes_opens() {
         fake.until(120_000, "the writing turn's end", |w| w.bodies(&chat, "work", "turn.end").iter().any(|e| e["turn"] == t)).await;
     }
     // the seam: the tool wrote in its agent's work directory, not in Hermes' home
-    assert!(c.exec(&["test", "-f", "/data/work/juniper-paul/tool.db"]), "the tool's database is the agent's work: {}", c.exec_out(&["sh", "-c", "find /data -name tool.db"]));
+    assert!(c.exec(&["test", "-f", "/data/work/juniper--k3x9/tool.db"]), "the tool's database is the agent's work: {}", c.exec_out(&["sh", "-c", "find /data -name tool.db"]));
     let (mut held_torn, mut held_dbs, mut hot_torn, mut hot_dbs, mut other_torn, mut others) = (0, 0, 0, 0, 0, 0);
     for (held, path) in &saves {
         let t = Instant::now();
@@ -789,7 +789,7 @@ async fn held_nothing_under_data_changes() {
     }
     eprintln!("hermes: /data quiet {} ms after its first reply", quiet.elapsed().as_millis());
     let left_out = hold(&c).unwrap_or_else(|| panic!("no answer to the hold; the container said:\n{}", c.logs()));
-    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper-paul/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
+    assert!(left_out.iter().any(|l| l == "/hermes/profiles/juniper--k3x9/state.db") && left_out.iter().all(|l| l.starts_with("/hermes/") && l.contains(".db")), "it names exactly the databases it copied: {left_out:?}");
     assert!(c.exec(&["test", "-f", "/data/held-copies/manifest.json"]), "its copies are made before it answers");
     let before = files(&c, &left_out);
     let held = Instant::now();
@@ -816,7 +816,7 @@ async fn held_nothing_under_data_changes() {
     assert!(!c.exec_out(&["find", "/tmp/node-compile-cache", "-type", "f"]).trim().is_empty(), "it is under /tmp, where npm's start put it");
     // a message as it is held: recorded, never claimed while held
     let said = fake.say(&chat, &person("paul"), json!({ "text": "said while held" }));
-    let t = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let t = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     tokio::time::sleep(Duration::from_secs(5)).await;
     fake.with(|w| assert!(w.bodies(&chat, "work", "turn.start").iter().all(|s| s["turn"] != t), "held, the message is not claimed"));
     unhold(&c);
@@ -893,7 +893,7 @@ fn chromium(c: &Container) -> String {
 async fn browser_shown(c: &Container, viewer: &mut support::rfb::Viewer, what: &str) -> [usize; 4] {
     let t = Instant::now();
     loop {
-        let at = window(c, "juniper-paul", "Example Domain");
+        let at = window(c, "juniper--k3x9", "Example Domain");
         let frame = viewer.frame().await.unwrap_or_else(|e| panic!("{what}: the viewer's frame: {e}"));
         let page = at.map(|r| page_shown(&frame, viewer.width as usize, r));
         if let (Some(rect), Some(p)) = (at, page) {
@@ -904,7 +904,7 @@ async fn browser_shown(c: &Container, viewer: &mut support::rfb::Viewer, what: &
         assert!(
             t.elapsed() < Duration::from_secs(30),
             "{what}: the browser never showed in the viewer's frame: its window at {at:?}, the page {page:?} of it; the desktop {}; chromium {}\n{}",
-            desk(c, "juniper-paul"),
+            desk(c, "juniper--k3x9"),
             chromium(c),
             c.logs().lines().rev().take(60).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
         );
@@ -993,11 +993,11 @@ async fn the_hermes_desktop() {
 
     // before any agent's call: the page, the control socket, the RFB stream
     assert!(c.exec_out(&["curl", "-sf", "http://127.0.0.1:6080/"]).contains("Take over"));
-    let mut watching = Control::open(&base, "watcher", "juniper.paul").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
-    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }), "a viewer hears whose screen it is, and who holds control");
+    let mut watching = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap_or_else(|e| panic!("the control socket: {e}"));
+    assert_eq!(watching.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }), "a viewer hears whose screen it is, and who holds control");
     let t = Instant::now();
-    let opened = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await;
-    let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"])));
+    let opened = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(60)).await;
+    let mut watcher = opened.unwrap_or_else(|e| panic!("the screen's RFB stream: {e}\n{}\nlauncher: {}", c.logs(), c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"])));
     eprintln!("desktop: first viewer to the RFB greeting {} ms; {}x{} {:?}", t.elapsed().as_millis(), watcher.width, watcher.height, watcher.name);
     // the desktop drawn: its wallpaper and panel, not one colour
     let t = Instant::now();
@@ -1008,29 +1008,29 @@ async fn the_hermes_desktop() {
     }
     let after = anon_mib(&c);
     eprintln!("desktop: a frame of {} colours {} ms on; the container holds {after} MiB with the desktop (+{})", colours(&frame), t.elapsed().as_millis(), after.saturating_sub(before));
-    assert!(colours(&frame) > 16, "the desktop shows something: {} colours\n{}", colours(&frame), c.exec_out(&["cat", "/data/hermes/profiles/juniper-paul/bot-desktop/launcher.log"]));
+    assert!(colours(&frame) > 16, "the desktop shows something: {} colours\n{}", colours(&frame), c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/bot-desktop/launcher.log"]));
 
     // Take over: the holder's pointer moves the screen's; a watcher's does not
-    let mut driving = Control::open(&base, "driver", "juniper.paul").await.unwrap();
+    let mut driving = Control::open(&base, "driver", "juniper--k3x9").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
-    let mut driver = Viewer::open(&base, "driver", "juniper.paul", Duration::from_secs(30)).await.unwrap();
+    let mut driver = Viewer::open(&base, "driver", "juniper--k3x9", Duration::from_secs(30)).await.unwrap();
     assert!(driver.clipboard_caps, "Xvnc offers its extended clipboard, and the viewer answers it as noVNC does (a ClientCutText of negative length)");
     driving.say("take").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], "driver");
     assert_eq!(watching.next().await.unwrap()["holder"], "driver", "every viewer hears who took over");
     driver.pointer(101, 57, 0).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the holder moves the pointer");
+    assert_eq!(desk(&c, "juniper--k3x9")["pointer"], json!([101, 57]), "the holder moves the pointer");
     watcher.pointer(301, 257, 0).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "a watcher does not");
+    assert_eq!(desk(&c, "juniper--k3x9")["pointer"], json!([101, 57]), "a watcher does not");
     driving.say("give").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
 
     // the agent's computer_use: among its tools, and it captures the screen
     let reply = |w: &support::fake::World, turn: &str| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "look at your screen" }));
-    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
     fake.until(240_000, "the capture's reply", |w| reply(w, &turn).is_some()).await;
     let offered = model.calls.lock().unwrap().iter().find(|c| c.path.ends_with("/chat/completions") && c.body["messages"].to_string().contains("look at your screen")).map(|c| c.body["tools"].clone()).unwrap_or_default();
     let tools: Vec<&str> = offered.as_array().into_iter().flatten().filter_map(|t| t["function"]["name"].as_str()).collect();
@@ -1052,7 +1052,7 @@ async fn the_hermes_desktop() {
         .collect();
     eprintln!("desktop: the calls shown an image (model, agent, a data: image on /v1/chat/completions): {looked:?}");
     assert!(
-        !looked.is_empty() && looked.iter().all(|(m, a, ok)| m == "vision" && a.as_deref() == Some("juniper.paul") && *ok),
+        !looked.is_empty() && looked.iter().all(|(m, a, ok)| m == "vision" && a.as_deref() == Some("juniper--k3x9") && *ok),
         "the capture's screenshot goes to the route's vision model, as the agent: {looked:?}"
     );
     assert!(tools.contains(&"browser_navigate") && !tools.contains(&"browser_exec"), "Hermes' built-in browser tools: {tools:?}");
@@ -1061,7 +1061,7 @@ async fn the_hermes_desktop() {
     // since before the desktop started
     let browse = |fake: &Fake| {
         let asked = fake.say(&chat, &person("paul"), json!({ "text": "browse: https://example.com" }));
-        fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap())
+        fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap())
     };
     let turn = browse(&fake);
     fake.until(240_000, "the browser's reply", |w| reply(w, &turn).is_some()).await;
@@ -1071,7 +1071,7 @@ async fn the_hermes_desktop() {
     eprintln!("desktop: the browser's window at {rect:?} in the watcher's frame; chromium {started}; the container holds {} MiB", anon_mib(&c));
     assert!(started.contains(" --no-sandbox --disable-dev-shm-usage "), "the image's Chromium, with the flags a container needs: {started}");
     // and the desktop's Browser icon, a person's after Take over, starts the same
-    let panel = "/data/hermes/profiles/juniper-paul/bot-desktop/xdg/xfce4/panel";
+    let panel = "/data/hermes/profiles/juniper--k3x9/bot-desktop/xdg/xfce4/panel";
     let icon = c.exec_out(&["sh", "-c", &format!("cat {panel}/launcher-$(cat {panel}/.hermes-browser-launcher)/hermes.desktop")]);
     assert!(icon.lines().any(|l| l.starts_with("Exec=\"/opt/fragment/bin/chromium\" ")), "the Browser icon starts the image's Chromium: {icon}");
 
@@ -1080,12 +1080,12 @@ async fn the_hermes_desktop() {
     // its display, so a viewer knows to open it again (the screen's page
     // does, on its own); the one it opens starts the display at once, and
     // shows the browser on it at the agent's next call.
-    let stopped = c.exec_code(&["env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/hermes", "-p", "juniper-paul", "computer-use", "screen", "stop"]);
+    let stopped = c.exec_code(&["env", "HOME=/data/hermes", "HERMES_HOME=/data/hermes", "/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/hermes", "-p", "juniper--k3x9", "computer-use", "screen", "stop"]);
     eprintln!("desktop: stopped: {stopped:?}");
     let ended = tokio::time::timeout(Duration::from_secs(15), watcher.frame()).await.map(|r| r.map(|f| f.len()));
     assert!(matches!(ended, Ok(Err(_))), "the watcher's stream ends with its display: {ended:?}");
     let t = Instant::now();
-    let mut again = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
+    let mut again = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the watcher, back: {e}\n{}", c.logs()));
     eprintln!("desktop: the watcher back on a desktop started for it in {} ms", t.elapsed().as_millis());
     let turn = browse(&fake);
     fake.until(240_000, "the browser's reply after the restart", |w| reply(w, &turn).is_some()).await;
@@ -1107,7 +1107,7 @@ async fn the_hermes_desktop() {
     let planted = format!("mkdir -p /tmp/gws/cache && printf '%s' '{doc}' > /tmp/gws/cache/drive_v3.json");
     assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &planted]));
     let asked = fake.say(&chat, &person("paul"), json!({ "text": "run: GOOGLE_WORKSPACE_CLI_CONFIG_DIR=/tmp/gws gws drive files list" }));
-    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", asked["seq"].as_u64().unwrap());
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", asked["seq"].as_u64().unwrap());
     fake.until(240_000, "gws's reply", |w| reply(w, &turn).is_some()).await;
     let seen = api.seen.lock().unwrap().clone();
     eprintln!("desktop: gws in the agent's terminal said {:?}; its API saw {seen:?}", fake.with(|w| reply(w, &turn)));
@@ -1173,37 +1173,37 @@ async fn two_agents_two_desktops() {
     assert!(!c.exec(&["test", "-e", "/var/lib/fragment-run/screen.sock"]), "no one screen for every agent");
 
     // each agent's own screen, refusals included
-    let mut jc = Control::open(&base, "watcher", "juniper.paul").await.unwrap();
-    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }));
-    let mut fc = Control::open(&base, "watcher", "fred.paul").await.unwrap();
-    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred.paul", "name": "fred", "holder": null }));
-    let nobody = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=nobody.paul", &[]).await.err().unwrap_or_default();
+    let mut jc = Control::open(&base, "watcher", "juniper--k3x9").await.unwrap();
+    assert_eq!(jc.next().await.unwrap(), json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }));
+    let mut fc = Control::open(&base, "watcher", "fred--k3x9").await.unwrap();
+    assert_eq!(fc.next().await.unwrap(), json!({ "type": "control", "agent": "fred--k3x9", "name": "fred", "holder": null }));
+    let nobody = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=nobody--k3x9", &[]).await.err().unwrap_or_default();
     assert!(nobody.contains("404"), "an agent not on this computer: {nobody}");
-    let unnamed = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=../fred-paul", &[]).await.err().unwrap_or_default();
+    let unnamed = fragment_bridge::net::connect_ws(&base, "/websockify?viewer=w&agent=../fred--k3x9", &[]).await.err().unwrap_or_default();
     assert!(unnamed.contains("400"), "no agent's name: {unnamed}");
     let t = Instant::now();
-    let jv = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen: {e}\n{}", c.logs()));
-    let mut fv = Viewer::open(&base, "watcher", "fred.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("fred's screen: {e}\n{}", c.logs()));
+    let jv = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen: {e}\n{}", c.logs()));
+    let mut fv = Viewer::open(&base, "watcher", "fred--k3x9", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("fred's screen: {e}\n{}", c.logs()));
     eprintln!("two desktops: both up for their viewers in {} ms; the container holds {} MiB", t.elapsed().as_millis(), anon_mib(&c));
-    assert_eq!((jv.name.as_str(), fv.name.as_str()), ("hermes:juniper-paul", "hermes:fred-paul"), "each socket shows its own agent's desktop");
+    assert_eq!((jv.name.as_str(), fv.name.as_str()), ("hermes:juniper--k3x9", "hermes:fred--k3x9"), "each socket shows its own agent's desktop");
     let xvnc = c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]);
     assert_eq!(xvnc.trim(), "2", "two desktops, two X servers");
 
     // Take over of juniper's screen is juniper's lease
-    let mut driving = Control::open(&base, "driver", "juniper.paul").await.unwrap();
+    let mut driving = Control::open(&base, "driver", "juniper--k3x9").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
-    let mut driver = Viewer::open(&base, "driver", "juniper.paul", Duration::from_secs(30)).await.unwrap();
+    let mut driver = Viewer::open(&base, "driver", "juniper--k3x9", Duration::from_secs(30)).await.unwrap();
     driving.say("take").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], "driver");
     assert_eq!(jc.next().await.unwrap()["holder"], "driver", "juniper's watcher hears it");
-    let (jl, fl) = (hermes_lease(&c, "juniper-paul"), hermes_lease(&c, "fred-paul"));
+    let (jl, fl) = (hermes_lease(&c, "juniper--k3x9"), hermes_lease(&c, "fred--k3x9"));
     eprintln!("two desktops: juniper's lease as Hermes reads it {jl}; fred's {fl}");
     assert!(jl["holder"] == "human" && jl["viewer_id"] == "driver" && jl["refused"].is_string(), "juniper's lease is the person's, and Hermes refuses juniper's screen actions: {jl}");
     assert!(fl["holder"] == "agent" && fl["refused"].is_null(), "fred's is fred's: {fl}");
     driver.pointer(101, 57, 0).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(desk(&c, "juniper-paul")["pointer"], json!([101, 57]), "the person drives juniper's desktop");
-    assert_ne!(desk(&c, "fred-paul")["pointer"], json!([101, 57]), "and not fred's");
+    assert_eq!(desk(&c, "juniper--k3x9")["pointer"], json!([101, 57]), "the person drives juniper's desktop");
+    assert_ne!(desk(&c, "fred--k3x9")["pointer"], json!([101, 57]), "and not fred's");
 
     // each agent's computer_use, as the lease has it
     let look = |chat: &str, agent: &str| {
@@ -1211,57 +1211,57 @@ async fn two_agents_two_desktops() {
         fragment_bridge::records::turn_id(agent, chat, "chat", said["seq"].as_u64().unwrap())
     };
     let reply = |w: &support::fake::World, chat: &str, turn: &str| w.bodies(chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn).and_then(|r| r["text"].as_str().map(str::to_string));
-    let jturn = look(&jchat, "juniper.paul");
+    let jturn = look(&jchat, "juniper--k3x9");
     within(&fake, &jchat, &c, 240_000, "juniper's look while a person holds its screen", |w| reply(w, &jchat, &jturn).is_some()).await;
     let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     eprintln!("two desktops: juniper, held: {}", jsaid.chars().take(400).collect::<String>());
     assert!(jsaid.contains("human_has_control"), "juniper's computer_use refuses while a person holds its screen: {jsaid}");
-    let fturn = look(&fchat, "fred.paul");
+    let fturn = look(&fchat, "fred--k3x9");
     within(&fake, &fchat, &c, 240_000, "fred's look", |w| reply(w, &fchat, &fturn).is_some()).await;
     let fsaid = fake.with(|w| reply(w, &fchat, &fturn)).unwrap_or_default();
     eprintln!("two desktops: fred, meanwhile: {}", fsaid.chars().take(400).collect::<String>());
     assert!(!fsaid.contains("human_has_control") && !fsaid.contains("no computer_use"), "fred's computer_use works on its own desktop: {fsaid}");
-    let fred_looked = model.calls.lock().unwrap().iter().any(|m| m.agent.as_deref() == Some("fred.paul") && m.body["messages"].to_string().contains("\"image_url\""));
+    let fred_looked = model.calls.lock().unwrap().iter().any(|m| m.agent.as_deref() == Some("fred--k3x9") && m.body["messages"].to_string().contains("\"image_url\""));
     assert!(fred_looked, "fred's capture went to the vision model, as fred");
 
     // Give back: juniper's lease again, and its computer_use works
     driving.say("give").await.unwrap();
     assert_eq!(driving.next().await.unwrap()["holder"], json!(null));
-    let jl = hermes_lease(&c, "juniper-paul");
+    let jl = hermes_lease(&c, "juniper--k3x9");
     assert!(jl["holder"] == "agent" && jl["refused"].is_null() && jl["epoch"].as_u64() >= Some(2), "given back: {jl}");
-    let jturn = look(&jchat, "juniper.paul");
+    let jturn = look(&jchat, "juniper--k3x9");
     within(&fake, &jchat, &c, 240_000, "juniper's look, given back", |w| reply(w, &jchat, &jturn).is_some()).await;
     let jsaid = fake.with(|w| reply(w, &jchat, &jturn)).unwrap_or_default();
     assert!(!jsaid.contains("human_has_control"), "given back, juniper's computer_use works: {jsaid}");
 
     // idle: juniper's desktop, unwatched and unused, stops; fred's, watched, does not
-    let marker = "/data/work/juniper-paul/browser-profile/fragment-marker";
+    let marker = "/data/work/juniper--k3x9/browser-profile/fragment-marker";
     assert!(c.exec(&["/command/s6-setuidgid", "hermes", "sh", "-c", &format!("echo kept > {marker}")]));
     drop((jc, driving, jv, driver));
     let t = Instant::now();
     // bounded: the 30 s bound, a look every 7.5 s, and Hermes' own stop
-    while desktop_up(&c, "juniper-paul") && t.elapsed() < Duration::from_secs(120) {
+    while desktop_up(&c, "juniper--k3x9") && t.elapsed() < Duration::from_secs(120) {
         tokio::time::sleep(Duration::from_secs(2)).await;
         let _ = fv.frame().await;
     }
     eprintln!("two desktops: juniper's stopped {} ms after its last viewer left", t.elapsed().as_millis());
-    assert!(!desktop_up(&c, "juniper-paul"), "an unwatched, unused desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
-    assert!(desktop_up(&c, "fred-paul"), "one watched does not");
-    let stopped = c.logs().lines().filter(|l| l.contains("\"screen.idle_stopped\"") && l.contains("juniper.paul")).map(str::to_string).collect::<Vec<_>>();
+    assert!(!desktop_up(&c, "juniper--k3x9"), "an unwatched, unused desktop stops: {}", c.logs().lines().filter(|l| l.contains("screen.")).collect::<Vec<_>>().join("\n"));
+    assert!(desktop_up(&c, "fred--k3x9"), "one watched does not");
+    let stopped = c.logs().lines().filter(|l| l.contains("\"screen.idle_stopped\"") && l.contains("juniper--k3x9")).map(str::to_string).collect::<Vec<_>>();
     assert!(!stopped.is_empty() && stopped.iter().all(|l| l.contains("\"code\":0")), "Hermes' own stop: {stopped:?}");
     assert_eq!(c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]).trim(), "1", "its X server gone");
     drop((fc, fv));
     let t = Instant::now();
-    while desktop_up(&c, "fred-paul") && t.elapsed() < Duration::from_secs(120) {
+    while desktop_up(&c, "fred--k3x9") && t.elapsed() < Duration::from_secs(120) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    assert!(!desktop_up(&c, "fred-paul"), "fred's too, once no one watches it");
+    assert!(!desktop_up(&c, "fred--k3x9"), "fred's too, once no one watches it");
 
     // and starts again on demand, its browser's profile kept
-    let back = Viewer::open(&base, "watcher", "juniper.paul", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen again: {e}\n{}", c.logs()));
-    assert_eq!(back.name, "hermes:juniper-paul");
+    let back = Viewer::open(&base, "watcher", "juniper--k3x9", Duration::from_secs(60)).await.unwrap_or_else(|e| panic!("juniper's screen again: {e}\n{}", c.logs()));
+    assert_eq!(back.name, "hermes:juniper--k3x9");
     assert_eq!(c.exec_out(&["cat", marker]).trim(), "kept", "its browser's profile, in its work, kept");
-    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper-paul/bot-desktop/browser-profile"]).trim(), "/data/work/juniper-paul/browser-profile");
+    assert_eq!(c.exec_out(&["readlink", "/data/hermes/profiles/juniper--k3x9/bot-desktop/browser-profile"]).trim(), "/data/work/juniper--k3x9/browser-profile");
 }
 
 // ---- what Hermes would decide by guessing it runs in a container (its
@@ -1301,7 +1301,7 @@ async fn homes(runtime: Runtime) -> Homes {
     let guess = c.exec_out(&["/command/s6-setuidgid", "hermes", "/opt/hermes/.venv/bin/python", "-c", "import os; os.chdir('/opt/hermes'); from hermes_platform.host.runtime import is_container; print(is_container())"]);
     let ask = |text: &str| {
         let said = fake.say(&chat, &person("paul"), json!({ "text": text }));
-        fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap())
+        fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap())
     };
     let reply = |turn: &str| fake.with(|w| w.bodies(&chat, "chat", "reply").into_iter().find(|r| r["turn"] == turn)).map(|r| r["text"].as_str().unwrap_or("").to_string());
     let turn = ask("run: echo home=$HOME real=$HERMES_REAL_HOME path=$PATH");
@@ -1317,7 +1317,7 @@ async fn homes(runtime: Runtime) -> Homes {
     if !written.is_empty() {
         assert_eq!(c.exec_out(&["cat", &written]), support::model::WRITTEN, "write_file wrote where it said");
     }
-    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper-paul", "/data/hermes/profiles/juniper-paul/sessions", "/data/hermes/profiles/juniper-paul/cache/scratch", "/data/work/juniper-paul/home"];
+    let dirs = ["/data/hermes", "/data/hermes/sessions", "/data/hermes/logs", "/data/hermes/memories", "/data/hermes/cron", "/data/hermes/cache/scratch", "/data/hermes/profiles/juniper--k3x9", "/data/hermes/profiles/juniper--k3x9/sessions", "/data/hermes/profiles/juniper--k3x9/cache/scratch", "/data/work/juniper--k3x9/home"];
     let modes = c.exec_out(&["sh", "-c", &format!("stat -c '%a %n' {} 2>/dev/null", dirs.join(" "))]);
     let real = |p: &str| if p.is_empty() { String::new() } else { c.exec_out(&["realpath", p]).trim().to_string() };
     let terminal = said(&terminal, "home");
@@ -1337,7 +1337,7 @@ async fn an_agents_home_is_the_same_on_either_runtime() {
     let (docker, hosted) = tokio::join!(homes(Runtime::Docker), homes(Runtime::Hosted));
     eprintln!("home: Docker {docker:#?}\nhome: Containers' way {hosted:#?}");
     assert!(docker.container && !hosted.container, "Hermes takes Docker for a container and the hosted rung for none (else this proves nothing): {docker:?} {hosted:?}");
-    let (profile_home, home) = ("/data/hermes/profiles/juniper-paul/home", "/data/work/juniper-paul/home");
+    let (profile_home, home) = ("/data/hermes/profiles/juniper--k3x9/home", "/data/work/juniper--k3x9/home");
     for (on, h) in [("Docker", &docker), ("Containers' way", &hosted)] {
         assert_eq!(h.terminal, profile_home, "on {on}, the agent's terminal's HOME is its profile's: {h:#?}");
         assert_eq!(h.terminal_real, home, "on {on}, which is its home in its work: {h:#?}");
@@ -1371,7 +1371,7 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
     let c = Container::run_on(Runtime::Hosted, &hermes_tag(), fake.addr.port(), model.addr.port(), &[]);
     within(&fake, &chat, &c, 180_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let said = fake.say(&chat, &person("paul"), json!({ "text": "start: DISPLAY=:99 /opt/fragment/bin/chromium --headless=new about:blank" }));
-    let turn = fragment_bridge::records::turn_id("juniper.paul", &chat, "chat", said["seq"].as_u64().unwrap());
+    let turn = fragment_bridge::records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
     within(&fake, &chat, &c, 240_000, "the terminal's reply", |w| w.bodies(&chat, "chat", "reply").iter().any(|r| r["turn"] == turn)).await;
     let dbs = |under: &str| c.exec_out(&["sh", "-c", &format!("find {under} \\( -name '*.db' -o -name History -o -name Cookies \\) -path '*chrom*' 2>/dev/null")]);
     let t = Instant::now();
@@ -1386,7 +1386,7 @@ async fn a_browser_the_agent_runs_keeps_its_databases_in_its_work() {
     assert!(c.exec(&["pgrep", "-f", "chrome-linux64/chrome"]), "and through it");
     assert_eq!(held["locked"], json!([]), "no database kept hot for being locked: {held}");
     assert_eq!(dbs("/data/hermes/").trim(), "", "none of its databases is under Hermes' home");
-    assert!(!dbs("/data/work/juniper-paul/home/").trim().is_empty(), "they are in its home, in its work");
+    assert!(!dbs("/data/work/juniper--k3x9/home/").trim().is_empty(), "they are in its home, in its work");
     unhold(&c);
 }
 
@@ -1446,7 +1446,7 @@ impl Expiry {
     /// Paul says `text`: its turn.
     fn say(&self, text: &str) -> String {
         let said = self.fake.say(&self.chat, &person("paul"), json!({ "text": text }));
-        fragment_bridge::records::turn_id("juniper.paul", &self.chat, "chat", said["seq"].as_u64().unwrap())
+        fragment_bridge::records::turn_id("juniper--k3x9", &self.chat, "chat", said["seq"].as_u64().unwrap())
     }
 
     fn ends(&self, w: &support::fake::World, turn: &str) -> Vec<serde_json::Value> {

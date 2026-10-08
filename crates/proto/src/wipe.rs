@@ -18,7 +18,7 @@ pub struct WipeAsk {
 }
 
 /// Where a person is: never wiped, being wiped (locked: no sign-in, no
-/// key, no session, their username held), or wiped.
+/// key, no session), or wiped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WipeState {
@@ -64,8 +64,8 @@ pub struct Found {
     pub sessions: u64,
     pub pictures: u64,
     pub agents: Vec<String>,
-    /// The fragments they own (theirs and their agents' rows under their
-    /// username), and the agent fragments the registry names.
+    /// The fragments they own (their list's rows they own), and the agent
+    /// fragments the registry names.
     pub fragments: Listed,
     /// Their and their agents' memberships in other people's fragments,
     /// as `<fragment> (<role>, <identity>)`.
@@ -115,8 +115,8 @@ pub struct Ran {
 #[serde(rename_all = "camelCase")]
 pub struct WipeReport {
     pub identity: String,
-    /// Their username while they hold it.
-    pub username: Option<String>,
+    /// Their email, while the registry holds them (their latest sign-in's).
+    pub email: Option<String>,
     pub state: WipeState,
     /// The step a wipe runs next, while it is wiping.
     pub next: Option<String>,

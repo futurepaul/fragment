@@ -127,9 +127,9 @@ pub fn brain(s: &mut Suite, api: &Api) -> Result<()> {
     // made as the shell's catalog makes it: blessed, named, with a title
     let catalog = api.call(Call { method: "GET", url: format!("{}/__shell/shell.js", api.base), ..Call::default() })?;
     s.ok("the shell's catalog offers a Brain, on the blessed template", catalog.status == 200 && catalog.text.contains(r#"template: "brain", name: "Brain""#), catalog.status);
-    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "name": label, "template": "brain", "title": "Garden" })), &[])?;
+    let made = shell(api, &session, "POST", "/api/fragments", Some(&json!({ "label": label, "template": "brain", "title": "Garden" })), &[])?;
     let name = made.body["name"].as_str().unwrap_or("").to_string();
-    s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && name.starts_with(&format!("{label}.")), &made);
+    s.ok("the shell makes a brain on the blessed brain template", made.status == 200 && fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &made);
     anyhow::ensure!(made.status == 200, "no brain to test: {made}");
     let repo = made.body["repo"].as_str().unwrap_or("").to_string();
     let listed = s.eventually(WAIT, || {

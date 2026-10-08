@@ -1,22 +1,19 @@
 //! Wiping a person (docs/api.md, Operators): the pure parts of the
 //! operator's wipe, which deletes everything that is a person's or their
-//! agents' and frees their username and sign-in, so their next sign-in is a
+//! agents' and frees their email and sign-in, so their next sign-in is a
 //! new person. The router runs it (cell/src/wipe.rs), the Registry keeps
 //! its progress and locks the person while it runs (cell/src/registry/
 //! wipe.rs); this file decides what those two would otherwise each decide:
 //!
-//! - **whom** an operator names (`named`): a username or an identity;
+//! - **whom** an operator names (`named`): an email or an identity;
 //! - **the steps**, in their order (`STEPS`), and how far a wipe has got
 //!   (`Progress`): each step is idempotent, a step is done only after the
 //!   one before it, and a wipe run again picks up at its first step not
 //!   done, so a wipe cut anywhere (a crash, a timeout, a vendor's error)
 //!   finishes when it is run again;
 //! - **the confirmation** a wipe takes (`confirmed`): the identity the dry
-//!   run named, so a username that changed hands between the two is never
+//!   run named, so an email that changed hands between the two is never
 //!   the wrong person wiped;
-//! - **whose** a fragment on the person's lists is (`whose`): theirs (under
-//!   their username: every fragment there is theirs), or someone else's,
-//!   where only their membership goes;
 //! - **what a report shows** (`listed`): counts, and a bounded list of names.
 
 use fragment_proto::wipe::Listed;
@@ -34,11 +31,12 @@ pub const CALL_BUDGET_MS: i64 = 20_000;
 /// Fragments one call ends or leaves at most (the rest are the next call's).
 pub const FRAGMENTS_PER_CALL: usize = 64;
 
-/// Whom an operator names: a person's username, or an identity (a wipe of
-/// one whose username is gone, or one finished, is named by its identity).
+/// Whom an operator names: a person's email, or an identity (a wipe of one
+/// whose sign-ins are gone, or one finished, is named by its identity).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Named {
-    Username(String),
+    /// A person's email (lower case), as a sign-in verified it.
+    Email(String),
     Identity(String),
 }
 
@@ -46,7 +44,7 @@ pub enum Named {
 /// to correct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// Neither a username nor an identity.
+    /// Neither an email nor an identity.
     Malformed(String),
     /// An agent is wiped with its owner, never alone.
     NotAPerson,
@@ -64,7 +62,7 @@ pub enum Refusal {
 impl Refusal {
     pub fn message(&self) -> String {
         match self {
-            Refusal::Malformed(what) => format!("{what:?} is neither a username nor an identity (an npub)"),
+            Refusal::Malformed(what) => format!("{what:?} is neither an email nor an identity (an npub)"),
             Refusal::NotAPerson => "that is an agent: an agent is wiped with its owner, so name the person".into(),
             Refusal::Unconfirmed => "a wipe names, in `confirm`, the identity its dry run answered".into(),
             Refusal::Mismatch { named, confirmed } => {
@@ -77,13 +75,13 @@ impl Refusal {
     }
 }
 
-/// Whom `text` names: an npub an identity, else a username.
+/// Whom `text` names: an npub an identity, else an email the person's.
 pub fn named(text: &str) -> Result<Named, Refusal> {
     if crate::npub::is_identity(text) {
         return Ok(Named::Identity(text.to_string()));
     }
-    if fragment_proto::valid_username(text) {
-        return Ok(Named::Username(text.to_string()));
+    if crate::mail::valid_address(text) {
+        return Ok(Named::Email(text.to_ascii_lowercase()));
     }
     Err(Refusal::Malformed(text.chars().take(80).collect()))
 }
@@ -110,7 +108,7 @@ pub fn may_wipe(operator_identity: Option<&str>, person: &str) -> Result<(), Ref
 
 /// The steps of a wipe after it began (the Registry's `begin` locked the
 /// person: their sessions and keys ended, no sign-in or agent made for
-/// them, their username held), in the order they run. Each is idempotent.
+/// them), in the order they run. Each is idempotent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
@@ -131,7 +129,7 @@ pub enum Step {
     Lists,
     /// Their picture's bytes (where no one else's is the same picture).
     Pictures,
-    /// The Registry's rows: identities, keys, sign-ins, username, sessions.
+    /// The Registry's rows: identities, keys, sign-ins, sessions.
     Registry,
 }
 
@@ -249,26 +247,6 @@ impl Progress {
     }
 }
 
-/// Whose a fragment on the wiped person's lists (or their agents') is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Whose {
-    /// Under their username: theirs (only its holder makes fragments
-    /// under a username, an agent for its owner among them), ended with
-    /// everything in it.
-    Theirs,
-    /// Someone else's: only the membership goes.
-    Elsewhere,
-}
-
-/// Whose `fragment` is, for a person whose username is `username` (`None`:
-/// they never chose one, so nothing is under it).
-pub fn whose(fragment: &str, username: Option<&str>) -> Whose {
-    match (fragment_proto::split_fragment_name(fragment), username) {
-        (Some((_, under)), Some(theirs)) if under == theirs => Whose::Theirs,
-        _ => Whose::Elsewhere,
-    }
-}
-
 /// `names` as a report lists them (`fragment_proto::wipe::Listed`): sorted,
 /// each once, all counted, the first `NAMES_SHOWN_MAX` shown.
 pub fn listed(names: impl IntoIterator<Item = String>) -> Listed {
@@ -290,13 +268,13 @@ mod tests {
         crate::npub::identity_of(&c.to_string().repeat(64))
     }
 
-    /// Goal: an operator names a person by username or identity, and
+    /// Goal: an operator names a person by email or identity, and
     /// anything else is refused before anything is read. Method: each form.
     #[test]
     fn whom_a_wipe_names() {
         assert_eq!(named(&id('a')), Ok(Named::Identity(id('a'))));
-        assert_eq!(named("paul"), Ok(Named::Username("paul".into())));
-        for bad in ["", "Paul", "id:short", "me", "a--b", &"x".repeat(200)] {
+        assert_eq!(named("Paul@Example.com"), Ok(Named::Email("paul@example.com".into())));
+        for bad in ["", "paul", "id:short", "me", "a@b", "paul@example.com, eve@example.com", &"x".repeat(200)] {
             assert!(matches!(named(bad), Err(Refusal::Malformed(_))), "{bad:?}");
         }
         // the message quotes at most a bounded piece of what it was given
@@ -304,7 +282,7 @@ mod tests {
     }
 
     /// Goal: a wipe changes nothing unless it names the identity its dry
-    /// run answered; a username that changed hands between the two is
+    /// run answered; an email that changed hands between the two is
     /// refused, not followed. Method: valid, missing, empty and another.
     #[test]
     fn a_wipe_is_confirmed_by_identity() {
@@ -388,19 +366,6 @@ mod tests {
         for bad in [-1, STEPS.len() as i64 + 1, i64::MAX] {
             assert_eq!(Progress::stored(bad), Err(Corrupt(bad)));
         }
-    }
-
-    /// Goal: a fragment under the person's username is theirs, any other
-    /// someone else's (only their membership goes). Method: names under
-    /// theirs, another's, a look-alike, and a person with no username.
-    #[test]
-    fn whose_a_listed_fragment_is() {
-        assert_eq!(whose("todo.paul", Some("paul")), Whose::Theirs);
-        assert_eq!(whose("juniper-chat.paul", Some("paul")), Whose::Theirs);
-        assert_eq!(whose("todo.bob", Some("paul")), Whose::Elsewhere);
-        assert_eq!(whose("todo.paula", Some("paul")), Whose::Elsewhere);
-        assert_eq!(whose("todo.paul", None), Whose::Elsewhere);
-        assert_eq!(whose("not a name", Some("paul")), Whose::Elsewhere);
     }
 
     /// Goal: a report counts every name and lists a bounded, sorted few.

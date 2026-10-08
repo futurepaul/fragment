@@ -32,7 +32,7 @@ use crate::records::{PromptOption, Step};
 /// An agent the computer runs (`GET /api/computer`'s `agents`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Agent {
-    /// The agent fragment's name (`<label>.<username>`): who requests act as
+    /// The agent fragment's name (`<label>--<suffix>`): who requests act as
     /// (`x-fragment-agent`).
     pub fragment: String,
     /// The agent's identity (its fragment's npub): who its records are by.

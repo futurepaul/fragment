@@ -13,11 +13,11 @@
 //!   agents' sessions and keys end at once (a signed-in browser is out, a
 //!   CLI's key is no one's), and nothing acts as them or for them again
 //!   (`wiping`: `by`, a sign-in's `person_for`, `lookup`, so no one adds
-//!   them to a fragment); their username stays theirs, so no one takes it
-//!   meanwhile and no fragment is made under it.
+//!   them to a fragment); their sign-ins and email stay theirs, so no one
+//!   signs in as them meanwhile.
 //! - **The end** (`Step::Registry`, the last): every row naming them or
 //!   their agents goes in one turn: identities, keys (their own sealed
-//!   key with the rest), sign-in subjects, username, picture, agent
+//!   key with the rest), sign-in subjects and emails, picture, agent
 //!   fragments, sessions, consents. Their next sign-in finds no subject,
 //!   and is a new person, named by a new key.
 
@@ -104,10 +104,7 @@ impl RegistryCell {
     pub(super) fn wipe_look(&self, b: WipeLook) -> CellResult<WipeFacts> {
         let identity = match wipe::named(&b.person).map_err(refused)? {
             Named::Identity(id) => id,
-            Named::Username(u) => {
-                let holder = self.row::<HolderRow>("SELECT identity FROM usernames WHERE username = ?", vec![u.as_str().into()])?;
-                holder.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no one is {u}")))?.identity
-            }
+            Named::Email(email) => self.person_by_email(&email)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no one signs in as {email}")))?,
         };
         self.wipe_facts(&identity)
     }
@@ -125,7 +122,7 @@ impl RegistryCell {
             return match progress {
                 Some(p) if p.finished() => Ok(WipeFacts {
                     identity: identity.to_string(),
-                    username: None,
+                    email: None,
                     agents: recorded()?,
                     agent_fragments: vec![],
                     sign_ins: 0,
@@ -174,7 +171,7 @@ impl RegistryCell {
         }
         Ok(WipeFacts {
             identity: identity.to_string(),
-            username: self.username_of(identity)?,
+            email: self.email_of(identity)?,
             agents,
             agent_fragments,
             sign_ins: self.count("SELECT COUNT(*) AS n FROM subjects WHERE identity = ?", vec![identity.into()])?,
@@ -273,13 +270,11 @@ impl RegistryCell {
         self.exec(&format!("DELETE FROM consents WHERE {THEIRS}"), theirs(identity))?;
         self.exec(&format!("DELETE FROM agent_fragments WHERE {THEIRS}"), theirs(identity))?;
         self.exec("DELETE FROM subjects WHERE identity = ?", vec![identity.into()])?;
-        self.exec("DELETE FROM usernames WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM pictures WHERE identity = ?", vec![identity.into()])?;
         self.exec("DELETE FROM identities WHERE id IN (SELECT agent FROM wiped_agents WHERE identity = ?) OR id = ?", twice())?;
         let left = self.count(
-            "SELECT (SELECT COUNT(*) FROM identities WHERE id = ? OR owner = ?) + (SELECT COUNT(*) FROM subjects WHERE identity = ?)
-               + (SELECT COUNT(*) FROM usernames WHERE identity = ?) AS n",
-            vec![identity.into(), identity.into(), identity.into(), identity.into()],
+            "SELECT (SELECT COUNT(*) FROM identities WHERE id = ? OR owner = ?) + (SELECT COUNT(*) FROM subjects WHERE identity = ?) AS n",
+            vec![identity.into(), identity.into(), identity.into()],
         )?;
         assert_eq!(left, 0, "no row names a wiped person");
         Ok(())

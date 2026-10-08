@@ -18,7 +18,7 @@ use support::fake::{person, Fake, World};
 const WAIT: u64 = 8_000;
 
 fn turn_of(agent: &str, chat: &str, seq: u64) -> String {
-    records::turn_id(&format!("{agent}.paul"), chat, "chat", seq)
+    records::turn_id(&format!("{agent}--k3x9"), chat, "chat", seq)
 }
 
 fn seq(r: &Value) -> u64 {
@@ -427,7 +427,7 @@ async fn agents_the_image_makes_ready() {
     let talk = fake.chat("talk", &["juniper"]);
     let dir = support::dir("ready-file");
     let file = dir.join("agents.json");
-    write_ready(&file, &["juniper.paul"]);
+    write_ready(&file, &["juniper--k3x9"]);
     let mut cfg = support::config(&fake.url(), &dir, support::settings());
     cfg.agents_file = Some(file.clone());
     // a pace that makes `slow` take five seconds: a turn that runs through the change
@@ -447,7 +447,7 @@ async fn agents_the_image_makes_ready() {
         assert_eq!(w.live_sockets(), 2, "nor followed");
     });
     let t = Instant::now();
-    write_ready(&file, &["juniper.paul", "maple.paul"]);
+    write_ready(&file, &["juniper--k3x9", "maple--k3x9"]);
     fake.until(WAIT, "maple's reply, once the image made it ready", |w| replies(w, &grove).len() == 1).await;
     let took = t.elapsed();
     eprintln!("ready file to maple's reply: {} ms", took.as_millis());
@@ -461,12 +461,12 @@ async fn agents_the_image_makes_ready() {
     });
 
     // Replay: the file written again with the same agents changes nothing.
-    write_ready(&file, &["juniper.paul", "maple.paul"]);
+    write_ready(&file, &["juniper--k3x9", "maple--k3x9"]);
     tokio::time::sleep(Duration::from_millis(1_500)).await;
     fake.with(|w| assert_eq!(w.live_sockets(), 4, "juniper's and maple's tasks and chats, once each"));
 
     // Out of the file: maple is followed no more, and its chat goes unanswered.
-    write_ready(&file, &["juniper.paul"]);
+    write_ready(&file, &["juniper--k3x9"]);
     fake.until(WAIT, "maple's follows dropped", |w| w.live_sockets() == 2).await;
     fake.say(&grove, &person("paul"), json!({ "text": "still there?" }));
     tokio::time::sleep(Duration::from_millis(2_000)).await;
@@ -599,12 +599,12 @@ async fn a_routine_is_a_turn() {
     let dir = support::dir("routine");
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
     following(&fake, 2).await;
-    fake.with(|w| w.append("juniper.paul", "tasks", "npub1paul", json!({ "kind": "routine", "text": "water the plants", "chat": chat })));
+    fake.with(|w| w.append("juniper--k3x9", "tasks", "npub1paul", json!({ "kind": "routine", "text": "water the plants", "chat": chat })));
     fake.until(WAIT, "the routine's reply", |w| replies(w, &chat).len() == 1).await;
     fake.with(|w| {
         assert_eq!(replies(w, &chat)[0]["text"], "echo: [your routine] water the plants");
         assert_eq!(w.bodies(&chat, "work", "turn.start")[0]["cause"]["channel"], "tasks");
-        assert_eq!(w.fragments["juniper.paul"].subscriptions.len(), 1, "the tasks channel wakes it too");
+        assert_eq!(w.fragments["juniper--k3x9"].subscriptions.len(), 1, "the tasks channel wakes it too");
     });
     bridge.stop().await;
 }

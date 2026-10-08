@@ -65,7 +65,7 @@ impl Call for Resolve {
 }
 
 /// `POST /lookup`: whom an npub or a 64-hex key names (the identity it
-/// is, or an active key's holder).
+/// is, or an active key's holder), or a verified email (its person).
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Lookup {
     pub who: String,
@@ -187,28 +187,10 @@ impl Call for View {
     type Answer = IdentityView;
 }
 
-/// `POST /username/claim`: the asker's username, chosen once.
+/// `POST /picture/of`: a person's picture, if they set one.
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ClaimUsername {
-    pub by: By,
-    pub username: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Claimed {
-    pub username: String,
-    pub claimed: bool,
-}
-
-impl Call for ClaimUsername {
-    const PATH: &'static str = "/username/claim";
-    type Answer = Claimed;
-}
-
-/// `POST /username/lookup`: whoever holds a username, and their picture.
-#[derive(Serialize, Deserialize)]
-pub(crate) struct FindUsername {
-    pub username: String,
+pub(crate) struct PictureOf {
+    pub identity: String,
 }
 
 /// A person's picture: its bytes are `pictures/<sha>` in BLOBS.
@@ -218,53 +200,30 @@ pub(crate) struct Picture {
     pub mime: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Holder {
-    #[serde(flatten)]
-    pub identity: Identity,
-    pub picture: Option<Picture>,
+impl Call for PictureOf {
+    const PATH: &'static str = "/picture/of";
+    type Answer = Option<Picture>;
 }
 
-impl Call for FindUsername {
-    const PATH: &'static str = "/username/lookup";
-    type Answer = Holder;
-    fn checked(answer: Holder) -> CellResult<Holder> {
-        Ok(Holder { identity: identity_checked(answer.identity)?, picture: answer.picture })
-    }
-}
-
-/// `POST /username/release`: an operator's undo of a username taken by
-/// mistake (the router has checked its person owns nothing under it).
-#[derive(Serialize, Deserialize)]
-pub(crate) struct ReleaseUsername {
-    pub username: String,
-}
-
-#[derive(Serialize, Deserialize)]
-pub(crate) struct Released {
-    pub username: String,
-    pub identity: String,
-    pub released: bool,
-}
-
-impl Call for ReleaseUsername {
-    const PATH: &'static str = "/username/release";
-    type Answer = Released;
-}
-
-/// `POST /profiles`: what anyone may know of some identities, as a page
-/// shows a name (the Registry answers at most 64 at once).
+/// `POST /profiles`: what a page shows of some identities, as a name
+/// (the Registry answers at most 64 at once). A person's email is in it
+/// only for those `emails_of` names: the members of the fragment that
+/// asks, when its asker is a member too (docs/cloudflare-v1.md, decision
+/// 48). The caller decides; the registry gives none unless named.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profiles {
     pub ids: Vec<String>,
+    #[serde(default)]
+    pub emails_of: Vec<String>,
 }
 
-/// A person's username and picture, or an agent's owner's username, and
-/// an agent made from an agent fragment's name (its label) and fragment.
+/// A person's picture, and their email when the caller may show it; an
+/// agent made from an agent fragment, its name (its label) and fragment.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Profile {
     pub kind: IdentityKind,
-    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     /// Where the picture is served, on the platform's origin.
     pub picture: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,7 +262,7 @@ impl Call for SetPicture {
 
 // ------------------------------------------------------------- wipes
 
-/// `POST /wipe/look`: whom a wipe names (a username, or an identity) and
+/// `POST /wipe/look`: whom a wipe names (an email, or an identity) and
 /// what the registry holds of them; it changes nothing (docs/api.md,
 /// Operators). A person never wiped whom nothing names is 404; an agent
 /// is 400 (it is wiped with its owner).
@@ -327,7 +286,8 @@ pub(crate) struct WipePicture {
 #[derive(Serialize, Deserialize)]
 pub(crate) struct WipeFacts {
     pub identity: String,
-    pub username: Option<String>,
+    /// Their latest sign-in's email, while they have a sign-in.
+    pub email: Option<String>,
     pub agents: Vec<String>,
     /// The agent fragments their agents were made from.
     pub agent_fragments: Vec<String>,
@@ -344,8 +304,8 @@ impl Call for WipeLook {
 }
 
 /// `POST /wipe/begin`: a wipe of `identity` begins (or goes on): the
-/// person is locked (no sign-in, no agent made, no key or session works,
-/// their username held), their and their agents' sessions and keys end
+/// person is locked (no sign-in, no agent made, no key or session works),
+/// their and their agents' sessions and keys end
 /// at once. Again, it changes nothing more. `by` is the operator, for the
 /// record.
 #[derive(Serialize, Deserialize)]
@@ -622,8 +582,9 @@ pub(crate) struct Mint {
 pub(crate) struct Minted {
     /// `None`: the person has not said yes to this fragment.
     pub redeem: Option<String>,
-    /// Whom the session names.
+    /// Whom the session names, and their latest sign-in's email.
     pub identity: Identity,
+    pub email: Option<String>,
 }
 
 impl Call for Mint {

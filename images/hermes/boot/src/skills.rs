@@ -5,7 +5,7 @@
 //!   the fragment's own at the same path. The boot installs them read-only
 //!   at `MANAGED_DIR`. The owner's skills fragment is found as the
 //!   computer's first agent acting for its owner (`for`): of the owner's
-//!   fragments, the one of kind `skills` under the owner's username. None
+//!   fragments, one of kind `skills` they own. None
 //!   means no managed skills, and what was installed goes: the skills a
 //!   person's settings list are their agents' (the shell reads the same
 //!   fragment).
@@ -107,16 +107,14 @@ pub fn next_install_ms(found: Option<bool>, every_ms: u64) -> u64 {
 }
 
 /// The owner's skills fragment among the fragments the agent reaches acting
-/// for them: kind `skills`, named under the owner's username (an agent
-/// fragment is its owner's, so its name's username is theirs: a skills
-/// fragment someone else shared with them is not theirs to install).
-/// `skills.<username>` first, else the first by name.
-pub fn pick(fragments: &[FragmentEntry], agent_fragment: &str) -> Option<String> {
-    let (_, username) = agent_fragment.split_once('.')?;
-    let mut theirs: Vec<&str> = fragments.iter().filter(|f| f.kind == "skills" && f.name.split_once('.').is_some_and(|(_, u)| u == username)).map(|f| f.name.as_str()).collect();
+/// for them: kind `skills`, owned by them (a skills fragment someone else
+/// shared with them is not theirs to install). One labelled `skills` first
+/// (the shell makes it so), else the first by name.
+pub fn pick(fragments: &[FragmentEntry]) -> Option<String> {
+    let mut theirs: Vec<&str> = fragments.iter().filter(|f| f.kind == "skills" && f.owned).map(|f| f.name.as_str()).collect();
     theirs.sort_unstable();
-    let preferred = format!("skills.{username}");
-    theirs.iter().find(|n| **n == preferred).or(theirs.first()).map(|n| n.to_string())
+    let labelled = theirs.iter().find(|n| n.rsplit_once("--").is_some_and(|(label, _)| label == "skills"));
+    labelled.or(theirs.first()).map(|n| n.to_string())
 }
 
 /// Installed files: path under `MANAGED_DIR` → the version installed.
@@ -266,7 +264,7 @@ pub async fn install(api: &Api, reader: &Agent, owner: &str, dir: &Path, manifes
     // from under it is fetched again)
     let mut installed: Installed = load_manifest(manifest).into_iter().filter(|(rel, _)| valid_rel(rel) && dir.join(rel).is_file()).collect();
     let fragments = api.fragments_for(&reader.fragment, owner).await?;
-    let fragment = pick(&fragments, &reader.fragment);
+    let fragment = pick(&fragments);
     let listing = match &fragment {
         Some(f) => Some(api.files_for(&reader.fragment, f, owner).await?),
         None => None,
@@ -321,24 +319,23 @@ pub fn managed_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    fn frag(name: &str, kind: &str) -> FragmentEntry {
-        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into() }
+    fn frag(name: &str, kind: &str, owned: bool) -> FragmentEntry {
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned }
     }
 
     fn file(path: &str, size: u64, version: &str) -> FileEntry {
         FileEntry { path: path.into(), size, last_commit_sha: version.into() }
     }
 
-    /// Valid: the owner's skills fragment, `skills.<user>` first. Invalid:
-    /// someone else's shared with them, a fragment of another kind.
+    /// Valid: the owner's skills fragment, one labelled `skills` first.
+    /// Invalid: someone else's shared with them, a fragment of another kind.
     #[test]
-    fn the_owners_skills_fragment_is_found_by_kind_and_username() {
-        let list = [frag("garden.paul", "app"), frag("skills.skyler", "skills"), frag("extra.paul", "skills"), frag("skills.paul", "skills")];
-        assert_eq!(pick(&list, "juniper.paul").as_deref(), Some("skills.paul"));
-        assert_eq!(pick(&list[..3], "juniper.paul").as_deref(), Some("extra.paul"), "another label of theirs");
-        assert_eq!(pick(&list[..2], "juniper.paul"), None, "skyler's is not paul's");
-        assert_eq!(pick(&[], "juniper.paul"), None);
-        assert_eq!(pick(&list, "nodot"), None, "an agent fragment names its username");
+    fn the_owners_skills_fragment_is_found_by_kind_and_owner() {
+        let list = [frag("garden--k3x9", "app", true), frag("skills--p2m4", "skills", false), frag("extra--r7t5", "skills", true), frag("skills--z8w6", "skills", true)];
+        assert_eq!(pick(&list).as_deref(), Some("skills--z8w6"));
+        assert_eq!(pick(&list[..3]).as_deref(), Some("extra--r7t5"), "another label of theirs");
+        assert_eq!(pick(&list[..2]), None, "a skills fragment shared with them is not theirs");
+        assert_eq!(pick(&[]), None);
     }
 
     #[test]
@@ -391,8 +388,8 @@ mod tests {
     #[test]
     fn the_reader_is_an_agent_of_the_computers_owner() {
         let a = |f: &str, o: &str| Agent { fragment: f.into(), identity: format!("npub1{f}"), name: f.into(), owner: o.into(), credentials: vec![] };
-        let agents = [a("x.skyler", "npub1skyler"), a("juniper.paul", "npub1paul")];
-        assert_eq!(reader(&agents, "npub1paul").map(|r| r.fragment.as_str()), Some("juniper.paul"));
+        let agents = [a("x.skyler", "npub1skyler"), a("juniper--k3x9", "npub1paul")];
+        assert_eq!(reader(&agents, "npub1paul").map(|r| r.fragment.as_str()), Some("juniper--k3x9"));
         assert!(reader(&agents[..1], "npub1paul").is_none());
     }
 
@@ -411,13 +408,13 @@ mod tests {
         let down = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), down.clone(), Arc::new(Mutex::new(true))).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (dir, manifest) = (root.join("managed"), root.join("sync/managed.json"));
 
         let d = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
-        assert_eq!((d.fragment.as_deref(), d.fetched, d.skills), (Some("skills.paul"), 2, 2));
+        assert_eq!((d.fragment.as_deref(), d.fetched, d.skills), (Some("skills--z8w6"), 2, 2));
         assert!(dir.join("research/arxiv-finite/SKILL.md").exists() && !dir.join("fragment.json").exists());
         let replay = install(&api, &agent, "npub1paul", &dir, &manifest).await.unwrap();
         assert_eq!((replay.fetched, replay.removed), (0, 0), "settled");
@@ -526,7 +523,7 @@ mod tests {
         let listed = Arc::new(Mutex::new(false));
         let (addr, _stop) = fake::start(files.clone(), Arc::new(Mutex::new(false)), listed.clone()).await;
         let api = Api::new(&format!("http://{addr}")).unwrap();
-        let agent = Agent { fragment: "juniper.paul".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
         let root = std::env::temp_dir().join(format!("hermes-boot-platform-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let (own, manifest) = (root.join("profile/skills"), root.join("sync/managed.json"));
@@ -551,7 +548,7 @@ mod tests {
         files.lock().unwrap().insert("skills/fragment/SKILL.md".into(), ("release:f".into(), b"---\nname: fragment\ndescription: The managed one.\n---\n".to_vec()));
         files.lock().unwrap().insert("skills/grill-me/SKILL.md".into(), ("release:g".into(), b"---\nname: grill-me\n---\n".to_vec()));
         let d = install(&api, &agent, "npub1paul", &managed, &manifest).await.unwrap();
-        assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills.paul"), 2));
+        assert_eq!((d.fragment.as_deref(), d.skills), (Some("skills--z8w6"), 2));
         let found = hermes_finds(&dirs);
         assert_eq!(found.get("fragment"), Some(&managed.join("fragment/SKILL.md")), "the managed one shadows it: {found:?}");
         assert!(found.contains_key("grill-me") && found.contains_key("garden-notes"));
@@ -589,24 +586,24 @@ mod tests {
                     if *down.lock().unwrap() {
                         return net::refusal(StatusCode::SERVICE_UNAVAILABLE, "unavailable", "down");
                     }
-                    assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper.paul"), "as the agent");
+                    assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper--k3x9"), "as the agent");
                     let q = req.uri().query().unwrap_or("").to_string();
                     assert!(q.split('&').any(|kv| kv == "for=npub1paul"), "acting for its owner: {q}");
                     let skills = *listed.lock().unwrap();
                     match (req.method().clone(), req.uri().path()) {
                         (Method::GET, "/api/fragments") => {
-                            let mut list = vec![json!({ "name": "garden.paul", "role": "editor", "kind": "app" })];
+                            let mut list = vec![json!({ "name": "garden--k3x9", "role": "editor", "kind": "app", "owned": true })];
                             if skills {
-                                list.insert(0, json!({ "name": "skills.paul", "role": "editor", "kind": "skills" }));
+                                list.insert(0, json!({ "name": "skills--z8w6", "role": "editor", "kind": "skills", "owned": true }));
                             }
                             net::json_answer(StatusCode::OK, &json!({ "fragments": list }))
                         }
-                        (_, path) if !skills && path.starts_with("/api/f/skills.paul/") => net::refusal(StatusCode::NOT_FOUND, "not_found", "no such fragment"),
-                        (Method::GET, "/api/f/skills.paul/files") => {
+                        (_, path) if !skills && path.starts_with("/api/f/skills--z8w6/") => net::refusal(StatusCode::NOT_FOUND, "not_found", "no such fragment"),
+                        (Method::GET, "/api/f/skills--z8w6/files") => {
                             let list: Vec<Value> = files.lock().unwrap().iter().map(|(p, (v, b))| json!({ "path": p, "size": b.len(), "lastCommitSha": v })).collect();
                             net::json_answer(StatusCode::OK, &json!({ "files": list }))
                         }
-                        (Method::GET, "/api/f/skills.paul/file") => {
+                        (Method::GET, "/api/f/skills--z8w6/file") => {
                             let path = q.split('&').find_map(|kv| kv.strip_prefix("path=")).unwrap_or("").replace("%2F", "/");
                             match files.lock().unwrap().get(&path) {
                                 Some((_, b)) => net::respond(StatusCode::OK, "text/markdown", b.clone()),

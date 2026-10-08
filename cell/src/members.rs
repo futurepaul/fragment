@@ -29,7 +29,7 @@
 //! (search.rs) follows their row: made with a role, gone without one.
 //!
 //! An invite may be for one identity (`invitee`, the share sheet's invite by
-//! username): only they may accept it, so a forwarded link admits no one
+//! email): only they may accept it, so a forwarded link admits no one
 //! else. Without one, whoever holds its token may.
 
 use fragment_core::access;
@@ -346,6 +346,20 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")));
         }
         crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: who.to_string() }).await
+    }
+
+    /// Which of `ids` are members here: those whose emails a member may
+    /// see (docs/cloudflare-v1.md, decision 48). Bounded by the caller's
+    /// list (a profile ask is at most `PROFILES_MAX`).
+    pub(crate) fn members_among(&self, ids: &[String]) -> CellResult<Vec<String>> {
+        assert!(ids.len() <= crate::registry::PROFILES_MAX * 2, "a profile ask is bounded before it reaches here");
+        let mut out = vec![];
+        for id in ids {
+            if self.member_role(id)?.is_some() {
+                out.push(id.clone());
+            }
+        }
+        Ok(out)
     }
 
     pub(crate) fn members(&self, caller: &Caller) -> CellResult<Response> {

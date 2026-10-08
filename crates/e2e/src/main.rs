@@ -415,8 +415,8 @@ impl Suite {
         self.chrome.lease()
     }
 
-    /// A label for this run (a fragment's full name adds its owner's
-    /// username). Hosted, it is `e2e-<run>-<base>`, so the run's sweep
+    /// A label for this run (a fragment's full name adds a suffix:
+    /// `named`). Hosted, it is `e2e-<run>-<base>`, so the run's sweep
     /// finds it, and leaves every other run's (hosted/sweep.rs).
     pub fn name(&self, base: &str) -> String {
         match self.hosted_rules {
@@ -425,7 +425,7 @@ impl Suite {
         }
     }
 
-    /// `base`'s full name for this run, under `owner`'s username.
+    /// `base`'s full name for this run, for `owner` (`Api::qualified`).
     pub fn named(&self, api: &Api, owner: &Keys, base: &str) -> Result<String> {
         api.qualified(owner, &self.name(base))
     }
@@ -682,7 +682,7 @@ impl Suite {
 
     /// `fragment login` in `home`, with a person approving its key in a
     /// browser: the CLI's pending login, a sign-in through the WorkOS fake,
-    /// the approval, then the CLI's login finishing, and a username taken.
+    /// the approval, then the CLI's login finishing.
     /// A login that fails is a FAIL of its own, so the lane's checks that
     /// fail after it have their cause printed first.
     pub fn login(&mut self, api: &Api, home: &Path) -> Output {
@@ -694,26 +694,10 @@ impl Suite {
             return pending;
         }
         let out = self.cli(api, home, &["login", "--no-browser"]);
-        let done = match out.status.success() {
-            true => self.take_username(api, home),
-            false => Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr))),
-        };
-        if let Err(e) = done {
-            self.fail("fragment login", format!("{e:#}"));
+        if !out.status.success() {
+            self.fail("fragment login", String::from_utf8_lossy(&out.stderr).to_string());
         }
         out
-    }
-
-    /// A username through the CLI, as a person takes one once.
-    fn take_username(&self, api: &Api, home: &Path) -> Result<()> {
-        let me = self.cli_json(api, home, &["whoami", "--json"])?;
-        if !me["identity"]["username"].is_null() {
-            return Ok(());
-        }
-        let npub = me["npub"].as_str().context("whoami answers the key's npub")?;
-        let username = format!("c{}", npub.get(5..15).context("an npub is longer than 15 characters")?);
-        self.cli_json(api, home, &["username", &username, "--json"])?;
-        Ok(())
     }
 
     /// The `data` of a `--json` CLI answer.

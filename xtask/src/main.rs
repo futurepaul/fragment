@@ -3,7 +3,7 @@
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
-//!                    <label>--<username>.fragment.localhost:8790), the
+//!                    <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
@@ -190,7 +190,7 @@ fn dev(args: &[String]) -> Result<()> {
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  node log:     {}", node.log.display());
-    println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
 

@@ -154,14 +154,14 @@ mod tests {
     #[test]
     fn a_file_names_each_agents_screen() {
         let f = br#"{"screens": [
-            {"agent": "juniper.paul", "rfb": "unix:/d/juniper-paul/bot-desktop/rfb.sock", "lease": "/d/juniper-paul/bot-desktop/lease.json", "activity": "/d/juniper-paul/bot-desktop/activity"},
-            {"agent": "fred.paul", "rfb": "tcp:127.0.0.1:5901"}
+            {"agent": "juniper--k3x9", "rfb": "unix:/d/juniper--k3x9/bot-desktop/rfb.sock", "lease": "/d/juniper--k3x9/bot-desktop/lease.json", "activity": "/d/juniper--k3x9/bot-desktop/activity"},
+            {"agent": "fred--k3x9", "rfb": "tcp:127.0.0.1:5901"}
         ]}"#;
         let s = parse(f).unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!(s["juniper.paul"].rfb, Target::Unix("/d/juniper-paul/bot-desktop/rfb.sock".into()));
-        assert_eq!(s["juniper.paul"].lease.as_deref(), Some(std::path::Path::new("/d/juniper-paul/bot-desktop/lease.json")));
-        assert_eq!((s["fred.paul"].lease.clone(), s["fred.paul"].activity.clone()), (None, None), "a display alone: Take over is the screen's own");
+        assert_eq!(s["juniper--k3x9"].rfb, Target::Unix("/d/juniper--k3x9/bot-desktop/rfb.sock".into()));
+        assert_eq!(s["juniper--k3x9"].lease.as_deref(), Some(std::path::Path::new("/d/juniper--k3x9/bot-desktop/lease.json")));
+        assert_eq!((s["fred--k3x9"].lease.clone(), s["fred--k3x9"].activity.clone()), (None, None), "a display alone: Take over is the screen's own");
         assert!(parse(br#"{"screens": []}"#).unwrap().is_empty());
     }
 
@@ -169,17 +169,17 @@ mod tests {
     #[test]
     fn a_file_that_is_no_screens_is_refused() {
         for bad in [
-            &br#"{"screens": [{"agent": "juniper.paul", "rfb": "/no/scheme"}]}"#[..],
+            &br#"{"screens": [{"agent": "juniper--k3x9", "rfb": "/no/scheme"}]}"#[..],
             br#"{"screens": [{"agent": "Juniper Paul", "rfb": "unix:/a"}]}"#,
-            br#"{"screens": [{"agent": "juniper.paul", "rfb": "unix:/a", "lease": "relative/lease.json"}]}"#,
-            br#"{"screens": [{"agent": "juniper.paul", "rfb": "unix:/a"}, {"agent": "juniper.paul", "rfb": "unix:/b"}]}"#,
-            br#"{"screens": [{"agent": "juniper.paul", "rfb": "unix:/a", "colour": "red"}]}"#,
+            br#"{"screens": [{"agent": "juniper--k3x9", "rfb": "unix:/a", "lease": "relative/lease.json"}]}"#,
+            br#"{"screens": [{"agent": "juniper--k3x9", "rfb": "unix:/a"}, {"agent": "juniper--k3x9", "rfb": "unix:/b"}]}"#,
+            br#"{"screens": [{"agent": "juniper--k3x9", "rfb": "unix:/a", "colour": "red"}]}"#,
             br#"{"agents": []}"#,
             b"{",
         ] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
-        let many: Vec<String> = (0..=limits::AGENTS_MAX).map(|i| format!(r#"{{"agent": "a{i}.paul", "rfb": "unix:/a"}}"#)).collect();
+        let many: Vec<String> = (0..=limits::AGENTS_MAX).map(|i| format!(r#"{{"agent": "a{i}--k3x9", "rfb": "unix:/a"}}"#)).collect();
         assert!(parse(format!(r#"{{"screens": [{}]}}"#, many.join(",")).as_bytes()).is_err(), "past AGENTS_MAX");
     }
 
@@ -192,12 +192,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("screens.json");
         let mut s = Screens::new(path.clone());
-        assert!(!s.refresh() && s.get("juniper.paul").is_none(), "no file: no screen");
-        std::fs::write(&path, br#"{"screens": [{"agent": "juniper.paul", "rfb": "unix:/a"}]}"#).unwrap();
-        assert!(s.refresh() && s.get("juniper.paul").is_some());
+        assert!(!s.refresh() && s.get("juniper--k3x9").is_none(), "no file: no screen");
+        std::fs::write(&path, br#"{"screens": [{"agent": "juniper--k3x9", "rfb": "unix:/a"}]}"#).unwrap();
+        assert!(s.refresh() && s.get("juniper--k3x9").is_some());
         assert!(!s.refresh(), "unchanged: not read again");
         std::fs::write(&path, b"{torn").unwrap();
-        assert!(!s.refresh() && s.get("juniper.paul").is_some(), "a file that does not read keeps the screens before it");
+        assert!(!s.refresh() && s.get("juniper--k3x9").is_some(), "a file that does not read keeps the screens before it");
         std::fs::remove_file(&path).unwrap();
         assert!(s.refresh() && s.agents().next().is_none(), "removed: no screen");
         let _ = std::fs::remove_dir_all(&dir);

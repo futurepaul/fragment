@@ -405,8 +405,8 @@ mod tests {
     #[test]
     fn commit_triple_success_replay_conflict() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("base.txt", b"base")]);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &[("base.txt", b"base")]);
+        let cs = cs_for(&mock, "t--k3x9");
         let head0 = cs.branch_head(MAIN).unwrap().unwrap();
 
         // 1. success: expected parent matches -> new tip, old content kept
@@ -443,10 +443,10 @@ mod tests {
     #[test]
     fn a_commit_whose_answer_is_lost_is_not_resent() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("base.txt", b"base")]);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &[("base.txt", b"base")]);
+        let cs = cs_for(&mock, "t--k3x9");
         let head0 = cs.branch_head(MAIN).unwrap().unwrap();
-        mock.drop_commit_answers("t", 1);
+        mock.drop_commit_answers("t--k3x9", 1);
         let err = cs.commit(Some(&head0), "one", &author(), &[upsert("a.txt", b"A")]).unwrap_err();
         assert!(matches!(err, CsError::OutcomeUnknown(_)), "got: {err}");
         assert_eq!(mock.commit_pack_count(), 1, "sent once");
@@ -457,8 +457,8 @@ mod tests {
     #[test]
     fn commit_deletes_and_oversized_chunking() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("small.txt", b"s")]);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &[("small.txt", b"s")]);
+        let cs = cs_for(&mock, "t--k3x9");
         let head = cs.branch_head(MAIN).unwrap().unwrap();
         // a body bigger than one 4 MiB chunk exercises the chunker
         let big = vec![7u8; CHUNK_MAX + 1024];
@@ -475,8 +475,8 @@ mod tests {
         let mock = crate::mockcs::start(); // page_size = 2 in the mock
         let files: Vec<(String, Vec<u8>)> = (0..5).map(|i| (format!("f{i}.txt"), vec![7u8; i + 1])).collect();
         let refs: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (p.as_str(), b.as_slice())).collect();
-        mock.seed_repo("t", &refs);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &refs);
+        let cs = cs_for(&mock, "t--k3x9");
         let listed = cs.list_files(MAIN).unwrap();
         let mut paths: Vec<&str> = listed.iter().map(|f| f.path.as_str()).collect();
         paths.sort();
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn first_commit_creates_branch_without_expected() {
         let mock = crate::mockcs::start();
-        let cs = cs_for(&mock, "fresh"); // a repo with no branches at all
+        let cs = cs_for(&mock, "fresh--k3x9"); // a repo with no branches at all
         assert!(cs.branch_head(MAIN).unwrap().is_none());
         let tip = cs.commit(None, "root", &author(), &[upsert("root.txt", b"r")]).unwrap();
         assert_eq!(cs.branch_head(MAIN).unwrap().unwrap(), tip);
@@ -498,13 +498,13 @@ mod tests {
     #[test]
     fn rollback_flow() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("v1.txt", b"1")]);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &[("v1.txt", b"1")]);
+        let cs = cs_for(&mock, "t--k3x9");
         // live at main's second commit, where a deploy leaves it (the
         // platform moves live: POST …/deploy)
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
         let live2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        mock.set_branch("t", LIVE, &live2);
+        mock.set_branch("t--k3x9", LIVE, &live2);
         // rollback: restore live to tip1 (an ancestor) with CAS on live
         let restored = cs.restore_live(&tip1, &live2, "rollback", &author()).unwrap();
         assert_ne!(restored, live2);
@@ -524,11 +524,11 @@ mod tests {
         // live moved since the SHA the rollback read -> 409 target_moved,
         // nothing applied
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("v1.txt", b"1")]);
-        let cs = cs_for(&mock, "t");
+        mock.seed_repo("t--k3x9", &[("v1.txt", b"1")]);
+        let cs = cs_for(&mock, "t--k3x9");
         let tip1 = cs.branch_head(MAIN).unwrap().unwrap();
         let tip2 = cs.commit(Some(&tip1), "v2", &author(), &[upsert("v2.txt", b"2")]).unwrap();
-        mock.set_branch("t", LIVE, &tip2);
+        mock.set_branch("t--k3x9", LIVE, &tip2);
         let err = cs.restore_live(&tip1, &tip1, "rollback", &author()).unwrap_err();
         assert!(matches!(err, CsError::CasRejected { .. }), "got: {err}");
         assert_eq!(cs.branch_head(LIVE).unwrap().unwrap(), tip2);
@@ -542,11 +542,11 @@ mod tests {
     #[test]
     fn a_held_client_mints_again_only_near_expiry_or_when_refused() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"1")]);
+        mock.seed_repo("t--k3x9", &[("a", b"1")]);
         let short = crate::mockcs::with_token_ttl(TOKEN_REMINT_BEFORE_EXPIRY_MS / 1000 / 2);
-        short.seed_repo("t", &[("a", b"1")]);
+        short.seed_repo("t--k3x9", &[("a", b"1")]);
         let host = crate::api::Client::new(&short.url, auth::fixed(7));
-        let mut held = Held::new("t");
+        let mut held = Held::new("t--k3x9");
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         assert_eq!(short.take_requests("").get("GET storage-token"), Some(&2), "a token inside the margin is minted again");
@@ -554,7 +554,7 @@ mod tests {
         // a token a minute old is minted again, though it has long left:
         // a removed editor's watcher pushes for at most that long
         let host = crate::api::Client::new(&mock.url, auth::fixed(7));
-        let mut held = Held::new("t");
+        let mut held = Held::new("t--k3x9");
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());
         held.client.as_mut().expect("connected").minted_at_ms -= TOKEN_REUSE_MAX_MS;
         assert!(held.get(&host).unwrap().branch_head(MAIN).unwrap().is_some());

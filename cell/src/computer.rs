@@ -2104,7 +2104,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str) 
     }
     let agent = req.headers().get(AGENT_HEADER)?.ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "name the agent this acts as (x-fragment-agent)"))?;
     if !fragment_proto::valid_fragment_name(&agent) {
-        return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>.<username>)"));
+        return Err(CellError::invalid("x-fragment-agent names an agent fragment (<label>--<suffix>)"));
     }
     let platform = cfg.platform();
     let arrived = Url::parse(&platform).map_err(|e| CellError::host(format!("FRAGMENT_PLATFORM_URL: {e}")))?;
