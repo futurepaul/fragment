@@ -489,7 +489,7 @@ impl Api {
     pub fn sign_in(&self, email: &str) -> Result<String> {
         match self.run.levers_sign_in {
             false => self.sign_in_through_workos(email),
-            true => self.e2e_sign_in(email, 0).map(|(session, _)| session),
+            true => self.e2e_session(email).map(|(session, _)| session),
         }
     }
 
@@ -499,11 +499,28 @@ impl Api {
     /// budget. Their identity joins the run's people (its spend is theirs).
     pub fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> Result<(String, String)> {
         self.run.lend(paid_calls)?;
-        let r = self.unsigned("POST", "/api/test/signin", Some(&json!({ "email": email, "paidCalls": paid_calls })))?;
+        self.levers_sign_in(email, Some(paid_calls))
+    }
+
+    /// Another session for an e2e person (a new one's: a seat lent
+    /// nothing), leaving the paid calls they were lent as they are: a
+    /// sweep's, which signs in every e2e person beside runs still spending.
+    pub fn e2e_session(&self, email: &str) -> Result<(String, String)> {
+        self.levers_sign_in(email, None)
+    }
+
+    fn levers_sign_in(&self, email: &str, paid_calls: Option<u64>) -> Result<(String, String)> {
+        let asked = match paid_calls {
+            Some(n) => json!({ "email": email, "paidCalls": n }),
+            None => json!({ "email": email }),
+        };
+        let r = self.unsigned("POST", "/api/test/signin", Some(&asked))?;
         anyhow::ensure!(r.status == 200, "the e2e sign-in of {email}: {r}");
         let session = r.body["session"].as_str().context("an e2e sign-in answers a session")?.to_string();
         let identity = r.body["identity"].as_str().context("an e2e sign-in answers an identity")?.to_string();
-        anyhow::ensure!(r.body["paidCalls"] == paid_calls, "the e2e sign-in capped {email} at {}, not {paid_calls}", r.body["paidCalls"]);
+        if let Some(n) = paid_calls {
+            anyhow::ensure!(r.body["paidCalls"] == n, "the e2e sign-in capped {email} at {}, not {n}", r.body["paidCalls"]);
+        }
         self.run.signed_in(&identity);
         Ok((session, identity))
     }

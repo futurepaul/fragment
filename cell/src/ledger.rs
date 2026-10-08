@@ -192,9 +192,10 @@ pub struct Status {}
 /// move this ledger's clock (`clock {offsetMs}`), run its sweep now
 /// (`sweep`), list the references under a prefix (`entries {prefix}`),
 /// read what moved its balance (`totals`), or cap its paid calls from now
-/// (`paid-calls {max}`: each new reservation, a model call or an AI step,
-/// counts one, and one past `max` is refused as a ledger at zero refuses
-/// it; the hosted e2e's people are capped so).
+/// (`paid-calls {max?}`, answering `{max, used}`; with no `max` the cap
+/// stays as it is, 0 where there was none: each new reservation, a model
+/// call or an AI step, counts one, and one past `max` is refused as a
+/// ledger at zero refuses it; the hosted e2e's people are capped so).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum TestHook {
@@ -203,7 +204,7 @@ pub enum TestHook {
     Sweep,
     Entries { prefix: String },
     Totals,
-    PaidCalls { max: u64 },
+    PaidCalls { max: Option<u64> },
 }
 
 impl Route for core::Reserve {
@@ -738,6 +739,10 @@ impl LedgerCell {
         assert!(self.cfg.test_hooks, "test hooks answer on test fleets only");
         match hook {
             TestHook::PaidCalls { max } => {
+                let max = match max {
+                    Some(max) => max,
+                    None => self.meta(PAID_CALLS_MAX)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0),
+                };
                 self.set_meta(PAID_CALLS_MAX, &max.to_string())?;
                 let used = self.meta(PAID_CALLS_USED)?.and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
                 Ok(json!({ "max": max, "used": used }))

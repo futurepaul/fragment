@@ -6,8 +6,9 @@
 //! (`RUN_HEX` hex digits, from the clock as it starts) right after the
 //! prefix, so a label a lane extends (`<agent label>-chat`) still names its
 //! run. A sweep walks every e2e person (the levers' list), signs each in
-//! again (a session, no paid calls) and acts as them: it has no power of
-//! its own.
+//! again (a session that leaves the paid calls they were lent as they are:
+//! a run beside it may be spending them) and acts as them: it has no power
+//! of its own.
 //!
 //! - **`Scope::Run`** (`--sweep <run>`; `--sweep`, the last run that
 //!   finished here; a rehearsal's end) deletes that run's fragments,
@@ -262,7 +263,7 @@ pub fn sweep_on(api: &Api, scope: &Scope, now_ms: i64) -> Result<Swept> {
         for person in r.body["people"].as_array().into_iter().flatten() {
             let email = person["email"].as_str().context("an e2e person has an email")?;
             swept.people += 1;
-            let (session, _) = api.e2e_sign_in(email, 0)?;
+            let (session, _) = api.e2e_session(email)?;
             let listed = shell(api, &session, "GET", "/api/fragments")?;
             anyhow::ensure!(listed.status == 200, "{email}'s fragments: {listed}");
             let (mut chosen, mut spared) = (0usize, 0usize);

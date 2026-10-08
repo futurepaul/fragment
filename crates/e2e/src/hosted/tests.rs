@@ -320,11 +320,12 @@ fn an_e2e_sign_in_lends_from_the_run() {
     let refused = api.e2e_sign_in("greedy@e2e.test", 3).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(refused.contains("paid calls are spent"), "{refused}");
     assert_eq!(seen.lock().unwrap().len(), 1, "a sign-in past the budget is never sent");
-    // a plain sign-in is the levers' too, lent nothing
+    // a plain sign-in is the levers' too, lent nothing: it names no paid
+    // calls, so the cap a lane lent its person stays (a sweep's beside it)
     api.sign_in("plain@e2e.test").unwrap();
     let seen = seen.lock().unwrap().clone();
     let body: Value = serde_json::from_str(&seen[1].body).unwrap();
-    assert_eq!((seen[1].path.as_str(), body), ("/api/test/signin", json!({ "email": "plain@e2e.test", "paidCalls": 0 })));
+    assert_eq!((seen[1].path.as_str(), body), ("/api/test/signin", json!({ "email": "plain@e2e.test" })));
     assert_eq!(seen[1].header(fragment_core::levers::SECRET_HEADER), Some(SECRET));
     assert_eq!(run.people().len(), 2);
 }
