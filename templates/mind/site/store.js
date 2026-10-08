@@ -17,6 +17,18 @@
 /// The fragment: `./__fragment.js`, or `./mock.js` in the page's dev mode.
 export let F = null;
 
+/// The page in the shell (`?embed=shell`): the shell's sidebar is its rail
+/// and its topbar its header (mind.js).
+export const EMBED = new URLSearchParams(location.search).get("embed") === "shell" && window.parent !== window;
+
+/// A message's files: at most this many, each at most this big (a chat's,
+/// docs/chat-records.md), uploaded as the fragment's blobs.
+export const FILES_MAX = 8;
+export const FILE_MAX_BYTES = 25 * 1024 * 1024;
+const SHA256 = /^[0-9a-f]{64}$/;
+/// Where a blob of the fragment is read (docs/api.md, Blobs).
+export const blobUrl = (sha256) => F?.blobUrl?.(sha256) ?? `./__blob/${sha256}`;
+
 /// The log's last records a page reads as it opens: each thread's latest
 /// turn state and a hand-off's latest steps are among them.
 const LOG_LAST = 300;
@@ -37,7 +49,7 @@ export const PENDING_MS = 20_000;
 
 export const S = {
   me: null, // { id, principal, role }
-  person: null, // { name, picture } from `__people`, when it answers
+  person: null, // { name, username, picture } from `__people`, when it answers
   personas: [], // [{ id, name, emoji, instructions, hands }]
   defaultPersona: null,
   chosen: null, // the persona picked for new chats (null: the default)
@@ -57,7 +69,7 @@ export const S = {
   work: new Map(), // bridge turn -> { turn, start, at, steps: [], end, endAt, seen }: goose's turn as `work` has it
   chatTask: new Map(), // `chat` seq -> task id: the message that handed the task over
   msgs: new Map(), // thread -> { byI: Map<i, message>, more, loaded, loading }
-  pending: new Map(), // thread -> [{ key, text, at, persona, failed? }]: said, not yet in the log
+  pending: new Map(), // thread -> [{ key, text, at, persona, files, uploading?, failed? }]: said, not yet in the log
   stopping: new Set(), // threads whose Stop was asked
   suggestions: null, // topic names offered (`suggest`)
   suggesting: false,
@@ -90,7 +102,17 @@ const num = (v) => (Number.isFinite(v) ? v : null);
 
 function message(b) {
   if (!Number.isInteger(b.i)) return null;
-  return { i: b.i, kind: str(b.kind) || "user", text: str(b.text), at: num(b.at) ?? Date.now(), thread: str(b.thread) || null, persona: str(b.persona) || null, task: str(b.task) || null };
+  return { i: b.i, kind: str(b.kind) || "user", text: str(b.text), at: num(b.at) ?? Date.now(), thread: str(b.thread) || null, persona: str(b.persona) || null, task: str(b.task) || null, attachments: filesOf(b.attachments) };
+}
+
+/// A message's files, as its record or the `thread` query has them: each
+/// a blob of the fragment by its hash.
+export function filesOf(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((a) => a && typeof a === "object" && SHA256.test(a.sha256))
+    .slice(0, FILES_MAX)
+    .map((a) => ({ sha256: a.sha256, size: Number.isFinite(a.size) ? a.size : null, type: str(a.type), name: str(a.name) }));
 }
 
 /// A task's steps as kept: an array, or its JSON (the table's `steps`).
@@ -158,6 +180,7 @@ function onLog(record) {
           const at = list?.findIndex((p) => head(p.text) === head(m.text));
           if (at >= 0) {
             S.landed.set(m.i, `p:${list[at].key}`);
+            for (const f of list[at].files ?? []) if (f.preview) URL.revokeObjectURL(f.preview);
             list.splice(at, 1);
           }
         }
@@ -452,10 +475,17 @@ export async function titleOf(id) {
   return S.titles.get(id);
 }
 
-/// Says `text` in `thread` as `personaId`: shown at once, then as the log
-/// has it.
-export async function say(thread, text, personaId) {
-  const item = { key: crypto.randomUUID(), text, at: Date.now(), persona: personaId };
+/// Says `text` in `thread` as `personaId`, with `files` (picked, dropped or
+/// pasted) uploaded first as the fragment's blobs (`fragment.blob`): shown
+/// at once, then as the log has it.
+export async function say(thread, text, personaId, files = []) {
+  const item = {
+    key: crypto.randomUUID(),
+    text,
+    at: Date.now(),
+    persona: personaId,
+    files: files.slice(0, FILES_MAX).map((file) => ({ file, name: file.name || "a file", type: file.type, size: file.size, sent: null, preview: /^image\//.test(file.type) ? URL.createObjectURL(file) : null })),
+  };
   const list = S.pending.get(thread) ?? [];
   list.push(item);
   S.pending.set(thread, list);
@@ -464,29 +494,31 @@ export async function say(thread, text, personaId) {
     t.last = item.at;
     bump(thread);
   }
-  changed();
-  const body = { text, thread };
-  if (personaId) body.persona = personaId;
-  try {
-    await F.post("say", body, { id: item.key });
-  } catch (e) {
-    item.failed = e.message || "not sent";
-    changed();
-  }
+  await send(thread, item);
 }
 
-export async function resend(thread, item) {
+/// A pending message, its files uploaded (each once: one that is up is
+/// not sent again), then posted; its id is its own, so a try again of an
+/// unchanged post is the same record (docs/api.md).
+async function send(thread, item) {
   item.failed = null;
+  item.uploading = item.files.some((f) => !f.sent);
   changed();
-  const body = { text: item.text, thread };
-  if (item.persona) body.persona = item.persona;
   try {
+    for (const f of item.files) if (!f.sent) f.sent = await F.blob(f.file, { name: f.name });
+    item.uploading = false;
+    const body = { text: item.text, thread };
+    if (item.persona) body.persona = item.persona;
+    if (item.files.length) body.attachments = item.files.map((f) => ({ sha256: f.sent.sha256, name: f.sent.name || f.name, type: f.sent.type || f.type, size: f.sent.size ?? f.size }));
     await F.post("say", body, { id: item.key });
   } catch (e) {
+    item.uploading = false;
     item.failed = e.message || "not sent";
-    changed();
   }
+  changed();
 }
+
+export const resend = (thread, item) => send(thread, item);
 
 export async function stop(thread) {
   S.stopping.add(thread);
@@ -566,7 +598,7 @@ async function people(principal) {
     const r = F.people ? await F.people([principal]) : await (await fetch(`./__people?id=${encodeURIComponent(principal)}`, { credentials: "same-origin" })).json();
     const p = r?.profiles?.[principal];
     if (p) {
-      S.person = { name: p.name || p.username || "", picture: typeof p.picture === "string" ? p.picture : "" };
+      S.person = { name: p.name || p.username || "", username: str(p.username), picture: typeof p.picture === "string" ? p.picture : "" };
       changed();
     }
   } catch {

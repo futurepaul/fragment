@@ -26,14 +26,27 @@
         </button>
         </div>
       </div>
+      <div class="sidebar-scroll">
+      <!-- the person's mind (docs/optchat.md): its personas, its screens and
+           its recent threads, as its frame in the middle column tells them -->
+      <div class="mind-nav" id="mind-nav" hidden>
+        <div class="section-label">Personas<button class="icon-button small" id="new-persona" type="button" title="New persona" aria-label="New persona"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+        <nav class="rows" id="personas"></nav>
+        <nav class="rows" id="mind-links"></nav>
+        <div class="section-label" id="recent-label" hidden>Recent</div>
+        <nav class="rows" id="recent"></nav>
+      </div>
+      <div class="agents" id="agents">
       <div class="section-label agents-label">Agents<span class="section-actions"><button class="icon-button small" id="new-group" type="button" title="New group chat" aria-label="New group chat" aria-haspopup="dialog">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 19a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9"/></svg>
         </button><button class="icon-button small" id="new-agent" type="button" title="New agent" aria-label="New agent">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         </button></span></div>
       <nav class="rows" id="chats"></nav>
+      </div>
       <div class="section-label">Apps<button class="icon-button small" id="add-app" type="button" title="Add an app" aria-label="Add an app"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
       <nav class="rows" id="apps"></nav>
+      </div>
       <div class="spacer"></div>
       <div class="update" id="update" hidden>
         <div class="update-confirm" id="update-confirm" hidden>
