@@ -17,6 +17,8 @@ release of this code, and its repo holds only its face.
 - `applib/prompts.mjs`: COMPACT, MASTER, VIEW_DOC and the subagent framing,
   the spec's verbatim with "OptChat" as "Mind" and MASTER's one change;
   the tools; topic_suggest's prompt.
+- `applib/files.mjs`: a message's files (attachments): their checks, a
+  small text one's text, and the message as the memory reads it with them.
 
 ## How it runs
 
@@ -36,6 +38,11 @@ release of this code, and its repo holds only its face.
   search, and computer (a persona with hands, and an agent member),
   each answer logged (`logged`: talk, tool, echo). `turn_end` lets the
   lock go; the thread is classified; when nothing waits, `pump` runs.
+- **Files:** a `say` record's `attachments` (the mind's blobs) are
+  logged with the message; `heard` reads the small text ones first
+  (`job.blob`), so the memory (the compactor, zoom, a turn) reads a
+  message with its files. A hand-off carries the turn's files on `chat`,
+  and goose's reply's files come back on its report.
 - **`pump`** builds what is ready, the level-0 node alone first (a turn
   waits on it), merges when none is: each node one conversation of up to
   TRIES `cheap` calls, written by `node_built` (first write wins). A job's

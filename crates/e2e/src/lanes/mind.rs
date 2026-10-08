@@ -15,15 +15,21 @@
 //! agent's bridge gives that record; the agent's one reply is the task's
 //! report, and comes back as a `[<task>] …` user message that runs a turn
 //! of its own. Its steps on `work` start nothing (a page follows them).
+//!
+//! Files: a message's text file (the mind's blob, named on `say`) is read
+//! whole into its turn, goes with the hand-off on `chat`, the stub names
+//! it, and its reply's file comes back on the report and is read into the
+//! next turn.
 
 use std::time::Duration;
 
 use anyhow::Result;
+use fragment_core::blob::sha256_hex;
 use serde_json::{json, Value};
 
 use super::computers::{agent_replies, phase, told, turn_of, AGENT_JSON};
 use super::jobs::records;
-use crate::api::{Api, Socket};
+use crate::api::{Api, Call, Socket};
 use crate::Keys;
 use crate::Suite;
 
@@ -269,6 +275,67 @@ pub fn mind(s: &mut Suite, api: &Api) -> Result<()> {
         runs.body["triggers"].as_array().is_some_and(|t| t.iter().all(|t| t["channel"] != "work") && t.iter().any(|t| t["channel"] == "chat" && t["run"] == "hands_said")),
         &runs,
     );
+
+    // ---- files: a text file said with a message, read whole into its
+    // turn, handed on with the task; goose's file back on its report
+    let notes = b"the spare key hangs on the third hook\n".to_vec();
+    let notes_sha = sha256_hex(&notes);
+    let r = api.call(Call {
+        method: "PUT",
+        url: format!("{}/api/f/{mind}/blobs/{notes_sha}", api.base),
+        body: Some(notes.clone()),
+        content_type: Some("text/plain"),
+        keys: Some(&owner),
+        ..Call::default()
+    })?;
+    anyhow::ensure!(r.status == 200, "uploading notes.txt to the mind: {r}");
+    let file = json!({ "sha256": notes_sha, "name": "notes.txt", "type": "text/plain", "size": notes.len() });
+    let hooks = "t_00112233445566bb";
+    let r = say("m6", json!({ "text": padded("draw the hooks [[call computer {\"task\": \"draw the hooks\"}]]"), "thread": hooks, "persona": "builder", "attachments": [file] }))?;
+    anyhow::ensure!(r.status == 200, "saying m6: {r}");
+    let opened = s.eventually(TURN, || op(api, &owner, &mind, "tasks", json!({ "thread": hooks }))["tasks"].as_array().is_some_and(|t| t.len() == 1));
+    let task = op(api, &owner, &mind, "tasks", json!({ "thread": hooks }))["tasks"][0]["id"].as_str().unwrap_or("").to_string();
+    let said = messages(api, &owner, &mind, hooks);
+    s.ok("a message's file is named on its msg record, without its text", opened && said.first().is_some_and(|m| m["kind"] == "user" && m["attachments"] == json!([file])), json!(said));
+    let shown = format!("[file: notes.txt (text/plain, {} B)]\n```\nthe spare key hangs on the third hook\n```", notes.len());
+    let call = s.ai.chats().into_iter().find(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with("draw the hooks")));
+    s.ok(
+        "its turn reads the text file whole, below its name (job.blob)",
+        call.as_ref().is_some_and(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.ends_with(&shown))),
+        format!("{call:?}"),
+    );
+    let first = said.first().and_then(|m| m["i"].as_i64()).unwrap_or(-1);
+    let z = op(api, &owner, &mind, "zoom", json!({ "id": first, "n": 1 }));
+    let listed = op(api, &owner, &mind, "thread", json!({ "id": hooks }));
+    s.ok(
+        "zoom opens the message with its file; the thread lists it named",
+        z["text"].as_str().is_some_and(|t| t.ends_with(&shown)) && listed["messages"][0]["attachments"] == json!([file]),
+        json!({ "zoom": z, "thread": listed }),
+    );
+    let handed = records(api, &owner, &mind, "chat").into_iter().find(|r| r["principal"] == npub.as_str() && r["body"]["text"].as_str().is_some_and(|t| t.ends_with(&format!("(task {task}, thread {hooks})"))));
+    s.ok("the hand-off carries the turn's file on chat", handed.as_ref().is_some_and(|h| h["body"]["attachments"] == json!([file])), format!("{handed:?}"));
+    let reported = s.eventually(WAKE, || messages(api, &owner, &mind, hooks).iter().any(|m| m["kind"] == "user" && m["task"] == task.as_str()));
+    let report = messages(api, &owner, &mind, hooks).into_iter().find(|m| m["kind"] == "user" && m["task"] == task.as_str()).unwrap_or(Value::Null);
+    let seq = handed.as_ref().and_then(|h| h["seq"].as_i64()).unwrap_or(-1);
+    let turn = turn_of(&agent_name, &mind, "chat", seq);
+    let reply = agent_replies(&records(api, &owner, &mind, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str()).unwrap_or(Value::Null);
+    s.ok(
+        "goose got the file (the stub names it), and its reply's file comes back on the report",
+        reported
+            && reply["body"]["text"].as_str().is_some_and(|t| t.ends_with("[got 1: notes.txt]"))
+            && reply["body"]["attachments"][0]["name"] == "drawing.txt"
+            && report["attachments"][0]["name"] == "drawing.txt"
+            && report["attachments"][0]["sha256"] == reply["body"]["attachments"][0]["sha256"],
+        json!({ "reply": reply, "report": report }),
+    );
+    let read_back = s.eventually(TURN, || {
+        s.ai.chats().iter().any(|c| c["messages"][1]["content"][1]["text"].as_str().is_some_and(|t| t.starts_with(&format!("[{task}] ")) && t.contains("[file: drawing.txt (text/plain, ") && t.contains("\na drawing for ")))
+    });
+    s.ok("and the report's turn reads goose's text file whole", read_back, "");
+    let bare = "t_00112233445566cc";
+    let r = say("m7", json!({ "text": "", "thread": bare, "attachments": [file] }))?;
+    let titled = r.status == 200 && s.eventually(TURN, || logged(api, &owner, &mind, "thread").iter().any(|t| t["body"]["id"] == bare && t["body"]["title"] == "notes.txt"));
+    s.ok("a message may be a file alone: its thread is titled by the file's name", titled, &r);
     std::thread::sleep(super::computers::QUEUE_DRAIN);
     api.signed(&owner, "POST", &format!("/api/computers/{computer}/sleep"), Some(&json!({})))?;
     Ok(())
