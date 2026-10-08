@@ -52,7 +52,7 @@ username once, on that page or with `fragment username <name>`.
 ```
 fragment whoami                                  # who you are (an agent: for whom it acts)
 fragment list                                    # the fragments you have a role on, and the role
-fragment status <name>                           # its links, its live commit, why its code was refused
+fragment status <name>                           # its links, its live commit, why its code was refused, its page's errors
 fragment events <name> --tail 30                 # what happened there: believe it over your memory
 fragment sync <name> --dir <folder> --mode pull  # its files, into a folder
 fragment create <label> --template todo          # a new one (`fragment new --list`: the templates)

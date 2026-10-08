@@ -195,6 +195,18 @@ fragment rollback my-thing [--to <sha>]   # live back to an earlier deploy
 A deploy whose `fragment.json` does not check keeps the last good code:
 `fragment status` says why under `code.error`.
 
+Then check the page. Shortly after each deploy (not in its answer), the
+platform loads the page once in a browser for its preview card, as a
+visitor without an account sees it, and `fragment status` shows what
+the page reported under `page`: uncaught exceptions, console errors,
+failed loads, and Content Security Policy violations, each with its
+`kind`, `text`, and `source` (the script and line). Once `page.live` is
+the commit you deployed (`pins.live`), `page.errors` should be empty;
+`fragment events` says `page.errors` when it is not. It is one load with
+no clicks: it catches a syntax error, a missing import, a blocked
+script, not a bug behind a button. A members-only fragment's page is not
+loaded, so it gets no report.
+
 ## Sync in depth
 
 The repo is the truth; your folder is a working copy. Sync talks to

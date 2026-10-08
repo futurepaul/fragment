@@ -261,6 +261,7 @@ Every change is checked against this table.
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md` | compiled in, never edited elsewhere: the CLI's `fragment skill` and `fragment guide`, the platform's `/llms.txt` and `/llms-full.txt` (docs/api.md, Agent docs) |
+| A fragment's preview card, and what its page reported as the card's shot loaded it | the fragment's own storage (`fragment_core::card::Cards`; docs/api.md, Cards) | status's `page` reads it; a report with errors is also a `page.errors` event |
 
 No file bytes persist in the cell's SQLite: a file lives in git or, at
 1 MiB and above, in R2 under its hash, named by a pointer in git.

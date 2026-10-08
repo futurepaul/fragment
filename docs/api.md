@@ -625,7 +625,7 @@ and styles only inline and images only from the platform
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
 | `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried until done), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
-| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
+| `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations: {<op>: {kind, role, input?, ephemeral?, description?}}, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes, page}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host); `page` is `{live, at, errors: [{kind, text, source}], dropped}`, what the page reported as its preview card's shot loaded it (Cards, below), absent before the first |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
 | `PUT /api/f/{name}/members/{id\|npub}` | owner, or their agent for them | `{role: viewer\|contributor\|editor, peopleOnly?}` → the member; a key names the identity holding it (404 when no one registered it). `peopleOnly: true` (decision 36): the share lends the member's agents nothing, so they act there only with memberships of their own. A new member that is an agent running on a computer is announced to it: `joined` on its agent fragment's `tasks`, and a wake (Computers, below) |
@@ -893,6 +893,21 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   URL carries `?view=`, as a link holder's does; the card goes only to
   members, who already see that page), and a `members` fragment is not
   shot at all (`card.skipped`): a visitor would see only its refusal.
+- **What the page reports.** The shot enables CDP's `Runtime` and `Log`
+  on the page and hears, as it loads and in the second after (no
+  clicks): uncaught exceptions and unhandled rejections (`exception`),
+  `console.error` and a failed `console.assert` (`console`), loads that
+  failed (`network`: a script, an image, a fetch; the page itself, "the
+  page did not open: …"; not Chrome's own ask for `/favicon.ico`, made
+  whether or not the page names one), and loads refused for security, a
+  Content Security Policy's above all (`security`). It keeps the first
+  10 and counts the rest (`dropped`), each `text` and `source` (the URL,
+  with its line and column when Chrome gives them) cut to 1 KiB. The try that
+  ends a live's tries (its card made, or given up) having opened the page
+  makes what it heard the page's report: status's `page`, `{live, at,
+  errors, dropped}`, its `errors` empty when the page reported none. A
+  retry's and a stale try's are dropped, and a live not shot leaves the
+  report before: `page.live` says which deploy it saw.
 - **Apps only.** A chat or an agent fragment is not an app (the shell
   lists it elsewhere): its deploys are not shot (`card.skipped`). A
   brain is an app.
@@ -907,7 +922,9 @@ rules are pure (`fragment_core::card`); cell/src/card.rs runs them.
   not answer refuses none.
 - **Events:** `card.made` (`{live, blob, attempt}`), `card.skipped`
   (`{live, why: not_an_app | members_only | owner_pays}`),
-  `card.failed` (`{failures}`). A retry and a stale shot say nothing.
+  `card.failed` (`{failures}`), and `page.errors` (the report, when it
+  has errors; its summary their count and the first one's first line).
+  A retry and a stale shot say nothing.
   A page's Open Graph image
   stays `__preview.svg`: the card is its members'.
 
