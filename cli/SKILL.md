@@ -75,3 +75,4 @@ minutes.
 
 Run `fragment guide` and read it all before you build: it is the whole
 manual (the folder, operations, deploys, sharing, the ledger, errors).
+<!-- PR #252's path-filter probe: never merged -->
