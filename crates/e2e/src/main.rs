@@ -75,6 +75,10 @@ pub const SIGNINS_PENDING_MAX: u64 = 200;
 /// A new person's plan here: a seat, so each starts the month with its
 /// included credit (production's is `guest`).
 pub const DEFAULT_PLAN: &str = "seat";
+/// How long a computer whose sleep's save keeps failing stays awake here
+/// (`computers.unsaved_max_ms`; thirty minutes in production): short, so
+/// the computers lane sees the bound run out and its owner told of it.
+pub const UNSAVED_MAX_MS: u64 = 45_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
@@ -485,6 +489,7 @@ impl Suite {
             test_secret: Some(self.test_secret.clone()),
             computer_image: Some("stub".into()),
             computer_snapshots: false,
+            computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),

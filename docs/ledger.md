@@ -85,7 +85,7 @@ the gateway's log `cost`) and its cost basis (list plus fee).
 | Meter (`Usage`) | Unit | Default list price | Source |
 |---|---|---|---|
 | `tokens` | tokens per model: input (uncached), cached input, cache write, output | per million: Flash $0.15 / $0.03 / $0.15 / $0.50; GLM-5.3 $1.40 / $0.26 / $1.40 / $4.40; Opus 5.5 $4 / $0.20 / $5 / $20 | Workers AI catalog (`/ai/models/search`); the AI model catalog page for Opus (S4) |
-| `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`) | Workers AI pricing (its image rows for FLUX.1 [schnell]); S4 matched it to tokens on every call |
+| `neurons` | thousandths of a neuron | $0.011 per thousand neurons; an image (FLUX.1 [schnell]) is 4.80 neurons a 512×512 tile and 9.60 a step (`fragment_core::media`); a transcription (Whisper large-v3-turbo) is 46.63 neurons a minute of audio, reserved at its bytes read as 16 kbps and settled at the length Whisper heard (`fragment_core::transcribe`) | Workers AI pricing (its image rows for FLUX.1 [schnell], its audio row for whisper-large-v3-turbo, read 2026-10-07); S4 matched it to tokens on every call |
 | `awake` | ms, per instance type | `2vcpu-6gib`: $0.064224 an hour | Containers pricing: 6 GiB memory and a 12 GB disk provisioned, plus 5% of 2 vCPU (CPU is billed on active use, which the Computer DO cannot see) |
 | `storage` | byte-hours, by class | per GB-month (10^9 bytes × 720 h): R2 $0.015, SQLite $0.20, git $0.015 | R2 and Durable Objects pricing; code.storage publishes no price to us, so git is at R2's |
 | `requests` | requests | $0.45 per million | Workers Standard $0.30 plus the Durable Object request $0.15 |
@@ -279,7 +279,10 @@ mark sends the same batch again, which answers as before.
   and every few minutes while awake, as `awake {instance, ms}` rows
   (`awake:<computer>:<from ms>`). The payer is the computer's owner. The
   ledger waives an always-on seat's awake time; no wake starts when
-  `may_spend(wake)` refuses.
+  `may_spend(wake)` refuses. The time a computer is kept for its failed
+  saves (a sleep's failed save to `computers.unsaved_max_ms` after it) is
+  never metered: the platform's, not its owner's (Paul, 2026-10-08;
+  docs/computers.md, "What its owner is told").
 - **Storage** (the Fragment DO's alarm, daily). It samples the fragment's
   own SQLite and its blobs, and meters `bytes × hours since the last
   sample` (`store:<fragment>@<incarnation>:<class>:<at>`) to the

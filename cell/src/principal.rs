@@ -41,6 +41,10 @@
 //!   nothing a page needs: it reads the list again as it reconnects. At
 //!   most `LIST_WATCHERS_MAX` at once; nothing is read from them.
 //!
+//!   Their computer tells the same sockets when what its owner is told of
+//!   it changes (`/changed`, from the Computer DO: `tell_changed`), so a
+//!   page reads it again with the list.
+//!
 //! **Wiped** (docs/api.md, Operators): a wipe of its person (or of the
 //! person who owns its agent) closes its sockets and empties it in one
 //! step, leaving one row that says so (`wiped`). From then it takes
@@ -106,6 +110,8 @@ pub struct PrincipalCell {
     /// Its person was wiped (`wiped`'s row, read as it starts): it takes
     /// nothing more.
     wiped: Cell<bool>,
+    /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `test/…` answers.
+    test_hooks: bool,
 }
 
 /// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
@@ -214,13 +220,14 @@ struct Hit {
 }
 
 impl DurableObject for PrincipalCell {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
         sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
         let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
         let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
-        PrincipalCell { state, wiped: Cell::new(wiped) }
+        let test_hooks = crate::config::Config::from_env(&env).test_hooks;
+        PrincipalCell { state, wiped: Cell::new(wiped), test_hooks }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -277,6 +284,10 @@ impl PrincipalCell {
             let body = req.bytes().await?;
             return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
         }
+        // the router's levers (`/api/test/list`), on fleets with them only
+        if let Some(op) = req.path().strip_prefix("/test/").filter(|_| self.test_hooks) {
+            return Ok(Response::from_json(&self.test_lever(op)?)?);
+        }
         if self.wiped.get() {
             return self.wiped_answer(&req);
         }
@@ -311,7 +322,39 @@ impl PrincipalCell {
                 Ok(Response::from_json(&self.search(&q)?)?)
             }
             (Method::Get, "/watch") => self.watch(&req),
+            // something of theirs the list does not hold changed (their
+            // computer: what its owner is told of it), so their pages read
+            // again; only the Worker's own code reaches here
+            (Method::Post, "/changed") => {
+                self.tell();
+                Ok(Response::from_json(&json!({ "ok": true }))?)
+            }
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
+        }
+    }
+
+    /// The test levers on a list (`POST /api/test/list {identity, op}`):
+    /// `before-searched` makes it a list from before its rows named the
+    /// channels searched (#186), whose table never gained the column (the
+    /// lists on p5, 2026-10-08: every newer change to one is refused, 500).
+    /// Answers its columns.
+    fn test_lever(&self, op: &str) -> CellResult<Value> {
+        assert!(self.test_hooks, "a list's levers answer on fleets with them only");
+        let columns = |sql: &SqlStorage| -> CellResult<Vec<String>> {
+            let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None)?.to_array()?;
+            Ok(cols.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
+        };
+        let sql = self.sql();
+        match op {
+            "before-searched" => {
+                if columns(&sql)?.iter().any(|c| c == "searched") {
+                    sql.exec("ALTER TABLE memberships DROP COLUMN searched", None)?;
+                }
+                let now = columns(&sql)?;
+                assert!(!now.iter().any(|c| c == "searched"), "the list is one from before the column");
+                Ok(json!({ "columns": now }))
+            }
+            other => Err(CellError::new(ErrorCode::NotFound, format!("no list lever {other}"))),
         }
     }
 
@@ -596,6 +639,21 @@ impl PrincipalCell {
         }
         Ok(SearchAnswer { fragments, messages })
     }
+}
+
+/// Tells `identity`'s open pages that something of theirs their list does
+/// not hold changed (their computer's notices, docs/computers.md): each
+/// reads the list, and their computer, again. A page that missed it reads
+/// again as it reconnects.
+pub(crate) async fn tell_changed(env: &Env, identity: &str) -> CellResult<()> {
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    let req = Request::new_with_init("https://principal.internal/changed", &init)?;
+    let resp = env.durable_object("PRINCIPAL")?.get_by_name(identity)?.fetch_with_request(req).await?;
+    if resp.status_code() != 200 {
+        return Err(CellError::host(format!("{identity}'s list answered {} to a change", resp.status_code())));
+    }
+    Ok(())
 }
 
 /// A row as a list shows it.

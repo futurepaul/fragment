@@ -170,6 +170,58 @@ pub fn vision_model(named: Option<&str>, book: &PriceBook) -> Result<String, Str
     Err(format!("the vision model {model:?} is not in the price book, which prices {}: add its prices (fragment_core::price) or name one of those", priced.join(", ")))
 }
 
+/// What a guest's key says to name its agent: `agent:<label>.<username>`.
+pub const AGENT_KEY_PREFIX: &str = "agent:";
+
+/// Why a guest's model call names no agent to bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unnamed {
+    /// Neither the header nor the key names one.
+    Missing,
+    /// The header, or a key that says `agent:`, names no agent fragment.
+    Malformed,
+    /// The header and the key name two agents.
+    Disagree,
+}
+
+impl Unnamed {
+    pub fn message(self) -> &'static str {
+        match self {
+            Unnamed::Missing => "name the agent this call is for (x-fragment-agent, or the key agent:<label>.<username>): its owner pays for it",
+            Unnamed::Malformed => "the agent a call names is an agent fragment's name, <label>.<username>",
+            Unnamed::Disagree => "x-fragment-agent and the key agent:<…> name two agents",
+        }
+    }
+}
+
+/// Who a guest's model call is for (docs/computers.md, Models), one rule
+/// for every model route: the agent its `x-fragment-agent` names, or, from
+/// a client that sends no header of its own (OpenAI's SDKs take a base URL
+/// and a key, nothing more), its key, `Authorization: Bearer
+/// agent:<label>.<username>`. A key that does not say `agent:` is the
+/// guest's own placeholder (Hermes' `fragment-model`), not a name. Named
+/// both ways, the two agree. The computer signs only for an agent that runs
+/// on it, so a key names no more than the header could.
+pub fn agent_named(header: Option<&str>, authorization: Option<&str>) -> Result<String, Unnamed> {
+    let from_key = authorization
+        .and_then(|a| a.trim().split_once(' ').filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer")).map(|(_, k)| k.trim()))
+        .and_then(|k| k.strip_prefix(AGENT_KEY_PREFIX));
+    let valid = |n: &str| fragment_proto::valid_fragment_name(n).then(|| n.to_string()).ok_or(Unnamed::Malformed);
+    match (header.map(str::trim), from_key) {
+        (None, None) => Err(Unnamed::Missing),
+        (Some(h), None) => valid(h),
+        (None, Some(k)) => valid(k),
+        (Some(h), Some(k)) => {
+            let (h, k) = (valid(h)?, valid(k)?);
+            if h == k {
+                Ok(h)
+            } else {
+                Err(Unnamed::Disagree)
+            }
+        }
+    }
+}
+
 /// The request the platform sends for one call, and what it may cost.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bounded {
@@ -389,6 +441,31 @@ mod tests {
         let image = json!([{ "type": "text", "text": "what is on the screen?" }, { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }]);
         let b = bound(v, json!({ "model": "vision", "messages": [{ "role": "user", "content": image }] }), false).unwrap();
         assert_eq!((b.model, b.input["messages"][0]["content"].clone(), b.input.get("model")), ("@cf/example/seeing", image, None));
+    }
+
+    /// Goal: one rule names the agent a guest's model call is for, chat and
+    /// transcription alike: the header, or a key `agent:<name>` from a
+    /// client that sends no header of its own (OpenAI's SDKs); any other
+    /// key is the guest's placeholder. Invalid: none, a malformed name
+    /// either way, and two that disagree are refused.
+    #[test]
+    fn the_header_or_the_key_names_the_agent() {
+        let named = |h: Option<&str>, a: Option<&str>| agent_named(h, a);
+        assert_eq!(named(Some("juniper.paul"), None), Ok("juniper.paul".into()));
+        assert_eq!(named(Some("juniper.paul"), Some("Bearer fragment-model")), Ok("juniper.paul".into()), "Hermes' chat calls: the header, its key a placeholder");
+        assert_eq!(named(None, Some("Bearer agent:juniper.paul")), Ok("juniper.paul".into()), "an OpenAI SDK's call: the key");
+        assert_eq!(named(None, Some("bearer   agent:juniper.paul ")), Ok("juniper.paul".into()));
+        assert_eq!(named(Some("juniper.paul"), Some("Bearer agent:juniper.paul")), Ok("juniper.paul".into()), "both, agreeing");
+        assert_eq!(named(None, None), Err(Unnamed::Missing));
+        assert_eq!(named(None, Some("Bearer fragment-model")), Err(Unnamed::Missing), "a placeholder names no one");
+        assert_eq!(named(None, Some("Basic agent:juniper.paul")), Err(Unnamed::Missing), "only a bearer key names");
+        for bad in ["Bearer agent:", "Bearer agent:juniper", "Bearer agent:Juniper.Paul", "Bearer agent:a b.c", "Bearer agent:juniper.paul.x"] {
+            assert_eq!(named(None, Some(bad)), Err(Unnamed::Malformed), "{bad}");
+        }
+        assert_eq!(named(Some("not a name"), None), Err(Unnamed::Malformed));
+        assert_eq!(named(Some("juniper.paul"), Some("Bearer agent:willow.paul")), Err(Unnamed::Disagree));
+        assert_eq!(named(Some("juniper.paul"), Some("Bearer agent:nope")), Err(Unnamed::Malformed), "a malformed key is refused whatever the header says");
+        assert!(Unnamed::Missing.message().contains("agent:<label>.<username>"));
     }
 
     /// Goal: the deployment's vision model is GLM-5.3 Flash unless it names

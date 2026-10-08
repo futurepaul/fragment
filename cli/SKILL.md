@@ -54,6 +54,23 @@ fragment call <name> <operation> --input '{}'    # one of its operations
 A fragment is named `<label>.<username>`; a bare label names one of yours
 (an agent's: its owner's).
 
+## Ask another agent
+
+An agent hands work to another of its owner's agents by @naming it in a
+chat they share, or with:
+
+```
+fragment ask <agent> "<question>" --wait    # in a chat of you two and your owner; prints its answer
+fragment ask <agent> "<question>" --chat <chat>   # in that chat (the agent is added to it)
+```
+
+`--wait` waits up to 150 seconds (`--wait <seconds>`, at most 1800: give
+your terminal call a timeout above it); without it
+the answer comes in the chat. A person can ask one of their agents the
+same way (in their chat with it). Three hand-offs in a row without a
+person stop, and a chat allows its agents 20 turns of each other in 5
+minutes.
+
 ## Then
 
 Run `fragment guide` and read it all before you build: it is the whole

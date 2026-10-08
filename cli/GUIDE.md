@@ -85,6 +85,29 @@ they are an agent's way to build and publish. `fragment sync` and
 `deploy --dir` still talk to code.storage directly, with the
 short-lived, repo-scoped token the platform mints for the agent.
 
+An agent asks another of its owner's agents (one its computer runs)
+with `fragment ask`:
+
+```
+fragment ask fred "what's on the calendar Friday?" --wait   # prints fred's answer
+fragment ask fred "draft the reply" --chat team-chat         # asks in that chat; the answer comes there
+```
+
+The question goes to a chat of the two agents and their owner
+(`<a>-<b>`, made the first time), or to `--chat`; whichever of the two
+is not in that chat is added as an editor (the owner's to do, so its
+agent may, on the owner's chats). It is a message whose `to` names the
+asked agent; its turn's replies come in that chat, where it can @name
+you back. `--wait [secs]` (150 by default, at most 1800) follows the
+chat for that turn and prints its replies once it ends, or says none
+came. `--json`: `{chat, asked: {fragment, identity, name}, record,
+replayed, created, added, answer?: {turn, outcome, error?, replies:
+[{seq, text, attachments}]}}`. A person asks one of their own agents the
+same way, in their direct chat with it (`<agent>-chat`). The answering
+agent's computer counts the hand-offs: three in a row without a person
+stop, and a chat allows its agents 20 turns of each other in 5 minutes
+(docs: chat records).
+
 ## The model in one screen
 
 - **Files.** One git repo per fragment (on code.storage). `main` is the
@@ -499,6 +522,7 @@ fragment deploy <name> [--dir D] [--note N]
 fragment write <name> <path> --text T | --from FILE|- [--message M]
 fragment drafts <name>                   fragment rollback <name> [--to <sha>]
 fragment rm <name>                       fragment guide | skill
+fragment ask <agent> <text> [--chat C] [--wait [S]] [--id ID]
 ```
 
 Global flags: `--host <url>` (or `FRAGMENT_HOST`, or `fragment host

@@ -89,7 +89,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, push, ai, ledger, transcribe, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
@@ -159,7 +159,11 @@ prebuilt bundle is in the debt ledger).
   real model, `Need::RealAgent`) and Chrome, through the flows a person
   uses (a first reply, the CLI, an app, the desktop and its screen, an
   approval, a sleep and a wake), for about half an hour and up to 50 paid
-  calls (crates/e2e/src/lanes/agent_smoke.rs). `--dry-run` prints the plan (base URL,
+  calls (crates/e2e/src/lanes/agent_smoke.rs). `agent-restart` runs only
+  here too, by name: its owner's Restart of a real Hermes computer awake
+  after a reply (its newest save restored, fresh from the image, asked
+  twice made once), then a reply after it; up to 10 paid calls
+  (crates/e2e/src/lanes/agent_restart.rs). `--dry-run` prints the plan (base URL,
   what runs, what is skipped and why) and calls nothing. A preview is
   shared (several sessions run on it at once), so a sweep is one run's
   unless told otherwise: `--sweep` deletes the fragments of the last run
@@ -238,13 +242,19 @@ prebuilt bundle is in the debt ledger).
   `.github/workflows/images.yml`); `cargo test -p fragment-bridge --test
   docker -- --ignored` builds both images and runs them in Docker
   (linux/amd64) against a fake API and a scripted model, real Hermes
-  included. The e2e's computer sections run the stub image under
-  `wrangler dev`, which needs Docker.
+  included (CI: images.yml's `docker`, below). The e2e's computer
+  sections run the stub image under `wrangler dev`, which needs Docker.
 - `.github/workflows/ci.yml` runs `check`, the e2e's four shards (`e2e
   shard k/4`), and `e2e`, green when they all are, on Linux. Its caches
   restore on every run and save only from master's pushes (each key's
-  contents are named in the workflow). `release.yml` builds the CLI for
-  macOS and Linux.
+  contents are named in the workflow). `images.yml` runs `images/`'s
+  `check` on every change there, and `docker`, the Docker lane above
+  (both images built, then every `--ignored` test of docker.rs on them,
+  in parallel; about 13 minutes), on pull requests and master's
+  pushes that touch images/hermes, images/bridge, images/stub, the
+  images' manifest or lock, or the workflow (its `changes` job reads what
+  changed), and on a run by hand. It keeps no layer cache: the workflow
+  says why. `release.yml` builds the CLI for macOS and Linux.
 - Master deploys to Cloudflare (`xtask deploy`): branch copies on the dev
   zone `finite.place` in Paul's account, and production only at cutover.
   fragment.club (the celld fleet on Fly) deploys only from the `celld`

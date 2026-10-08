@@ -91,6 +91,13 @@ fn text_field(o: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
+/// Whether a record's principal is an identity (`id:…`: a person or an
+/// agent), not a fragment's own key (an npub: its cron's and the
+/// platform's records), `platform`, or an anonymous visitor.
+pub fn is_identity(principal: &str) -> bool {
+    principal.starts_with("id:")
+}
+
 /// Whether `s` is an id of the alphabet records use for prompts and
 /// options (`^[A-Za-z0-9._-]{1,max}$`).
 pub fn valid_token(s: &str, max: usize) -> bool {

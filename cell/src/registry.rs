@@ -297,7 +297,8 @@ impl RegistryCell {
         Ok(who)
     }
 
-    /// A person's username, chosen once: taken names and reserved words are refused.
+    /// A person's username, chosen once: taken names, reserved words, and one
+    /// too long for this deployment's hosts (`fragment_core::names`) are refused.
     fn claim_username(&self, b: ClaimUsername) -> CellResult<Claimed> {
         let who = self.by(&b.by)?;
         if who.kind != IdentityKind::Person {
@@ -315,6 +316,8 @@ impl RegistryCell {
             Some(u) => return Err(conflict(format!("you are {u}: a username is chosen once"))),
             None => {}
         }
+        // a new one leaves room for its labels in its fragments' hosts
+        fragment_core::names::username_fits(&b.username, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
         if self.row::<HolderRow>("SELECT identity FROM usernames WHERE username = ?", vec![b.username.as_str().into()])?.is_some() {
             return Err(conflict(format!("{} is taken", b.username)));
         }

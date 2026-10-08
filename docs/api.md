@@ -20,7 +20,7 @@ the deployment's secrets are Worker secrets (below).
 | `CODESTORAGE_ORG` | the code.storage org (required) |
 | `CODESTORAGE_API_URL` | the API base (default `https://api.<org>.code.storage`) |
 | `FRAGMENT_HOST_SUFFIX` | fragments are served from `<label>--<username>.<suffix>` (any other name under it is 404, never the platform; the suffix's own name is the platform's, or redirects to it: Hosts, below). Every deployment names one: an isolate without it does not start |
-| `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>`: its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone |
+| `FRAGMENT_HOST_LABEL_SUFFIX` | a branch deployment's mark, `--<branch>` (a branch is 1 to 16 of lowercase letters, digits, and single dashes inside, as `cargo xtask deploy` makes them; an isolate with another does not start): its fragments are `<label>--<username>--<branch>.<suffix>`, one DNS label beside the other branches' in one zone, and the mark takes from the room its labels and usernames have (Names, below) |
 | `CODESTORAGE_REPO_PREFIX` | what this deployment's repos are named with first (a branch's `<branch>--`), so deployments sharing an org never share a repo |
 | `FRAGMENT_POLL_INTERVAL_S` | how often a busy fragment's pass runs (default 300): one whose pins may lag its repo (a storage token was minted for it, or a move failed to follow, in the last day), which polls code.storage for its branches (the backstop for a push no one refreshed), or with a run in flight (checked against its Workflow), an ended run's reservation to give back, or a template or the agent it declares still to land. Any other fragment's pass is daily, and polls nothing: every move the platform makes or is told of (`refresh`) is followed at once |
 | `FRAGMENT_JOB_RETRY_DELAY_S` | a failed job step's first retry delay, doubling over 4 retries (default 10) |
@@ -31,6 +31,7 @@ the deployment's secrets are Worker secrets (below).
 | `FRAGMENT_AI_URL` | dev and the e2e only: the model route POSTs the AI binding's input to `<url>/run/<model>` instead of calling the binding (the Workers AI fake, a lower rung) |
 | `FRAGMENT_DEFAULT_PLAN` | a new person's plan (Ledger, below): `guest` (the default and production's), `seat`, or `seat_always_on`; dev and the e2e set `seat` |
 | `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` | how long a computer whose sleep's save keeps failing stays awake, its container kept, before it sleeps unsaved (the deploy config's `computers.unsaved_max_ms`; default 1800000, thirty minutes; docs/computers.md, "Saves and what a wake restores") |
+| `FRAGMENT_SUPPORT_URL` | where a person whose computer will not start gets help (the deploy config's `support_url`): an `https:` page or a `mailto:` address, at most 512 visible characters, refused at the node's first request otherwise; `GET /api/computers` gives it as `support`, and the shell links it (docs/computers.md, "What its owner is told"). Unset, none |
 | `FRAGMENT_OPERATORS` | identities and keys that grant credit and set plans, seats and overdrafts, release usernames, and wipe a person (Operators, below); a key listed is an operator's whether or not anyone holds it |
 | `FRAGMENT_DEPLOY_ID` | which deployment this is (default `dev`); `GET /healthz` answers it in `x-fragment-deploy` |
 | `WORKOS_API_URL` | where WorkOS is (default https://api.workos.com; dev and the e2e: the fake); sign-in is on where the `WORKOS_CLIENT` secret is bound (below), and answers 500 where it is not |
@@ -83,8 +84,9 @@ registry's are no route (404); a local fleet's reach everything.
 | `POST /api/test/people` | `{after?}` → `{people: [{identity, email}], next}`: the e2e people by identity, 100 a page (`next`: the identity to ask after, `null` on the last page); the hosted e2e's sweep signs each in again and deletes their fragments of one run (`e2e-<run>-…`), or with `--sweep-all` every `e2e-…` one at least an hour old (crates/e2e/src/hosted/sweep.rs) |
 | `POST /api/test/ledger` | `{identity, op, …}`: a lever on that person's ledger: `clock {offsetMs}` moves its clock, `sweep` runs its sweep now, `entries {prefix}` lists its references under a prefix (at most 500), `totals` answers what moved its balance, and `paid-calls {max}` caps its paid calls from now (`{max, used}`) |
 | `POST /api/test/keys` | `{fragment, op, plaintext\|sealed}`: seals or opens as that fragment |
-| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos}], dueAt}`: each life a delete ended whose cleanup is not done (`lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
-| `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (1 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container). `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
+| `POST /api/test/list` | `{identity, op}`: a lever on that identity's list (on a preview, an e2e person's or their agent's): `before-searched` makes it a list from before its table named the channels searched (#186), as the lists p5 made before then are: every newer change to it is refused (500) → `{columns}` |
+| `POST /api/test/fragment` | `{fragment, op, …}` pulls a lever on that fragment: `fail-deliveries {times}` fails its next queue sends, `fail-outbox {times}` fails its next records' outbox writes just after their append, `fail-triggers {times}` fails its next trigger steps just before their last run starts, `drop-effects {times}` loses its next job step answers on their way back to the Workflow (after the step ran and its answer was kept), `forget-steps` forgets the kept answers of its runs in flight, `hold-advances {on}` holds each advance after a run's first step while on (at most 20 s), and `advance-held` answers `{run}`, the last run it held, `forget-live` makes it forget what it knows of its live sockets beyond their attachments (as waking from hibernation does), `age-live {ms}` makes every live socket's identity check `ms` older (as if that long had passed), `drop-live {code}` drops its live sockets, `ledger {ms \| null}` shortens (or restores) its operation ledger's window, `age {ms}` forgets its write keys as if `ms` had passed, `members {fill}` adds placeholder members until there are `fill`, `code-builds` answers `{builds}`: how many times the fragment's activation built its app's worker code for the loader, `alarm` answers `{alarmAt, pollAt, now}` (ms): when its alarm and its next poll are set for, `age-outside {ms}` makes the last sign its pins may lag (a storage token minted, a move that failed to follow) `ms` older, `fail-after-paid {times}` fails its next paid AI steps just after their call was paid and kept (so the step is tried again), `fail-meter-acks {times}` loses its next meter batches' acknowledgements (so the queue delivers them again), `meter-now {sample?, resend?}` closes every counted minute, takes a storage sample (unless `sample: false`) and sends its outbox's batch now (a waiting one again with `resend`), answering the outbox, `meter` answers the outbox, `forget-standing` forgets what it heard of its owner's standing (meter.rs), `cron-now` makes each of its cron schedules due at once (`{due}`: how many), so a test need not wait for a schedule's minute, `poll-now` makes its next alarm a poll pass (the blob collection's), `fail-cards {times}` makes its next card shots open a page nothing serves (`http://127.0.0.1:9/`, which Chrome refuses), so they fail as an unreachable page does, `cards` answers `{cards, failCardsLeft}`: its card and schedule as kept (`fragment_core::card::Cards`) and the shots the lever still fails, `repo {repo}` makes it name the repo `repo` (`[a-z0-9-]`), as a fragment made before repos were named for their owner does (a wipe deletes what it names), and `ended` answers `{ended: [{incarnation, name, stored, attempts, lists, repos, tries, held, error}], dueAt}`: each life a delete ended whose cleanup is not done (at most 8; `lists`: the members' lists it has still to tell; `stored`: 1 while its app's database or blobs remain; `repos`: 1 while a wipe's end of it has its repo still to delete; `tries`: the most failed tries of a part left; `held`: one failed ten times or was refused, so it is tried daily, and by each wipe call; `error`: the last error of a part left, `part: error`), and when its next pass is due. `ended` alone answers on a name with no fragment (deleted, and not made again) |
+| `POST /api/test/computer` | `{computer, op, times?, on?}` pulls a lever on that computer (docs/computers.md): `kill` → `{computer, killed}` sends SIGKILL to the guest's PID 1 (from outside its PID namespace), so its container exits as a crash does and its real exit is reported (`killed`: the start it was); one not running (asleep, or won't wake) is 400. `saves` → what its Computer DO keeps of its saves: `saves` (newest first, at most three: `{number, id, generation, atMs, held, records, unusable}`, each with its `DirectoryBackup` records), `numbered` (the last save's number), `snapshot` (`{id, image, save}`, the cache of a save for one image, or `null`), `restored` (what its last start that came up restored, as the view has it), `rollbacks`, `ended` (`{generation, by, saved}`: how the last life ended, until the next start that comes up reads it), `starting` (`{generation, from}`: the start under way), `running` (`{generation, image}`: the image's reference the last start that came up runs), `generation` (its lifecycle's last start), `saving` (the save under way, by its step: `{step: hold \| save \| stop, since_ms, …}`, or `null`), `unsavedSince` (since when a sleep's save has kept failing, or `null`), `keepalives` (the guest's keepalives it counts open: its turns running) and `failSaves` (the lever's failures still to come). `fail-saves` with `times` (0 to 100) → `{computer, failSaves}`: its next that many saves fail before they start (a sleep's included, which then keeps its container); 0 fails none more. `always-on` with `on` → `{computer, alwaysOn, view}`: its owner's plan made always-on, or not (decision 25: the plan itself does not reach a computer yet). Another op, or one without its argument, is 400; a computer no one made is 404 |
 | `POST /api/test/registry` | a local fleet's only: `{down}` makes the registry answer 503 (until it is set back, or the registry restarts), `{calls: null}` answers `{calls}`, how many calls the registry has had since it started (a test counts a request's round trips by the difference), `{hold: ms}` makes its next call wait that long (at most 10 s) before it is answered, while other calls go on, and `{signins: "count"\|"expire"\|"sweep"\|{expireSession: token}}` counts sign-in's rows (`{logins, redemptions, sessions}`), expires every pending sign-in and unspent redemption, runs its sweep now, or expires the one session a cookie's token names (a platform session's site sessions end with it) |
 
 A request body is at most what the zone's Cloudflare plan takes (100 MB
@@ -223,7 +225,7 @@ the new key and meant it for this signer.
 | `DELETE /api/identities/{id\|me}/keys/{npub}` | the same | → the identity; the key is 401 from the next request and never comes back; an agent's last active key cannot be revoked (400); a person who signs in may hold none |
 | `GET /api/identities/{id}/keys/{npub}` | the identity, or an agent it owns | → `{active}` (an agent's runtime checks its owner's keys with it) |
 | `PUT /api/identities/{agent}/held` | the agent's owner | `{held: "viewer" \| "editor" \| null}` → the agent: held below its owner (decision 36), it acts with at most that for whomever it acts, wherever its owner's access reaches; its own memberships (its chats, its agent fragment) are not held, so a held agent still answers and records its turns there; `null` lets it go; anyone else 403, `owner` or `public` 400 |
-| `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word); taken 409, another after yours 409, yours again `claimed: false` |
+| `PUT /api/identities/me/username` | a person | `{username}` → `{username, claimed}`: chosen once (3 to 32 of lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word; on a branch deployment, at most 32 less its mark's length, so it leaves 29 bytes for its labels: Names, below, 400 saying why); taken 409, another after yours 409, yours again `claimed: false` |
 | `PUT /api/identities/me/picture` | a person with a username | the image (PNG, JPEG, WebP, or GIF, told by its bytes; at most 256 KiB) → `{sha, mime}` |
 | `GET /api/users/{username}` | anyone | → `{id, kind, username, picture}` (`picture`: its URL, or null) |
 | `GET /api/users/{username}/picture` | anyone | the picture's bytes |
@@ -248,7 +250,32 @@ for the new person. A fragment made before 2026-10-07 keeps the repo it
 was made with (`todo--futurepaul`).
 A label and a username never contain `--`. Creating with a bare label
 puts it under the creator's username; creating under someone else's is
-403. In a signed request's path, a bare label names the signer's own
+403.
+
+A fragment's host label, `<label>--<username>` and a branch
+deployment's mark (`--<branch>`), is one DNS label: at most 63 bytes
+(`limits::HOST_LABEL_MAX_BYTES`). A label alone may be 63 bytes and a
+username 32, so the label a person may use is at most `63 - 2 -
+len(username) - len(mark)` bytes (`fragment_proto::label_room`): 57
+under `paul` on a deployment of its own, 53 on the branch `p5`. A
+create past it is 400 `invalid_request`, naming the address it would
+have had, its length, and how long a label under that username may be
+here, and nothing is made; it is never cut to fit
+(`fragment_core::names`). However it is asked (the CLI's `fragment
+new`, the shell's chats and agents, an agent naming an app, the API),
+the create checks it.
+
+Every username leaves 29 bytes for its labels on every deployment
+(`limits::LABEL_ROOM_MIN_BYTES`: the room the longest username leaves
+where hosts carry no mark), so a label of 29 bytes or fewer fits
+anyone's host. A branch's mark takes from the username instead: there a
+username is at most `32 - len(mark)` bytes (28 on `p5`;
+`fragment_proto::username_max`), and a longer one is refused (400)
+where it is chosen, saying why. The limits were kept, not cut: a label
+is also an agent's name and one DNS label wherever it stands, and a
+username already held must keep naming its fragments' hosts (a shorter
+limit would make some unroutable). Branches are at most 16 bytes, so
+a computer's host label, `<24 hex>--computer--<branch>`, fits too. In a signed request's path, a bare label names the signer's own
 fragment (`/api/f/todo/status` is `todo.<your username>`); anything
 unsigned (an inbox, a site) names it in full.
 
@@ -279,8 +306,8 @@ names no one; its identity still answers, `wiped`).
 `WipeReport` is `{identity, username, state, next, found, ran, done}`:
 `state` is `live`, `wiping` (begun, locked) or `wiped`; `next`, the step a
 wipe runs next; `ran`, the steps this call ran, each `{step, done,
-deleted, note?}` (`note` says what a step skipped, waits for, or why it
-failed this time: the next call tries again); `done`, wiped with nothing
+deleted, note?, cleaning?}` (`note` says what a step skipped, waits for, or why it
+failed this time: the next call tries again; `cleaning`, the `cleanup` step's, below); `done`, wiped with nothing
 left. `found` is what the person and their agents hold now: `{signIns,
 keys, sessions, pictures, agents, fragments, memberships, computer,
 ledger, lists}`, `fragments` (theirs) and `memberships` (theirs and their
@@ -321,7 +348,24 @@ once it is whole:
   stay.
 - `cleanup`: until each ended fragment's cleanup is done: its members'
   lists told, its app's database, its blobs, and its repo deleted
-  (code.storage deletes softly, then its storage on its own).
+  (code.storage deletes softly, then its storage on its own; a repo it
+  says is gone, or never there, is gone). The lists of the person and
+  their agents are not waited on: the `lists` step empties them, and they
+  take nothing after (a list of theirs that refuses every change, as p5's
+  from before its table named the channels searched did, holds no wipe).
+  Each call is the retry: every part left is tried once a call. A part
+  that fails is told apart (`fragment_core::ended`): a refusal the same
+  call cannot pass (a 4xx) is held at once, any other failure after ten
+  tries (backing off between the alarm's tries), and a held part is
+  tried daily by the fragment's alarm, and by each wipe call. The step's
+  `Ran` names each fragment not cleaned yet, in `cleaning` (at most 50):
+  `{fragment, lists, stored, repo, tries, held, error?}` (`lists`: the
+  members' lists still to tell; `stored`: its app's database or blobs
+  remain; `repo`: its repo is still to delete; `tries`: the most failed
+  tries of a part left; `held`; `error`: the last error of a part left,
+  `part: error`, at most 300 characters), and its `note` says the same in
+  a line: `failed: …` once a fragment is held, naming it and its error,
+  else `still cleaning …`.
 - `ledger`: emptied in one step; it keeps one row saying it was wiped and
   refuses everything after (404, `Refused::Wiped`), so a meter batch still
   in the queue is acknowledged and kept nowhere.
@@ -613,12 +657,12 @@ and styles only inline and images only from the platform
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/fragments` | a person with a username, not a guest; an agent for its owner (the fragment is the owner's, under their username, billed to them, with its maker an editor)
- | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
+ | `{name, visibility?, template?}`: `name` a label, or `<label>.<your username>` → `{name, npub, owner, visibility, viewToken, inboxToken, repo, canonical}` (`name` in full). A name whose host label (`<label>--<username>`, and a branch's mark) would pass 63 bytes is 400 `invalid_request`, saying why, and nothing is made (Names, above). Its maker's ledger is asked first (`Spend::Create`): a guest's create is 403 `forbidden`, "guests can't create fragments: …" (Paul, 2026-10-03: a fragment's hosting bills its owner, and a guest pays for nothing; a guest still edits fragments shared with them), however it is asked (a template's, an agent's for its owner, the shell's catalog), and nothing is made; past the overdraft it is 402 `budget_used_up` (the maker's fragments are read-only). A ledger that does not answer refuses none. `visibility` defaults to `link`. The fragment's own key is made in its cell and kept sealed for it. The cell creates (or, for a name its owner deleted before, finds) the code.storage repo, named for its owner (Names, above). With `template` (`blank`, `todo`, `inbox`, `calories`; any other is 400 and nothing is made), the template's files are main's first commit (its `fragment.json` stamped with the fragment's name) and live at once: the create answers once they are (one seed at a time: the alarm, armed during the create, seeds only a template still to land); one that fails to land is retried by the fragment's alarm (`template.failed` events). `chat`, `agent`, `brain` and `skills` are blessed (decision 40), named and not copied: main's first commit is `{"template", "meta": {title}}` (`title`, theirs alone), and the platform's release serves the rest (Apps; a brain: templates/brain/README.md). `notes` is the CLI's only (`fragment new --template notes`). |
 | `PUT /api/fragments/{name}/archived` | any signer, for a fragment they hold a role on | `{archived: bool}` → `{name, archived}`: the signer's own view of it (the shell leaves it out of its sidebar; search still finds it), kept in their list's row and nowhere else, so no one else's list or the fragment changes. The same again answers the same. A bare label names the signer's own; a fragment they hold no role on, or none of that name, is 404; a name that is none, or a body without a boolean `archived`, 400. It goes when they leave the fragment (back in, it is not archived), or the fragment is made again. Not honored for `for` |
 | `GET /api/search?q=` | any signer | → `{fragments: [ListedFragment], messages: [{fragment, channel, seq, at, snippet}]}` (`SearchAnswer`): the signer's fragments whose title or label hold every word of `q`, then the messages that do, newest first, from fragments they hold a role on now, archived ones included (The shell, Search, below). `q` once, at most 256 bytes and 8 words (400 past either, or without it). Not honored for `for` |
 | `GET /api/fragments` | any signer | → `{fragments: [{name, role, kind, title?, agents?, preview?, sharing?, archived?}]}` (`archived: true` on the ones the signer archived); `agents`: its agent members, the first added (a chat's lead) first, at most 16 (`LISTED_AGENTS_MAX`), as the fragment last sent them (an agent's joining or leaving sends every row; a row sent before rows named them has none until it is sent again); `preview`, a chat's only: the first line with words of its newest message the signer's search holds (Search, below), at most 160 bytes, none when it holds none; `sharing` on the signer's own fragments only: `{visibility, members, guests}` (guests: members who are neither the owner nor an agent of theirs), as the fragment last sent it with a change to its members or visibility; an agent's `?for=<id>`: the fragments that identity holds a role on where the agent or its owner is a member too, each with the role the agent acts with there for it (`fragment_core::access::listed_role`; a call decides again) |
 | `GET /api/fragments/watch` | any signer; the shell with its session (below) | a WebSocket, upgraded; anything else is 400. It answers `{type: "hello"}`, then `{type: "changed"}` each time the signer's list changes: a fragment made, shared with them, changed (its title, kind, agents, sharing, their role), left or deleted, their archiving, and a chat's message new to their search (its preview) (principal.rs, Watching). A frame names nothing: the page reads `GET /api/fragments` again with its own credential, so a socket that outlives its session learns only that something changed. The platform session counts only on the platform's host with the platform's exact `Origin` (a browser names its page on every upgrade; a fragment's page, one site with the platform, is refused like no one: 401). A list holds `LIST_WATCHERS_MAX` (16) at once; one more is 429. It reads nothing from the client. Not honored for `for` |
-| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried until done), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
+| `DELETE /api/f/{name}` | the owner (never an agent) | → `{ok, deleted}` once the fragment is gone: from then it is 404 to everyone, its owner's list no longer has it, and its name can be made again. Its other members' lists, the app's database and the blobs go after, by the fragment's alarm (seconds; each part retried, backing off, until done: one that fails ten tries in a row, or is refused, is held and tried daily, its last error kept, as the `ended` lever shows), so a delete answers as soon at `MEMBERS_MAX` members as at one: it tells at most one round of lists itself (32 at once). A fragment made again meanwhile under the name is untouched by the old one's cleanup. The repo stays |
 | `GET /api/f/{name}/status` | viewer | → `{name, npub, owner, role, visibility, repo, pins: {main, live}, counts: {files, events, members}, code: {sha, id, operations, error}, viewToken, inboxToken (editor), urls: {canonical, platform}, blobMinBytes}`; `code.sha` is the live commit installed and `code.id` the code that runs (`app:<hash>` of its `app.mjs` and `applib/`, or a blessed template's `blessed:<template>@<release>`); `urls.platform` is the platform's own origin, for links a person opens (a client in a computer calls an internal host) |
 | `GET /api/f/{name}/manifest` | viewer | → `fragment.json` at main (404 when there is none) |
 | `GET /api/f/{name}/members` | viewer | → `{members: [{principal, role, addedBy, addedAt, kind, owner?}]}` (`owner`: an agent member's) |
@@ -1005,6 +1049,37 @@ tier an agent or a job's step may name.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` names whom it acts for) | an OpenAI chat completion, `model` a tier or `vision` → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
+| `POST /api/models/v1/audio/transcriptions` | an agent | an OpenAI transcription, `multipart/form-data`: `file` (the audio, at most 10 MiB), `model` `whisper`, and optional `language` (ISO-639-1), `prompt` and `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text alone |
+
+Transcription (decision 9, as Paul changed it on 2026-10-07: a voice
+memo is one the agent transcribes itself, through this route):
+- **The model.** `whisper` is Workers AI's Whisper
+  (`@cf/openai/whisper-large-v3-turbo`), called as a tier's model is.
+- **What it is sent.** The audio as base64. A `language` or `prompt` it
+  was given passes on; with no language, Whisper detects it. OpenAI's
+  other fields are let go.
+- **Refusals before anything is reserved.** A form that is not one, a
+  model other than `whisper`, and a format other than `json` or `text`
+  are refused 400. Audio past 10 MiB is refused 413.
+- **Metering** (`fragment_core::transcribe`). Workers AI's 46.63 neurons
+  a minute of audio. The call reserves its audio's bytes read as 16
+  kbps, and settles at the length Whisper reports. Above the
+  reservation it is charged in full; with no length reported, at the
+  reservation.
+- **Who pays.** The payer is the agent's owner, under no fragment's cap.
+- **What is kept.** Only the usage, on the ledger. Whisper's refusal is
+  released and passed through, as a chat call's is.
+- **Its answer's shape.** An answer carries `x-fragment-answer-shape`:
+  the model's own answer's top-level keys, and its `usage` when that is
+  a small object of numbers and short strings (`{"keys": […], "usage":
+  …}`), never its words. The e2e's `transcribe` section prints it, so a
+  hosted run shows what Workers AI answers.
+- **What Workers AI answers.** Read on the e2e preview, 2026-10-08: the
+  catalog's schema unwrapped (`text`, `transcription_info`, `segments`,
+  `vtt`, `word_count`), plus a `usage` the schema does not name. The
+  route reads `text` and `transcription_info.duration` (the catalog's own
+  field). An answer in any other shape is answered 502 and settled at its
+  reservation.
 
 What the model is sent is the body bounded: no `model` (the tier's),
 its images as they came, `max_tokens` at most 16384, `reasoning_effort`
@@ -1406,6 +1481,34 @@ added, by `addedAt`). Which agents a chat has is its member list, as
 its row names them (`agents`), never its name; the sidebar stacks their
 avatars, each in its identity's colour (the chat page's FNV-1a choice).
 
+**A page of the person's own may ask for their agents.** A frame the
+shell made of a fragment its person owns (the open chat, an app's window)
+may `postMessage({fragment: "agents?"})` to it; the shell answers that
+frame, at that fragment's own origin only (its status's canonical URL),
+`{fragment: "agents", agents: [{identity, fragment, name, title}]}`: the
+agents its person's computer runs, `name` the label that `@mentions`
+each. It sends the list again when it changes. The frame may then ask
+`{fragment: "add-agent", identity, nonce}` (a nonce of at most 64
+characters) for one of those agents. **The shell asks its person first**,
+in its own dialog, never in the frame: "Add Fred to <the fragment's
+title>? Fred will be able to read and edit it.", Add and Cancel, Add armed
+800 ms after it shows (so the click or key that sent the page's message
+cannot confirm it). Only on Add does it add the agent to the frame's
+fragment as an editor (`PUT …/members/{identity}`, as making a chat
+does). It answers `{fragment: "agent-added", nonce, identity, ok,
+error?}`: `ok: true` once added; `error` `"declined"` on Cancel or Escape,
+`"not answered"` when the dialog is left 90 s, `"busy"` while another ask
+is open, or the API's refusal. Nothing is remembered: each add is asked,
+in every fragment. A page is code its author or an agent writes (sometimes
+from what it read on the web, or a forked template's), so it asks and
+never grants: no page can put its person's agents (and their connections)
+into a fragment whose records it controls without them saying so. A frame
+of a fragment shared with the person (not theirs) gets no answer to
+either, so it neither learns their agents nor adds one, and no page adds
+anyone but its own owner's agents to its own fragment, which is an
+owner's share with their own agent (decision 36). It names no template;
+the chat's `@` is its user (docs/chat-records.md, "The page").
+
 ### Search (decision 9; docs/cloudflare-v1.md, lesson 12)
 
 Search is FTS5 in the person's `Principal` cell (principal.rs), a
@@ -1467,17 +1570,19 @@ is docs/computers.md; the routes here are its owner's.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `POST /api/computers` | a person | → `{computer, owner, image, phase, why?, agents, origin}` (`ComputerView`): their computer, made asleep on the deployment's default image (`FRAGMENT_COMPUTER_IMAGE`); again, the same one (its id is derived from its owner) |
-| `GET /api/computers` | a person | → `{computers: [ComputerView], defaultImage}`: `defaultImage` is the image a new computer is pinned to; one pinned to another may update to it (the shell asks) |
-| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; anyone else 404 |
+| `GET /api/computers` | a person | → `{computers: [ComputerView], defaultImage, support}`: `defaultImage` is the image a new computer is pinned to; one pinned to another may update to it (the shell asks); `support` is where a person whose computer will not start gets help (`FRAGMENT_SUPPORT_URL`), or `null` |
+| `GET /api/computers/{id}` | its owner | → `ComputerView`: `phase` is `asleep`, `starting`, `awake`, `sleeping`, or `wont_wake` (its starts kept failing; `why` says why); `restored` is what its last start that came up restored (`{generation, from: snapshot \| backup \| nothing, save?, savedAt?, ageMs?, after?: sleep \| exit, rollback, at}`: the save's id, when it was taken and how old it was then, and how the life before that start ended; absent before its first start), `rollbacks` counts its starts that went back in time (the life before ended by a crash, or by a sleep that slept unsaved, or its start fell back to an older save: docs/computers.md, "Saves and what a wake restores"), and `saves` lists the saves of its `/data` it keeps, newest first (`[{number, id, at, generation, held, unusable?}]`, at most three); `why` also says when its sleep's save failed and it stays awake, or slept unsaved; `generation` is its newest start (what a restart names); `notices` is what its owner is told, the most pressing first (proto's `ComputerNotice`; docs/computers.md, "What its owner is told"): `{kind: "wont_wake", why}`, `{kind: "unsaved", since, save?, failingSince, failures, why, stopsAt?}` (its saves failing: its work in no save since `since`, a stop going back to save `save`, the bound stopping it at `stopsAt` unless a save works or something uses it), `{kind: "went_back", life, cause: crash \| unsaved \| restart \| unusable, endedAt?, pending, save?, savedAt?, at?}` (a start went back to save `save`, or will as it next starts, until its owner says they saw it); absent when none. Their open pages are told when it changes (`/api/fragments/watch`'s `changed`); anyone else 404 |
 | `POST /api/computers/{id}/wake` | its owner | → the view once it is awake (a wake also lifts `wont_wake`); 503 `wont_wake` when it would not start |
 | `POST /api/computers/{id}/sleep` | its owner | → the view once it is asleep: the guest held, `/data` saved, the guest signalled, the container gone. When the save fails, the view is awake (its container kept, its `why` saying so), and its sleep is tried again on its own (docs/computers.md); asked again, it tries at once |
+| `POST /api/computers/{id}/restart` | its owner | `{generation?}` (no body: whatever runs) → the view once it has started again: its way back to working. Running, a sleep that saves if it can and stops whether or not it did (a failed save keeps no container), then a start at once; asleep or `wont_wake`, a start (lifting it). The start is fresh: the image and the newest good save, never a snapshot. `generation` names the start the owner saw: a restart of one already restarted (the same press again, another tab's) restarts nothing and answers the view. Its owner's ledger is asked first, as for a wake: at zero credit 402, a guest 403, and what runs runs on |
+| `POST /api/computers/{id}/notices/seen` | its owner | `{life}` → the view: its owner saw the `went_back` notice of the start `life` lost, which is told no more (nor any loss before it); again, the same. A `life` past the newest loss told, or 0, is 400 |
 | `PUT /api/computers/{id}/image` | its owner | `{image}` → the view: the image it starts from at its next wake (an upgrade, or a rollback), its `/data` restored; an image the deployment lacks is 400 |
 | `PUT /api/computers/{id}/agents/{fragment}` | the owner of both | → the view: the agent fragment runs on it. The fragment's own key becomes the agent's identity (registered to its owner), an editor of its own fragment; it signs the guest's requests only while it is assigned here. Assigning it again changes nothing. Nothing restarts: an awake computer's guest reads its agents again while it runs and runs the new one (our Hermes image within seconds; docs/computers.md); a sleeping one's reads it as it starts |
 | `DELETE /api/computers/{id}/agents/{fragment}` | the same | → the view: it signs nothing for the guest from now on; an awake guest stops running it as it reads its agents again |
 | `PUT /api/computers/{id}/agents/{fragment}/connections` | its owner | `{connections: [provider] \| null}` → the view: the providers of the catalog (connections, operator keys, own keys) the agent may have swapped in (decisions 22 and 37), all named at once. `null`, the default, is every one its owner has (decision 44: a person's agents are not fenced from each other); a list narrows the agent to those, and its guest is given the rest no more. A provider the deployment does not offer (`FRAGMENT_PROVIDERS`) is 400, as is a body without `connections` |
 | `GET /api/computers/{id}/uses` | its owner | → `{computer, month, uses: [{provider, agent, calls, micros}]}` (proto's `ComputerUses`): this month's (UTC, `YYYY-MM`) calls through the computer's swap that a provider answered (under 500), by provider and agent fragment, and what they were charged: an operator key's at the price book's price and the margin (as its owner's ledger charged them), a connection's and an own key's `0` (counted, never charged). Thirteen months are kept |
 | `GET /api/computers/{id}/uses/{YYYY-MM}` | its owner | → the same, for that month; a month that is not one is 400 |
-| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port>/`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none |
+| `POST /api/computers/{id}/ports/{port}/ticket` | its owner | `{path?}` → `{url, expiresAt}`: a one-time link (two minutes) that signs a browser in to the computer's own origin, `<24 hex>--computer.<suffix>` (`/__ticket`, then `/p/<port><path>`), cross-site from the platform, in a tab of its own or a frame of the platform's page (below); a signed request needs none. `path` is where on the port it lands, `/` by default: a path and query the image reads (an agent's screen: `/?agent=<agent fragment>`, docs/computers.md, Ports), which the platform carries and never reads; it starts with `/`, is at most 512 visible characters, and has no `//`, `#`, `\`, `.` or `..` segment, else 400 |
 
 On a computer's origin, `/__ticket?t=` redeemed by a top-level visit
 sets `fragment_computer` (HttpOnly, SameSite=Lax, `Path=/`); redeemed by

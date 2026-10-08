@@ -40,15 +40,10 @@ pub const TOOLS_DIR: &str = "target/tools";
 pub const CACHE_DIR: &str = "target/cache";
 
 /// What a branch deployment's name may be (`cargo xtask deploy --branch`,
-/// and the hosted e2e's): a DNS label short enough that
-/// `<label>--<username>--<branch>` fits in one (63 bytes).
-pub fn valid_branch(b: &str) -> bool {
-    (1..=16).contains(&b.len())
-        && b.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        && !b.starts_with('-')
-        && !b.ends_with('-')
-        && !b.contains("--")
-}
+/// and the hosted e2e's): the wire contract's, which the cell checks its
+/// mark (`--<branch>`) against as it starts, and whose length every
+/// username's room for labels allows for (`fragment_proto::username_max`).
+pub use fragment_proto::valid_branch;
 
 pub fn repo_root() -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -310,6 +305,11 @@ pub struct Fleet {
     /// `containers` images), and whether they sleep with a snapshot.
     pub computer_image: Option<String>,
     pub computer_snapshots: bool,
+    /// How long a computer whose sleep's save keeps failing stays awake
+    /// before it sleeps unsaved (`FRAGMENT_COMPUTER_UNSAVED_MAX_MS`; `None`:
+    /// the cell's thirty minutes). The e2e's is short, so its lane sees the
+    /// bound run out.
+    pub computer_unsaved_max_ms: Option<u64>,
     /// What a computer's swap offers: the provider catalog
     /// (`FRAGMENT_PROVIDERS`, `fragment_core::catalog`'s JSON: connections,
     /// operator keys and own keys, each with its hosts, placements,
@@ -405,6 +405,10 @@ impl Fleet {
         }
         if !self.computer_snapshots {
             vars.push(("FRAGMENT_COMPUTER_SNAPSHOTS", "off"));
+        }
+        let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
+        if let Some(ms) = &unsaved {
+            vars.push(("FRAGMENT_COMPUTER_UNSAVED_MAX_MS", ms.as_str()));
         }
         if let Some(p) = &self.providers {
             vars.push(("FRAGMENT_PROVIDERS", p.as_str()));
