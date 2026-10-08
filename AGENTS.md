@@ -86,7 +86,7 @@ prebuilt bundle is in the debt ledger).
   a fresh `wrangler dev` node (workerd) and the in-process fakes, which
   stand only at vendor boundaries (sections, in order:
   auth, create, lockdown, keys, members, identities, signin, drafts, levers, secrets,
-  delegation, files, deploy, templates, when, wall, share, mcp, isolation, frames, ops, public,
+  delegation, files, deploy, templates, when, wall, board, share, mcp, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
   brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
@@ -100,7 +100,7 @@ prebuilt bundle is in the debt ledger).
   in Docker, and `chat`, `frames` and `shell-ui` drive Chrome. A check local workerd cannot make (its
   CPU and memory limits, a Workflow that sleeps through a crash) is a
   `skip`, printed and counted: the hosted lane's. The share, isolation, browser, mcp (its settings check),
-  notes, when and wall sections drive headless Chrome (`CHROME_BIN` to choose one; one
+  notes, when, wall and board sections drive headless Chrome (`CHROME_BIN` to choose one; one
   Chrome serves the whole run, a fresh browser context per section;
   frames, and computers' frame checks, start one of their own that
   blocks third-party cookies, as Safari does);
@@ -200,8 +200,9 @@ prebuilt bundle is in the debt ledger).
   `fragment new|init --template` scaffolds any of `templates/` (also
   `blank`, `calories`: a channel trigger and a text step, `when`: `public` operations,
   live, presence, and `wall`: a channel people post to, live, anonymous
-  posters held to the public call budget); the shell's catalog offers
-  `todo`, `inbox`, `when`, `wall` and `blank`.
+  posters held to the public call budget, and `board`: live, presence, a push
+  to the person a card is given to); the shell's catalog offers `todo`,
+  `inbox`, `when`, `wall`, `board` and `blank`.
 - `cargo xtask secret set <name> --config <file> [--from-file <path>]`,
   `secret gen <name> --config <file>`, `secret list --config <file>`: the
   deployment's secrets in its account's Cloudflare Secrets Store

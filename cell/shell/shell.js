@@ -44,6 +44,7 @@ const CATALOG = [
   { template: "inbox", name: "Inbox", about: "Webhooks in, a job to read each one." },
   { template: "when", name: "When", about: "Find a time or run a poll: anyone with the link votes, live." },
   { template: "wall", name: "Wall", about: "A page anyone with the link posts to, live." },
+  { template: "board", name: "Board", about: "Chores or tasks, live, with a push when one is yours." },
   { template: "blank", name: "Blank", about: "One page to start from." },
   // blessed (decision 40): named, not copied, and made with a title, as a chat is
   { template: "brain", name: "Brain", about: "A knowledge base your agents keep and search.", blessed: true },
