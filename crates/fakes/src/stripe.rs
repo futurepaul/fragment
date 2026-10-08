@@ -294,6 +294,16 @@ impl Stripe {
         Ok(())
     }
 
+    /// A subscription's item at `lookup_key` comes to hold `quantity`, with
+    /// no event: someone changed it in Stripe's dashboard.
+    pub fn set_quantity(&self, sub: &str, lookup_key: &str, quantity: u64) -> Result<(), String> {
+        let mut s = self.state.lock().expect("stripe state");
+        let sb = s.subs.get_mut(sub).ok_or_else(|| format!("no subscription {sub}"))?;
+        let it = sb.items.iter_mut().find(|(_, k, _)| k == lookup_key).ok_or_else(|| format!("{sub} has no item {lookup_key}"))?;
+        it.2 = quantity;
+        Ok(())
+    }
+
     /// Events wait instead of going (`true`), as a lost webhook would; or go again.
     pub fn hold_events(&self, hold: bool) {
         let mut s = self.state.lock().expect("stripe state");

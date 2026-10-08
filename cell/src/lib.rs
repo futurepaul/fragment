@@ -1078,7 +1078,10 @@ pub(crate) async fn route(mut req: Request, env: &Env, ctx: &Context) -> CellRes
             billing::route(req, env, cfg, &url, &rest).await
         }
         (_, ["api", "seat"]) => orgs::seat(req, env, &url).await,
-        (Method::Get, ["api", "org"]) => orgs::org(req, env, &url).await,
+        (_, ["api", "org", rest @ ..]) => {
+            let rest = rest.to_vec();
+            orgs::org(req, env, cfg, &url, &rest).await
+        }
         (_, ["api", "admin", rest @ ..]) => {
             let rest = rest.to_vec();
             orgs::admin(req, env, cfg, &url, &rest).await

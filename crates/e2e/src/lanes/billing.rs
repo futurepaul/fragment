@@ -27,12 +27,13 @@ fn seat(api: &Api, keys: &Keys) -> Value {
     api.signed(keys, "GET", "/api/seat", None).map(|r| r.body).unwrap_or(Value::Null)
 }
 
-/// The org's subscription id, from what the platform asked Stripe for.
+/// The org's live subscription's id (not one that ended), from what the
+/// platform asked Stripe for.
 fn subscription_of(s: &Suite, org: &str) -> Option<String> {
     s.stripe.requests().iter().rev().find_map(|r| {
         let id = r.path.strip_prefix("/v1/subscriptions/")?;
         let sub = s.stripe.subscription(id)?;
-        (sub.metadata.get("fragment_org").map(String::as_str) == Some(org)).then(|| id.to_string())
+        (sub.metadata.get("fragment_org").map(String::as_str) == Some(org) && sub.status != "canceled").then(|| id.to_string())
     })
 }
 
@@ -182,6 +183,77 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     let stranger = api.person()?;
     let r = api.signed(&stranger, "POST", "/api/billing/portal", Some(&json!({})))?;
     s.ok("someone in no org opens none (403)", r.status == 403, &r);
+
+    // ---- an org's admin gives seats: each billed from its invite
+    let sub2 = subscription_of(s, &org).context("the org's new subscription")?;
+    let quantities = |s: &Suite| s.stripe.subscription(&sub2).map(|x| x.items.iter().map(|(_, k, q)| (k.clone(), *q)).collect::<Vec<_>>()).unwrap_or_default();
+    let seat_q = |q: u64| vec![("fragment_seat_month".to_string(), q)];
+    let cy_email = format!("billing-cy-{}@e2e.test", &Keys::generate().pubkey_hex()[..10]);
+    let r = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat" })))?;
+    let cy_seat = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let replay = api.signed(&ann, "POST", "/api/org/seats", Some(&json!({ "email": cy_email, "kind": "seat" })))?;
+    s.ok(
+        "an org's admin adds a seat for an email: it waits on it, mailed, and again is the same seat",
+        r.status == 200 && r.body["created"] == true && r.body["seat"]["person"].is_null() && r.body["seat"]["comped"] == false && replay.body["created"] == false && replay.body["seat"]["id"] == cy_seat.as_str(),
+        json!([r.body, replay.body]),
+    );
+    if !s.hosted() {
+        let sent = s.mail.sent_to(&cy_email);
+        s.ok("the email is mailed where to sign in to take it", r.body["mailed"] == true && sent.len() == 1 && sent[0].text.contains("Sign in with this email address to take it"), format!("{sent:?}"));
+    }
+    let billed = s.eventually(PUSHED, || quantities(s) == seat_q(2));
+    s.ok("Stripe bills it from the invite: the subscription's quantity follows the seats", billed, format!("{:?}", quantities(s)));
+    let cy = Keys::generate();
+    let cy_session = api.sign_in(&cy_email)?;
+    api.approve(&cy_session, &cy)?;
+    let held = s.eventually(PUSHED, || ledger(api, &cy)["seat"] == "active" && ledger(api, &cy)["plan"] == "seat");
+    s.ok("whoever signs in with it holds it, paid, and their ledger follows", held && seat(api, &cy)["seat"]["id"] == cy_seat.as_str() && seat(api, &cy)["seat"]["admin"] == false, seat(api, &cy));
+    let r = api.signed(&ann, "PATCH", &format!("/api/org/seats/{cy_seat}"), Some(&json!({ "kind": "seat_always_on" })))?;
+    let moved = s.eventually(PUSHED, || {
+        let mut q = quantities(s);
+        q.sort();
+        q == vec![("fragment_seat_always_on_month".to_string(), 1), ("fragment_seat_month".to_string(), 1)]
+    });
+    let upgraded = s.eventually(PUSHED, || ledger(api, &cy)["plan"] == "seat_always_on");
+    s.ok("its admin upgrades it: an item of each kind, and the holder's plan follows", r.status == 200 && moved && upgraded, format!("{:?} {}", quantities(s), ledger(api, &cy)));
+    let prorated = s.stripe.requests().iter().filter(|a| a.path == format!("/v1/subscriptions/{sub2}") && a.method == "POST").all(|a| a.form.get("proration_behavior").map(String::as_str) == Some("create_prorations"));
+    s.ok("every change is prorated onto the next invoice", prorated, "");
+
+    // the seats are the truth: Stripe's counts changed behind them are pushed back
+    s.stripe.set_quantity(&sub2, "fragment_seat_month", 7).map_err(anyhow::Error::msg)?;
+    s.stripe.set_status(&sub2, "active").map_err(anyhow::Error::msg)?;
+    let repaired = s.eventually(PUSHED, || {
+        let mut q = quantities(s);
+        q.sort();
+        q == vec![("fragment_seat_always_on_month".to_string(), 1), ("fragment_seat_month".to_string(), 1)]
+    });
+    s.ok("a quantity changed in Stripe's dashboard is pushed back to the seats' count", repaired, format!("{:?}", quantities(s)));
+
+    let not_admin = api.signed(&cy, "POST", "/api/org/seats", Some(&json!({ "email": "x@e2e.test", "kind": "seat" })))?;
+    let not_admin_view = api.signed(&cy, "GET", "/api/org", None)?;
+    s.ok("a seat's holder who is no admin changes nothing, nor sees the org (403)", not_admin.status == 403 && not_admin_view.status == 403, json!([not_admin.status, not_admin_view.status]));
+    let r = api.signed(&ann, "DELETE", &format!("/api/org/seats/{cy_seat}"), None)?;
+    let removed = s.eventually(PUSHED, || quantities(s) == seat_q(1));
+    let canceled = s.eventually(PUSHED, || ledger(api, &cy)["seat"] == "canceled");
+    s.ok("its admin removes it: the quantity goes down, and its holder's seat is canceled", r.status == 200 && removed && canceled, format!("{:?} {}", quantities(s), ledger(api, &cy)));
+    let own = seat(api, &ann)["seat"]["id"].as_str().unwrap_or("").to_string();
+    let last = api.signed(&ann, "DELETE", &format!("/api/org/seats/{own}"), None)?;
+    s.ok("the org's last paid seat is not removed here: its subscription is canceled in the portal (400)", last.status == 400 && last.message().contains("cancel"), &last);
+
+    // admins: one at least
+    let dee = api.person()?;
+    let r = api.signed(&ann, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&dee) })))?;
+    let dee_row = r.body["admin"]["id"].as_str().unwrap_or("").to_string();
+    let sees = api.signed(&dee, "GET", "/api/org", None)?;
+    s.ok("an admin adds another, who sees the org (and holds no seat)", r.status == 200 && r.body["created"] == true && sees.status == 200 && seat(api, &dee)["seat"].is_null(), &sees);
+    let ann_row = sees.body["members"].as_array().into_iter().flatten().find(|m| m["person"] == ann_id.as_str()).and_then(|m| m["id"].as_str()).unwrap_or("").to_string();
+    let r = api.signed(&dee, "DELETE", &format!("/api/org/admins/{ann_row}"), None)?;
+    let kept = seat(api, &ann);
+    s.ok("an admin removes another; one with a seat keeps it", r.status == 200 && kept["admin"] == false && kept["seat"]["good"] == true, &kept);
+    let last_admin = api.signed(&dee, "DELETE", &format!("/api/org/admins/{dee_row}"), None)?;
+    s.ok("the last admin stays (400)", last_admin.status == 400, &last_admin);
+    let r = api.signed(&dee, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&ann) })))?;
+    s.ok("and makes them admin again", r.status == 200 && seat(api, &ann)["admin"] == true, &r);
 
     // ---- invalid
     let refused = [

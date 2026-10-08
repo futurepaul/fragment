@@ -5,7 +5,7 @@
 //! (registry/orgs.rs) and pushes each seat's plan to its holder's ledger
 //! and computer; this module only checks who asks.
 
-use fragment_proto::org::{CompSeat, Comped, SeatKind, SetSeatKind, SetSleeps};
+use fragment_proto::org::{CompSeat, Comped, OrgMember, SeatKind, SetSeatKind, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
 
@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::registry::calls::By;
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, Mine, OrgOf, Sleeps, SyncSeat};
+use crate::registry::seats::{AddAdmin, AddSeat, RemoveAdmin, RemoveSeat, SeatKindChange};
 use crate::{acting_for, ask_registry, caller, json_answer, read_body, signer, Caller};
 use fragment_nip98::Payload;
 
@@ -46,11 +47,43 @@ pub(crate) async fn seat(mut req: Request, env: &Env, url: &Url) -> CellResult<R
     }
 }
 
-/// `GET /api/org`: the asker's org, if they are one of its admins.
-pub(crate) async fn org(mut req: Request, env: &Env, url: &Url) -> CellResult<Response> {
+/// `/api/org…`, for the asker's org's admins: `GET` it; add a paid seat
+/// by email, change one's kind, remove one; add or remove an admin.
+pub(crate) async fn org(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest: &[&str]) -> CellResult<Response> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NewSeat {
+        email: String,
+        kind: SeatKind,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct NewAdmin {
+        email: String,
+    }
     let bytes = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
     let by = by(env, &req, url, &bytes)?;
-    json_answer(&ask_registry(env, &OrgOf { by: Some(by), org: None }).await?)
+    match (req.method(), rest) {
+        (Method::Get, []) => json_answer(&ask_registry(env, &OrgOf { by: Some(by), org: None }).await?),
+        (Method::Post, ["seats"]) => {
+            let b: NewSeat = body(&bytes)?;
+            let added = ask_registry(env, &AddSeat { by, email: b.email, kind: b.kind }).await?;
+            let mailed = added.created && cfg.mail_from.is_some() && mail_seat(env, cfg, &added.member, &added.org_name).await;
+            json_answer(&serde_json::json!({ "seat": added.member, "created": added.created, "mailed": mailed }))
+        }
+        (Method::Patch, ["seats", seat]) => {
+            let set: SetSeatKind = body(&bytes)?;
+            json_answer(&ask_registry(env, &SeatKindChange { by, seat: seat.to_string(), kind: set.kind }).await?)
+        }
+        (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &RemoveSeat { by, seat: seat.to_string() }).await?),
+        (Method::Post, ["admins"]) => {
+            let b: NewAdmin = body(&bytes)?;
+            let added = ask_registry(env, &AddAdmin { by, email: b.email }).await?;
+            json_answer(&serde_json::json!({ "admin": added.member, "created": added.created }))
+        }
+        (Method::Delete, ["admins", member]) => json_answer(&ask_registry(env, &RemoveAdmin { by, member: member.to_string() }).await?),
+        (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/org/{}", m.as_ref(), rest.join("/")))),
+    }
 }
 
 /// `/api/admin/…`: the deployment's operators' (docs/api.md, Operators),
@@ -77,6 +110,27 @@ pub(crate) async fn admin(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
         (Method::Delete, ["seats", seat]) => json_answer(&ask_registry(env, &EndComp { seat: seat.to_string() }).await?),
         (Method::Get, ["orgs", org]) => json_answer(&ask_registry(env, &OrgOf { by: None, org: Some(org.to_string()) }).await?),
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
+    }
+}
+
+/// A new seat's mail to its email, from its org: where to sign in.
+async fn mail_seat(env: &Env, cfg: &Config, seat: &OrgMember, org: &str) -> bool {
+    let kind = match seat.seat {
+        Some(SeatKind::SeatAlwaysOn) => "a seat with an always-on computer",
+        _ => "a seat",
+    };
+    let held = match seat.person {
+        Some(_) => "It is yours now",
+        None => "Sign in with this email address to take it",
+    };
+    let text = format!("{org} gave you {kind} on fragment.\n\n{held}: {}/\n", cfg.platform());
+    let mail = crate::mail::Mail { to: seat.email.clone(), subject: "You have a seat on fragment".into(), text };
+    match crate::mail::send(env, cfg, &mail).await {
+        Ok(_) => true,
+        Err(e) => {
+            console_error!("{}", serde_json::json!({ "seat-mail": seat.id, "failed": e.message }));
+            false
+        }
     }
 }
 
