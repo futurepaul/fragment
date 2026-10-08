@@ -384,6 +384,7 @@ const QUERIES = {
   tasks: ({ thread } = {}) => ({ tasks: [...tasks.values()].filter((t) => !thread || t.thread === thread).map((t) => ({ ...publicTask(t), i: t.i, steps: [], report: t.report ?? null, started: t.started, ended: t.ended })) }),
   status: () => ({ turn: turnNow ? { running: true, thread: turnNow.thread, since: turnNow.since } : null, queued: queue.length, unbuilt: view.filter((p) => !isBuilt(p.l, p.i)).length, T: log.length, hands: true }),
   settings: () => ({ about }),
+  imported: ({ conversations }) => ({ landed: conversations.map((c) => imports.get(`${c.source}:${c.id}`) ?? 0) }),
   // the whole log, a page at a time: entries after `after`, and the last one's i while more remain
   export: ({ after, limit = 500 }) => {
     const from = after === undefined ? 0 : after + 1;
@@ -436,6 +437,17 @@ const MUTATIONS = {
   settings_set: ({ about: a }) => {
     about = String(a ?? "");
     return {};
+  },
+  // a part of an imported conversation: its new messages, then a slow
+  // pretend compactor, so the page's upload shows its progress
+  import: ({ source, conversation, from, messages }) => {
+    const key = `${source}:${conversation.id}`;
+    const had = imports.get(key) ?? 0;
+    const fresh = messages.slice(Math.max(0, had - from));
+    for (const m of fresh) append(push(m.role === "user" ? "user" : "talk", m.text, m.at, null, null).i);
+    imports.set(key, Math.max(had, from + messages.length));
+    compactSlowly();
+    return { thread: null, landed: imports.get(key), appended: fresh.length, T: log.length };
   },
   note: ({ text }) => {
     const m = push("note", text, Date.now(), null, null);
@@ -549,6 +561,20 @@ function classify(thread) {
   threadTopic.set(thread, list);
   publish("log", { type: "topics", thread, topics: list });
   changed();
+}
+
+// how many of each imported conversation's messages landed
+const imports = new Map();
+// an import's compactor: a few messages at a time
+let compacting = 0;
+function compactSlowly() {
+  if (compacting) return;
+  compacting = setInterval(() => {
+    summarized = Math.min(log.length, summarized + 3);
+    fit(true);
+    changed();
+    if (summarized === log.length) compacting = (clearInterval(compacting), 0);
+  }, 900);
 }
 
 // a pretend compactor: new messages are summarized a moment later

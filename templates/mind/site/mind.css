@@ -572,7 +572,6 @@ button.did-row:hover { background: var(--hover); color: var(--text); }
 .sheet-scrim.leaving { animation: fade .16s ease reverse both; }
 @keyframes fade { from { opacity: 0; } }
 .sheet { width: min(480px, 100%); max-height: min(86vh, 760px); display: flex; flex-direction: column; border: 1px solid var(--line-2); border-radius: 18px; background: var(--bg-raise); box-shadow: 0 20px 60px rgba(0, 0, 0, .3); animation: sheet .24s var(--ease) both; overflow: hidden; }
-.sheet.wide { width: min(560px, 100%); }
 @keyframes sheet { from { opacity: 0; transform: translateY(10px); } }
 .sheet-grab { display: none; }
 .sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 20px 16px 6px 24px; }
@@ -599,15 +598,27 @@ button.did-row:hover { background: var(--hover); color: var(--text); }
 .switch-row input:focus-visible + .switch { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch-row input:disabled + .switch { opacity: .6; }
 .sheet-note { margin: 4px 2px 0; font-size: 13px; color: var(--text-2); }
-.settings { display: flex; flex-direction: column; gap: 22px; }
-.settings section { display: flex; flex-direction: column; gap: 10px; }
-.settings h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--text-3); }
+
+/* ---- settings (settings.js): a screen, never a sheet; or the page alone in the shell's Settings ---- */
+.settings { max-width: 688px; display: flex; flex-direction: column; gap: 30px; padding-top: 24px; padding-bottom: 64px; }
+.settings section { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.settings section > * { max-width: 100%; }
+.settings h3 { margin: 0; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); }
 .settings p { margin: 0; font-size: 14px; }
+.settings .field { align-self: stretch; background: var(--composer); }
+.settings .import-slot, .settings .cmd { align-self: stretch; }
 .saved { font-size: 13px; color: var(--sage); }
+.saved.bad { color: var(--rose); }
 .cmd { display: flex; flex-direction: column; gap: 5px; }
-.cmd-label { font-size: 12.5px; color: var(--text-2); font-weight: 500; }
+.cmd + .cmd { margin-top: 6px; }
+.cmd-label { font-size: 13px; color: var(--text); font-weight: 600; }
 .cmd-line { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-radius: 10px; background: var(--code); }
-.cmd-line code { flex: 1; min-width: 0; font: 500 12.5px/1.6 var(--font-mono); overflow-x: auto; white-space: nowrap; }
+.cmd-line code { flex: 1; min-width: 0; padding: 0; border-radius: 0; background: none; font: 500 12.5px/1.6 var(--font-mono); overflow-x: auto; white-space: nowrap; }
+.cmd-then { color: var(--text-3); font-size: 12.5px; }
+/* framed by the shell's Settings: on its ground, its sections under the shell's "Mind" */
+html.settings-frame, html.settings-frame body { height: auto; overflow: visible; background: transparent; }
+.settings.framed { max-width: none; margin: 0; padding: 0 0 4px; gap: 26px; }
+.settings.framed h3 { font-size: 14px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--text); }
 .apps-link { display: flex; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; transition: background .12s; }
 .apps-link:hover { background: var(--hover); }
 .apps-link span { flex: 1; display: flex; flex-direction: column; }
@@ -666,7 +677,7 @@ button.did-row:hover { background: var(--hover); color: var(--text); }
   .screen-intro { padding-top: 16px; }
   .mem-kids { margin-left: 6px; padding-left: 10px; }
   .sheet-scrim { place-items: end stretch; padding: 0; }
-  .sheet, .sheet.wide { width: 100%; max-height: 92vh; border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom); animation-name: up; }
+  .sheet { width: 100%; max-height: 92vh; border-radius: 18px 18px 0 0; padding-bottom: env(safe-area-inset-bottom); animation-name: up; }
   .sheet-grab { display: block; width: 38px; height: 5px; border-radius: 99px; background: var(--surface-3); margin: 8px auto 0; }
   .sheet-head { padding-top: 8px; }
   .toast { bottom: calc(90px + env(safe-area-inset-bottom)); }

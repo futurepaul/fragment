@@ -20,6 +20,9 @@ export let F = null;
 /// The page in the shell (`?embed=shell`): the shell's sidebar is its rail
 /// and its topbar its header (mind.js).
 export const EMBED = new URLSearchParams(location.search).get("embed") === "shell" && window.parent !== window;
+/// The page in the shell's Settings (`?embed=settings`): the settings
+/// alone (settings.js).
+export const EMBED_SETTINGS = new URLSearchParams(location.search).get("embed") === "settings" && window.parent !== window;
 
 /// A message's files: at most this many, each at most this big (a chat's,
 /// docs/chat-records.md), uploaded as the fragment's blobs.
@@ -550,16 +553,6 @@ export function start(fragment) {
     (e) => problem(`Could not read personas: ${e.message}`),
   );
   F.live(
-    "status",
-    {},
-    (r) => {
-      S.status = r;
-      S.statusAt = Date.now();
-      changed();
-    },
-    () => {},
-  );
-  F.live(
     "topics",
     {},
     (r) => {
@@ -574,21 +567,39 @@ export function start(fragment) {
       changed();
     })
     .catch(() => {});
+  loadRecent();
+  F.closed?.(({ code }) => {
+    S.closed = code === 4004 ? "This mind was deleted." : "Your access changed: reload the page.";
+    changed();
+  });
+  startSettings(fragment);
+}
+
+/// Wires what the settings read: the status, the about-me, and who the
+/// person is. The page alone in the shell's Settings (`?embed=settings`)
+/// follows nothing else.
+export function startSettings(fragment) {
+  F = fragment;
+  F.live(
+    "status",
+    {},
+    (r) => {
+      S.status = r;
+      S.statusAt = Date.now();
+      changed();
+    },
+    () => {},
+  );
   F.call("settings", {})
     .then((r) => {
       S.about = typeof r.about === "string" ? r.about : "";
       changed();
     })
     .catch(() => {});
-  loadRecent();
   F.me().then((hello) => {
     S.me = hello;
     changed();
     people(hello.principal);
-  });
-  F.closed?.(({ code }) => {
-    S.closed = code === 4004 ? "This mind was deleted." : "Your access changed: reload the page.";
-    changed();
   });
 }
 

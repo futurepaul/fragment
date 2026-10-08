@@ -12,8 +12,8 @@
 //     topics and hand-offs, and the computer's and memory's state.
 //
 // Routes are the hash: #/new, #/t/<thread>, #/search?q=, #/topics,
-// #/topic/<id>, #/memory. The fragment (./__fragment.js, or ./mock.js in
-// the page's dev mode) is handed in by index.html.
+// #/topic/<id>, #/memory, #/settings. The fragment (./__fragment.js, or
+// ./mock.js in the page's dev mode) is handed in by index.html.
 //
 // In the shell (`?embed=shell`, framed by the platform's page: the
 // shell's `openChat`), the shell's sidebar is the rail and its topbar the
@@ -23,14 +23,16 @@
 // memory}}`, to the platform's origin only. It takes the shell's asks
 // from the page around it only: `go` (a route), `new` (New chat with a
 // persona, null the default), `sheet` ("persona", with `id` or none for a
-// new one; "settings") and `panel` (true, false or "toggle"). It asks the
+// new one) and `panel` (true, false or "toggle"). It asks the
 // shell for the computer's screen (`screen: true`) and to open a link to
-// one of the person's fragments there (`app: <url>`).
+// one of the person's fragments there (`app: <url>`). The shell's own
+// Settings frames the settings alone (`?embed=settings`: settings.js).
 
 import { memoryScreen, searchScreen, topicScreen, topicsScreen } from "./browse.js";
 import { avatar, go } from "./pieces.js";
-import { personaSheet, platformOrigin, settingsSheet } from "./sheets.js";
-import { EMBED, S, busy, changed, currentPersona, handOff, handRunning, onChange, persona, start } from "./store.js";
+import { mountSettings, settingsScreen } from "./settings.js";
+import { personaSheet, platformOrigin } from "./sheets.js";
+import { EMBED, EMBED_SETTINGS, S, busy, changed, currentPersona, handOff, handRunning, onChange, persona, start } from "./store.js";
 import { newScreen, threadScreen } from "./thread.js";
 import { WEB_TOOLS, ago, cleanSummary, firstLine, h, icon, iconButton, parseTool, plural, reconcile } from "./ui.js";
 
@@ -55,12 +57,15 @@ function route() {
       return { name: "topic", id: decodeURIComponent(parts[1] ?? ""), key: `topic:${parts[1]}` };
     case "memory":
       return { name: "memory", key: "memory" };
+    case "settings":
+      return { name: "settings", key: "settings" };
     default:
       return { name: "new", key: "new" };
   }
 }
 
 export function mount(root, fragment) {
+  if (EMBED_SETTINGS) return mountSettings(root, fragment);
   root.classList.add("mind");
   const rail = h("aside.rail", { "aria-label": "Mind" });
   const scrim = h("div.scrim", { "aria-hidden": "true" });
@@ -115,7 +120,7 @@ export function mount(root, fragment) {
   function screenTitle(r) {
     if (r.name === "thread") return S.threads.get(r.id)?.title || "New chat";
     if (r.name === "topic") return (S.topics ?? []).find((t) => t.id === r.id)?.name ?? "Topic";
-    return { new: "New chat", search: "Search", topics: "Topics", memory: "Memory" }[r.name] ?? "Mind";
+    return { new: "New chat", search: "Search", topics: "Topics", memory: "Memory", settings: "Settings" }[r.name] ?? "Mind";
   }
   let told = "";
   function tellShell() {
@@ -196,7 +201,7 @@ export function mount(root, fragment) {
     once(foot, [name, S.person?.picture], () => [
       h(
         "button.me",
-        { type: "button", onclick: () => settingsSheet(), "aria-label": "Settings" },
+        { type: "button", onclick: () => go("/settings"), "aria-label": "Settings" },
         S.person?.picture ? h("img.me-pic", { src: S.person.picture, alt: "" }) : h("span.me-pic.letter", { text: name.slice(0, 1).toUpperCase() }),
         h("span.me-name", { text: name }),
         icon("settings"),
@@ -309,7 +314,7 @@ export function mount(root, fragment) {
     current = r;
     if (!same) {
       screen?.destroy?.();
-      screen = r.name === "thread" ? threadScreen(r.id) : r.name === "search" ? searchScreen(r.q) : r.name === "topics" ? topicsScreen() : r.name === "topic" ? topicScreen(r.id) : r.name === "memory" ? memoryScreen() : newScreen();
+      screen = r.name === "thread" ? threadScreen(r.id) : r.name === "search" ? searchScreen(r.q) : r.name === "topics" ? topicsScreen() : r.name === "topic" ? topicScreen(r.id) : r.name === "memory" ? memoryScreen() : r.name === "settings" ? settingsScreen() : newScreen();
       main.replaceChildren(screen.el);
       drawer(false);
       app.dataset.screen = r.name;
@@ -347,7 +352,6 @@ export function mount(root, fragment) {
     if (!EMBED || d?.fragment !== "mind" || event.origin !== platformOrigin()) return;
     if (typeof d.go === "string" && ROUTE.test(d.go)) go(d.go.slice(1));
     if (d.new === null || typeof d.new === "string") newChat(d.new === null ? null : (persona(d.new)?.id ?? null));
-    if (d.sheet === "settings") settingsSheet();
     if (d.sheet === "persona") personaSheet(typeof d.id === "string" ? persona(d.id) : null);
     if (typeof d.panel === "boolean") setPanel(d.panel);
     else if (d.panel === "toggle") setPanel(!panelOpen);

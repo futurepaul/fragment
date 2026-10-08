@@ -10,7 +10,7 @@
 // kept to these three formats; the CLI reads more (Hermes, folders).
 //
 // mountImport(container) fills `container` and keeps it current while it
-// is in the document. The settings sheet links it.
+// is in the document. The settings (settings.js) show it.
 import { F } from "./store.js";
 import { h, plural } from "./ui.js";
 
@@ -331,19 +331,23 @@ function* parts(c, from) {
   }
 }
 
+// in the platform's look (./__fragment.css), which the page links
 const STYLE = `
-.imp { display: grid; gap: 14px; font: 15px/1.5 var(--ui, system-ui); color: var(--text, inherit); }
-.imp-lede { margin: 0; color: var(--text-2, inherit); }
+.imp { display: grid; gap: 12px; justify-items: start; }
+.imp > * { max-width: 100%; }
+.imp-lede { margin: 0; color: var(--muted); font-size: 14px; }
 .imp-pick { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.imp-btn { font: inherit; border: 1px solid var(--line-2, #444); background: var(--surface, transparent); color: inherit; border-radius: 999px; padding: 7px 16px; cursor: pointer; }
-.imp-btn.primary { background: var(--accent, #eda76b); color: var(--accent-ink, #24170b); border-color: transparent; }
+.imp-btn { display: inline-flex; align-items: center; height: 34px; padding: 0 16px; border: 1px solid var(--line-strong); border-radius: 999px; background: none; color: var(--fg); font: 600 13.5px var(--font); cursor: pointer; }
+.imp-btn.primary { border-color: transparent; background: var(--fg); color: var(--bg); }
 .imp-btn:disabled { opacity: .5; cursor: default; }
-.imp-file { color: var(--text-2, inherit); font-size: 13px; }
-.imp-facts { margin: 0; padding: 12px 14px; border-radius: var(--r, 12px); background: var(--surface, transparent); font-size: 14px; }
-.imp-bar { height: 6px; border-radius: 3px; background: var(--line, #333); overflow: hidden; }
-.imp-bar > div { height: 100%; width: 0; background: var(--sage, #a9c79c); transition: width .3s var(--ease, ease); }
-.imp-note { font-size: 13px; color: var(--text-3, inherit); }
-.imp-error { color: var(--rose, #e8907f); font-size: 14px; }
+.imp-file { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.imp-facts { margin: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); font-size: 14px; }
+.imp-bar { justify-self: stretch; height: 6px; border-radius: 3px; background: var(--soft); overflow: hidden; }
+.imp-bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+.imp-status { margin: 0; color: var(--muted); font-size: 13.5px; }
+.imp-status:empty { display: none; }
+.imp-note { margin: 0; color: var(--faint); font-size: 13px; }
+.imp-error { margin: 0; color: var(--danger); font-size: 14px; }
 `;
 
 /// Fills `container` with the upload: a file to pick, what it holds, and
@@ -355,7 +359,7 @@ export function mountImport(container) {
   const facts = h("p.imp-facts", { hidden: true });
   const go = h("button.imp-btn.primary", { type: "button", text: "Import", hidden: true });
   const bar = h("div.imp-bar", { hidden: true }, h("div"));
-  const status = h("p.imp-note");
+  const status = h("p.imp-status", { "aria-live": "polite" });
   const error = h("p.imp-error", { hidden: true });
   let convs = [];
   let busy = false;
