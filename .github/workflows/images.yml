@@ -78,40 +78,39 @@ jobs:
           printf 'changed:\n%s\n' "$files"
           if printf '%s\n' "$files" | grep -qE "$lane"; then echo docker=true; else echo docker=false; fi | tee -a "$GITHUB_OUTPUT"
 
-  # The Docker lane. The images are built first, each with BuildKit's layers
-  # kept in the Actions cache (its own scope; restored on every run, saved
-  # only from master's pushes, as ci.yml's caches are), loaded into the
-  # runner's Docker under the tags the tests run, then the tests run with
-  # FRAGMENT_DOCKER_SKIP_BUILD. The Hermes image is about 3.9 GB in one
-  # layer (images/hermes/Dockerfile's last stage), so the build needs more
-  # disk than the runner has free: toolchains this job never uses are
-  # removed first, and BuildKit's own copy of what it built is dropped once
-  # Docker holds the images. The tests' container logs are kept on failure.
+  # The Docker lane. The images are built first by the runner's own Docker
+  # (its BuildKit, straight into its image store, under the tags the tests
+  # run), then the tests run on them with FRAGMENT_DOCKER_SKIP_BUILD, in
+  # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
+  # 145 GB disk with about 85 GB free): the Hermes image builds in about
+  # BUILD minutes (its two Rust stages, the CLI's and the bridge's, about
+  # 5.5 of them), the tests take about 3, and the job uses at most about
+  # PEAK GB of the disk.
+  #
+  # No layer cache, by measurement (PR #252): with BuildKit's layers in the
+  # Actions cache (mode=max), an image whose every input was unchanged built
+  # in 2 minutes, but that is a re-run's case. A change to the image changes
+  # its last layer (the whole image, 1.4 GB compressed); the CLI's stage, the
+  # build's longest, reads the root workspace, which 108 of master's 147
+  # commits from 2026-10-01 to 10-08 changed; and of the 33 pairs of
+  # master's image-touching commits in that time, the CLI's stage was
+  # unchanged across 6 and the image across none. What the cache would
+  # still hit (the Hermes base and its first layers) is off the build's
+  # critical path, which is the Rust. It cost 3.3 GB of the repository's
+  # 10 GB of caches, and about 1.5 GB more at each write, against the
+  # caches ci.yml reads on every run.
+  #
+  # The tests' container logs are kept on failure.
   docker:
     name: docker (real Hermes)
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: images
-    env:
-      # TEMPORARY (measuring a warm run on the PR; removed before review)
-      CACHE_SAVE: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.head_ref == 'claude/ci-docker-lane' }}
     steps:
-      - name: the runner
-        working-directory: .
-        run: |
-          nproc; free -g; df -h; docker info --format '{{.ServerVersion}} {{.Driver}} {{.DockerRootDir}}'
-          sudo du -sh /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift 2>/dev/null || true
-      # toolchains no step here uses: Android's SDK, .NET, Haskell, CodeQL's
-      # bundle, Swift
-      - name: free disk
-        working-directory: .
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
-          df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       # the check job's cache (the registry and images/target), read only
@@ -124,45 +123,25 @@ jobs:
           key: images-${{ runner.os }}-${{ hashFiles('images/Cargo.lock') }}
           restore-keys: images-${{ runner.os }}-
       - run: cargo test -p fragment-bridge --test docker --locked --no-run
-      - id: buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: the runner
+        run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
+      # as the tests' own `build` does (docker.rs), the stub from images/, the
+      # Hermes image from the repo's root
       - name: build the stub image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: images
-          file: images/stub/Dockerfile
-          platforms: linux/amd64
-          tags: fragment-stub:test
-          load: true
-          provenance: false
-          sbom: false
-          cache-from: type=gha,scope=docker-stub
-          cache-to: ${{ env.CACHE_SAVE == 'true' && 'type=gha,scope=docker-stub,mode=max,ignore-error=true' || '' }}
+        run: docker build --platform linux/amd64 -f stub/Dockerfile -t fragment-stub:test .
       - name: build the Hermes image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: images/hermes/Dockerfile
-          platforms: linux/amd64
-          tags: fragment-hermes:test
-          load: true
-          provenance: false
-          sbom: false
-          cache-from: type=gha,scope=docker-hermes
-          cache-to: ${{ env.CACHE_SAVE == 'true' && 'type=gha,scope=docker-hermes,mode=max,ignore-error=true' || '' }}
-      # Docker holds the images now: BuildKit's copy goes (its cache is saved)
-      - name: drop the builder's copy
-        run: |
-          docker buildx prune --builder ${{ steps.buildx.outputs.name }} --all --force > /dev/null
-          docker image ls; docker system df; df -h /
+        working-directory: .
+        run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      - name: disk, built
+        run: docker system df; df -h /
       - name: the Docker lane
         run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
         env:
           FRAGMENT_DOCKER_SKIP_BUILD: "1"
           RUST_BACKTRACE: "1"
       - if: always()
-        name: disk after
-        run: docker system df; df -h /
+        name: disk, after
+        run: df -h /
       # each container's log (Container's drop) and the tests' own
       - if: failure()
         uses: actions/upload-artifact@v4
