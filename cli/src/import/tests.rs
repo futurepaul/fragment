@@ -44,18 +44,20 @@ fn times_read_as_utc_milliseconds() {
     assert_eq!(at(61), "2026-03-01T10:01:01.000Z");
 }
 
-/// Goal: a message the CLI caps is the one the mind logs (its `capText`):
-/// head and tail kept, the cut counted. Method: texts at, under and over
-/// the cap, in characters, not bytes.
+/// Goal: a message goes whole up to what a part carries, and past it keeps
+/// its head and tail with the cut counted, as the mind notes a cut. Method:
+/// texts at and over the cap in bytes, two-byte characters on the cut.
 #[test]
 fn caps_keep_head_and_tail_as_the_mind_does() {
-    let at_cap = "é".repeat(CAP);
-    assert_eq!(cap_text(&at_cap, CAP), at_cap, "at the cap, in characters, nothing is cut");
-    let long = format!("{}{}", "a".repeat(20_000), "b".repeat(20_000));
-    let capped = cap_text(&long, CAP);
-    assert!(capped.chars().count() <= CAP);
-    assert!(capped.starts_with(&"a".repeat(14_960)) && capped.ends_with(&"b".repeat(14_960)));
-    assert!(capped.contains("\n\n[… 10080 characters cut here …]\n\n"), "{}", &capped[14_950..15_010]);
+    let at_cap = "é".repeat(TEXT_MAX_BYTES / 2);
+    assert_eq!(cap_bytes(&at_cap, TEXT_MAX_BYTES), at_cap, "at the cap, in bytes, nothing is cut");
+    let long = format!("{}{}", "a".repeat(80_000), "é".repeat(40_000));
+    let capped = cap_bytes(&long, TEXT_MAX_BYTES);
+    assert!(capped.len() <= TEXT_MAX_BYTES, "{} bytes", capped.len());
+    let half = (TEXT_MAX_BYTES - CAP_NOTE_ROOM) / 2;
+    assert!(capped.starts_with(&"a".repeat(half)) && capped.ends_with(&"é".repeat(half / 2)));
+    let kept = half + half / 2;
+    assert!(capped.contains(&format!("\n\n[… {} characters cut here …]\n\n", 120_000 - kept)), "{}", &capped[half - 10..half + 50]);
 }
 
 /// Goal: a Claude Code session keeps the person's words and each turn's
@@ -313,7 +315,7 @@ fn conv(source: Source, id: &str, started: i64, messages: &[(Role, &str)]) -> Co
 #[test]
 fn prepare_orders_dedups_caps_and_limits() {
     let paste = "x ".repeat(PASTE_MIN_BYTES);
-    let long = "y".repeat(CAP + 100);
+    let long = "y".repeat(TEXT_MAX_BYTES + 100);
     let convs = vec![
         conv(Source::Codex, "late", T0_MS + 2000, &[(Role::User, &paste), (Role::User, "and this"), (Role::Assistant, &long)]),
         conv(Source::ClaudeCode, "early", T0_MS, &[(Role::User, &paste), (Role::Assistant, "read it")]),
@@ -322,7 +324,8 @@ fn prepare_orders_dedups_caps_and_limits() {
     let ready = prepare(convs.clone(), None, None);
     assert_eq!(ready.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["early", "late"], "oldest first; one with no words of the person's goes");
     assert_eq!(ready[1].messages.len(), 2, "the paste repeated (whitespace aside) is dropped where it repeats");
-    assert!(ready[1].messages[1].text.chars().count() <= CAP && ready[1].messages[1].text.contains("characters cut here"), "a message is capped at CAP characters");
+    assert!(ready[1].messages[1].text.len() <= TEXT_MAX_BYTES && ready[1].messages[1].text.contains("characters cut here"), "a message is cut past TEXT_MAX_BYTES");
+    assert_eq!(prepare(vec![conv(Source::Codex, "c", T0_MS, &[(Role::User, &"w".repeat(CAP * 2))])], None, None)[0].messages[0].text.len(), CAP * 2, "a long one goes whole: the mind splits it");
     assert_eq!(prepare(convs.clone(), Some(T0_MS + 1), None).iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["late"]);
     assert_eq!(prepare(convs, None, Some(1)).iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["early"]);
 }
@@ -341,6 +344,13 @@ fn parts_fit_the_operation() {
     let large = conv(Source::Codex, "l", T0_MS, &vec![(Role::Assistant, big.as_str()); 20]);
     let p = parts(&large, 0);
     assert_eq!(p.first(), Some(&(0, 6)), "six 30 000-character messages to a part");
+    let quoted = "\"\n".repeat(TEXT_MAX_BYTES / 2);
+    let escaped = conv(Source::Codex, "q", T0_MS, &[(Role::User, quoted.as_str()); 3]);
+    let q = parts(&escaped, 0);
+    assert_eq!(q, [(0, 1), (1, 2), (2, 3)], "a message whose JSON doubles goes alone");
+    for (a, b) in q {
+        assert!(part_input(&escaped, a, &escaped.messages[a..b]).to_string().len() <= 256 * 1024, "within an operation's input");
+    }
     for (a, b) in p {
         let input = part_input(&large, a, &large.messages[a..b]).to_string();
         assert!(input.len() <= PART_MAX_BYTES, "{} bytes", input.len());
@@ -354,9 +364,13 @@ fn estimate_counts_calls_and_free_nodes() {
     let long = "w".repeat(NODE + 1);
     let c = conv(Source::Codex, "e", T0_MS, &[(Role::User, "hi"), (Role::Assistant, "hello"), (Role::User, &long), (Role::Assistant, &long)]);
     let e = estimate(&[c]);
-    assert_eq!((e.messages, e.level0_calls, e.level0_batches), (4, 2, 1), "two long messages, one batch");
+    assert_eq!((e.messages, e.logged, e.level0_calls), (4, 4, 2), "two long messages, a call each");
     assert_eq!((e.merges_free, e.merge_calls), (2, 1), "hi+hello fit together, and with the long pair's line; the long pair does not");
     assert!(e.list_cached > 0 && e.list_cached <= e.list_uncached && e.list_uncached < e.charge_uncached);
+    assert!(e.hours_fast < e.hours && e.hours < e.hours_slow, "calls 8 at once, at 3 to 8 s each");
+    let huge = "v".repeat(CAP * 2 + 1);
+    let h = estimate(&[conv(Source::Codex, "h", T0_MS, &[(Role::User, &huge)])]);
+    assert_eq!((h.messages, h.logged, h.level0_calls), (1, 3, 2), "a text past CAP is logged as several, each summarized (its short last piece free)");
 }
 
 /// Goal: files are told apart by what they hold. Method: one of each

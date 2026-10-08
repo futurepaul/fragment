@@ -3,8 +3,9 @@
 //! `import` mutation, from where the mind says it stopped (`imported`), so
 //! a rerun resumes and a conversation that grew sends what is new. Then it
 //! follows the mind's compactor until every message is summarized, starting
-//! a `pump` again whenever one stopped with work left (its chain of runs
-//! ends at the platform's 16 hops).
+//! a `pump` again whenever none is at work with work left (the pumps, up to
+//! 8 at once, start each other, and their chain of runs ends at the
+//! platform's 16 hops).
 
 use std::time::{Duration, Instant};
 
@@ -19,9 +20,9 @@ use crate::import::{self, Conversation, Estimate, Found, Source};
 const ASK_MAX: usize = 200;
 /// How often the wait looks at the compactor.
 const POLL: Duration = Duration::from_secs(15);
-/// A pump that has planned nothing this long has stopped (the template's
-/// PUMP_KICK_MS); one this started is given this long to plan.
-const PUMP_QUIET_MS: i64 = 3 * 60_000;
+/// With no compaction at work, a pump that took nothing this long has
+/// stopped; one this started is given KICK_AGAIN to take its first.
+const PUMP_QUIET_MS: i64 = 60_000;
 const KICK_AGAIN: Duration = Duration::from_secs(60);
 /// Pumps started again in a row with nothing summarized between: past
 /// this, the wait stops (a node that keeps failing is the mind's `status`'s
@@ -83,16 +84,13 @@ pub fn print_report(convs: &[Conversation], found: &Found) {
         println!("  from {} to {}", day(first.started), day(last));
     }
     println!("the compactor's work (estimated, into an empty mind):");
+    if e.logged > e.messages {
+        println!("  {} messages logged as {} (a text past {} characters is several in a row)", e.messages, e.logged, import::CAP);
+    }
+    println!("  {} messages over {} bytes need a model call", e.level0_calls, import::NODE);
+    println!("  {} merges need a model call ({} free)", e.merge_calls, e.merges_free);
     println!(
-        "  {} messages over {} bytes need a model call: {} calls batched 8 a call (one a call: {})",
-        e.level0_calls,
-        import::NODE,
-        e.level0_batches,
-        e.level0_calls
-    );
-    println!("  {} merges need a model call ({} free): {} calls batched", e.merge_calls, e.merges_free, e.merge_batches);
-    println!(
-        "  about {}M tokens in (of them {}M the view as context), {}M out, on the cheap tier ({})",
+        "  about {}M tokens in (of them {}M the tools, the system prompt and the compaction view, cached across calls), {}M out, on the cheap tier ({})",
         e.input_tokens.saturating_add(e.context_tokens) / 1_000_000,
         e.context_tokens / 1_000_000,
         e.output_tokens / 1_000_000,
@@ -105,7 +103,10 @@ pub fn print_report(convs: &[Conversation], found: &Found) {
         usd(e.charge_cached),
         usd(e.charge_uncached)
     );
-    println!("  time: about {:.1} hours, a call at a time (~8 s each)", e.hours);
+    println!(
+        "  time: about {:.1} hours, {} calls 8 at once at ~5 s each ({:.1} to {:.1} hours at 3 to 8 s)",
+        e.hours, e.calls, e.hours_fast, e.hours_slow
+    );
 }
 
 /// The first `n` chats as they would go: a line a message, its first line
@@ -200,9 +201,9 @@ pub fn wait(c: &Client, mind: &str, quiet: bool) -> Result<Value> {
         if unbuilt == 0 && !ready {
             return Ok(s);
         }
-        // no pump at work (none planned work lately), and none this started
-        // in the last minute (a run takes a moment to plan)
-        let idle = s["pump"]["at"].as_i64().is_none_or(|at| s["now"].as_i64().unwrap_or(at) - at > PUMP_QUIET_MS);
+        // no compaction at work, none taken lately, and no pump this
+        // started in the last minute (a run takes a moment to take its first)
+        let idle = s["pumps"].as_i64().unwrap_or(0) == 0 && s["pump"]["at"].as_i64().is_none_or(|at| s["now"].as_i64().unwrap_or(at) - at > PUMP_QUIET_MS);
         if idle && kicked.is_none_or(|k| k.elapsed() > KICK_AGAIN) {
             kicked = Some(Instant::now());
             let progress = (t - unbuilt, s["nodes"].as_i64().unwrap_or(0));

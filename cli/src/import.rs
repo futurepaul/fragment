@@ -3,10 +3,12 @@
 //! parser reads its files into conversations of the person's words and the
 //! agent's final replies: tool calls and their results, system and meta
 //! records, the agent's narration between tool calls, repeated pastes and
-//! empty turns are dropped, and a message is capped at the mind's CAP, its
-//! head and tail kept. The conversations go to the mind oldest first, each
-//! in parts of the `import` mutation, which a rerun resumes where the mind
-//! says it stopped (`imported`).
+//! empty turns are dropped. A message goes whole (the mind logs one past
+//! its CAP as several in a row: UniiChat §1) up to TEXT_MAX_BYTES, what one
+//! `import` part can carry; one past that is cut there, its head and tail
+//! kept. The conversations go to the mind oldest first, each in parts of
+//! the `import` mutation, which a rerun resumes where the mind says it
+//! stopped (`imported`).
 //!
 //! Formats:
 //! - `claude-code`: Claude Code's sessions, `~/.claude/projects/*/<session>.jsonl`;
@@ -28,9 +30,15 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-/// A message's most characters, as the mind caps one at logging
-/// (templates/mind/applib/optmem.mjs `CAP`, the spec's).
+/// A message's most characters in the mind's log (templates/mind/applib/
+/// optmem.mjs `CAP`, UniiChat's): a longer text is several messages in a
+/// row there, each a node of its own.
 pub const CAP: usize = 30_000;
+/// An imported message's most bytes: an `import` part's input is at most
+/// 256 KiB, and a message escaped as JSON may take twice its bytes. One
+/// past it is cut, its head and tail kept (the mind's `import` takes at
+/// most 131 072 characters a message).
+pub const TEXT_MAX_BYTES: usize = 96 * 1024;
 /// A summary line's target size (the spec's NODE): a message whose
 /// `kind: text` fits is its own line, with no model call.
 pub const NODE: usize = 512;
@@ -219,22 +227,25 @@ fn time_of(v: &Value) -> Option<i64> {
 
 // ---------- texts ----------
 
-/// At most `max` characters of `text`, its head and tail kept with a note
-/// of what was cut between them: the mind's `capText`, so a message the
-/// CLI capped is the one the mind logs.
-pub fn cap_text(text: &str, max: usize) -> String {
-    let n = text.chars().count();
-    if n <= max {
+/// At most `max` bytes of `text`, its head and tail kept (half the room
+/// each, whole characters) with a note of how many characters were cut
+/// between them, as the mind's `capText` notes it.
+pub fn cap_bytes(text: &str, max: usize) -> String {
+    if text.len() <= max {
         return text.to_string();
     }
     assert!(max > CAP_NOTE_ROOM * 2, "a cap leaves room for its note");
-    let room = max - CAP_NOTE_ROOM;
-    let head = room.div_ceil(2);
-    let tail = room - head;
-    let cut = n - head - tail;
-    let start: String = text.chars().take(head).collect();
-    let end: String = text.chars().skip(n - tail).collect();
-    format!("{start}\n\n[… {cut} characters cut here …]\n\n{end}")
+    let half = (max - CAP_NOTE_ROOM) / 2;
+    let mut head = half;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - half;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    let cut = text[head..tail].chars().count();
+    format!("{}\n\n[… {cut} characters cut here …]\n\n{}", &text[..head], &text[tail..])
 }
 
 /// `text` without each `<tag>…</tag>` block (and an unclosed one's opening
@@ -1023,8 +1034,8 @@ fn merge(copies: Vec<Conversation>) -> Conversation {
 
 /// The conversations as they go to the mind: oldest first; the copies of one
 /// merged; a record copied into another conversation and a repeated paste
-/// dropped; each message capped; those begun before `since` (ms) left out,
-/// and then all but the first `limit`.
+/// dropped; each message cut past TEXT_MAX_BYTES; those begun before
+/// `since` (ms) left out, and then all but the first `limit`.
 pub fn prepare(convs: Vec<Conversation>, since: Option<i64>, limit: Option<usize>) -> Vec<Conversation> {
     let mut by_id: BTreeMap<(Source, String), Vec<Conversation>> = BTreeMap::new();
     for c in convs {
@@ -1044,7 +1055,7 @@ pub fn prepare(convs: Vec<Conversation>, since: Option<i64>, limit: Option<usize
             pastes.insert(Sha256::digest(words.join(" ").as_bytes()).into())
         });
         for m in &mut c.messages {
-            m.text = cap_text(&m.text, CAP);
+            m.text = cap_bytes(&m.text, TEXT_MAX_BYTES);
         }
     }
     convs.retain(|c| c.messages.iter().any(|m| m.role == Role::User) && since.is_none_or(|s| c.started >= s));
@@ -1069,7 +1080,7 @@ pub fn part_input(c: &Conversation, from: usize, messages: &[Message]) -> Value 
 
 /// A conversation's messages `from` on, as parts: at most
 /// PART_MESSAGES_MAX messages and PART_MAX_BYTES of input each (a message
-/// is capped, so one always fits).
+/// is at most TEXT_MAX_BYTES, so one fits a part of its own).
 pub fn parts(c: &Conversation, from: usize) -> Vec<(usize, usize)> {
     let mut out = vec![];
     let mut start = from;
@@ -1097,14 +1108,15 @@ pub fn parts(c: &Conversation, from: usize) -> Vec<(usize, usize)> {
 pub struct Estimate {
     pub messages: usize,
     pub bytes: usize,
-    /// Messages whose line is over NODE: each needs a model call.
+    /// The messages the mind logs: one past CAP characters is several.
+    pub logged: usize,
+    /// Logged messages whose line is over NODE: each needs a model call.
     pub level0_calls: usize,
-    /// Level-0 calls when consecutive ones go 8 to a call (the batched path).
-    pub level0_batches: usize,
     /// Merges that need a model call, and those that are free.
     pub merge_calls: usize,
     pub merges_free: usize,
-    pub merge_batches: usize,
+    /// Calls in all, the cut-at-limit retries counted.
+    pub calls: u64,
     pub input_tokens: u64,
     pub context_tokens: u64,
     pub output_tokens: u64,
@@ -1114,67 +1126,67 @@ pub struct Estimate {
     /// What the ledger charges (list, the credits fee, the margin), cached.
     pub charge_cached: i64,
     pub charge_uncached: i64,
+    /// Hours, JOBS calls at once, at SECONDS_PER_CALL each and at the range's ends.
     pub hours: f64,
+    pub hours_fast: f64,
+    pub hours_slow: f64,
 }
 
-/// The spec's budget of the view a compactor call sees as its context.
-const VIEW: usize = 128_000;
-/// A model's summary line, bytes, on average (the spec measured about 250
-/// on real lines; a line the compactor writes is near NODE).
+/// The compaction view a compactor call sees as its context (UniiChat §4:
+/// 16 to 32 KB, 24 on average), once the import is past it.
+const COMPACTION_VIEW: usize = 24_000;
+/// A model's summary line, bytes, on average (a line the compactor writes
+/// is near NODE).
 const LINE_BYTES: usize = 420;
 /// Bytes a token holds, on average, for chat text and summary lines.
 const BYTES_PER_TOKEN: usize = 3;
-/// COMPACT and SCALE, the fixed part of every call, in tokens.
-const PROMPT_TOKENS: u64 = 1_300;
-/// A call's reasoning and its overhead, in output tokens, and a line's.
-const CALL_OUTPUT_TOKENS: u64 = 300;
-const LINE_OUTPUT_TOKENS: u64 = 160;
+/// The tools and the system prompt every call has (the cached head of the
+/// turns' and compactions' prompts), and a task's ruler and words, in tokens.
+const PROMPT_TOKENS: u64 = 3_000;
+const TASK_TOKENS: u64 = 250;
+/// A call's reasoning and its line, in output tokens.
+const CALL_OUTPUT_TOKENS: u64 = 450;
 /// Calls a line takes, on average, with the cut-at-limit retries.
 const RETRY_FACTOR: f64 = 1.25;
-/// A call's time, one after another (a job's steps run one at a time).
-const SECONDS_PER_CALL: f64 = 8.0;
-/// A batch's nodes, at most (the template's BATCH), and its messages'
-/// bytes, at most (BATCH_MAX_BYTES).
-const BATCH: usize = 8;
-const BATCH_MAX_BYTES: usize = 192 * 1024;
+/// Compactor calls at once (the template's JOBS: that many pump runs).
+const JOBS: f64 = 8.0;
+/// A call's time on the cheap tier (GLM-5.3 Flash: 3 to 8 s seen).
+const SECONDS_PER_CALL: f64 = 5.0;
+const SECONDS_FAST: f64 = 3.0;
+const SECONDS_SLOW: f64 = 8.0;
 
 /// The compactor's work for these conversations played into an empty mind,
-/// simulated: a level-0 node is free when its line fits NODE, a merge when
-/// its two children's lines fit together; every other node is a call whose
-/// line is LINE_BYTES. Each call sees the view so far (at most VIEW) as its
-/// context. Priced at the cheap tier's prices in the default price book.
+/// simulated: each message logged as the mind logs it (several past CAP
+/// characters); a level-0 node free when its line fits NODE, a merge when
+/// its two children's lines fit together; every other node one call whose
+/// line is LINE_BYTES, with the tools, the system prompt and the compaction
+/// view (cached across calls) before its task. Priced at the cheap tier's
+/// prices in the default price book; timed JOBS calls at once.
 pub fn estimate(convs: &[Conversation]) -> Estimate {
     let mut e = Estimate::default();
     let mut sizes: Vec<usize> = vec![];
-    let mut view = 0usize;
-    let mut batch = (0usize, 0usize);
-    let mut step_bytes = 0u64;
+    let mut task_bytes = 0u64;
+    let mut seen = 0usize;
     for m in convs.iter().flat_map(|c| &c.messages) {
-        let line = m.role.kind().len() + 2 + m.text.len();
         e.messages += 1;
         e.bytes += m.text.len();
-        if line <= NODE {
-            sizes.push(line);
-            view += line;
-            continue;
+        let chars: Vec<char> = m.text.chars().collect();
+        for piece in chars.chunks(CAP) {
+            let line = m.role.kind().len() + 2 + piece.iter().map(|c| c.len_utf8()).sum::<usize>();
+            e.logged += 1;
+            if line <= NODE {
+                sizes.push(line);
+            } else {
+                e.level0_calls += 1;
+                task_bytes += line as u64;
+                e.context_tokens += (seen.min(COMPACTION_VIEW) / BYTES_PER_TOKEN) as u64;
+                sizes.push(LINE_BYTES);
+            }
+            seen += sizes[sizes.len() - 1];
         }
-        e.level0_calls += 1;
-        step_bytes += line as u64;
-        if batch.0 == BATCH || batch.1 + line > BATCH_MAX_BYTES {
-            batch = (0, 0);
-        }
-        if batch.0 == 0 {
-            e.level0_batches += 1;
-            e.context_tokens += (view.min(VIEW) / BYTES_PER_TOKEN) as u64;
-        }
-        batch = (batch.0 + 1, batch.1 + line);
-        sizes.push(LINE_BYTES);
-        view += LINE_BYTES;
     }
     // merges, level by level, over complete pairs
     let mut level = sizes;
-    let mut merge_context = 0u64;
-    let mut done = 0usize;
     while level.len() >= 2 {
         let mut up = Vec::with_capacity(level.len() / 2);
         for pair in level.as_chunks::<2>().0 {
@@ -1184,23 +1196,17 @@ pub fn estimate(convs: &[Conversation]) -> Estimate {
                 up.push(joined);
             } else {
                 e.merge_calls += 1;
-                step_bytes += joined as u64;
+                task_bytes += joined as u64;
+                e.context_tokens += (seen.min(COMPACTION_VIEW) / BYTES_PER_TOKEN) as u64;
                 up.push(LINE_BYTES);
-                done += 1;
-                if done % BATCH == 1 {
-                    merge_context += (VIEW.min(e.bytes) / BYTES_PER_TOKEN) as u64;
-                }
             }
         }
         level = up;
     }
-    e.merge_batches = e.merge_calls.div_ceil(BATCH);
-    e.context_tokens += merge_context;
-    let calls = ((e.level0_batches + e.merge_batches) as f64 * RETRY_FACTOR).ceil() as u64;
-    let lines = ((e.level0_calls + e.merge_calls) as f64 * RETRY_FACTOR).ceil() as u64;
-    e.context_tokens = (e.context_tokens as f64 * RETRY_FACTOR).ceil() as u64;
-    e.input_tokens = calls * PROMPT_TOKENS + step_bytes / BYTES_PER_TOKEN as u64;
-    e.output_tokens = calls * CALL_OUTPUT_TOKENS + lines * LINE_OUTPUT_TOKENS;
+    e.calls = (((e.level0_calls + e.merge_calls) as f64) * RETRY_FACTOR).ceil() as u64;
+    e.context_tokens = (e.context_tokens as f64 * RETRY_FACTOR).ceil() as u64 + e.calls * PROMPT_TOKENS;
+    e.input_tokens = e.calls * TASK_TOKENS + task_bytes / BYTES_PER_TOKEN as u64;
+    e.output_tokens = e.calls * CALL_OUTPUT_TOKENS;
     let book = fragment_core::price::PriceBook::defaults();
     let model = fragment_core::models::CHEAP_MODEL.to_string();
     let priced = |cached: bool| {
@@ -1210,7 +1216,8 @@ pub fn estimate(convs: &[Conversation]) -> Estimate {
     };
     (e.list_uncached, e.charge_uncached) = priced(false);
     (e.list_cached, e.charge_cached) = priced(true);
-    e.hours = calls as f64 * SECONDS_PER_CALL / 3600.0;
+    let hours = |secs: f64| e.calls as f64 * secs / JOBS / 3600.0;
+    (e.hours, e.hours_fast, e.hours_slow) = (hours(SECONDS_PER_CALL), hours(SECONDS_FAST), hours(SECONDS_SLOW));
     e
 }
 
