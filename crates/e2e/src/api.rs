@@ -54,9 +54,17 @@ fn client() -> reqwest::blocking::Client {
     client_with(POOL_IDLE)
 }
 
+/// How long a request waits for its answer, unless a lane asks for more
+/// (`Api::patient`).
+const REQUEST_WAIT: Duration = Duration::from_secs(60);
+
 fn client_with(pool_idle: Duration) -> reqwest::blocking::Client {
+    client_waiting(pool_idle, REQUEST_WAIT)
+}
+
+fn client_waiting(pool_idle: Duration, wait: Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(wait)
         .pool_idle_timeout(pool_idle)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -323,6 +331,23 @@ impl Api {
         }
         api.http = builder.build().expect("http client");
         api
+    }
+
+    /// This API, its requests waiting up to `wait` for their answers: a
+    /// request that answers only once something slow is done (a computer's
+    /// restart on a preview: its save, then its start) is read whole, as a
+    /// browser's fetch waits for it.
+    pub fn patient(&self, wait: Duration) -> Api {
+        assert!(wait >= REQUEST_WAIT, "patience waits longer, never shorter");
+        Api {
+            http: client_waiting(POOL_IDLE, wait),
+            base: self.base.clone(),
+            port: self.port,
+            suffix: self.suffix.clone(),
+            label_suffix: self.label_suffix.clone(),
+            target: self.target.clone(),
+            run: Arc::clone(&self.run),
+        }
     }
 
     /// A lane wiped `identity`, one of the run's people, who was lent no

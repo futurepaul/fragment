@@ -1138,7 +1138,11 @@ for a host) and finds the same `HOME`, `~` and modes.
   refused at zero credit. The `shell-ui` lane sees the same in Chrome:
   the warning on Settings with no reload, its Restart, the notice of what
   it went back to and its OK (gone after a reload), and Settings' Restart
-  computer.
+  computer. On a preview, the hosted `agent-restart` section (by name)
+  restarts a real Hermes computer awake after a reply: it comes back
+  running from its newest save, the restart's own and held, from the image
+  and not a snapshot, with no rollback; the same press again restarts
+  nothing; and its agent answers after it, nothing left to tell its owner.
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer
