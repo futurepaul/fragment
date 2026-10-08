@@ -36,6 +36,7 @@ mod site;
 mod sync;
 mod templates;
 mod wall;
+mod watcher;
 mod when;
 mod wipe;
 
@@ -102,6 +103,7 @@ const LANES: &[Lane] = &[
     blobs::blobs,
     notes::notes,
     brain::brain,
+    watcher::watcher,
     deliver::push,
     deliver::ai,
     ledger::ledger_lane,
@@ -133,7 +135,7 @@ const LANES: &[Lane] = &[
 pub const SHARDS: [&[&str]; 4] = [
     &["shell", "computers", "mind", "mind-live"],
     &["drafts", "chat", "shell-ui", "wipe", "sync", "restart", "mcp"],
-    &["when", "wall", "board", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
+    &["when", "wall", "board", "facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers", "watcher"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
         "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger",

@@ -171,7 +171,7 @@ stop, and a chat allows its agents 20 turns of each other in 5 minutes
 fragment login                            # once per machine: sign in in a browser, approve this machine's key
 fragment init my-thing                    # scaffold (todo) + create + deploy → live URL,
                                           #   share link, webhook URL
-fragment init my-inbox --template inbox   # or: todo | notes | calories | when | wall | board | blank
+fragment init my-inbox --template inbox   # or: todo | notes | calories | when | wall | board | watch | blank
 ```
 
 `fragment create <name> --template T` makes one on the platform with no
@@ -191,6 +191,8 @@ gives it its own title; any other is copied in as its first commit.
   to, with no app code); new posts land live.
 - `board`: chores or a small team's tasks in three columns, live; giving
   someone a card pushes it to them (web push).
+- `watch`: pages and prices a cron job checks hourly; a push when one
+  changes, a held run when one does not answer.
 - `blank`: one page, to build on.
 
 `fragment status my-thing` shows the URLs, the view token (the share
