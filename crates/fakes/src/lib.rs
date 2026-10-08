@@ -10,6 +10,7 @@ pub mod codestorage;
 pub mod http;
 pub mod mail;
 pub mod push;
+pub mod stripe;
 pub mod upstream;
 pub mod workers_ai;
 pub mod workos;

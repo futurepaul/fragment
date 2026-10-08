@@ -78,6 +78,11 @@ pub const DEFAULT_PLAN: &str = "seat";
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The Stripe fake's account key, the node's webhook endpoint's signing
+/// secret, and its portal configuration (docs/billing.md).
+pub const STRIPE_KEY: &str = "sk_test_fragment_e2e_stripe";
+pub const STRIPE_WEBHOOK: &str = "whsec_fragment_e2e";
+pub const STRIPE_PORTAL: &str = "bpc_fragment_e2e";
 /// Where the platform's mail says it comes from on the e2e's node.
 pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
@@ -216,6 +221,8 @@ pub struct Suite {
     pub push: Fake<fragment_fakes::push::PushService>,
     /// The platform's mail: Email Sending, faked; what was sent is read here.
     pub mail: Fake<fragment_fakes::mail::Mailer>,
+    /// Stripe: seats sold, faked; its events go to the node's webhook.
+    pub stripe: Fake<fragment_fakes::stripe::Stripe>,
     org_key: String,
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
@@ -479,6 +486,13 @@ impl Suite {
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
             }),
+            stripe: Some(devstack::StripeVars {
+                key: STRIPE_KEY.into(),
+                webhook_secret: STRIPE_WEBHOOK.into(),
+                api_url: Some(self.stripe.node().url.clone()),
+                portal: Some(STRIPE_PORTAL.into()),
+                tax: true,
+            }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
                 Shape::Plain => format!("http://127.0.0.1:{}", self.port),
@@ -510,6 +524,8 @@ impl Suite {
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
+        // Stripe's events go to the platform's host, as its endpoint would
+        self.stripe.node().set_endpoint(&format!("{}/api/stripe/webhook", fleet.platform_url), STRIPE_WEBHOOK);
         Ok(Api::new(self.port, self.suffix(), &self.shared))
     }
 
@@ -873,6 +889,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
         mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
+        stripe: Fake::of(hidden, "Stripe", fragment_fakes::stripe::Stripe::start(0, STRIPE_KEY)?),
         org_key,
         host_secret: devstack::random_hex(32),
         test_secret,

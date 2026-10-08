@@ -1158,6 +1158,35 @@ later is told when it is made.
 a person the deployment's `operators` names (decision 59). A wipe takes
 the person's rows, and an org it leaves empty.
 
+### Billing (docs/billing.md, "Stripe")
+
+On a deployment that sells seats (its config's `stripe`; else these are
+400, and seats are comped only), a person buys their own through Stripe
+Checkout: a monthly subscription to one seat at its price's lookup key
+(`fragment_seat_month`, `fragment_seat_always_on_month`), a card always,
+Stripe's automatic tax unless the deployment turns it off, and promotion
+codes allowed. Their org is made, of one, if they are in none; its
+admin may buy again once its subscription has ended (their lapsed seat
+becomes the kind bought). An org has one Stripe customer and one
+subscription; everything fragment makes carries `fragment_deployment`
+(the platform's origin) in its metadata, and nothing without this
+deployment's is touched (the account is finite-mono's too).
+
+The registry writes an org's subscription only as fetched from Stripe:
+by the Checkout's return, by the webhook, and daily by the registry's
+alarm for each org whose copy is a day old (a webhook lost). A newer
+subscription replaces the org's only once it has ended; an event older
+than the last applied changes nothing. `trialing`, `active` and
+`past_due` are good; anything else lapses the org's paid seats (Seats
+and orgs).
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `POST /api/billing/checkout` | a person (409 holding a good seat, or in an org whose admins give seats) | `{kind}` → `{url, session}`: Stripe's Checkout, for 31 minutes |
+| `POST /api/billing/sessions/{id}` | its buyer (anyone else, or a session Stripe never made: 404) | → `MySeat`: the Checkout's return (`/settings?checkout={id}`): a completed one's seat is theirs at once, whatever the webhook's timing; again, it changes nothing |
+| `POST /api/billing/portal` | an org's admin (403 otherwise; 400 an org that never paid) | → `{url}`: Stripe's portal on the deployment's own configuration (`stripe.portal`): card, invoices, billing address, cancel at period end |
+| `POST /api/stripe/webhook` | Stripe, signed (`Stripe-Signature`, this endpoint's secret, within 300 s; else 401) | an event → `{received, applied}`: `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted` are fetched again and written; any other event, or one not this deployment's, is answered and dropped. A failure is 5xx, and Stripe sends it again |
+
 ### Jobs and triggers
 
 A job is a method called `(input, job)` that runs as a Cloudflare Workflow,

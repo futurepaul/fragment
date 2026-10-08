@@ -31,6 +31,21 @@ pub struct WorkOsConfig {
     pub api: String,
 }
 
+/// Stripe (docs/billing.md): configured when its key is bound
+/// (`secrets_store::STRIPE_KEY`; keys.rs reads it, and the webhook's
+/// signing secret). Without it seats are comped only.
+pub struct StripeConfig {
+    /// `STRIPE_API_URL` (default https://api.stripe.com; dev and the e2e: the fake).
+    pub api: String,
+    /// `FRAGMENT_STRIPE_PORTAL`: the deployment's own portal configuration
+    /// (never the account's default, which finite-mono's is).
+    pub portal: Option<String>,
+    /// `FRAGMENT_STRIPE_TAX` (default on): Stripe's automatic tax on a
+    /// Checkout, prices before tax (decision 54); `off` where the account
+    /// has no tax settings (a sandbox).
+    pub tax: bool,
+}
+
 pub struct Config {
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
@@ -87,6 +102,7 @@ pub struct Config {
     /// boundary, which never sends it.
     pub mail_url: Option<String>,
     workos: Option<WorkOsConfig>,
+    stripe: Option<StripeConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
     /// sign-in and the platform session live (e.g. https://fragment.club).
     /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
@@ -247,6 +263,15 @@ impl Config {
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
+            stripe: crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY).then(|| StripeConfig {
+                api: var(env, "STRIPE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.stripe.com".into()),
+                portal: var(env, "FRAGMENT_STRIPE_PORTAL").filter(|p| !p.is_empty()),
+                tax: match var(env, "FRAGMENT_STRIPE_TAX").as_deref() {
+                    None | Some("on") => true,
+                    Some("off") => false,
+                    Some(other) => panic!("FRAGMENT_STRIPE_TAX is on or off, not {other:?}"),
+                },
+            }),
             platform_url,
             default_plan: default_plan(env),
             ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
@@ -290,6 +315,18 @@ impl Config {
     /// or nothing.
     pub fn host_label_suffix(&self) -> &str {
         self.host_label_suffix.as_deref().unwrap_or("")
+    }
+
+    /// Stripe, when this deployment sells seats: else a 400 that says so.
+    pub fn stripe(&self) -> CellResult<&StripeConfig> {
+        self.stripe
+            .as_ref()
+            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)))
+    }
+
+    /// The deployment as Stripe's metadata names it: its platform's origin.
+    pub fn stripe_deployment(&self) -> &str {
+        &self.platform_url
     }
 
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {

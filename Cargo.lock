@@ -605,6 +605,7 @@ dependencies = [
  "base64",
  "fragment-core",
  "fragment-nip98",
+ "fragment-proto",
  "hex",
  "hkdf",
  "p256",
@@ -612,6 +613,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
+ "url",
 ]
 
 [[package]]

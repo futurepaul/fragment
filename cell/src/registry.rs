@@ -53,6 +53,7 @@ macro_rules! username_join {
     };
 }
 
+pub(crate) mod billing;
 pub(crate) mod calls;
 pub(crate) mod orgs;
 mod signin;
@@ -114,6 +115,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
         state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
+        state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -134,6 +136,12 @@ impl DurableObject for RegistryCell {
         if let Err(e) = self.sweep_alarm().await {
             console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
             self.sweep_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        if let Err(e) = self.reconcile_alarm().await {
+            console_error!("the registry's reconcile with Stripe failed ({:?}): {}", e.code, e.message);
+        }
+        if let Err(e) = self.arm_reconcile().await {
+            console_error!("the registry's next reconcile was not armed ({:?}): {}", e.code, e.message);
         }
         if let Err(e) = self.sync_alarm().await {
             console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
@@ -711,6 +719,9 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
         }
         if let Some(answer) = self.org_route(&path, &bytes).await {
+            return answer;
+        }
+        if let Some(answer) = self.billing_route(&path, &bytes).await {
             return answer;
         }
         match path.as_str() {

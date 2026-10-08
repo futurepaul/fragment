@@ -45,6 +45,19 @@
     "client_id": "fragment-workos-client-id",
     "api_key": "fragment-workos-api-key"
   },
+  // Seats sold through Stripe (docs/billing.md). Leave it out and seats are
+  // comped by operators only. The key is a restricted key of the account's
+  // (Customers, Checkout Sessions, Subscriptions and portal sessions
+  // written; Products and Prices read); the webhook secret is this
+  // deployment's own endpoint's, which takes exactly
+  // `fragment_core::stripe::EVENTS`. `portal` is the deployment's own
+  // portal configuration, never the account's default (finite-mono's).
+  // "stripe": {
+  //   "key": "fragment-stripe-key",
+  //   "webhook_secret": "fragment-stripe-webhook-secret",
+  //   "portal": "bpc_...",
+  //   "tax": true
+  // },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,

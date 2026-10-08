@@ -64,6 +64,9 @@ struct Deployment {
     host_secret_previous: Option<String>,
     codestorage: CodeStorage,
     workos: WorkOs,
+    /// Seats sold through Stripe (docs/billing.md). Without it, seats are
+    /// comped by operators only.
+    stripe: Option<StripeDeploy>,
     /// Who may grant credit, set plans, release usernames, and wipe a
     /// person (npubs, or identities). The hosted e2e's `wipe` signs with an
     /// operator key among them, its file named on its command line
@@ -171,6 +174,21 @@ struct CodeStorage {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct StripeDeploy {
+    /// The account's restricted key and this deployment's webhook signing
+    /// secret: their names in the store.
+    key: String,
+    webhook_secret: String,
+    /// The deployment's own portal configuration (`bpc_…`), never the
+    /// account's default: finite-mono's is.
+    portal: Option<String>,
+    /// Stripe's automatic tax on a Checkout (decision 54; default true): off
+    /// for an account with no tax settings, as a sandbox may be.
+    tax: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WorkOs {
     /// The environment's client id and API key: their names in the store.
     client_id: String,
@@ -185,6 +203,7 @@ fn bound(d: &Deployment) -> Result<devstack::store::Bound> {
         host_secret_previous: d.host_secret_previous.clone(),
         codestorage_key: d.codestorage.private_key.clone(),
         workos: Some((d.workos.client_id.clone(), d.workos.api_key.clone())),
+        stripe: d.stripe.as_ref().map(|s| (s.key.clone(), s.webhook_secret.clone())),
         operator_keys,
     })
 }
@@ -199,6 +218,10 @@ fn named_secrets(b: &devstack::store::Bound) -> Vec<(String, &str)> {
     if let Some((client, key)) = &b.workos {
         named.push(("workos.client_id".into(), client.as_str()));
         named.push(("workos.api_key".into(), key.as_str()));
+    }
+    if let Some((key, webhook)) = &b.stripe {
+        named.push(("stripe.key".into(), key.as_str()));
+        named.push(("stripe.webhook_secret".into(), webhook.as_str()));
     }
     for (provider, name) in &b.operator_keys {
         named.push((format!("providers: {provider}'s key"), name.as_str()));
@@ -609,6 +632,14 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     if let Some(f) = &d.mail_from {
         v.insert("FRAGMENT_MAIL_FROM".into(), json!(f.trim()));
     }
+    if let Some(s) = &d.stripe {
+        if let Some(p) = &s.portal {
+            v.insert("FRAGMENT_STRIPE_PORTAL".into(), json!(p));
+        }
+        if s.tax == Some(false) {
+            v.insert("FRAGMENT_STRIPE_TAX".into(), json!("off"));
+        }
+    }
     if let Some(m) = &d.vision_model {
         v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
     }
@@ -729,6 +760,7 @@ mod tests {
             host_secret_previous: None,
             codestorage: CodeStorage { org: "o".into(), private_key: "fragment-codestorage-private-key".into(), api: None },
             workos: WorkOs { client_id: "fragment-workos-client-id".into(), api_key: "fragment-workos-api-key".into() },
+            stripe: None,
             operators: vec![],
             ai_gateway: None,
             vision_model: None,
@@ -884,7 +916,7 @@ mod tests {
             assert_eq!(names, ["google", "perplexity", "google-places", "xai", "elevenlabs"], "{file}");
             assert_eq!(keys.len(), 4, "{file}: each operator key's store secret");
             assert!(catalog.key_prices().iter().all(|k| fragment_core::price::default_key_price(&k.key) == Some((k.micros, k.per))), "{file}: at list");
-            let conventional = devstack::store::Bound::conventional(true, &["perplexity", "google-places", "xai", "elevenlabs"]);
+            let conventional = devstack::store::Bound::conventional(true, false, &["perplexity", "google-places", "xai", "elevenlabs"]);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
         }
     }
