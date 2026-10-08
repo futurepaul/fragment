@@ -45,6 +45,7 @@ pub(crate) const PROFILES_MAX: usize = 64;
 
 pub(crate) mod calls;
 mod invites;
+pub(crate) mod orgs;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
@@ -101,6 +102,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(signin::SCHEMA, None).expect("the sign-in schema applies");
         state.storage().sql().exec(wipe::SCHEMA, None).expect("the wipes' schema applies");
         state.storage().sql().exec(invites::SCHEMA, None).expect("the invites' schema applies");
+        state.storage().sql().exec(orgs::SCHEMA, None).expect("the orgs' schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -113,13 +115,18 @@ impl DurableObject for RegistryCell {
         }
     }
 
-    /// Sign-in's sweep of expired rows (signin.rs), off every request. A
-    /// failed sweep is logged and arms the next itself; failing that too,
-    /// the alarm fails and the node retries it.
+    /// Sign-in's sweep of expired rows (signin.rs), off every request, and
+    /// the seat holders' plans pushed (orgs.rs). A failed run of either is
+    /// logged and arms its next itself; failing that too, the alarm fails
+    /// and the node retries it.
     async fn alarm(&self) -> Result<Response> {
         if let Err(e) = self.sweep_alarm().await {
             console_error!("the registry's sweep failed ({:?}): {}", e.code, e.message);
             self.sweep_later().await.map_err(|e| Error::RustError(e.message))?;
+        }
+        if let Err(e) = self.sync_alarm().await {
+            console_error!("the registry's plan pushes failed ({:?}): {}", e.code, e.message);
+            self.sync_later().await.map_err(|e| Error::RustError(e.message))?;
         }
         Response::ok("")
     }
@@ -655,6 +662,9 @@ impl RegistryCell {
         }
         if self.down.get() {
             return Err(CellError::new(ErrorCode::RegistryUnavailable, "the registry is down (a test hook)"));
+        }
+        if let Some(answer) = self.org_route(&path, &bytes).await {
+            return answer;
         }
         match path.as_str() {
             Resolve::PATH => reply::<Resolve>(self.key_holder(&body::<Resolve>(&bytes)?.key)),

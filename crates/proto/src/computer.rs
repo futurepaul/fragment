@@ -224,6 +224,10 @@ pub struct ComputerView {
     /// that restores.
     #[serde(default)]
     pub saves: Vec<ComputerSave>,
+    /// It stays awake whatever is open: its owner's `seat_always_on` seat,
+    /// unless they let it sleep (docs/billing.md).
+    #[serde(default)]
+    pub always_on: bool,
 }
 
 /// One save of a computer's `/data`, as its view shows it.

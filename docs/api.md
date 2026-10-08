@@ -1227,7 +1227,7 @@ credit first. What happened is always charged, past zero.
 | `GET /api/ledger` | a person (an agent: its owner's) | → `LedgerStatus` (`crates/proto` `ledger`): `{plan, seat, month, balanceMicros, includedMicros, includedGrantedMicros, purchasedMicros, reservedMicros, availableMicros, overdraftMicros, standing: {standing: ok \| agents_stopped \| read_only, why?: guest \| seat_canceled \| no_credit \| overdrawn}, priceBook, fragments: [{fragment, spentMicros, capMicros}]}` (this month's spend, the largest 50 first) |
 | `PUT /api/f/{name}/cap` | the fragment's owner (never an agent) | `{id, micros \| null}` → `{fragment, capMicros, default}`: once by `id` (again: the same answer; another body: 409); `null` is the default |
 | `POST /api/ledger/{person}/grant` | the deployment's operators | `GrantCredit {id, micros, by, why}` → `{}`: purchased credit, once by `id`; `by` is the operator who signs; at most $10,000 |
-| `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}` |
+| `POST /api/ledger/{person}/plan` | the same | `SetPlan {id, plan}` → `{}`: an override; a seat's holder's plan is the registry's to push (Seats and orgs), and its next push wins (the debt ledger) |
 | `POST /api/ledger/{person}/seat` | the same | `SetSeat {id, seat: active \| past_due \| canceled, seq}` → `{}`: a change older (by `seq`) than the last applied changes nothing |
 | `POST /api/ledger/{person}/overdraft` | the same | `SetOverdraft {id, micros}` → `{}`: at most $1,000; read-only is decided afresh |
 
@@ -1239,6 +1239,42 @@ rule (an amount past its limit, a field misspelt) is 400 and remembered
 by nothing, so it may be sent again. Test fleets add `POST
 /api/test/ledger {identity, op: clock {offsetMs} | sweep | entries
 {prefix} | totals}`.
+
+### Seats and orgs (docs/billing.md)
+
+A seat is what lets a person create (decisions 49 and 51): `seat` ($100,
+a computer that sleeps) or `seat_always_on` ($200, a computer that stays
+awake unless its holder lets it sleep). Every seat is in an org, the one
+who pays; a person is in at most one org and holds at most one seat. An
+org's members (`OrgMember`) are its admins, its seats' holders, or both,
+each a person (`person`, an npub) or an email a seat waits on until
+someone signs in with it verified, who then takes it (the oldest offer
+first, if they are in no org yet). A seat is **comped** (an operator's,
+outside Stripe; always good) or **paid** (counted on the org's Stripe
+subscription, good while it is `trialing`, `active` or `past_due`: not
+built yet).
+
+The registry is the one writer of a seat holder's plan. Each change to a
+seat pushes, within seconds (the registry's alarm, tried again until it
+lands), to the holder's ledger (`SetPlan` its kind, and `SetSeat
+active`, or `canceled` once it lapses or ends: agents stop, the plan is
+kept) and to their computer (`alwaysOn` in its view while a good
+`seat_always_on` seat's holder has not let it sleep). A computer made
+later is told when it is made.
+
+| method & path | who | body → answer |
+| --- | --- | --- |
+| `GET /api/seat` | a person | → `MySeat {seat: SeatView? {id, org: {id, name}, kind, comped, good, sleeps, admin}, org: {id, name}?, admin, offered: [{id, org, kind}]}`: their seat, the org they are in, and seats offered to an email of theirs while they are in another org |
+| `PUT /api/seat` | a seat's holder | `{sleeps}` → `MySeat`: whether their `seat_always_on` computer may sleep; no seat is 400 |
+| `GET /api/org` | an org's admin | → `OrgView {id, name, createdAt, members: [OrgMember {id, person?, email, admin, seat?, comped, addedAt}]}` (a held seat shows its holder's latest sign-in's email); anyone else is 403 |
+| `POST /api/admin/seats` | the deployment's operators | `CompSeat {email, kind, org?}` → `Comped {seat: OrgMember, org, created, mailed}`: in `org` when named (404 when none), else in the org the email's person is in, else in a new org of one named by the email, whose seat's holder is its admin. A person who holds a seat already is 409, unless it is this same comp, which answers it again (`created: false`); a person in another org than the one named is 409. A new comp mails the email (`mailed`; a mail that fails leaves the seat made) |
+| `PATCH /api/admin/seats/{id}` | the same | `{kind}` → `OrgMember`: a comped seat's new kind (a paid one is 400) |
+| `DELETE /api/admin/seats/{id}` | the same | → `OrgMember` as it was: the comp ends; an admin keeps their place, seatless; anyone else's row goes. None is 404 |
+| `GET /api/admin/orgs/{id}` | the same | → `OrgView` |
+
+`/api/admin/*` takes an operator's signature, or the shell's session of
+a person the deployment's `operators` names (decision 59). A wipe takes
+the person's rows, and an org it leaves empty.
 
 ### Jobs and triggers
 

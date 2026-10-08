@@ -26,6 +26,7 @@ mod ledger;
 mod limits;
 mod members;
 mod notes;
+mod orgs;
 mod plane;
 mod posts;
 mod restart;
@@ -99,6 +100,7 @@ const LANES: &[Lane] = &[
     deliver::ai,
     ledger::ledger_lane,
     ledger::transcribe_lane,
+    orgs::orgs,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -135,7 +137,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe", "orgs",
     ],
 ];
 

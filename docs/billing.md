@@ -465,7 +465,8 @@ The first run starts once a seat is held, so a guest's first run is
 
    The cut should keep exactly those. With that done, the ledger no
    longer needs `past_due`.
-4. **Orgs and seats, without Stripe:**
+4. **Orgs and seats, without Stripe** (built 2026-10-08, branch
+   `claude/orgs-seats`; docs/api.md, Seats and orgs):
    - the registry's tables and the org API;
    - comped seats by operators;
    - pending seats by email;

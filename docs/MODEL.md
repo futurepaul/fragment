@@ -253,6 +253,8 @@ Every change is checked against this table.
 | Identities (npubs) and their keys, each person's own key (sealed), sign-ins and their verified emails, agents' owners, sessions | the registry (fragment's BANKS: docs/cloudflare-v1.md, decisions 45 to 50) | an identity's npub never changes; an email names at most one person; sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
+| Orgs, their admins and seats (held by an npub, or pending on an email; comped or paid) | the registry (docs/billing.md) | a seat holder's plan and standing on their ledger, and their computer's always-on, are pushed from it, each push read fresh and ordered (`SetSeat.seq`); the registry is their one writer |
+| A subscription's status | Stripe (docs/billing.md; not built) | the registry's copy is refreshed from Stripe, never built from an event's payload |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |
 | The agent docs | `cli/SKILL.md` and `cli/GUIDE.md` | compiled in, never edited elsewhere: the CLI's `fragment skill` and `fragment guide`, the platform's `/llms.txt` and `/llms-full.txt` (docs/api.md, Agent docs) |

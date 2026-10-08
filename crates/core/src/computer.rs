@@ -461,6 +461,12 @@ impl Default for Lifecycle {
 }
 
 impl Lifecycle {
+    /// Whether it stays awake whatever is open (a `seat_always_on` seat's,
+    /// as its owner's seat says: the registry tells it).
+    pub fn always_on(&self) -> bool {
+        self.always_on
+    }
+
     pub fn new() -> Lifecycle {
         Lifecycle {
             phase: Phase::Asleep,
