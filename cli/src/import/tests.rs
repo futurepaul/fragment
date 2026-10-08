@@ -53,7 +53,7 @@ fn caps_keep_head_and_tail_as_the_mind_does() {
     assert_eq!(cap_text(&at_cap, CAP), at_cap, "at the cap, in characters, nothing is cut");
     let long = format!("{}{}", "a".repeat(20_000), "b".repeat(20_000));
     let capped = cap_text(&long, CAP);
-    assert_eq!(capped.chars().count() <= CAP, true);
+    assert!(capped.chars().count() <= CAP);
     assert!(capped.starts_with(&"a".repeat(14_960)) && capped.ends_with(&"b".repeat(14_960)));
     assert!(capped.contains("\n\n[… 10080 characters cut here …]\n\n"), "{}", &capped[14_950..15_010]);
 }
@@ -391,7 +391,7 @@ fn detects_each_format() {
     let listed = files(std::slice::from_ref(&dir)).unwrap();
     assert!(!listed.iter().any(|p| p.starts_with(dir.join("subagents"))), "a subagents folder is a Claude Code agent's own");
     assert_eq!(listed.len(), cases.len() + 1, "each .json, .jsonl and .db, and nothing else: {listed:?}");
-    let (convs, found) = read(&[dir.clone()], None).unwrap();
+    let (convs, found) = read(std::slice::from_ref(&dir), None).unwrap();
     assert_eq!(found.sqlite, [db.display().to_string()]);
     assert!(convs.is_empty(), "{convs:?}");
     std::fs::remove_dir_all(&dir).unwrap();

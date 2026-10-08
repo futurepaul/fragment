@@ -985,7 +985,7 @@ fn run(cli: Cli) -> Result<()> {
             }
             let c = require_client(&cli.host, cli.verbose)?;
             let (conversations, messages) = mind::send(&c, &o, &convs, j)?;
-            let status = if o.wait { Some(mind::wait(&c, &o.mind)?) } else { None };
+            let status = if o.wait { Some(mind::wait(&c, &o.mind, j)?) } else { None };
             json_exit(j, &json!({ "conversations": conversations, "messages": messages, "status": status }));
             println!("imported {messages} messages of {conversations} chats into {}", o.mind);
             if !o.wait {

@@ -20,8 +20,9 @@ const ASK_MAX: usize = 200;
 /// How often the wait looks at the compactor.
 const POLL: Duration = Duration::from_secs(15);
 /// A pump that has planned nothing this long has stopped (the template's
-/// PUMP_KICK_MS).
+/// PUMP_KICK_MS); one this started is given this long to plan.
 const PUMP_QUIET_MS: i64 = 3 * 60_000;
+const KICK_AGAIN: Duration = Duration::from_secs(60);
 /// Pumps started again in a row with nothing summarized between: past
 /// this, the wait stops (a node that keeps failing is the mind's `status`'s
 /// `failing`).
@@ -174,10 +175,11 @@ pub fn send(c: &Client, o: &Options, convs: &[Conversation], quiet: bool) -> Res
 
 /// Follows the compactor until every message is summarized and nothing is
 /// left to merge, starting a pump when none ran lately.
-pub fn wait(c: &Client, mind: &str) -> Result<Value> {
+pub fn wait(c: &Client, mind: &str, quiet: bool) -> Result<Value> {
     let began = Instant::now();
     let mut restarts = 0;
-    let mut last_first: Option<i64> = None;
+    let mut kicked: Option<Instant> = None;
+    let mut last_progress: Option<(i64, i64)> = None;
     let mut last_line = String::new();
     loop {
         let s = op(c, mind, "status", json!({}))?;
@@ -191,27 +193,32 @@ pub fn wait(c: &Client, mind: &str) -> Result<Value> {
             s["view"].as_i64().unwrap_or(0) / 1000,
             began.elapsed().as_secs()
         );
-        if line != last_line {
+        if line != last_line && !quiet {
             println!("{line}");
             last_line = line;
         }
         if unbuilt == 0 && !ready {
             return Ok(s);
         }
-        let quiet = s["pump"]["at"].as_i64().is_none_or(|at| s["now"].as_i64().unwrap_or(at) - at > PUMP_QUIET_MS);
-        if quiet {
-            let first = t - unbuilt;
-            if last_first == Some(first) {
+        // no pump at work (none planned work lately), and none this started
+        // in the last minute (a run takes a moment to plan)
+        let idle = s["pump"]["at"].as_i64().is_none_or(|at| s["now"].as_i64().unwrap_or(at) - at > PUMP_QUIET_MS);
+        if idle && kicked.is_none_or(|k| k.elapsed() > KICK_AGAIN) {
+            kicked = Some(Instant::now());
+            let progress = (t - unbuilt, s["nodes"].as_i64().unwrap_or(0));
+            if last_progress == Some(progress) {
                 restarts += 1;
             } else {
                 restarts = 0;
             }
-            last_first = Some(first);
+            last_progress = Some(progress);
             if restarts >= RESTARTS_MAX {
                 anyhow::bail!("{mind}'s compactor made no progress in {RESTARTS_MAX} runs: see `fragment call {mind} status` (failing) and `fragment runs {mind}`");
             }
             let r = op(c, mind, "pump", json!({}))?;
-            println!("started the compactor (run {})", r["run"]);
+            if !quiet {
+                println!("started the compactor (run {})", r["run"]);
+            }
         }
         std::thread::sleep(POLL);
     }

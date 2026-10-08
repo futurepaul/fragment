@@ -68,9 +68,11 @@ const PUMP_ROUNDS_MAX = 30;
 const NODE_STEPS = M.TRIES + 1;
 const COMPACT_TOKENS = 4096;
 const BATCH_TOKENS = 8192;
-// The compactor is started again by an import when no pump planned this
-// long ago (a `compact` record, whose trigger runs `pump`).
+// The compactor is started by an import when no pump planned work this
+// long ago (a `compact` record, whose trigger runs `pump`), at most once
+// in KICK_AGAIN_MS.
 const PUMP_KICK_MS = 3 * 60_000;
+const KICK_AGAIN_MS = 60_000;
 // An import's part: at most this many messages (docs/optchat.md, "Importing
 // chats"); `imported` answers for at most this many conversations.
 const IMPORT_MESSAGES_MAX = 64;
@@ -639,7 +641,11 @@ export class App extends DurableObject {
     const merges = upto === null || m.bytes > M.VIEW ? M.ready(m, { busy, max: n + 1 }).filter((x) => x.l > 0).slice(0, n) : [];
     for (const x of [...nodes, ...merges]) leases[M.key(x.l, x.i)] = { run, until: now + LEASE_MS };
     this.#setJson("busy", leases);
-    if (upto === null && run !== null) this.#set("pump_at", now);
+    // a pump at work says when it last planned; one that found nothing has ended
+    if (upto === null && run !== null) {
+      if (nodes.length || merges.length) this.#set("pump_at", now);
+      else this.#del("pump_at");
+    }
     const lock = this.#json("turn", null);
     return { nodes, merges, settled, first: f, T: m.T, stopped: !!(run !== null && lock && lock.run === run && lock.stop) };
   }
@@ -895,9 +901,10 @@ export class App extends DurableObject {
         source, id, thread, n, now,
       );
       call.publish("log", { type: "import", source, conversation: id, thread, n, total: isInt(total) ? total : null, T: m.T });
-      // a pump planned lately is running, or about to: else one is started
-      const last = Math.max(Number(this.#get("pump_at") ?? 0), Number(this.#get("kicked") ?? 0));
-      if (now - last > PUMP_KICK_MS) {
+      // a pump that planned lately is at work; else one is started, at most
+      // one a minute (each is a triggered run, under the hourly breaker)
+      const working = now - Number(this.#get("pump_at") ?? 0) <= PUMP_KICK_MS;
+      if (!working && now - Number(this.#get("kicked") ?? 0) > KICK_AGAIN_MS) {
         this.#set("kicked", now);
         call.publish("compact", { at: now });
       }
@@ -1095,6 +1102,7 @@ export class App extends DurableObject {
       ready: M.ready(m, { max: 1 }).length > 0,
       pump: pumped ? { at: pumped } : null,
       view: m.bytes,
+      nodes: this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM node").one().n,
       import: imp.conversations ? { conversations: imp.conversations, messages: imp.messages, last: imp.last } : null,
       now,
     };

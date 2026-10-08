@@ -1177,7 +1177,7 @@ pub fn estimate(convs: &[Conversation]) -> Estimate {
     let mut done = 0usize;
     while level.len() >= 2 {
         let mut up = Vec::with_capacity(level.len() / 2);
-        for pair in level.chunks_exact(2) {
+        for pair in level.as_chunks::<2>().0 {
             let joined = pair[0] + 1 + pair[1];
             if joined <= NODE {
                 e.merges_free += 1;
