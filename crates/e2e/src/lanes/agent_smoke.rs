@@ -234,7 +234,7 @@ fn held_saves(s: &mut Suite, api: &Api, id: &str) {
 }
 
 /// The app `name`, once it is its owner's in their list and live.
-fn live_app(api: &Api, owner: &Keys, name: &str) -> Option<Value> {
+pub(super) fn live_app(api: &Api, owner: &Keys, name: &str) -> Option<Value> {
     let listed = api.signed(owner, "GET", "/api/fragments", None).ok()?;
     let row = listed.body["fragments"].as_array()?.iter().find(|f| f["name"] == name && f["role"] == "owner")?.clone();
     let status = api.signed(owner, "GET", &format!("/api/f/{name}/status"), None).ok()?;
@@ -356,7 +356,7 @@ fn ticket(api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<String> {
 }
 
 /// `agent`'s screen's page through a new ticket, connected or not by `PAGE`.
-fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool)> {
+pub(super) fn open_screen(chrome: &mut Browser, api: &Api, owner: &Keys, id: &str, agent: &str) -> Result<(Page, bool)> {
     let page = chrome.open(&ticket(api, owner, id, agent)?)?;
     let connected = chrome.until(&page, CONNECTED, PAGE);
     Ok((page, connected))

@@ -767,6 +767,59 @@ fragment.club until cutover (decisions 34–35).
   script's temp file in the gateway's scratch, which then holds it to the
   work with the rest.
 
+## An agent's Bot Chat is found by its chat's name
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image
+  (docs/computers.md, "Bot Mode in our Hermes image"). Which chat is an
+  agent's own, and so its Hermes Bot Chat, the image reads from names
+  alone: `<label>-chat` beside the agent's `<label>`, as the shell's
+  `makeAgent` makes it (`bots::bot_chat`; `fragment ask`'s `direct_label`
+  reads the same). Nothing on the platform says which chat is an agent's.
+- **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
+  of ours, and Hermes makes one of its own that the person never sees; a
+  rename of fragments (the identity work's `<label>--<suffix>`) that the
+  three places do not follow together leaves every agent with none.
+- **First proof:** a bot whose roster and `message_agent` never appear in
+  its own chat (no `botmode.titled` event for it).
+- **Delete when:** the agent fragment names its own chat (its
+  `agent.json`, written by whatever makes the two), and the image, the
+  shell and the CLI read that.
+
+## Bot Mode's roster lists the gateway as a teammate
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image. Hermes lists its
+  default profile in every bot's roster as `@hermes`, always
+  (`tools/bot_mode_probe.py`, `_roster`); in our image that profile is the
+  gateway's own, which runs no agent's turns. Its `profile.yaml` says so
+  ("this computer's gateway, not an agent: never message it").
+- **Risk:** a model messages `@hermes` anyway: Hermes runs a turn as the
+  default profile, whose model calls name no agent, so the model route
+  refuses them and the sender is told the delivery failed, having spent
+  a turn on it.
+- **First proof:** a `message_agent` call whose target is `hermes` in a
+  hosted run's model calls.
+- **Delete when:** Hermes lets an install leave its default profile out
+  of the roster, or our gateway's own profile is an agent's.
+
+## A bot's answer to a teammate outlives the teammate's wait only while awake
+
+- **Observed:** 2026-10-08, Bot Mode in our Hermes image (the keeper,
+  `images/hermes/botmode.py`). A bot's `message_agent` waits for its
+  teammate's answer in a background process of Hermes' (up to 30
+  minutes), and the keeper delivers the message by a `fragment ask --wait`
+  of its own. Neither is saved: a sleep, a crash or a restart while the
+  teammate's turn runs ends both. Hermes keeps the delivery's claim for
+  good (its receipts never expire), and nothing settles it.
+- **Risk:** the sender never hears the answer, and never tells its owner;
+  the answer is in the teammate's chat, and the sender's owner sees it
+  there only if they look.
+- **First proof:** a hosted run where a computer sleeps while one bot's
+  teammate is still answering it, and the sender's chat says nothing more.
+- **Delete when:** a delivery's wait is the journal's: the keeper, at its
+  start, finds each claim of its own left unsettled and settles it from
+  the teammate's chat (the hand-off's record is `dm-<delivery>`), and the
+  sender's wake comes from that receipt rather than from a process.
+
 ## Own keys are kept by the person's computer
 
 - **Observed:** Paul, 2026-10-04 (`computer.rs` `own_keys`). A person's
