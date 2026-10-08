@@ -486,7 +486,9 @@ The first run starts once a seat is held, so a guest's first run is
    - the return, the webhook and the reconcile;
    - the portal and seat changes;
    - the `billing` e2e section.
-6. **Trials:** codes, capacity, Checkout with trial days.
+6. **Trials** (built 2026-10-08, branch `claude/billing-trials`;
+   docs/api.md, Billing and Operators): codes, capacity, Checkout with
+   trial days.
 7. **Packs:** one $25 pack (decision 55).
 8. **The operator's admin:** the API, the CLI, `/admin`, and the audit
    log. The API can start alongside 4.
