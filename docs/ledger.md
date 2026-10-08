@@ -339,3 +339,4 @@ the batch, so a guest's fragments are billed nothing.
   average of each day's peak). That is a deployment-wide charge no one
   shot causes, so it is not metered per person; the margin carries it
   (each fragment has at most one shot out: its alarm takes it).
+<!-- PR #252's path-filter probe: a docs-only change, never merged -->
