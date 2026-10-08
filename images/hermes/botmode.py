@@ -21,6 +21,16 @@
 #   turn of the bridge's in that chat, which its owner sees; once that turn
 #   ends, its replies settle the delivery, which wakes the sender.
 #
+# A bot answers a teammate once. Hermes' roster tells a bot that a teammate
+# messaged to answer with `message_agent`, and its sender is woken by the
+# delivery's answer as well, so each said it twice (the sender relaying the
+# answer again, the teammate acknowledging that). So the posted message
+# ends with a line telling the bot its reply there goes back on its own;
+# and when it messages its sender back anyway while answering it, both
+# deliveries are settled with their answer under a line telling the woken
+# bot it has had it already: to end its turn with Hermes' `[SILENT]`
+# (gateway/response_filters.py), which its gateway says nothing for.
+#
 # It writes nothing while the platform holds the computer (`FRAGMENT_HOLD`),
 # so a save never copies a mailbox or a lease it is writing.
 #
@@ -28,6 +38,7 @@
 # own Python, whose session and mailbox code only it can call.
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -58,6 +69,20 @@ CALL_S = 30
 PAGES_MAX = 10
 PAGE_RECORDS = 1000
 REPLAY_BACK = 2000
+# A bot that messages its sender back while answering it does so in its
+# turn, which has ended by the time its own answer is read: its message is
+# taken within the keeper's next pass, so an answer waits this long for it.
+REPLIED_WAIT_S = 3.0
+# The line a teammate's message ends with, in the chat it is posted to.
+ANSWER_HERE = "\n\n(Your reply here goes back to {name} on its own: answer here, and don't message_agent {name} about this.)"
+# What a woken bot is told above an answer it has had already.
+HAD_IT = {
+    "answered": "{name} also messaged you this answer directly, in your own chat, and you passed it on there. If it adds nothing for your person, end this turn with exactly [SILENT].",
+    "reply": "{name} read your message in their own chat and answered there. If this asks nothing more of you, end this turn with exactly [SILENT].",
+}
+# Hermes' attribution of a teammate's message (tools/bot_mode_dm.py): the
+# sender's friendly name.
+ATTRIBUTION = re.compile(r"Message from \S+ (.+?) \(@[^)]+\): ")
 # Messages being delivered at once, per bot at most: past it the rest wait
 # in its mailbox (the bridge runs one of the bot's turns in a chat at a
 # time anyway).
@@ -219,16 +244,62 @@ def hand_off(bot, sender, message, post):
         time.sleep(POLL_S)
 
 
+class Exchanges:
+    """The deliveries being answered now, so a bot's message to its sender while it answers them is
+    known for an answer of its: delivery id -> {sender, recipient, answered, reply_to}."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.by_id = {}
+
+    def open(self, delivery, sender, recipient):
+        """A delivery from `sender` to `recipient` taken: whether it answers one of `recipient`'s to
+        `sender` being answered now (then that one is marked as answered directly)."""
+        with self.lock:
+            answering = next((d for d, x in self.by_id.items() if x["sender"] == recipient and x["recipient"] == sender), None)
+            if answering is not None:
+                self.by_id[answering]["answered"] = True
+            self.by_id[delivery] = {"sender": sender, "recipient": recipient, "answered": False, "reply_to": answering}
+            return answering is not None
+
+    def close(self, delivery):
+        """The delivery's state, let go."""
+        with self.lock:
+            return self.by_id.pop(delivery, None) or {}
+
+
+EXCHANGES = Exchanges()
+
+
+def name_of(message, fallback):
+    """The sender's name as Hermes attributes its message, or `fallback`."""
+    found = ATTRIBUTION.match(message or "")
+    return found.group(1) if found else fallback
+
+
+def bot_name(bot):
+    """The bot's name as its profile says it (its Bot Mode title: bots.rs), else its label."""
+    try:
+        import hermes_yaml
+
+        data = hermes_yaml.safe_load((Path(bot["home"]) / "profile.yaml").read_text(encoding="utf-8")) or {}
+        title = ((data.get("ui_meta") or {}).get("hermes-bots") or {}).get("title") or data.get("display_name")
+        return str(title).strip() or bot["agent"].split(".")[0]
+    except Exception:
+        return bot["agent"].split(".")[0]
+
+
 def deliver(bot, sender, owner, claimed):
     """A teammate's message, posted into the bot's own chat as the teammate, and its answer settling it."""
     delivery = claimed["delivery_id"]
     t = time.time()
-    status, reply, error, reason = "failed", "", "", ""
+    status, reply, error, reason, had = "failed", "", "", "", None
     try:
         if sender is None:
             error = "the sender is no agent of this computer"
         else:
-            text, failed = hand_off(bot, sender, claimed["message"], "dm-" + delivery[:32])
+            them = name_of(claimed["message"], sender["agent"].split(".")[0])
+            text, failed = hand_off(bot, sender, claimed["message"] + ANSWER_HERE.format(name=them), "dm-" + delivery[:32])
             if failed is None or text:
                 status, reply = "settled", (text or "")[:REPLY_MAX_CHARS]
                 if failed:
@@ -239,12 +310,21 @@ def deliver(bot, sender, owner, claimed):
         error = f"{type(e).__name__}: {e}"[:600]
     if status == "failed":
         reason = classify_agent_error(error)
+    else:
+        # a message back from the bot to its sender, sent in the turn just
+        # read, is taken within the keeper's next pass
+        time.sleep(REPLIED_WAIT_S)
+    exchange = EXCHANGES.close(delivery)
+    if status == "settled":
+        had = "reply" if exchange.get("reply_to") else "answered" if exchange.get("answered") else None
+        if had is not None:
+            reply = HAD_IT[had].format(name=bot_name(bot)) + "\n\n" + reply
     until_unheld()
     try:
         complete_delivery(owner.home, delivery, status=status, reply=reply, error=error, reason=reason)
     except Exception as e:
         ev("settle_failed", agent=bot["agent"], delivery=delivery, error=f"{type(e).__name__}: {e}"[:300])
-    ev("delivered", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, status=status, reason=reason or None, ms=int((time.time() - t) * 1000))
+    ev("delivered", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=delivery, status=status, reason=reason or None, had=had, ms=int((time.time() - t) * 1000))
     with owner.lock:
         owner.in_flight -= 1
 
@@ -265,7 +345,8 @@ def take(bot, bots, owner):
             return
         author = str((claimed.get("author") or {}).get("id") or "")
         sender = next((b for b in bots if "bot:" + b["profile"] == author), None)
-        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"])
+        replying = EXCHANGES.open(claimed["delivery_id"], sender["agent"] if sender else None, bot["agent"])
+        ev("taken", agent=bot["agent"], sender=sender["agent"] if sender else None, delivery=claimed["delivery_id"], replying=replying)
         with owner.lock:
             owner.in_flight += 1
         threading.Thread(target=deliver, args=(bot, sender, owner, claimed), name="deliver-" + claimed["delivery_id"][:12], daemon=True).start()

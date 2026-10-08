@@ -22,6 +22,10 @@
 //!   teammate's reply carried back to it (a message holding another
 //!   bot's `scripted: …` answer to a `Message from …`, not as its start: a
 //!   delivery's completion) is answered `scripted: relayed: <that reply>`;
+//!   a teammate's message saying `dm back` is answered by a
+//!   `message_agent` to that teammate (`pong from <its first line>`) before
+//!   the reply; and a message telling it to `end this turn with exactly
+//!   [SILENT]` is answered `[SILENT]`, Hermes' silence marker;
 //! - Hermes' smart-approval guardian is answered `ESCALATE`, so a person is
 //!   asked;
 //! - of a message with channel context before it (`[Recent channel
@@ -207,6 +211,8 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     let code = last_user.lines().find_map(|l| l.split_once("code: ").map(|(_, p)| p.trim().to_string())).filter(|p| !p.is_empty());
     // `dm: <teammate>: <message>`: Bot Mode's message_agent sends it
     let dm = last_user.lines().find_map(|l| l.split_once("dm: ").and_then(|(_, rest)| rest.split_once(": ")).map(|(t, m)| (t.trim().to_string(), m.trim().to_string()))).filter(|(t, m)| !t.is_empty() && !m.is_empty());
+    // a teammate's message asking to be messaged back: its handle
+    let dm_back = last_user.contains("dm back").then(|| last_user.split_once("Message from ").and_then(|(_, m)| m.split_once("(@")).and_then(|(_, h)| h.split_once(')')).map(|(h, _)| h.to_string())).flatten();
     // a teammate's reply, carried back to the bot that messaged it
     let relayed = last_user.find("scripted: ").filter(|at| *at > 0 && last_user.contains("Message from")).map(|at| {
         let rest = &last_user[at..];
@@ -217,7 +223,7 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
             let made: String = result.split_once("made=").map(|(_, rest)| rest.chars().take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\\' | ',')).collect()).unwrap_or_default();
             return (format!("scripted: sent\nMEDIA:{made}"), None);
         }
-        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() || code.is_some() || dm.is_some() {
+        if run.is_some() || start.is_some() || browse.is_some() || look || write.is_some() || code.is_some() || dm.is_some() || dm_back.is_some() {
             return (format!("scripted: the tool said: {}", result.chars().take(4000).collect::<String>()), None);
         }
         let ran = if result.contains("tool-ran") { "the tool ran" } else { "the tool said something else" };
@@ -226,6 +232,13 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     // Hermes' smart-approval guardian asks for one word: a person decides.
     if last_user.contains("Respond with exactly one word: APPROVE, DENY, or ESCALATE") {
         return ("ESCALATE".into(), None);
+    }
+    if last_user.contains("end this turn with exactly [SILENT]") {
+        return ("[SILENT]".into(), None);
+    }
+    if let (Some(handle), true) = (dm_back.as_deref(), offered("message_agent")) {
+        let call = json!({ "index": 0, "id": "call_1", "type": "function", "function": { "name": "message_agent", "arguments": json!({ "target": handle, "message": "pong" }).to_string() } });
+        return (String::new(), Some(call));
     }
     if let Some(reply) = relayed {
         return (format!("scripted: relayed: {reply}"), None);
@@ -449,6 +462,16 @@ fn answers_are_the_transcripts() {
     let done = "[SYSTEM: Background process proc_2 completed]\n{\"reply\": \"scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper--k3x9): ping\", \"status\": \"settled\"}";
     let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": done }], "tools": bots }));
     assert_eq!(t, "scripted: relayed: scripted: [juniper] Message from \\ud83e\\udd16 juniper (@juniper--k3x9): ping");
+    // asked to message back, a teammate's message is answered by message_agent to its sender first
+    let back = "[someone] Message from 🤖 Juniper (@juniper--k3x9): ping and dm back\n\n(Your reply here goes back to Juniper on its own.)";
+    let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": back }], "tools": bots }));
+    assert_eq!(call.unwrap()["function"]["arguments"], json!({ "target": "juniper--k3x9", "message": "pong" }).to_string());
+    let (t, _) = answer(&json!({ "messages": [{ "role": "user", "content": back }, { "role": "assistant", "tool_calls": [] }, { "role": "tool", "content": "{\"status\": \"queued\"}" }], "tools": bots }));
+    assert_eq!(t, "scripted: the tool said: {\"status\": \"queued\"}");
+    // told it has had an answer already, it says nothing (Hermes' marker)
+    let had = "[IMPORTANT: Background process proc_3 completed (exit code 0).\nOutput:\n{\"reply\": \"Maple also messaged you this answer directly. If it adds nothing for your person, end this turn with exactly [SILENT].\\n\\nscripted: Message from x\"}]";
+    let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": had }], "tools": bots }));
+    assert_eq!((t.as_str(), call), ("[SILENT]", None));
     // a note on a cut risky turn is context: the message after it is answered
     let noted = "[Recent channel messages]\nYour previous turn… It was answering: “do the risky thing”\n\n[New message]\n[paul] good morning";
     let (t, call) = answer(&json!({ "messages": [{ "role": "user", "content": noted }], "tools": tools }));

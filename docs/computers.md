@@ -1105,11 +1105,20 @@ actually makes a chat a Bot Chat"), so the image does both
   Bot Chat of its own, outside the bridge, which the person sees nowhere
   until the agent has its own chat, whose session then takes the title.
   So does every agent while the keeper is down.
-- Hermes' roster tells a bot that a teammate messaged to answer with
-  `message_agent` too, so a sender often hears an answer twice: the
-  teammate's own message (a hand-off in the sender's chat) and its
-  delivery's settlement (the wake). The second one usually only says
-  that it already passed the answer on.
+- A bot answers a teammate once. Hermes' roster tells a bot that a
+  teammate messaged to answer with `message_agent`, and the delivery's
+  answer wakes the sender too, so each said it twice (the sender relaying
+  the answer again, the teammate acknowledging that: two redundant lines
+  a run on the preview). So the posted message ends with a line telling
+  the bot its reply there goes back to the sender on its own, and not to
+  message the sender about it (`ANSWER_HERE`). When a bot messages its
+  sender back anyway while answering (the keeper sees its message taken
+  while it answers the sender's, or within 3 s of that turn's end), both
+  deliveries settle with their answer under a line telling the woken bot it
+  has had it already, and to end its turn with exactly `[SILENT]` if it
+  adds nothing (`HAD_IT`), Hermes' silence marker, for which its gateway
+  says nothing (gateway/response_filters.py). Event: `botmode.delivered`'s
+  `had` (`answered`, `reply`).
 
 Proven by the Docker lane's `bots_message_each_other` (the scripted
 model: the roster and the tool from an agent's first turn in its own

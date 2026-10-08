@@ -2119,7 +2119,8 @@ async fn bots_message_each_other() {
     let record = fake.with(|w| asked_maple(w)).unwrap();
     eprintln!("bots: juniper's message in maple's chat {} ms after her turn: {}", t.elapsed().as_millis(), record["body"]);
     let text = record["body"]["text"].as_str().unwrap_or_default();
-    assert!(text.starts_with("Message from 🤖 Juniper (@juniper--k3x9): ") && text.ends_with("ping from juniper"), "as Hermes attributes it, by her title: {text}");
+    assert!(text.starts_with("Message from 🤖 Juniper (@juniper--k3x9): ping from juniper\n\n"), "as Hermes attributes it, by her title: {text}");
+    assert!(text.ends_with("(Your reply here goes back to Juniper on its own: answer here, and don't message_agent Juniper about this.)"), "and told her reply there goes back: {text}");
     // maple's answer is a turn of the bridge's there, as maple
     let mturn = fragment_bridge::records::turn_id("maple--k3x9", &mchat, "chat", record["seq"].as_u64().unwrap());
     within(&fake, &mchat, &c, 180_000, "maple's turn", |w| w.bodies(&mchat, "work", "turn.end").iter().any(|e| e["turn"] == mturn)).await;
@@ -2140,4 +2141,37 @@ async fn bots_message_each_other() {
     // no turn of Hermes' own answered it: maple's every model call that was handed it is the bridge's turn's
     let handed: Vec<_> = calls_of(&model, "maple--k3x9", "ping from juniper").into_iter().filter(|m| m.body["messages"].as_array().and_then(|ms| ms.iter().rev().find(|x| x["role"] == "user")).is_some_and(|u| u.to_string().contains("ping from juniper"))).collect();
     assert_eq!(handed.len(), 1, "one turn of maple's answered it");
+
+    // Asked to message juniper back as well, maple's answer is still said
+    // once: the message she sends back is a hand-off in juniper's chat,
+    // which juniper passes on, and each one's woken turn after it, told it
+    // has had that answer, says nothing (Hermes' `[SILENT]`)
+    let jturn2 = asked(&fake, &jchat, &c, "dm: maple: ping again and dm back", |w, turn| reply(w, &jchat, turn).is_some()).await;
+    let t = Instant::now();
+    // bounded: three minutes
+    while c.logs().matches("\"botmode.delivered\"").count() < 3 {
+        assert!(t.elapsed() < Duration::from_secs(180), "both messages delivered: {}", told(&fake, &jchat, &c));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // what either woken turn would say, said by now
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    let logs = c.logs();
+    let delivered: Vec<&str> = logs.lines().filter(|l| l.contains("\"botmode.delivered\"")).collect();
+    eprintln!("bots: delivered {delivered:#?}");
+    let had = |why: &str, sender: &str| delivered.iter().any(|l| l.contains(&format!("\"had\": \"{why}\"")) && l.contains(&format!("\"sender\": \"{sender}\"")));
+    assert!(had("answered", "juniper--k3x9") && had("reply", "maple--k3x9"), "juniper's message answered directly, and maple's a reply: {delivered:?}");
+    let seq_of = |w: &support::fake::World, chat: &str, by: &str, says: &str| w.records(chat, "chat").into_iter().find(|r| r["principal"] == by && r["body"]["text"].as_str().is_some_and(|t| t.contains(says))).and_then(|r| r["seq"].as_u64());
+    let said_after = |w: &support::fake::World, chat: &str, agent: &str, since: u64, not: &str| -> Vec<String> {
+        w.records(chat, "chat").into_iter().filter(|r| r["principal"] == agent && r["seq"].as_u64() > Some(since) && r["body"].get("kind").is_none() && r["body"]["turn"] != not).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect()
+    };
+    let (jsaid, msaid) = fake.with(|w| {
+        let asked_at = seq_of(w, &jchat, &person("paul"), "ping again and dm back").unwrap_or(0);
+        let handed_at = seq_of(w, &mchat, "npub1juniper", "ping again and dm back").unwrap_or(0);
+        let mturn2 = fragment_bridge::records::turn_id("maple--k3x9", &mchat, "chat", handed_at);
+        (said_after(w, &jchat, "npub1juniper", asked_at, &jturn2), said_after(w, &mchat, "npub1maple", handed_at, &mturn2))
+    });
+    eprintln!("bots: after asking again, juniper said {jsaid:?}; maple said more {msaid:?}");
+    assert!(jsaid.len() == 1 && jsaid[0].contains("pong"), "juniper passes maple's message on once, and her woken turn says nothing: {jsaid:?}");
+    assert!(msaid.is_empty(), "maple's woken turn says nothing: {msaid:?}");
+    assert!(fake.with(|w| seq_of(w, &jchat, "npub1maple", "pong").is_some()), "maple's message back is a hand-off in juniper's chat");
 }
