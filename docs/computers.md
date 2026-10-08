@@ -1026,7 +1026,10 @@ for a host) and finds the same `HOME`, `~` and modes.
   Hermes gateway; and, with Docker, both images built and run against
   the fake API and a scripted model on the host
   (`cargo test -p fragment-bridge --test docker -- --ignored`), real
-  Hermes included. These are lower rung: fakes at the platform's edge.
+  Hermes included. CI runs the Docker ones (images.yml's `docker`) on
+  pull requests and master's pushes that touch images/hermes,
+  images/bridge or images/stub, the rest on every change to `images/`.
+  These are lower rung: fakes at the platform's edge.
   Among them, saves of our Hermes image taken as the DO takes them
   (`a_save_taken_while_it_writes_opens`: during turns whose tool writes a
   SQLite database every few ms, half under the hold and half hot, each
