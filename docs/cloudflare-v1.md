@@ -383,8 +383,9 @@ speaking Cloudflare's APIs) returns once this product works.
     bills that fragment's owner (decision 26). A $100 seat includes $50
     of credit a month and a computer that sleeps when idle. A $200 seat
     includes an always-on computer (its awake time not metered), SimpleX,
-    and $100 of credit. More credit can be bought. Stripe arrives later
-    through two hooks: granting credit, and a seat's state.
+    and $100 of credit. More credit can be bought. Stripe sells them
+    (decisions 51 to 58; docs/billing.md) through the ledger's two
+    hooks: granting credit, and a seat's state.
 26. **A fragment's costs bill its owner**, with a monthly cap the owner
     sets per fragment (default $5). Past it, AI steps and agent turns
     stop for everyone but the owner.
@@ -665,9 +666,10 @@ runaround".
     methods (fragment mails no login links) and is a guest (decision
     25): they see and edit what is shared with them, and create
     nothing. Creating needs a paid user, a seat (Paul: "you have to be
-    a paid user (stripe) to create stuff"). A seat needs an invite, an
-    operator's grant until Stripe is built (Paul: "still need invite to
-    become a full paid user").
+    a paid user (stripe) to create stuff"). Anyone may buy one, or be
+    given one by an org's admin or comped by an operator (decisions 51
+    and 52, which replaced "a seat needs an invite until Stripe is
+    built").
 50. **Later: paying with a key** (Paul: "a future plan", "useful as a
     design constraint right now"; Bitcoin Lightning first). A CLI makes
     its own key and pays over HTTP 402 (x402's shape). That gives it an
@@ -683,6 +685,60 @@ runaround".
       (docs/ledger.md).
 
     What such an identity may create is decided when it is built.
+
+### Seats, orgs and Stripe (Paul, 2026-10-08)
+
+Paul: "before we go live, we'll need stripe billing", with trials as
+finite-mono has them, organizations with central billing, and an admin
+dashboard; the Stripe account is finite-mono's. docs/billing.md is the
+design; Paul took its recommendations whole ("I agree with your
+recommendations"). Nothing below is built yet.
+
+51. **Anyone may buy a seat, and an org is who pays.** A guest buys a
+    seat through Stripe Checkout; no invite is needed (payment is the
+    gate; trials and comps cover the rest). Every seat belongs to an
+    org, and a person who pays for themselves pays through an org of
+    one. A person is in at most one org and holds at most one seat; an
+    org's admins manage its seats and billing, need not hold a seat
+    themselves, and number at least one. Prices are monthly; there is
+    no annual plan.
+52. **Seats are paid or comped, held or pending.** A seat is `seat`
+    ($100) or `seat_always_on` ($200), held by an npub or pending on an
+    email until someone signs in with it verified (as decision 48's
+    invites). Paid seats are counted on the org's one subscription,
+    pending ones included: a seat bills from its invite. Adding,
+    removing and changing a seat's kind take effect at once, prorated
+    onto the next invoice. Comped seats are an operator's, outside
+    Stripe, and replace decision 49's "operator's grant".
+53. **Standing is Stripe's status.** `trialing`, `active` and
+    `past_due` are good (Stripe's retries are the grace period);
+    anything else lapses the org's paid seats. A lapsed or removed seat
+    is today's `canceled` (docs/ledger.md): agents stop, the computer
+    sleeps and won't wake, fragments serve on the credit left, nothing
+    is deleted, and paying again restores it. A removed member's
+    fragments stay theirs. How long a lapsed person's data stays is
+    decided later.
+54. **Stripe automatic tax, prices before tax** ("$100 + tax"), as
+    finite-mono's.
+55. **One credit pack, $25, kept until spent**, bought through
+    Checkout by a seat holder (or an org admin for a member), granted
+    on the ledger by its payment's id. Usage never goes to Stripe.
+56. **Trials are our codes on Stripe's trial**, finite-mono's shape: a
+    code names a kind, days (1 to 30), a capacity and an expiry; a
+    card is taken first; one trial per person ever, for a seat of one.
+    A place is held by a Checkout that has not expired, and freed by
+    its expiry. Discounts are Stripe promotion codes, made in Stripe's
+    dashboard.
+57. **A $200 seat's computer stays awake**, unless its owner lets it
+    sleep. A `seat` computer sleeps when idle.
+58. **Previews have their own Stripe sandbox endpoint.** `xtask deploy
+    --branch` registers the preview's webhook endpoint in fragment's
+    Stripe sandbox and uploads its signing secret as a Worker secret,
+    as it does the test secret, so the hosted lane tests webhooks.
+59. **The operator's admin** (`/admin`) acts through an operator's
+    browser session: people, invites, trial codes, orgs, billing
+    health, and an audit log of every write. The wipe stays a signed
+    CLI call.
 
 ### Carried from the ROADMAP (Paul, 2026-09-23 to 09-25)
 
