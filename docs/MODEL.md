@@ -183,7 +183,9 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   one or more public keys in the registry (finite.computer's BANKS
   model, docs/cloudflare-v1.md, R15). The CLI proves a key with NIP-98 and the
   registry names its identity; a browser has a platform session that
-  maps to the person; an agent signs with its cell's key; a fragment
+  maps to the person; an MCP client (Claude, ChatGPT) has a connection
+  its person made, acting as them on one resource (docs/api.md,
+  Connected clients); an agent signs with its cell's key; a fragment
   with its own key (unregistered: it is the principal of its own
   triggered runs only). The platform holds no person's private
   key. An agent's designated owner reads what the agent can read, as a
@@ -255,7 +257,7 @@ Every change is checked against this table.
 | Members, roles, invites | the fragment's supervisor | grants and revokes are transactional; `events` records each |
 | Cell state (supervisor tables, the operation ledger, channels, the app's SQL) | the Durable Objects' own storage | none |
 | Large file bytes (1 MiB or more) | R2 (`BLOBS`), keyed by SHA-256 | git holds a pointer; a sync resolves it; a blob no branch tip references is deleted |
-| Identities and their keys, agents' owners, sessions | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions and caches name an identity and never outlive a revocation; cookies hold only tokens, the registry their hashes |
+| Identities and their keys, agents' owners, sessions, connected clients' connections | the registry (BANKS's shape; BANKS later, docs/finite-integration.md) | sessions, connections and caches name an identity and never outlive a revocation; cookies and clients hold only tokens, the registry their hashes; a connection grants nothing (the resource it reaches decides, as for any of its person's requests) |
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |

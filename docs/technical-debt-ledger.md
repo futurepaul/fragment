@@ -26,6 +26,25 @@ fragment.club until cutover (decisions 34–35).
 - **Delete when:** the registry (or a per-username index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
+## A replayed refresh token does not end its connection
+
+- **Observed:** 2026-10-07, connected clients (docs/api.md, Connected
+  clients). A refresh token is replaced at each use, and the one it
+  replaced is refused (`invalid_grant`), but the connection stays: OAuth
+  2.1's reuse detection (a replaced refresh token presented again ends
+  the whole connection, since a thief or its client holds a copy) is not
+  done. The registry keeps only the current token's hash.
+- **Risk:** a refresh token stolen and used before its client next
+  refreshes keeps the thief connected (as the person, on its one
+  resource) until the person ends it in their settings; the client finds
+  itself refused and connects again, and the person sees two.
+- **First proof:** a person's list showing a connection of a client they
+  connected once, used after they reconnected it.
+- **Delete when:** each connection keeps the hash of the refresh token it
+  replaced last, and that token presented again ends the connection
+  (and a lost answer to a refresh, which looks the same, asks its person
+  to connect again).
+
 ## The browser half of web push is not driven by a test
 
 - **Observed:** phase 2 slice F. The e2e proves the server half end to end

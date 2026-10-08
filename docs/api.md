@@ -303,8 +303,8 @@ once it is whole:
 
 - *Begin*, in one Registry turn: the wipe is recorded and the person
   locked. Their and their agents' sessions end (a signed-in browser is
-  out at once), and their keys (deleted, not revoked: the key is no
-  one's, 401). Until the last step, a sign-in with their account is 403,
+  out at once), their connected clients' connections and codes, and their
+  keys (deleted, not revoked: the key is no one's, 401). Until the last step, a sign-in with their account is 403,
   nothing acts as them or makes an agent for them, no one adds them or
   their agents to a fragment (404), and their username stays theirs:
   no one takes it, and no fragment is made under it (no one can sign as
@@ -613,6 +613,40 @@ every fragment is another origin), sever their opener, allow scripts
 and styles only inline and images only from the platform
 (`Content-Security-Policy`), and keep their URL to the platform
 (`Referrer-Policy: same-origin`: the join page's holds its invite).
+
+## Connected clients
+
+A chat client with no shell (Claude, ChatGPT) and any other MCP client
+reaches fragment through MCP, as the person who connects it. The
+platform is its OAuth 2.1 authorization server, as the MCP authorization
+spec has it (2026-07-28; cell/src/oauth.rs, the registry's half
+`cell/src/registry/oauth.rs`, the rules `fragment_core::oauth`). A
+**connection** is one client acting as one person on one resource, an
+MCP server of the platform's: a fragment's own (`<fragment
+origin>/__mcp`) or the platform's (`<platform>/mcp`). It acts as the
+person themselves, with their role there and nothing more (decision for
+Paul; the alternative is an agent identity of theirs acting `for` them
+under the agent cap, R17), and what it does names its client. Its tokens
+are bound to its resource and reach no other.
+
+| method & path (platform origin) | what |
+| --- | --- |
+| `GET /.well-known/oauth-authorization-server` | the metadata (RFC 8414): the platform's origin as `issuer`, the endpoints below, `code` with PKCE's `S256` only, public clients only (`none`), Client ID Metadata Documents, and `iss` in the answer (RFC 9207) |
+| `POST /oauth/register` | a client registers (RFC 7591): `{redirect_uris, client_name?, …}` → 201 `{client_id, client_name, redirect_uris, grant_types, response_types, token_endpoint_auth_method: "none"}`, a public client of the code grant whatever else it asked. A redirect URI is https, or http on this computer (`localhost`, `127.0.0.1`, `[::1]`), without a fragment; 1 to 8 of them, at most 512 bytes each; a name of at most 80 characters (none: its first redirect URI's host). The newest 100 000 registrations are kept (`oauth::CLIENTS_MAX`); one past them registers again |
+| `GET /oauth/authorize?response_type=code&client_id=&redirect_uri=&code_challenge=&code_challenge_method=S256&resource=&state=` | checked in order. The client: a registered one, or, when `client_id` is an https URL with a path, the metadata document there (CIMD), read now (at most 5 KiB in 5 s, no redirect followed, public addresses only), naming that URL as its `client_id`, its `client_name` and its `redirect_uris`; then `redirect_uri`, one of its own (exactly; on this computer, on any port: RFC 8252). A refusal of either is a page, never a redirect. Then the rest, refused back to the client (`error`, `error_description`, `state`, `iss`): `code` only, `S256` PKCE, and one `resource` (RFC 8707) naming an MCP server of the platform's (`invalid_target` otherwise). The whole query is at most 2031 bytes, so it survives a sign-in. Signed out: → sign in first (WorkOS, as the shell), and back. Signed in: a page asking "Connect X?", saying who it acts as, what it reaches, what the client calls itself and where it sends them back (a client sent back only to this computer is any program there, and the page says so), with Allow and Don't allow. `scope` is not read |
+| `POST /oauth/authorize?…` | that page's form (`form`, its token for this client on this resource; `answer`: `allow` or anything else): the same checks; a yes → 303 to `redirect_uri` with `code`, `state` and `iss`; a no → `error=access_denied`. Sharing's protections: the platform's `Origin` (403 otherwise), a form token, buttons that arm after 800 ms, no frame |
+| `POST /oauth/token` | `application/x-www-form-urlencoded`, its `client_id` always: `grant_type=authorization_code` with `code`, `redirect_uri` (the one asked with) and `code_verifier`; or `grant_type=refresh_token` with `refresh_token`. A `resource`, when named, must be the connection's. → `{access_token, token_type: "Bearer", expires_in, refresh_token}` (`Cache-Control: no-store`). A code is spent as it is read, whatever its answer; a refresh token is replaced by the one it answers. Refusals are OAuth's (`{error, error_description}`, 400; `invalid_client` 401) |
+| `POST /oauth/revoke` | `token` (either) and `client_id`, as a form → 200 `{}`: the connection ends when the token is that client's; anything else changes nothing (RFC 7009) |
+| `GET /api/oauth/connections` | a person (signed, or the shell) → `{connections: [{id, client, clientId, resource, createdAt, expiresAt}]}` (proto's `Connections`), newest first |
+| `DELETE /api/oauth/connections/{id}` | its person → `{ok, ended}`: its tokens are refused from the next request; another's, or none, 404 |
+
+A code is good for 5 minutes, an access token for an hour, and a refresh
+token for 30 days, renewed at each use: a connection its client does not
+use for 30 days ends. A person keeps their newest 16 codes and their
+newest 64 connections; past either, the oldest goes. The registry keeps
+each token's SHA-256 only, and sweeps expired codes and connections on
+its alarm. A wipe ends a person's connections as it begins (Operators).
+These endpoints answer no CORS: a client is a program or a server.
 
 ## Control API
 
@@ -1441,7 +1475,8 @@ their connections (every provider the deployment offers, one row each:
 its kind, their state there with its action, which of their agents may
 use it, pressed to narrow one, and this month's calls by agent with an
 operator key's cost: `GET /api/connections`, the computer's view and its
-`uses`), and pairing the
+`uses`), their connected clients (Connected clients, above: each one's
+client, what it reaches and since when, and an End), and pairing the
 CLI (the one-line install, `fragment login`, and `fragment skill` for a
 coding agent); its sidebar lists their fragments, each one's share sheet
 (`/share/<name>`) in a dialog, and the catalog makes an app from a

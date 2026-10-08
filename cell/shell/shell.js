@@ -1051,10 +1051,11 @@ async function openSettings(push = true) {
   renderHeading();
   renderChats();
   leaveSidebar();
-  const [ledger, linked, uses] = await Promise.all([
+  const [ledger, linked, uses, clients] = await Promise.all([
     api("GET", "/api/ledger").catch(() => null),
     api("GET", "/api/connections").catch(() => null),
     state.computer ? api("GET", `/api/computers/${seg(state.computer.computer)}/uses`).catch(() => null) : null,
+    api("GET", "/api/oauth/connections").catch(() => null),
   ]);
   const emails = (state.me.subjects ?? []).map((x) => x.email).filter(Boolean);
   const id = line("Identity", state.me.id);
@@ -1141,7 +1142,41 @@ async function openSettings(push = true) {
     say("If `fragment` is not found after, put `~/.local/bin` on your PATH. Then run `fragment login`: it opens this platform to approve its key. To have your coding agent (Claude Code, Codex) do the work, give it the skill:"),
     el("pre", "command", SKILL),
   );
-  page.replaceChildren(account, credit, computer, agents, skills, connections, cli, ...credited(WALLPAPER));
+  page.replaceChildren(account, credit, computer, agents, skills, connections, clientsSection(clients), cli, ...credited(WALLPAPER));
+}
+
+// ---- connected clients (docs/api.md, Connected clients): the apps a
+// person let act as them (Claude, ChatGPT, any MCP client), each on one
+// fragment or on their fragments as a whole, and an end to each
+function clientsSection(listed) {
+  const s = section("Connected clients");
+  s.id = "settings-clients";
+  const all = listed?.connections;
+  if (!all) return s.append(el("p", "muted", "Your connected clients could not be read.")), s;
+  if (!all.length) return s.append(el("p", "muted", "None yet. An app you connect acts as you, and what it does names it.")), s;
+  for (const c of all) {
+    const row = el("p", "settings-line");
+    row.dataset.connection = c.id;
+    let reach = "your fragments";
+    try {
+      const at = new URL(c.resource);
+      if (at.pathname === "/__mcp") reach = at.host;
+    } catch {}
+    const end = el("button", "quiet", "End");
+    end.type = "button";
+    end.onclick = async () => {
+      end.disabled = true;
+      try {
+        await api("DELETE", `/api/oauth/connections/${seg(c.id)}`);
+      } catch (e) {
+        notice("That was not ended", e.message);
+      }
+      await openSettings(false);
+    };
+    row.append(el("span", "settings-key", c.client), el("span", "settings-value", `${reach}, since ${new Date(c.createdAt).toLocaleDateString()}`), end);
+    s.append(row);
+  }
+  return s;
 }
 
 // ---- connections (decisions 22, 37 and 44): every provider the platform

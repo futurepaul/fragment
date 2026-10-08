@@ -192,6 +192,8 @@ struct EarliestRow {
     login: Option<i64>,
     redeem: Option<i64>,
     session: Option<i64>,
+    code: Option<i64>,
+    connection: Option<i64>,
 }
 
 fn alarm_at(at_ms: i64) -> ScheduledTime {
@@ -217,6 +219,16 @@ impl RegistryCell {
             .len(),
             self.rows::<IgnoredAny>(
                 "DELETE FROM sessions WHERE hash IN (SELECT hash FROM sessions WHERE expires_at <= ? LIMIT ?) RETURNING hash",
+                vec![SqlStorageValue::Integer(now), batch.clone()],
+            )?
+            .len(),
+            self.rows::<IgnoredAny>(
+                "DELETE FROM oauth_codes WHERE hash IN (SELECT hash FROM oauth_codes WHERE expires_at <= ? LIMIT ?) RETURNING hash",
+                vec![SqlStorageValue::Integer(now), batch.clone()],
+            )?
+            .len(),
+            self.rows::<IgnoredAny>(
+                "DELETE FROM connections WHERE id IN (SELECT id FROM connections WHERE refresh_expires_at <= ? LIMIT ?) RETURNING id",
                 vec![SqlStorageValue::Integer(now), batch],
             )?
             .len(),
@@ -231,11 +243,12 @@ impl RegistryCell {
         let r = self
             .row::<EarliestRow>(
                 "SELECT (SELECT MIN(created_at) FROM logins) AS login, (SELECT MIN(expires_at) FROM redemptions) AS redeem,
-                        (SELECT MIN(expires_at) FROM sessions) AS session",
+                        (SELECT MIN(expires_at) FROM sessions) AS session, (SELECT MIN(expires_at) FROM oauth_codes) AS code,
+                        (SELECT MIN(refresh_expires_at) FROM connections) AS connection",
                 vec![],
             )?
             .ok_or_else(|| CellError::host("the sweep's MIN answered no row"))?;
-        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session].into_iter().flatten().min();
+        let earliest = [r.login.map(|c| c + LOGIN_TTL_MS), r.redeem, r.session, r.code, r.connection].into_iter().flatten().min();
         Ok(earliest.map(|at| at + SWEEP_SLACK_MS))
     }
 
@@ -243,7 +256,7 @@ impl RegistryCell {
     /// unless it is armed sooner already: one read of the alarm, and most
     /// calls change nothing. Called before a row's writes, so a failure
     /// leaves no row unswept.
-    async fn sweep_by(&self, expires_at: i64) -> CellResult<()> {
+    pub(super) async fn sweep_by(&self, expires_at: i64) -> CellResult<()> {
         let due = expires_at + SWEEP_SLACK_MS;
         let storage = self.state.storage();
         match storage.get_alarm().await? {
@@ -273,7 +286,8 @@ impl RegistryCell {
     fn signin_counts(&self) -> CellResult<SigninCounts> {
         self.row::<SigninCounts>(
             "SELECT (SELECT COUNT(*) FROM logins) AS logins, (SELECT COUNT(*) FROM redemptions) AS redemptions,
-                    (SELECT COUNT(*) FROM sessions) AS sessions",
+                    (SELECT COUNT(*) FROM sessions) AS sessions, (SELECT COUNT(*) FROM oauth_codes) AS codes,
+                    (SELECT COUNT(*) FROM connections) AS connections",
             vec![],
         )?
         .ok_or_else(|| CellError::host("COUNT answered no row"))
@@ -286,6 +300,7 @@ impl RegistryCell {
                 let now = js::now_ms();
                 self.exec("UPDATE logins SET created_at = ?", vec![SqlStorageValue::Integer(now - LOGIN_TTL_MS)])?;
                 self.exec("UPDATE redemptions SET expires_at = ?", vec![SqlStorageValue::Integer(now)])?;
+                self.exec("UPDATE oauth_codes SET expires_at = ?", vec![SqlStorageValue::Integer(now)])?;
             }
             SigninsHook::Sweep => self.state.storage().set_alarm(alarm_at(js::now_ms())).await?,
             SigninsHook::ExpireSession(token) => {

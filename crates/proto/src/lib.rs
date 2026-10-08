@@ -699,6 +699,30 @@ pub struct SetArchived {
     pub archived: bool,
 }
 
+/// A client a person connected (docs/api.md, Connected clients): it acts
+/// as them on `resource`, an MCP server of the platform's, until it ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection {
+    /// 16 hex: what `DELETE /api/oauth/connections/{id}` names.
+    pub id: String,
+    /// What the client calls itself.
+    pub client: String,
+    /// Its OAuth client id: a registered client's, or the URL of its
+    /// metadata document.
+    pub client_id: String,
+    pub resource: String,
+    pub created_at: i64,
+    /// When it ends unless its client renews it (each refresh does).
+    pub expires_at: i64,
+}
+
+/// `GET /api/oauth/connections`: the signer's, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connections {
+    pub connections: Vec<Connection>,
+}
+
 /// Its answer: the fragment, and whether it is archived now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Archived {
