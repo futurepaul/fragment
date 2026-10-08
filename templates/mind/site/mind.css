@@ -45,7 +45,7 @@
 html, body { height: 100%; }
 body { overflow: hidden; }
 /* the platform's stylesheet makes every button a pill and every field a box: here each is styled below */
-button { display: inline-block; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; color: inherit; font-weight: inherit; cursor: pointer; }
+button { display: inline-block; align-items: normal; justify-content: normal; gap: normal; min-height: 0; padding: 0; border: 0; border-radius: 0; background: none; color: inherit; font-weight: inherit; cursor: pointer; }
 input, textarea { padding: 0; border: 0; border-radius: 0; background: none; }
 a { color: inherit; text-decoration: none; }
 .i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
