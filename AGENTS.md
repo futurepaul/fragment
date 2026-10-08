@@ -35,6 +35,8 @@ image's agent runtime.
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/ledger.md` — the usage ledger: what is metered, at what price,
    and who pays;
+   `docs/billing.md` — seats, orgs, Stripe, trials and the operator's
+   admin (decisions 51 to 59);
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
@@ -89,7 +91,7 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, shell, computers, chat, shell-ui, wipe,
+  brain, push, ai, ledger, orgs, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the

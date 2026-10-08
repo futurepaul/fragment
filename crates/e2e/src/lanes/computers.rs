@@ -958,14 +958,26 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         json!(replies),
     );
     std::thread::sleep(QUEUE_DRAIN);
+
+    // a $200 seat's computer stays awake unless its owner lets it sleep
+    // (decision 57): an operator comps its owner one (docs/billing.md)
+    let op_session = api.sign_in("operator@e2e.test")?;
+    // the ledger section approves the operator's key when it runs first
+    let _ = api.approve(&op_session, &s.operator);
+    let me = api.signed(&owner, "GET", "/api/identities/me", None)?;
+    let email = me.body["subjects"][0]["email"].as_str().unwrap_or("").to_string();
+    let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
+    let view = |api: &Api| api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let on = r.status == 200 && s.eventually(Duration::from_secs(20), || view(&api)["alwaysOn"] == true);
+    s.ok("comped a $200 seat, its owner's computer stays awake", on && view(&api)["phase"] == "awake", json!([r.body, view(&api)]));
+    let r = api.signed(&owner, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(&api)["alwaysOn"] == false);
+    s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
 
     // at zero credit agents stop, and no wake starts (decision 27): an
     // operator makes its owner a guest
-    let op_session = api.sign_in("operator@e2e.test")?;
-    // the ledger section approves the operator's key when it runs first
-    let _ = api.approve(&op_session, &s.operator);
     let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/plan"), Some(&json!({ "id": "computers-guest", "plan": "guest" })))?;
     s.ok("an operator makes its owner a guest", r.status == 200, &r);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;

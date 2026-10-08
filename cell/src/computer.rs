@@ -336,6 +336,12 @@ struct WakeBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlwaysOnBody {
+    on: bool,
+}
+
+#[derive(Deserialize)]
 struct Assign {
     fragment: String,
     identity: String,
@@ -1322,6 +1328,7 @@ impl ComputerCell {
             restored: saves.restored().cloned(),
             rollbacks: saves.rollbacks(),
             saves: saves.views(),
+            always_on: life.always_on(),
         })
     }
 
@@ -1483,6 +1490,15 @@ impl ComputerCell {
             "computer/sleep" => {
                 self.must(MetaKey::Id)?;
                 self.drive(Event::Sleep).await?;
+                json_response(&self.view()?)
+            }
+            // its owner's seat, as the registry pushes it (registry/orgs.rs)
+            "computer/always-on" => {
+                let b: AlwaysOnBody = body_json(&mut req).await?;
+                self.must(MetaKey::Id)?;
+                if self.lifecycle()?.always_on() != b.on {
+                    self.drive(Event::AlwaysOn { on: b.on }).await?;
+                }
                 json_response(&self.view()?)
             }
             "computer/assign" => {
@@ -1848,7 +1864,9 @@ pub(crate) async fn route(env: &Env, who: &str, kind: IdentityKind, method: Meth
     match (method, rest) {
         (Method::Post, []) => {
             let id = fragment_core::computer::default_computer_of(who);
-            json_response(&view_of(ask(env, &id, "computer/init", &json!({ "id": id, "owner": who })).await?)?)
+            let made = view_of(ask(env, &id, "computer/init", &json!({ "id": id, "owner": who })).await?)?;
+            crate::orgs::computer_made(env, who).await;
+            json_response(&made)
         }
         (Method::Get, []) => {
             let id = fragment_core::computer::default_computer_of(who);
