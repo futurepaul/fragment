@@ -75,10 +75,48 @@ pub enum Step {
     /// text when they are UTF-8 (`blob_read`).
     #[serde(rename = "blob")]
     Blob { sha256: String },
+    /// `job.owner.fragments()`: the fragment's owner's other fragments,
+    /// each with the described operations its owner may call there. Only a
+    /// blessed template that declares the `owner` capability takes the
+    /// `owner` steps (`crate::access::owner_lent`).
+    #[serde(rename = "owner.fragments")]
+    OwnerFragments {},
+    /// `job.owner.call(fragment, op, input)`: one of those operations, as
+    /// the owner (their role there), keyed by the run and the step
+    /// (`owner_call_id`).
+    #[serde(rename = "owner.call")]
+    OwnerCall { fragment: String, op: String, input: Value },
 }
 
 /// The identities one `job.people` step names: a page's `__people` limit.
 pub const PEOPLE_MAX: usize = 64;
+
+/// The fragments one `job.owner.fragments` step asks, at most (by name).
+pub const OWNER_FRAGMENTS_MAX: usize = 64;
+
+/// An `owner.call` step's arguments, checked: a fragment's full name, an
+/// operation's, and its input, an object (none is `{}`), as a tool's
+/// arguments are (`crate::mcp::call_of`). Answers the input to call with.
+pub fn owner_call(fragment: &str, op: &str, input: &Value) -> Result<Value, String> {
+    if !fragment_proto::valid_fragment_name(fragment) {
+        return Err(format!("{fragment:?} is not a fragment's name (<label>.<username>)"));
+    }
+    if !fragment_proto::valid_op_name(op) {
+        return Err(format!("{op:?} is not an operation's name"));
+    }
+    crate::mcp::call_of(input).map_err(|_| "an operation's input here is an object".to_string())
+}
+
+/// The operation id an `owner.call` step calls with: its run's name beyond
+/// its fragment (`run_key`: the fragment, its life, the run) and the step,
+/// the same on every try and replay of the step, so the fragment it calls
+/// applies it once. `job:` ids are the platform's alone: no caller of the
+/// API may choose one.
+pub fn owner_call_id(run_key: &str, index: u32) -> String {
+    let id = format!("job:{run_key}-s{index}");
+    assert!(fragment_proto::valid_op_id(&id), "an owner call's id is an operation id: {id}");
+    id
+}
 
 /// What one `job.blob` step reads of a blob, at most.
 pub const BLOB_READ_MAX_BYTES: usize = 64 * 1024;
@@ -348,6 +386,8 @@ impl Step {
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
             Step::Blob { .. } => "blob",
+            Step::OwnerFragments {} => "owner.fragments",
+            Step::OwnerCall { .. } => "owner.call",
         }
     }
 }
@@ -428,13 +468,15 @@ mod tests {
             ("people", json!({ "ids": ["id:00112233445566778899aabbccddeeff"] })),
             ("presence", json!({})),
             ("blob", json!({ "sha256": "ab".repeat(32) })),
+            ("owner.fragments", json!({})),
+            ("owner.call", json!({ "fragment": "todo.paul", "op": "add", "input": { "text": "milk" } })),
         ]
     }
 
     #[test]
     fn every_kind_platform_mjs_sends_decodes_as_itself() {
         let kinds = every_kind();
-        assert_eq!(kinds.len(), 19, "a new kind of step is added here too");
+        assert_eq!(kinds.len(), 21, "a new kind of step is added here too");
         for (kind, args) in kinds {
             let s = step(kind, args.clone()).unwrap_or_else(|e| panic!("{kind}: {e}"));
             assert_eq!(s.kind(), kind);
@@ -501,6 +543,38 @@ mod tests {
         refused("people", json!({}), "missing field `ids`");
         refused("people", json!({ "ids": "id:x" }), "invalid type");
         refused("people", json!({ "ids": [7] }), "invalid type");
+        refused("owner.call", json!({ "fragment": "todo.paul", "input": {} }), "missing field `op`");
+        refused("owner.call", json!({ "op": "add", "input": {} }), "missing field `fragment`");
+        refused("owner.call", json!({ "fragment": "todo.paul", "op": "add" }), "missing field `input`");
+        refused("owner.call", json!({ "fragment": 7, "op": "add", "input": {} }), "invalid type");
+    }
+
+    /// Goal: an owner call names a fragment and an operation as the API
+    /// does, and takes an object, as a tool does; its id is the same on
+    /// every try of its step, and no caller of the API could have chosen it.
+    /// Method: valid and invalid names and inputs; the id's form.
+    #[test]
+    fn an_owner_call_names_a_fragment_and_an_operation_and_takes_an_object() {
+        assert_eq!(owner_call("todo.paul", "add", &json!({ "text": "milk" })), Ok(json!({ "text": "milk" })));
+        assert_eq!(owner_call("todo.paul", "list", &Value::Null), Ok(json!({})), "none is the empty object");
+        for (fragment, op, input, says) in [
+            ("todo", "add", json!({}), "not a fragment's name"),
+            ("Todo.paul", "add", json!({}), "not a fragment's name"),
+            ("../todo.paul", "add", json!({}), "not a fragment's name"),
+            ("todo.paul", "Add", json!({}), "not an operation's name"),
+            ("todo.paul", "add/x", json!({}), "not an operation's name"),
+            ("todo.paul", "", json!({}), "not an operation's name"),
+            ("todo.paul", "add", json!("milk"), "an object"),
+            ("todo.paul", "add", json!([1]), "an object"),
+        ] {
+            let e = owner_call(fragment, op, &input).expect_err(&format!("{fragment} {op} {input}"));
+            assert!(e.contains(says), "{fragment} {op} {input}: {e}");
+        }
+        let id = owner_call_id("0123456789abcdef0123-1700000000000-r12", 4);
+        assert_eq!(id, "job:0123456789abcdef0123-1700000000000-r12-s4");
+        assert_eq!(id, owner_call_id("0123456789abcdef0123-1700000000000-r12", 4), "a step's every try calls with the same id");
+        assert_ne!(id, owner_call_id("0123456789abcdef0123-1700000000000-r12", 5));
+        assert!(fragment_proto::valid_op_id(&id) && id.starts_with("job:"), "an id the API refuses its callers (ops.rs `call_op`)");
     }
 
     #[test]

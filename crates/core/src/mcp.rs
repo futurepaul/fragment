@@ -292,6 +292,19 @@ pub fn tools_of(operations: &BTreeMap<String, OpDecl>, writes: bool, may_call: i
     operations.iter().filter(|(_, d)| served(d, writes) && may_call(d)).map(|(name, d)| tool(name, d)).collect()
 }
 
+/// These operations as a job of another fragment reads them, acting as a
+/// person who may change things (`job.owner.fragments`): the tools' rule
+/// (`served`, writes allowed) and the caller's role (`may_call`), each
+/// `{name, kind, description, input}`, its input the tool's schema, in name
+/// order.
+pub fn described(operations: &BTreeMap<String, OpDecl>, may_call: impl Fn(&OpDecl) -> bool) -> Vec<Value> {
+    operations
+        .iter()
+        .filter(|(_, d)| served(d, true) && may_call(d))
+        .map(|(name, d)| json!({ "name": name, "kind": d.kind.as_str(), "description": d.description, "input": input_schema(d) }))
+        .collect()
+}
+
 /// What a fragment's MCP server tells its client of itself.
 pub fn instructions(fragment: &str, writes: bool) -> String {
     let reach = if writes { "its queries read it, and its mutations and jobs change it, each call once" } else { "its queries alone: this client may only read it" };
@@ -439,6 +452,12 @@ mod tests {
         assert!(not_served("add", &ops["add"], false).contains("may only read"));
         assert!(not_served("shout", &ops["shout"], true).contains("no object"));
         assert!(instructions("todo.paul", false).contains("may only read") && instructions("todo.paul", true).contains("change it"));
+        // another fragment's job reads them by the same rule, changes allowed
+        let read = described(&ops, |d| d.role <= Role::Editor);
+        let names: Vec<&str> = read.iter().filter_map(|o| o["name"].as_str()).collect();
+        assert_eq!(names, ["add", "digest", "list"], "described, taking an object, within the caller's role");
+        assert_eq!(read[0], json!({ "name": "add", "kind": "mutation", "description": "Adds one.", "input": object }));
+        assert_eq!(read[2]["input"], json!({ "type": "object" }), "no input declared: any object");
     }
 
     #[test]

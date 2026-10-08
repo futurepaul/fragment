@@ -35,8 +35,51 @@ pub struct Manifest {
     /// `limits::APP_DB_MAX_BYTES` to `limits::APP_DB_DECLARED_MAX_BYTES`;
     /// `None`: the platform's.
     pub storage: Option<u64>,
+    /// What the platform lends its code beyond the fragment itself
+    /// (`capabilities`): only a blessed template's release declares any
+    /// (`own_code`).
+    pub capabilities: Vec<Capability>,
     /// Top-level keys that no longer do anything here.
     pub ignored: Vec<&'static str>,
+}
+
+/// A power beyond the fragment itself that its code asks the platform for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Capability {
+    /// Its jobs act as its owner on the owner's other fragments
+    /// (`job.owner.*`, `crate::access::owner_lent`).
+    Owner,
+}
+
+impl Capability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Capability::Owner => "owner",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Capability> {
+        [Capability::Owner].into_iter().find(|c| c.as_str() == s)
+    }
+}
+
+/// A manifest whose code is the fragment's own (no `template`) asks for no
+/// capability: what one lends is the owner's reach, which only the
+/// platform's own release code (a blessed template, decision 40) is
+/// trusted with, since whoever may change a fragment's code (an editor, an
+/// agent) would hold it.
+pub fn own_code(m: &Manifest) -> Result<(), String> {
+    assert!(m.template.is_none(), "own_code is for a fragment that runs its own code");
+    match m.capabilities.as_slice() {
+        [] => Ok(()),
+        caps => {
+            let names: Vec<&str> = caps.iter().map(|c| c.as_str()).collect();
+            Err(format!(
+                "capabilities ({}) are the platform's to lend, to a blessed template's release alone: a fragment with its own code declares none",
+                names.join(", ")
+            ))
+        }
+    }
 }
 
 impl Manifest {
@@ -63,6 +106,7 @@ pub fn on_template(own: &Manifest, blessed: &Manifest) -> Result<Manifest, Strin
         ("channels", !own.channels.is_empty()),
         ("triggers", !own.triggers.is_empty()),
         ("storage", own.storage.is_some()),
+        ("capabilities", !own.capabilities.is_empty()),
     ]
     .into_iter()
     .filter_map(|(k, set)| set.then_some(k))
@@ -306,6 +350,19 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest, String> {
         None | Some(Value::Null) => {}
         Some(v) => m.storage = Some(storage(v)?),
     }
+    match obj.get("capabilities") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            for c in list {
+                let c = c.as_str().and_then(Capability::parse).ok_or_else(|| format!("capabilities names owner, not {c}"))?;
+                if m.capabilities.contains(&c) {
+                    return Err(format!("capabilities names {} twice", c.as_str()));
+                }
+                m.capabilities.push(c);
+            }
+        }
+        Some(_) => return Err("capabilities must be an array: [\"owner\"]".into()),
+    }
     Ok(m)
 }
 
@@ -541,5 +598,26 @@ mod tests {
         assert_eq!(on_template(&own, &blessed).unwrap().storage, Some(hi), "a template's fragment runs with its template's cap");
         let mine = parse(json!({ "template": "mind", "storage": { "maxBytes": lo } }).to_string().as_bytes()).unwrap();
         assert!(on_template(&mine, &blessed).unwrap_err().contains("storage"), "and declares none of its own");
+    }
+
+    /// Goal: a capability is the platform's to lend to its own release
+    /// code alone. Method: a blessed template's declaration runs on its
+    /// fragments; the same declared by a fragment on it, or by one with its
+    /// own code (a fork), is refused; unknown and repeated names are too.
+    #[test]
+    fn only_a_blessed_templates_release_declares_a_capability() {
+        assert_eq!(parse(b"{}").unwrap().capabilities, [], "none unless declared");
+        let blessed = parse(br#"{"kind":"mind","capabilities":["owner"]}"#).unwrap();
+        assert_eq!(blessed.capabilities, [Capability::Owner]);
+        let on = on_template(&parse(br#"{"template":"mind"}"#).unwrap(), &blessed).unwrap();
+        assert_eq!(on.capabilities, [Capability::Owner], "a template's fragment runs with its template's");
+        let asks = parse(br#"{"template":"mind","capabilities":["owner"]}"#).unwrap();
+        assert!(on_template(&asks, &blessed).unwrap_err().contains("capabilities"), "and declares none of its own");
+        let fork = parse(br#"{"kind":"mind","capabilities":["owner"],"operations":{"x":{"kind":"job"}}}"#).unwrap();
+        assert!(own_code(&fork).unwrap_err().contains("blessed template"), "a fragment with its own code is refused it");
+        assert_eq!(own_code(&parse(br#"{"operations":{"x":{"kind":"job"}}}"#).unwrap()), Ok(()));
+        for bad in [json!({ "capabilities": ["root"] }), json!({ "capabilities": ["owner", "owner"] }), json!({ "capabilities": "owner" }), json!({ "capabilities": [7] })] {
+            assert!(parse(bad.to_string().as_bytes()).unwrap_err().contains("capabilities"), "{bad}");
+        }
     }
 }

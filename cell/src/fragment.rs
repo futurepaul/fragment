@@ -50,6 +50,7 @@
 //!   POST   /deliver/report                the delivery consumer (deliveries.rs); never routed from outside
 //!   GET    /api/card                      viewer: the preview card's JPEG (card.rs)
 //!   POST   /meter/acked  /meter/whose     the ledger queue's consumer, and the model route (meter.rs); never routed from outside
+//!   POST   /owner/ops  /owner/call        another fragment's job, acting as its owner here (owner.rs); never routed from outside
 //!   POST   /test/keys  /test/fragment     the router's `/api/test/*`, on fleets with test hooks only (ops.rs)
 
 use std::borrow::Cow;
@@ -446,6 +447,10 @@ pub(crate) enum MetaKey {
     /// Test fleets only: how many more card shots open a page nothing
     /// serves, so they fail (`fail-cards`).
     TestFailCards,
+    /// The capabilities live's manifest declares (a blessed template's
+    /// alone: `manifest::own_code`), as a JSON array of names, when it
+    /// declares any.
+    Capabilities,
 }
 
 impl MetaKey {
@@ -499,6 +504,7 @@ impl MetaKey {
             MetaKey::Cards => "cards",
             MetaKey::Draft => "draft",
             MetaKey::TestFailCards => "test_fail_cards",
+            MetaKey::Capabilities => "capabilities",
         }
     }
 
@@ -743,6 +749,12 @@ impl FragmentCell {
         if let Some(signed) = caller.signed.as_ref().filter(|s| s.acting_for.is_some()) {
             return self.standing_for(signed, link);
         }
+        self.own_standing(principal, link)
+    }
+
+    /// An identity's standing as itself: its membership, or an agent of
+    /// its own that is a member.
+    pub(crate) fn own_standing(&self, principal: &str, link: bool) -> CellResult<Standing> {
         #[derive(serde::Deserialize)]
         struct Row {
             role: Option<String>,
@@ -923,6 +935,15 @@ impl FragmentCell {
             let route = route.to_string();
             let bytes = req.bytes().await?;
             return json_response(&self.wipe_route(&route, &bytes).await?);
+        }
+        if let Some(route) = path.strip_prefix("/owner/") {
+            // Only another fragment's `owner` step sets the header; the router never passes it.
+            if req.headers().get(crate::owner::OWNER_HEADER)?.is_none() {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
+            }
+            let route = route.to_string();
+            let bytes = req.bytes().await?;
+            return json_response(&self.owner_route(&route, &bytes).await?);
         }
         // Every route below is the router's: decoded once, from headers only it sets.
         let Routed { name: routed_name, url, signed, credential } = Routed::from_headers(req.headers())?;

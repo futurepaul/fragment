@@ -401,6 +401,24 @@ class Job {
     return this.#step("blob", { sha256 });
   }
 
+  // As the fragment's owner, on their other fragments: only a blessed
+  // template that declares the `owner` capability, while no one but its
+  // owner reads or drives it (docs/api.md, Jobs). `fragments()` → [{ name,
+  // title, kind, role, url, operations: [{ name, kind, description, input
+  // }] }], the described operations the owner may call in each;
+  // `call(fragment, op, input)` → { result, url }, one of them, as the
+  // owner, applied once however often its step is tried.
+  get owner() {
+    const step = (kind, args) => this.#step(kind, args);
+    return {
+      fragments: () => step("owner.fragments", {}).then((v) => v.fragments),
+      call: (fragment, op, input = {}) => {
+        if (typeof fragment !== "string" || typeof op !== "string") throw new TypeError("job.owner.call(fragment, op, input): a fragment's name and an operation's");
+        return step("owner.call", { fragment, op, input: JSON.parse(JSON.stringify(input ?? {})) });
+      },
+    };
+  }
+
   // Milliseconds, or "N seconds|minutes|hours|days"; up to 30 days.
   sleep(duration) {
     const ms = durationMs(duration);

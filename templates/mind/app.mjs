@@ -94,6 +94,8 @@ const TASK_LOST_MS = 30 * 60_000;
 // kept for it, at most this many.
 const EARLY_REPLIES_MAX = 32;
 const SEARCH_TOOL_MAX = 20;
+// An operation's line in `apps`, at most (its description in full is app_ops').
+const OP_LINE_MAX = 160;
 const SEARCH_MAX = 50;
 const SNIPPET_MAX_BYTES = 300;
 const QUERY_WORDS_MAX = 16;
@@ -238,6 +240,42 @@ function endedBy(text) {
   return m === null || m[1] === "idle" ? "done" : m[1] === "stopped" ? "stopped" : "error";
 }
 
+// The user's apps for the model (the `apps` tool): each by name, with its
+// title, kind, the user's role and its address, then its operations, a
+// line each.
+function appsText(fragments) {
+  if (!fragments.length) return "The user has no apps besides this mind. The computer makes one.";
+  const lines = ["The user's apps (app_ops shows one's inputs; app_call uses it):"];
+  for (const f of fragments) {
+    const title = f.title ? ` "${f.title}"` : "";
+    lines.push(`- ${f.name}:${title} (${f.kind}, ${f.role}) ${f.url}`);
+    const ops = Array.isArray(f.operations) ? f.operations : [];
+    if (!ops.length) lines.push("  (no operations to use: the computer changes it)");
+    for (const o of ops) lines.push(`  ${o.name} (${o.kind}): ${opLine(o.description)}`);
+  }
+  return lines.join("\n");
+}
+
+// An operation's description as one line, short.
+function opLine(text) {
+  const line = String(text ?? "").replace(/\s+/g, " ").trim();
+  return line.length > OP_LINE_MAX ? `${line.slice(0, OP_LINE_MAX - 1).trimEnd()}…` : line;
+}
+
+// One app's operations in full (the `app_ops` tool), each with its input's schema.
+function opsText(app) {
+  const title = app.title ? ` "${app.title}"` : "";
+  const lines = [`${app.name}:${title} (${app.kind}, ${app.role}) ${app.url}`];
+  const ops = Array.isArray(app.operations) ? app.operations : [];
+  if (!ops.length) lines.push("(no operations to use: the computer changes it)");
+  for (const o of ops) lines.push(`${o.name} (${o.kind}): ${String(o.description ?? "").trim()}`, `  input: ${JSON.stringify(o.input ?? { type: "object" })}`);
+  return lines.join("\n");
+}
+
+// An operation's result for the model: a `text` it rendered for one as it
+// is, else its JSON (the MCP servers' rule, fragment_core::mcp `called`).
+const resultText = (r) => (typeof r?.text === "string" ? r.text : (JSON.stringify(r ?? null) ?? "null"));
+
 // A run's steps, counted with the size of their answers, so a run stays
 // within the platform's 256 steps and 4 MiB of answers.
 class Steps {
@@ -289,6 +327,14 @@ class Steps {
 
   people(ids) {
     return this.#took(this.job.people(ids));
+  }
+
+  ownerFragments() {
+    return this.#took(this.job.owner.fragments());
+  }
+
+  ownerCall(fragment, op, input) {
+    return this.#took(this.job.owner.call(fragment, op, input));
   }
 
   left() {
@@ -1273,7 +1319,8 @@ export class App extends DurableObject {
       const v = await s.call("view", { upto: b.tail });
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
       const hands = b.persona.hands === true && agent !== null;
-      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, ...(hands ? [TOOLS.computer] : [])];
+      // the same tools every turn, a persona with hands one more at the end
+      const tools = [TOOLS.zoom, TOOLS.date, TOOLS.search, TOOLS.web_search, TOOLS.web_fetch, TOOLS.research, TOOLS.apps, TOOLS.app_ops, TOOLS.app_call, ...(hands ? [TOOLS.computer] : [])];
       // the web's steps (applib/web.mjs), and the providers it passes over
       // this turn (a secret found missing, DuckDuckGo found refusing)
       const web = {
@@ -1285,7 +1332,8 @@ export class App extends DurableObject {
         room: (n) => s.left() - WEB_KEEP_STEPS >= n,
         passed: new Set(),
       };
-      const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [] };
+      // `apps`: the owner's apps, read once a turn (`#apps`)
+      const ctx = { thread, hands, agent, web, attachments: Array.isArray(b.attachments) ? b.attachments : [], apps: null };
       const messages = [
         { role: "system", content: system(b.persona, b.about) },
         { role: "user", content: [{ type: "text", text: v.text }, { type: "text", text: b.texts.join("\n\n") }] },
@@ -1499,8 +1547,23 @@ export class App extends DurableObject {
     return { built, rounds: PUMP_ROUNDS_MAX, continued: true };
   }
 
+  // The owner's apps (`job.owner.fragments`), read once a turn: an answer's
+  // `apps` and a later `app_ops` share one step. `{fragments}`, or the
+  // tool's error (a platform that lends none, a mind shared with someone).
+  async #apps(s, ctx) {
+    if (ctx.apps) return ctx.apps;
+    if (typeof s.job.owner?.fragments !== "function") return (ctx.apps = { error: "Error: this platform lends the mind no apps." });
+    try {
+      ctx.apps = { fragments: await s.ownerFragments() };
+    } catch (e) {
+      ctx.apps = { error: `Error: ${describe(e)}` };
+    }
+    return ctx.apps;
+  }
+
   // One tool call of a turn: zoom, date and search are queries; the web's
-  // are fetches (applib/web.mjs); computer hands the task to goose on
+  // are fetches (applib/web.mjs); the apps' are the owner's (`job.owner`,
+  // docs/optchat.md "The user's apps"); computer hands the task to goose on
   // `chat` (docs/optchat.md, "Hand-offs").
   async #tool(job, s, name, args, ctx) {
     switch (name) {
@@ -1534,6 +1597,33 @@ export class App extends DurableObject {
         const question = String(args.question ?? "").trim().slice(0, 2000);
         if (!question) return { text: "Error: research needs the question." };
         return { text: await W.research(ctx.web, question) };
+      }
+      case "apps": {
+        const apps = await this.#apps(s, ctx);
+        return { text: apps.error ?? appsText(apps.fragments) };
+      }
+      case "app_ops": {
+        const fragment = String(args.fragment ?? "").trim();
+        if (!fragment) return { text: "Error: app_ops needs the app's name (fragment), as apps lists it." };
+        const apps = await this.#apps(s, ctx);
+        if (apps.error) return { text: apps.error };
+        const app = apps.fragments.find((f) => f.name === fragment);
+        return { text: app ? opsText(app) : `Error: the user has no app ${JSON.stringify(fragment)}: apps lists theirs.` };
+      }
+      case "app_call": {
+        const fragment = String(args.fragment ?? "").trim();
+        const op = String(args.op ?? "").trim();
+        if (!fragment || !op) return { text: "Error: app_call needs the app (fragment) and its operation (op)." };
+        const input = args.input ?? {};
+        if (typeof input !== "object" || Array.isArray(input)) return { text: "Error: an operation's input is an object." };
+        if (typeof job.owner?.call !== "function") return { text: "Error: this platform lends the mind no apps." };
+        try {
+          const r = await s.ownerCall(fragment, op, input);
+          // its first line names the app and where it is (the page links it)
+          return { text: `${fragment} ${op} at ${r.url}\n${resultText(r.result)}` };
+        } catch (e) {
+          return { text: `Error: ${describe(e)}` };
+        }
       }
       case "computer": {
         if (!ctx.hands) return { text: "Error: no computer is at hand for this persona; answer yourself." };

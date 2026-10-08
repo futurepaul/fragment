@@ -305,11 +305,43 @@ pub fn refuse_remove(actor: Option<Role>, actor_is_target: bool, target_current:
     }
 }
 
+/// Whether a fragment lends its owner's reach to its jobs (the `owner`
+/// steps: `job.owner.fragments`, `job.owner.call`; docs/api.md, Jobs), or
+/// why not. Its live code is a blessed template's release (`blessed`: the
+/// platform's own code, decision 40) that declares the `owner` capability
+/// (`declares`); and no one but its owner reads or drives it: it is
+/// `members`, and its members are its owner and the owner's own agents
+/// (`others` counts the rest). Shared with anyone else, what its jobs read
+/// of the owner's fragments would show to them, and what they say to it
+/// would act as the owner.
+pub fn owner_lent(blessed: bool, declares: bool, visibility: Visibility, others: u64) -> Result<(), &'static str> {
+    if !blessed || !declares {
+        return Err("only a blessed template's release that declares the owner capability acts as its owner (fragment.json `capabilities`)");
+    }
+    if visibility != Visibility::Members || others > 0 {
+        return Err("it acts as its owner only while no one else can read or drive it: its visibility is members and its members are its owner and their own agents");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use Role::*;
     use Visibility as V;
+
+    /// Goal: only the platform's own code that asks for it acts as the
+    /// owner, and only while the owner alone (with their agents) reaches
+    /// it. Method: each condition missing in turn.
+    #[test]
+    fn only_a_blessed_private_fragment_lends_its_owners_reach() {
+        assert_eq!(owner_lent(true, true, V::Members, 0), Ok(()));
+        assert!(owner_lent(false, true, V::Members, 0).is_err_and(|e| e.contains("blessed")), "its own code (a fork)");
+        assert!(owner_lent(true, false, V::Members, 0).is_err_and(|e| e.contains("capability")), "a template that does not ask");
+        assert!(owner_lent(true, true, V::Link, 0).is_err_and(|e| e.contains("members")), "anyone with its link reads it");
+        assert!(owner_lent(true, true, V::Public, 0).is_err());
+        assert!(owner_lent(true, true, V::Members, 1).is_err_and(|e| e.contains("their own agents")), "shared with someone else");
+    }
 
     fn st(member: Option<Role>, link: bool, signed: bool) -> Standing {
         Standing { member, owns_member_agent: false, link, signed, cap: None, held: None }

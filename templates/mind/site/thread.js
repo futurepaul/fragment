@@ -4,7 +4,9 @@
 // written. A turn's tool calls and their results fold into one quiet
 // "Looked through memory ×3" row, which opens to each step, and each
 // result's lines open further (a search hit to its context, a memory line
-// to its parts). A `computer` call is a hand-off card: goose's steps as
+// to its parts); a turn that used the person's apps reads "Used todo:
+// add", the app's name a link to it. A `computer` call is a hand-off
+// card: goose's steps as
 // they come, its words as they stream, then its report. The mind's reply
 // streams in as `log`'s draft `turn:<thread>` until its `talk` arrives.
 
@@ -37,6 +39,7 @@ import { WEB_TOOLS, clock, dayLabel, firstLine, greeting, h, hostOf, icon, iconB
 /// A message's longest text (the log caps at 30 000 characters).
 const TEXT_MAX = 30_000;
 const MEMORY_TOOLS = new Set(["zoom", "search", "date"]);
+const APP_TOOLS = new Set(["apps", "app_ops", "app_call"]);
 /// The most of a web page or a research answer a step shows.
 const WEB_SHOWN = 6000;
 /// Steps a hand-off card shows before "N earlier".
@@ -280,12 +283,34 @@ function stepTitle(call) {
       return `Read ${hostOf(a.url) || "a page"}`;
     case "research":
       return `Researched “${firstLine(a.question ?? "", 70)}”`;
+    case "apps":
+      return "Looked at your apps";
+    case "app_ops":
+      return `Read what ${appLabel(a.fragment)} can do`;
+    case "app_call": {
+      const input = a.input && typeof a.input === "object" && Object.keys(a.input).length ? ` ${firstLine(JSON.stringify(a.input), 60)}` : "";
+      return `${appLabel(a.fragment)}: ${a.op ?? ""}${input}`;
+    }
     default:
       return `${call.name}${a && Object.keys(a).length ? ` ${firstLine(JSON.stringify(a), 80)}` : ""}`;
   }
 }
 
-const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar", web_search: "globe", web_fetch: "link", research: "sparkles" };
+const STEP_ICON = { zoom: "zoom", search: "search", date: "calendar", web_search: "globe", web_fetch: "link", research: "sparkles", apps: "grid", app_ops: "grid", app_call: "grid" };
+
+/// An app as a person reads it: its label (`todo` of `todo.paul`).
+const appLabel = (name) => String(name ?? "").split(".")[0] || "an app";
+
+/// An app call's echo names the app and where it is on its first line
+/// (`<app> <op> at <url>`: app.mjs), its result below.
+function appCalled(text) {
+  const m = String(text ?? "").match(/^(\S+) (\S+) at (https?:\/\/\S+)\n?([\s\S]*)$/);
+  return m ? { name: m[1], op: m[2], url: m[3], result: m[4] } : null;
+}
+
+/// A link to one of the person's apps: in the shell it opens beside the
+/// mind (mind.js), else in a tab.
+const appLink = (name, url) => (url ? h("a.app-link", { href: url, target: "_blank", rel: "noopener noreferrer", text: appLabel(name) }) : h("span", { text: appLabel(name) }));
 
 /// A web search's results (applib/web.mjs `searchText`): `N. title`, then
 /// its URL and its snippet, each on a line indented three spaces.
@@ -298,6 +323,10 @@ function webHits(text) {
 /// A tool's result, readable: search hits and memory lines open in place;
 /// the web's results are links, its pages and answers markdown.
 function echoView(call, text) {
+  if (call?.name === "app_call") {
+    const called = appCalled(text);
+    if (called) return h("div.echo-app", null, h("div.echo-note", null, appLink(called.name, called.url), ` ${called.op}`), h("pre.echo-pre", { text: called.result.length > 2000 ? `${called.result.slice(0, 2000)}…` : called.result }));
+  }
   if (call?.name === "web_search") {
     const hits = webHits(text);
     if (hits.length) return h("div.web-hits", null, hits.map((x) => h("a.web-hit", { href: x.url, target: "_blank", rel: "noopener noreferrer" }, h("span.web-title", { text: x.title }), h("span.web-host", { text: hostOf(x.url) }), x.snippet ? h("span.web-snippet", { text: x.snippet }) : null)));
@@ -337,11 +366,32 @@ function echoView(call, text) {
   return h("pre.echo-pre", { text: text.length > 2000 ? `${text.slice(0, 2000)}…` : text });
 }
 
+/// What a row of steps that used the person's apps (and looked through
+/// memory or the web) says: "Used" each app called, a link to it, and what
+/// was done there; or that it looked at them. Null for any other row.
+function appsLabel(parsed, results, live) {
+  const known = parsed.every((c) => APP_TOOLS.has(c.name) || MEMORY_TOOLS.has(c.name) || WEB_TOOLS.has(c.name));
+  if (!known || !parsed.some((c) => APP_TOOLS.has(c.name))) return null;
+  const apps = new Map();
+  parsed.forEach((c, k) => {
+    if (c.name !== "app_call" || typeof c.args?.fragment !== "string") return;
+    const app = apps.get(c.args.fragment) ?? { url: null, ops: [] };
+    app.url ??= appCalled(results[k]?.text)?.url ?? null;
+    if (typeof c.args.op === "string" && !app.ops.includes(c.args.op)) app.ops.push(c.args.op);
+    apps.set(c.args.fragment, app);
+  });
+  if (!apps.size) return [live ? "Looking at your apps" : "Looked at your apps"];
+  const out = [live ? "Using " : "Used "];
+  [...apps].forEach(([name, app], k) => out.push(k ? "; " : "", appLink(name, app.url), app.ops.length ? `: ${app.ops.join(", ")}` : ""));
+  return out;
+}
+
 function stepsNode(key, items, live) {
   const calls = [];
   const results = [];
   for (const m of items) (m.kind === "tool" ? calls : results).push(m);
   const parsed = calls.map((m) => parseTool(m.text));
+  const used = appsLabel(parsed, results, live);
   const memory = parsed.every((c) => MEMORY_TOOLS.has(c.name));
   const web = parsed.every((c) => WEB_TOOLS.has(c.name));
   const looked = parsed.every((c) => MEMORY_TOOLS.has(c.name) || WEB_TOOLS.has(c.name));
@@ -354,11 +404,12 @@ function stepsNode(key, items, live) {
         : live ? "Working" : "Used tools";
   const isOpen = opened.has(key);
   const node = h(`div.steps${isOpen ? ".open" : ""}${live ? ".live" : ""}`);
+  // it acts as a button and may hold a link (an app's), which a button may not
   const head = h(
-    "button.steps-head",
-    { type: "button", "aria-expanded": String(isOpen) },
-    live ? icon("loader", "spin") : icon(web ? "globe" : "layers"),
-    h("span", { text: label }),
+    "div.steps-head",
+    { role: "button", tabindex: "0", "aria-expanded": String(isOpen) },
+    live ? icon("loader", "spin") : icon(used ? "grid" : web ? "globe" : "layers"),
+    used ? h("span", null, used) : h("span", { text: label }),
     parsed.length > 1 ? h("span.times", { text: `×${parsed.length}` }) : null,
     icon("chevron", "chev"),
   );
@@ -372,7 +423,7 @@ function stepsNode(key, items, live) {
       }),
     );
   }
-  head.addEventListener("click", () => {
+  const toggle = () => {
     const now = !opened.has(key);
     if (now) {
       opened.add(key);
@@ -380,6 +431,13 @@ function stepsNode(key, items, live) {
     } else opened.delete(key);
     node.classList.toggle("open", now);
     head.setAttribute("aria-expanded", String(now));
+  };
+  // an app's link opens the app (beside the mind in the shell, else a tab)
+  head.addEventListener("click", (e) => e.target.closest?.("a") || toggle());
+  head.addEventListener("keydown", (e) => {
+    if (e.target !== head || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault();
+    toggle();
   });
   node.append(head, h("div.steps-fold", null, body));
   return node;

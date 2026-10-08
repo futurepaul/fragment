@@ -105,7 +105,8 @@ Inspiration:
     { "channel": "sort", "run": "classify" },
     { "channel": "compact", "run": "pump" }
   ],
-  "storage": { "maxBytes": 1073741824 }
+  "storage": { "maxBytes": 1073741824 },
+  "capabilities": ["owner"]
 }
 ```
 
@@ -133,6 +134,8 @@ goose agent, an editor. The shell makes it `members` (private).
   pump is at work, and its trigger starts `pump` ("Importing chats").
 - **`storage`**: the mind declares the most an app may (1 GiB; docs/api.md,
   Apps): a long imported history outgrows the platform's 16 MiB.
+- **`capabilities`**: `owner`, so its turns use the person's other apps
+  as them ("The user's apps", below).
 
 ### The log, the tree, the view: OptChat's spec, in SQLite
 
@@ -164,10 +167,11 @@ import(source TEXT, conv TEXT, thread TEXT, n INTEGER, at INTEGER, PRIMARY KEY (
     to find pages, `web_fetch` to read one, `research` for a question
     that needs several sources), saying where it came from; use
     `computer` for real computer work (files, code, running programs,
-    anything that needs the user's accounts); the computer has the
-    fragment CLI and its skill, so it makes and updates the user's apps
-    (fragments), and any app they want made or changed is handed to it.
-    Answer everything else yourself.
+    anything that needs the user's accounts); use the user's apps
+    (fragments) directly, as the user (`apps`, `app_ops`, `app_call`: "add
+    milk to my todo", "what's on my board"); the computer has the
+    fragment CLI and its skill, so only making an app or changing an
+    app's code is handed to it. Answer everything else yourself.
   - The system prompt is MASTER + VIEW_DOC + the persona's
     instructions + the person's about-me. It is byte-identical across
     turns for one persona, with no dates.
@@ -222,7 +226,8 @@ The spec's §7, as a job:
    - Log each reply `talk`, each tool call `tool` (name and JSON input),
      and each result `echo` (capped). Publish each on `log`.
    - Run the tools: `zoom`, `date` and `search` are queries; the web's
-     are fetches ("The web"); `computer` opens a hand-off. At most 8 run
+     are fetches ("The web"); the apps' are the owner's steps ("The
+     user's apps"); `computer` opens a hand-off. At most 8 run
      per answer; past 24, an answer's calls are dropped (a mutation
      publishes 64 records). Past 512 KiB of conversation, an answer's
      next tool is answered "this turn has read all it can hold" and the
@@ -248,15 +253,61 @@ Tools (descriptions verbatim from the spec where it has them):
 - `web_fetch(url)`: a page's `# title`, its URL, and its readable text
   (markdown-ish), capped at CAP, head and tail, as every result.
 - `research(question)`: an answer with numbered sources.
+- `apps()`, `app_ops(fragment)`, `app_call(fragment, op, input)`: the
+  user's apps ("The user's apps", below).
 - `computer(task)`: hand work to goose on the person's computer. Its
-  description says it has the fragment CLI and its skill, and makes and
-  updates the user's apps. It answers `[<task id>] started` at once.
+  description says it has the fragment CLI and its skill, and makes the
+  user's apps and changes their code (to use one, `app_call`). It
+  answers `[<task id>] started` at once.
   The report arrives later as a `user` message `[<task id>] <report>`,
   which starts a turn of its own when none runs (MASTER: never wait or
   poll for it). It is offered only when the persona has `hands` and the
   mind has an agent member. The turn's files go with it.
 
-Every persona has `zoom`, `date`, `search` and the web's three.
+Every persona has `zoom`, `date`, `search`, the web's three and the
+apps' three, in that order, then `computer` with hands: the same tools
+every turn, so the prompt cache holds.
+
+### The user's apps (`apps`, `app_ops`, `app_call`)
+
+Paul (2026-10-07): "the in-fragment agent doesn't know about fragment
+operations, which is something the old design had" (the goose agent cut
+in 1dd80a4f had a tool per operation of the fragments it was in, and
+`platform__list_fragments`, `platform__operations`, `platform__call`).
+The mind uses the person's apps itself, as them, through the platform's
+`owner` steps (docs/api.md, Jobs and triggers; "Platform additions" 6),
+and hands goose only the making of an app or a change to its code.
+
+- **`apps()`**: one `job.owner.fragments()` step, read once a turn (a
+  later `app_ops` in the turn reads the same answer). The person's other
+  fragments (the mind is never among them), each `- <name>: "<title>"
+  (<kind>, <their role>) <url>`, then its operations, each `  <op>
+  (<kind>): <its description's first 160 characters>`; one with none
+  says the computer changes it.
+- **`app_ops(fragment)`**: that app's operations in full: each one's
+  description and its input's JSON Schema.
+- **`app_call(fragment, op, input)`**: one `job.owner.call` step. Its
+  echo's first line is `<fragment> <op> at <url>`, then the result: a
+  string `text` as it is, else its JSON (the MCP servers' rule); capped
+  at CAP like every result. A refusal (no such app, an operation it does
+  not describe, the person's role, the schema) is the echo, `Error: …`,
+  for the model to act on.
+- **What only the platform decides:** which operations are tools (the
+  described ones, by `fragment_core::mcp`'s rule, mutations and jobs
+  too); the role (the person's own, in fragments they are a member of);
+  each call once (its id is the turn's run and step: a retried step, or
+  a replayed run, applies nothing twice); and the gate: the mind's release
+  declares `owner`, and the mind is `members` with no member but its
+  owner and their own agents. Shared with anyone else, `apps` and
+  `app_call` answer why, and use nothing.
+- **What the app sees:** `call.principal` is the person (a todo's item
+  is "by" them), `call.agent` the mind's key; its `ops` records name the
+  mind's key, and its `events` say `fragment.called`, "add job:… by id:…
+  through mind.paul".
+- **The page:** a turn's steps row that used apps reads "Used todo: add"
+  ("Using" while it runs), each app's label a link to its canonical URL,
+  which the shell opens beside the mind; one that only listed them,
+  "Looked at your apps".
 
 ### The web (`applib/web.mjs`)
 
@@ -611,7 +662,8 @@ beside the mind; opened on its own origin the page shows its own rail.
 - **Center:** the thread.
   - Messages are markdown.
   - The steps of a turn (tool and echo) fold into one "looked at memory
-    ×3" row.
+    ×3" row; one that used the person's apps reads "Used todo: add", the
+    app's name a link to it.
   - A hand-off is a card that shows goose's live steps and its report.
   - Snippets of other threads (a search hit, a zoom result) are
     expandable.
@@ -660,7 +712,22 @@ beside the mind; opened on its own origin the page shows its own rail.
    of its fragment's blobs, its first 64 KiB as text when they are UTF-8
    (docs/api.md, Jobs). The mind reads a message's small text files
    with it.
-6. **The shell's first run:**
+6. **`job.owner.fragments()` and `job.owner.call(fragment, op, input)`**
+   (docs/api.md, Jobs and triggers; cell/src/owner.rs): a job acting as
+   its fragment's owner on their other fragments, for the mind's apps
+   tools. Lent by the manifest's new `capabilities: ["owner"]`, which only
+   a blessed template's release declares (a fork, or any fragment with its
+   own code, is refused it at deploy), and only while the fragment is
+   `members` with no member but its owner and their agents (asked at each
+   step). The listing is the owner's list (at most 64 fragments, by
+   name), each with their role, its canonical URL and its described
+   operations (`fragment_core::mcp::described`); a call goes to the target
+   behind an internal route, as the owner with their role there, recorded
+   as an agent's `for` call is, keyed by the run and the step. The old
+   design's `fragments` capability (8edc2783 cut it) was a page's, gated
+   by the owner viewing it; this one is a job's, gated by who can reach
+   the fragment.
+7. **The shell's first run:**
    - it makes the agent (on the default image, goose), assigns it to
      the computer, makes `mind` (members) and adds the agent there as
      an editor;
@@ -910,5 +977,9 @@ draft holds `ai.decide` steps as it holds every other AI step.
   there is Wikipedia's. Bing's `format=rss` answers both, but its feed
   says its results are for a personal RSS reader alone (decision for
   Paul). A key (Perplexity's, Brave's or Tavily's) is the way.
+- An app's files to the main agent (a `job.owner` step reading one at
+  `main`): an app whose state is its files (notes) is reached through its
+  described operations alone, else through the computer. And past 64 of
+  the person's apps, `apps` lists the first 64 by name.
 - Images to the main agent (the `vision` model is no tier a job names),
   and `search` over a file's words (FTS indexes the message's own).
