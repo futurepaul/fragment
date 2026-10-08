@@ -71,6 +71,9 @@ const DEV_WORKOS_PORT: u16 = 8794;
 /// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
 /// never calls real models.
 const DEV_AI_PORT: u16 = 8796;
+/// The vendors a person's own models call (`FRAGMENT_MODELS_UPSTREAM`:
+/// Anthropic, OpenAI, its sign-in): dev's are the fake too.
+const DEV_VENDORS_PORT: u16 = 8798;
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
@@ -133,6 +136,7 @@ fn dev(args: &[String]) -> Result<()> {
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let vendors = fragment_fakes::vendors::Vendors::start(DEV_VENDORS_PORT)?;
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -163,9 +167,11 @@ fn dev(args: &[String]) -> Result<()> {
         test_secret: None,
         computer_image: Some("stub".into()),
         computer_snapshots: false,
-        providers: None,
+        // a person's own models (an own key each): their calls go to the vendors' fake
+        providers: Some(fragment_fakes::vendors::catalog_rows().to_string()),
         operator_key_values: vec![],
         swap_upstream: None,
+        models_upstream: Some(vendors.url.clone()),
     };
     // its secrets go to wrangler's local store under cell/.wrangler/state
     fleet.configure(&tools, &devstack::cell_dir())?;
@@ -184,6 +190,7 @@ fn dev(args: &[String]) -> Result<()> {
     println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    println!("  own models:   {} (Anthropic's, OpenAI's and ChatGPT's sign-in, faked; `FRAGMENT_CHATGPT_ISSUER={}` for `fragment connect chatgpt`)", vendors.url, vendors.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");

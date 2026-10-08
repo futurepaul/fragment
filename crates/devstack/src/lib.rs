@@ -319,6 +319,10 @@ pub struct Fleet {
     pub providers: Option<String>,
     pub operator_key_values: Vec<(String, String)>,
     pub swap_upstream: Option<String>,
+    /// Where a person's own models' calls go instead of their vendors
+    /// (`FRAGMENT_MODELS_UPSTREAM`: crates/fakes `vendors`, dev's and the
+    /// e2e's; `None`: the vendors themselves).
+    pub models_upstream: Option<String>,
 }
 
 /// A WorkOS environment as the cell reads it.
@@ -411,6 +415,9 @@ impl Fleet {
         }
         if let Some(u) = &self.swap_upstream {
             vars.push(("FRAGMENT_SWAP_UPSTREAM", u.as_str()));
+        }
+        if let Some(u) = &self.models_upstream {
+            vars.push(("FRAGMENT_MODELS_UPSTREAM", u.as_str()));
         }
         write_dev_vars(project, &vars)
     }

@@ -84,7 +84,10 @@
   // price book's list price for its name (fragment_core::price
   // DEFAULT_KEYS) unless it names `"price": {"micros", "per"}`
   // (micro-dollars per calls, at list; the margin is added). An `own` row
-  // takes the person's own key instead.
+  // takes the person's own key instead. `anthropic` and `openai` are also
+  // the model route's own providers (docs/optchat.md, "Your own models"): a
+  // person's key there, or (`openai`) their Sign in with ChatGPT, runs the
+  // roles they choose for it; without the row the picker offers neither.
   "providers": [
     { "name": "google", "kind": "connection",
       "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com"],
@@ -101,7 +104,13 @@
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" }
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+    { "name": "anthropic", "kind": "own", "hosts": ["api.anthropic.com"],
+      "placements": [{ "header": "x-api-key" }],
+      "env": ["ANTHROPIC_API_KEY"] },
+    { "name": "openai", "kind": "own", "hosts": ["api.openai.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["OPENAI_API_KEY"] }
   ],
   // A branch deployment's test levers, for the hosted e2e (`cargo xtask
   // e2e --hosted`; docs/secrets.md): 32 random bytes or more, as text. A

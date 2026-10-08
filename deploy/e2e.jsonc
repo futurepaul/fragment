@@ -59,7 +59,14 @@
       "env": ["XAI_API_KEY"], "key": "fragment-xai-api-key" },
     { "name": "elevenlabs", "kind": "operator", "hosts": ["api.elevenlabs.io"],
       "placements": [{ "header": "xi-api-key" }],
-      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" }
+      "env": ["ELEVENLABS_API_KEY"], "key": "fragment-elevenlabs-api-key" },
+    // a person's own models (docs/optchat.md, "Your own models")
+    { "name": "anthropic", "kind": "own", "hosts": ["api.anthropic.com"],
+      "placements": [{ "header": "x-api-key" }],
+      "env": ["ANTHROPIC_API_KEY"] },
+    { "name": "openai", "kind": "own", "hosts": ["api.openai.com"],
+      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+      "env": ["OPENAI_API_KEY"] }
   ],
   // the preview's test levers (docs/secrets.md, The test secret)
   "test_secret_file": "~/.config/fragment/secrets/e2e-test-secret",

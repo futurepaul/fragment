@@ -96,6 +96,9 @@ pub const SWAP_KEYS: [(&str, &str, &str); 4] = [
     ("xai", "xai-e2e-0c4d22", "XAI_API_KEY"),
     ("elevenlabs", "sk_e2e_eleven_9e1f", "ELEVENLABS_API_KEY"),
 ];
+/// The own providers a person's own models take a key for
+/// (deploy/e2e.jsonc's rows; docs/optchat.md, "Your own models").
+pub const MODEL_OWN: [&str; 2] = ["anthropic", "openai"];
 pub const SWAP_OWN: &str = "e2e-mail";
 pub const SWAP_OWN_HOST: &str = "api.mail.test";
 pub const SWAP_OWN_ENV: &str = "E2E_MAIL_KEY";
@@ -221,6 +224,9 @@ pub struct Suite {
     pub workos: Fake<fragment_fakes::workos::WorkOs>,
     /// The provider APIs a computer's swap sends to.
     pub upstream: Fake<fragment_fakes::upstream::Upstream>,
+    /// The vendors a person's own models call (`FRAGMENT_MODELS_UPSTREAM`):
+    /// Anthropic, OpenAI, and its sign-in.
+    pub vendors: Fake<fragment_fakes::vendors::Vendors>,
     /// The fleet's operator (`FRAGMENT_OPERATORS`): a key a person approves
     /// when a lane needs it.
     pub operator: Keys,
@@ -489,6 +495,7 @@ impl Suite {
             providers: Some(swap_providers()?.to_string()),
             operator_key_values: SWAP_KEYS.iter().map(|(name, value, _)| (name.to_string(), value.to_string())).collect(),
             swap_upstream: Some(self.upstream.node().url.clone()),
+            models_upstream: Some(self.vendors.node().url.clone()),
         };
         // its secrets go to wrangler's local store in the node's own state
         // (seeded once a state, bound by name as a deploy binds them)
@@ -869,6 +876,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         test_secret,
         workos: Fake::of(hidden, "WorkOS", fragment_fakes::workos::WorkOs::start(WORKOS_CLIENT, WORKOS_KEY)?),
         upstream: Fake::of(hidden, "upstream", fragment_fakes::upstream::Upstream::start()?),
+        vendors: Fake::of(hidden, "model vendors", fragment_fakes::vendors::Vendors::start(0)?),
         operator: Keys::generate(),
         wiper: Some(Keys::generate()),
         cli,

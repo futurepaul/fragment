@@ -301,6 +301,7 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         test_secret: String::new(),
         workos: Fake::absent("WorkOS"),
         upstream: Fake::absent("upstream"),
+        vendors: Fake::absent("model vendors"),
         // no operator the deployment names: a section that needs one declares Need::Deployment
         operator: Keys::generate(),
         // read as the run starts (`sections`): a dry run reads no secret

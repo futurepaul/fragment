@@ -137,7 +137,7 @@ pub fn shell_platform(s: &mut Suite, api: &Api) -> Result<()> {
     });
     s.ok(
         "the shell lists every provider the deployment offers: the connection not connected yet, the operator's keys offered at their prices, an own key not set",
-        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && rows.len() == crate::SWAP_KEYS.len() + 2,
+        status(&r) == Some(json!("not_connected")) && row(crate::SWAP_CONNECTION)["kind"] == "connection" && keys && row(crate::SWAP_OWN)["state"] == "not_set" && crate::MODEL_OWN.iter().all(|p| row(p)["kind"] == "own" && row(p)["state"] == "not_set") && rows.len() == crate::SWAP_KEYS.len() + 2 + crate::MODEL_OWN.len(),
         &r,
     );
     let r = shell(api, &session, "POST", "/api/connections/perplexity/authorize", Some(&json!({})), &[])?;
@@ -1066,7 +1066,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     // each row: its provider, kind, state, agents allowed, and uses
     let rows = "[...document.querySelectorAll('#settings-connections [data-provider]')].map((r) => [r.dataset.provider, r.dataset.kind, r.dataset.state, \
                 r.querySelectorAll('[data-agent][aria-pressed=true]').length, [...r.querySelectorAll('[data-use]')].map((u) => [u.dataset.use, Number(u.dataset.calls), Number(u.dataset.micros)])])";
-    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 2, row("perplexity")), wait);
+    let shown = b.until(page, &format!("document.querySelectorAll('#settings-connections [data-provider]').length === {} && !!document.querySelector('{} [data-use]')", crate::SWAP_KEYS.len() + 2 + crate::MODEL_OWN.len(), row("perplexity")), wait);
     let got = b.eval(page, rows)?;
     let of = |p: &str| got.as_array().and_then(|l| l.iter().find(|r| r[0] == p)).cloned().unwrap_or(Value::Null);
     let perplexity_charge = 7_500; // $0.005 a call at list, and the margin
@@ -1094,7 +1094,7 @@ fn connections_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, sessio
     let narrowed = b.until(page, &format!("document.querySelector('{} [data-agent={lead:?}]')?.getAttribute('aria-pressed') === 'false'", row("perplexity")), wait);
     let view = shell(api, session, "GET", &format!("/api/computers/{id}"), None, &[])?;
     let list = view.body["agents"].as_array().and_then(|l| l.iter().find(|a| a["fragment"] == lead.as_str())).map(|a| a["connections"].clone()).unwrap_or(Value::Null);
-    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN]).collect();
+    let others: Vec<&str> = std::iter::once(crate::SWAP_CONNECTION).chain(crate::SWAP_KEYS.iter().map(|(k, _, _)| *k).filter(|k| *k != "perplexity")).chain([crate::SWAP_OWN]).chain(crate::MODEL_OWN).collect();
     s.ok(
         "pressing an agent takes that provider from it (a narrowing of the rest), and the page says so",
         narrowed && list.as_array().is_some_and(|l| l.len() == others.len() && others.iter().all(|p| l.iter().any(|x| x == p))),
