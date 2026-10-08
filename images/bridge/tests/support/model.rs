@@ -58,6 +58,10 @@ pub struct Call {
     pub body: Value,
     /// Its `authorization`, as it came.
     pub authorization: Option<String>,
+    /// When it came (ms since the epoch, as the bridge's log and the fake's
+    /// records stamp theirs), and its body's size.
+    pub at_ms: u64,
+    pub bytes: usize,
 }
 
 /// A second of silence, as a WAV, that says `words` in a chunk of its own
@@ -285,14 +289,15 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
         return net::json_answer(StatusCode::OK, &json!({ "object": "list", "data": [{ "id": "cheap", "object": "model" }, { "id": "medium", "object": "model" }, { "id": "high", "object": "model" }, { "id": "vision", "object": "model" }] }));
     }
     let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+    let (at_ms, bytes) = (fragment_bridge::log::now_ms(), body.len());
     if path.ends_with("/audio/transcriptions") {
         let (fields, answer) = transcription(&content_type, &body, &agent, &authorization);
-        calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, stream: false, body: fields, authorization });
+        calls.lock().unwrap().push(Call { path, model: fields["model"].as_str().unwrap_or("").into(), agent, stream: false, body: fields, authorization, at_ms, bytes });
         return answer;
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
-    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone(), authorization });
+    calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone(), authorization, at_ms, bytes });
     if !path.ends_with("/chat/completions") {
         return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
     }
