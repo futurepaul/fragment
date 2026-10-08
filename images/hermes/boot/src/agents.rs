@@ -25,8 +25,6 @@ pub struct Change {
     /// one (moving it while Hermes winds down a turn of its could leave a
     /// half profile behind).
     pub removed: Vec<Agent>,
-    /// The agent whose desktop the screen shows (the first) is another.
-    pub screen: bool,
     /// Still here, with other credentials (a connection made or lost, an
     /// operator key offered, its owner's narrowing): its `.env` and its
     /// credentials file are written again, nothing restarted.
@@ -35,7 +33,7 @@ pub struct Change {
 
 impl Change {
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && !self.screen && self.credentials.is_empty()
+        self.added.is_empty() && self.removed.is_empty() && self.credentials.is_empty()
     }
 }
 
@@ -50,7 +48,6 @@ pub fn diff(running: &[Agent], read: &[Agent]) -> Change {
     Change {
         added: read.iter().filter(|a| !had.contains(a.fragment.as_str())).cloned().collect(),
         removed: running.iter().filter(|a| !has.contains(a.fragment.as_str())).cloned().collect(),
-        screen: running.first().map(|a| &a.fragment) != read.first().map(|a| &a.fragment),
         credentials: read.iter().filter(|a| running.iter().any(|r| r.fragment == a.fragment && r.credentials != a.credentials)).cloned().collect(),
     }
 }
@@ -87,23 +84,24 @@ mod tests {
     }
 
     /// Valid: an agent assigned while it runs is added, one unassigned is
-    /// removed, and a new first agent moves the screen.
+    /// removed (each agent's screen comes and goes with it: the screens
+    /// file is written with the ready file).
     #[test]
     fn a_change_is_what_was_added_and_removed() {
         let c = diff(&[agent("juniper")], &[agent("juniper"), agent("maple")]);
-        assert_eq!((names(&c.added), names(&c.removed), c.screen), (vec!["maple.paul"], vec![], false));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec!["maple.paul"], vec![]));
         let c = diff(&[agent("juniper"), agent("maple")], &[agent("maple")]);
-        assert_eq!((names(&c.added), names(&c.removed), c.screen), (vec![], vec!["juniper.paul"], true));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper.paul"]));
         // the first run: a computer started before its first agent was made
         let c = diff(&[], &[agent("juniper")]);
-        assert_eq!((names(&c.added), c.screen), (vec!["juniper.paul"], true));
+        assert_eq!(names(&c.added), vec!["juniper.paul"]);
         let c = diff(&[agent("juniper")], &[]);
-        assert_eq!((names(&c.removed), c.screen), (vec!["juniper.paul"], true));
+        assert_eq!(names(&c.removed), vec!["juniper.paul"]);
     }
 
     /// Replay: the same set read again is no change, nor is an agent the
-    /// platform describes anew (its fragment is its profile); the order
-    /// matters only for the screen's agent.
+    /// platform describes anew (its fragment is its profile), nor another
+    /// order (each agent's screen is its own, whichever is first).
     #[test]
     fn the_same_agents_again_are_no_change() {
         let set = [agent("juniper"), agent("maple")];
@@ -114,6 +112,8 @@ mod tests {
         assert!(diff(&[agent("juniper")], &[renamed]).is_empty());
         let c = diff(&[agent("juniper"), agent("maple"), agent("oak")], &[agent("juniper"), agent("oak"), agent("maple")]);
         assert!(c.is_empty(), "{c:?}");
+        let c = diff(&[agent("juniper"), agent("maple")], &[agent("maple"), agent("juniper")]);
+        assert!(c.is_empty(), "a new first agent changes nothing: {c:?}");
     }
 
     /// Valid and replay: an agent whose credentials changed is named so,

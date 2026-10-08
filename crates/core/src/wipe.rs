@@ -269,6 +269,87 @@ pub fn whose(fragment: &str, username: Option<&str>) -> Whose {
     }
 }
 
+/// One ended life of a fragment, and what its cleanup has left, as the
+/// fragment answers a wipe's `wipe/end` (cell/src/ended.rs `ended_lives`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeLeft {
+    pub incarnation: i64,
+    /// Members' lists still to tell.
+    pub lists: u64,
+    /// Its app's database or blobs remain.
+    pub stored: bool,
+    /// Its repo is still to delete.
+    pub repo: bool,
+    /// The most failed tries of a part left.
+    pub tries: u64,
+    /// The last error of a part left (`part: error`), when one failed.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The ended lives one fragment's answer names at most (an object has one
+/// a delete or a wipe, rarely more).
+pub const LIVES_SHOWN_MAX: usize = 8;
+
+/// The fragments a cleanup's note names at most (`cleaning` names them all,
+/// up to `NAMES_SHOWN_MAX`).
+pub const NOTE_FRAGMENTS_MAX: usize = 5;
+
+/// What a fragment's ended lives have left, as a wipe's report says it.
+pub fn cleaning(fragment: &str, lives: &[LifeLeft]) -> fragment_proto::wipe::Cleaning {
+    let mut c = fragment_proto::wipe::Cleaning { fragment: fragment.to_string(), ..Default::default() };
+    // the latest life's error first: the one a wipe ended
+    for l in lives.iter().rev().take(LIVES_SHOWN_MAX) {
+        c.lists += l.lists;
+        c.stored |= l.stored;
+        c.repo |= l.repo;
+        c.tries = c.tries.max(l.tries);
+        if c.error.is_none() {
+            c.error = l.error.as_deref().map(crate::ended::kept_error);
+        }
+    }
+    c.held = crate::ended::held(i64::try_from(c.tries).unwrap_or(i64::MAX));
+    c
+}
+
+/// The `cleanup` step's note when fragments are not cleaned yet: those held
+/// (failed past their tries, or refused) named first, with their errors, so
+/// a stuck cleanup says why; else what is still going. Bounded: at most
+/// `NOTE_FRAGMENTS_MAX` fragments, each error `ended::ERROR_MAX_CHARS`.
+pub fn cleanup_note(left: &[fragment_proto::wipe::Cleaning]) -> String {
+    assert!(!left.is_empty(), "a note says what is left");
+    let held: Vec<&fragment_proto::wipe::Cleaning> = left.iter().filter(|c| c.held).collect();
+    let going: Vec<&fragment_proto::wipe::Cleaning> = left.iter().filter(|c| !c.held).collect();
+    let one = |c: &fragment_proto::wipe::Cleaning| {
+        let mut parts = vec![];
+        if c.lists > 0 {
+            parts.push(format!("{} list{}", c.lists, if c.lists == 1 { "" } else { "s" }));
+        }
+        if c.stored {
+            parts.push("app database or blobs".to_string());
+        }
+        if c.repo {
+            parts.push("repo".to_string());
+        }
+        let tries = if c.tries > 0 { format!(", {} failed tries", c.tries) } else { String::new() };
+        let error = c.error.as_deref().map(|e| format!("; last: {e}")).unwrap_or_default();
+        format!("{} ({}{tries}{error})", c.fragment, parts.join(", "))
+    };
+    let names = |list: &[&fragment_proto::wipe::Cleaning]| {
+        let shown: Vec<String> = list.iter().take(NOTE_FRAGMENTS_MAX).map(|c| one(c)).collect();
+        let more = list.len().saturating_sub(NOTE_FRAGMENTS_MAX);
+        let more = if more > 0 { format!("; and {more} more") } else { String::new() };
+        format!("{}{more}", shown.join("; "))
+    };
+    let failed = format!("failed: {} fragment(s) held after their tries (each wipe call tries them again): {}", held.len(), names(&held));
+    match (held.is_empty(), going.is_empty()) {
+        (true, _) => format!("still cleaning {} fragment(s): {}", going.len(), names(&going)),
+        (false, true) => failed,
+        (false, false) => format!("{failed}. Still cleaning {}: {}", going.len(), names(&going)),
+    }
+}
+
 /// `names` as a report lists them (`fragment_proto::wipe::Listed`): sorted,
 /// each once, all counted, the first `NAMES_SHOWN_MAX` shown.
 pub fn listed(names: impl IntoIterator<Item = String>) -> Listed {
@@ -401,6 +482,46 @@ mod tests {
         assert_eq!(whose("todo.paula", Some("paul")), Whose::Elsewhere);
         assert_eq!(whose("todo.paul", None), Whose::Elsewhere);
         assert_eq!(whose("not a name", Some("paul")), Whose::Elsewhere);
+    }
+
+    /// Goal: what a fragment's ended lives have left reads as one line of a
+    /// report: lists summed, any stored or repo part, the most tries, held
+    /// past `TRIES_MAX`, and the latest life's error first, bounded.
+    /// Method: two lives, one failing; one held; one with nothing failed.
+    #[test]
+    fn a_fragments_lives_read_as_one_cleaning() {
+        let old = LifeLeft { incarnation: 1, lists: 2, stored: false, repo: false, tries: 3, error: Some("lists: id:a: its list answered 500".into()) };
+        let new = LifeLeft { incarnation: 2, lists: 4, stored: true, repo: true, tries: 1, error: Some(format!("repo: {}", "x".repeat(900))) };
+        let c = cleaning("chat.paul", &[old.clone(), new]);
+        assert_eq!((c.fragment.as_str(), c.lists, c.stored, c.repo, c.tries, c.held), ("chat.paul", 6, true, true, 3, false));
+        let error = c.error.unwrap();
+        assert!(error.starts_with("repo: ") && error.chars().count() <= crate::ended::ERROR_MAX_CHARS, "the latest life's, bounded");
+        let held = cleaning("todo.paul", &[LifeLeft { tries: crate::ended::TRIES_MAX as u64, ..old.clone() }]);
+        assert!(held.held && held.error.as_deref() == old.error.as_deref());
+        let clean = cleaning("x.paul", &[LifeLeft { incarnation: 3, lists: 1, ..LifeLeft::default() }]);
+        assert!(!clean.held && clean.error.is_none() && clean.tries == 0);
+        // a fragment with more lives than a report names counts the newest few
+        let many: Vec<LifeLeft> = (0..20).map(|i| LifeLeft { incarnation: i, lists: 1, ..LifeLeft::default() }).collect();
+        assert_eq!(cleaning("m.paul", &many).lists, LIVES_SHOWN_MAX as u64);
+    }
+
+    /// Goal: a cleanup's note says why it waits: the held fragments first,
+    /// named with their errors (`failed: …`), else what is still going
+    /// (`still cleaning …`); never more than `NOTE_FRAGMENTS_MAX` named.
+    /// Method: going only, held only, both, and many.
+    #[test]
+    fn a_cleanups_note_names_the_held_first() {
+        let going = |n: &str| fragment_proto::wipe::Cleaning { fragment: n.into(), lists: 3, tries: 1, error: Some("lists: id:b: its list answered 503".into()), ..Default::default() };
+        let held = |n: &str| fragment_proto::wipe::Cleaning { fragment: n.into(), repo: true, tries: 10, held: true, error: Some("repo: code.storage delete repo x: 403 {}".into()), ..Default::default() };
+        let note = cleanup_note(&[going("a.p")]);
+        assert!(note.starts_with("still cleaning 1 fragment(s): a.p (3 lists, 1 failed tries; last: lists: id:b"), "{note}");
+        let note = cleanup_note(&[held("b.p")]);
+        assert!(note.starts_with("failed: 1 fragment(s) held") && note.contains("b.p (repo, 10 failed tries; last: repo: code.storage delete repo x: 403"), "{note}");
+        let note = cleanup_note(&[going("a.p"), held("b.p")]);
+        assert!(note.starts_with("failed:") && note.contains("b.p (repo") && note.contains("Still cleaning 1: a.p"), "{note}");
+        let many: Vec<_> = (0..12).map(|i| held(&format!("f{i}.p"))).collect();
+        let note = cleanup_note(&many);
+        assert!(note.contains("and 7 more") && !note.contains("f5.p"), "{note}");
     }
 
     /// Goal: a report counts every name and lists a bounded, sorted few.

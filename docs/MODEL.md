@@ -274,6 +274,7 @@ No file bytes persist in the cell's SQLite: a file lives in git or, at
 | inbox pending | 1000 | overload is a 429, not memory pressure |
 | hop depth | 16 | carried from fragment's loop guard |
 | `public`-role calls | 60 per minute per anonymous principal, 600 per minute per fragment | public writes must not become an abuse amplifier; tunable per operation |
+| a fragment's host label | 63 bytes: `<label>--<username>` and a branch's mark; every username leaves 29 for labels | one DNS label under one wildcard certificate; refused at create (and a username that would leave less, where it is chosen), never cut (docs/api.md, Names) |
 
 ## Answered (2026-09-23)
 

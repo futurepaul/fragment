@@ -8,6 +8,7 @@ description = "Starts and stops the local fragment stack (`wrangler dev` for cel
 [dependencies]
 anyhow = "1"
 fragment-core = { path = "../core" }
+fragment-proto = { path = "../proto" }
 serde_json = "1"
 # the pinned Node (src/node.rs): fetched over HTTPS, checked by its
 # SHA-256, unpacked from its .tar.gz

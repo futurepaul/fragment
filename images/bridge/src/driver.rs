@@ -16,7 +16,8 @@
 //! - the runtime's commands (a turn's attachments downloaded first, and its
 //!   note read from its chat's journal: what a restart cut of the agent's
 //!   turn before it, note.rs) and events;
-//! - the keepalive socket, held while the engine says so (decision 39).
+//! - the keepalive socket, held while the engine says so (decision 39);
+//! - the screen (screen.rs), told which agents it runs.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ use crate::note;
 use crate::ready::Ready;
 use crate::records::{self, AttachmentRef, Record};
 use crate::runtime::{Agent, Command, Event, LocalFile, Runtime, RuntimeIo, TurnStart};
+use crate::screen::{self, Named, ScreenConfig};
 
 /// What the bridge is given.
 #[derive(Debug, Clone)]
@@ -68,6 +70,9 @@ pub struct Config {
     /// `BRIDGE_AGENTS_FILE`: the agents the image has made ready (ready.rs);
     /// none, every agent the platform lists.
     pub agents_file: Option<PathBuf>,
+    /// `BRIDGE_SCREEN_LISTEN` and the rest: the screen of each agent it runs
+    /// (screen.rs); none, no screen.
+    pub screen: Option<ScreenConfig>,
 }
 
 /// Why the bridge stopped.
@@ -240,8 +245,26 @@ impl Shared {
     }
 }
 
+/// The agents the screen names, from those the bridge runs.
+fn named(agents: &[Agent]) -> Vec<Named> {
+    agents.iter().map(|a| Named { fragment: a.fragment.clone(), name: a.name.clone() }).collect()
+}
+
 /// Runs the bridge until `stop` turns true.
 pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<bool>) -> Result<(), BridgeError> {
+    // The screen's page answers from the start (a viewer's port wakes the
+    // computer, and waits for it); its sockets wait for the agents, which
+    // are told only past the restore gate, so no lease under `/data` is
+    // touched before the restore.
+    let (screen_agents, screen_rx) = watch::channel::<Option<Vec<Named>>>(None);
+    if let Some(sc) = cfg.screen.clone() {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            if let Err(e) = screen::serve(sc, screen_rx, stop).await {
+                crate::ev!("screen.failed", { "error": e });
+            }
+        });
+    }
     if !restore_gate(&cfg, stop.clone()).await {
         return Ok(());
     }
@@ -300,6 +323,7 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
     let Some(mut computer) = computer else { return Ok(()) };
     let listed = computer.agents.len();
     computer.agents = gated(computer.agents, &ready);
+    screen_agents.send_replace(Some(named(&computer.agents)));
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtime": name, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight });
@@ -357,6 +381,8 @@ pub async fn run(cfg: Config, runtime: Box<dyn Runtime>, stop: watch::Receiver<b
                     Msg::Input(input) => engine.step(input, crate::log::now_ms()),
                     Msg::Computer(c, only) => {
                         let agents = gated(c.agents, &ready);
+                        let now = Some(named(&agents));
+                        screen_agents.send_if_modified(|was| if *was == now { false } else { *was = now; true });
                         let s = engine.step(Input::Agents(agents.clone()), crate::log::now_ms());
                         // An agent that left this computer (or is not ready) is followed no more.
                         follows.keep_only(&agents);
@@ -1142,13 +1168,62 @@ async fn read_back(api: &Api, agent: &str, fragment: &str, channel: &str, before
     }
 }
 
-/// The note a turn carries (note.rs), from its chat's journal alone: `work`
+/// The note a turn carries (note.rs): what a restart cut of the agent's
+/// turn before it in the chat (`cut_note`), and what its runtime does not
+/// remember of the chat (`forgotten_note`), each from the chat's journal,
+/// together at most twice a note's bound. `None` when there is neither, or
+/// the journal did not answer: a turn is never held back for its note.
+async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
+    let (cut, forgot) = tokio::join!(cut_note(api, ts), forgotten_note(api, ts));
+    let note = [cut, forgot].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+    assert!(note.len() <= 2 * limits::NOTE_MAX_BYTES + 2, "a turn's notes are bounded");
+    (!note.is_empty()).then_some(note)
+}
+
+/// What the agent no longer remembers of the chat (note.rs, "forgotten"):
+/// its turns there that another life ran since this life's `/data` was
+/// saved (`TurnStart::forgotten`), read from `work` back from the turn's
+/// claim to the oldest of their starts, and from `chat` back from its tail
+/// to the oldest of their causes. `None` when there are none, or the
+/// journal did not answer.
+async fn forgotten_note(api: &Api, ts: &TurnStart) -> Option<String> {
+    if ts.forgotten.is_empty() {
+        return None;
+    }
+    let claim = ts.claim_seq?;
+    let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
+    let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "forgotten": ts.forgotten.len(), "error": e.to_string() });
+    let started = |rs: &[Record]| ts.forgotten.iter().all(|t| rs.iter().any(|r| r.principal == me && r.body["kind"] == "turn.start" && r.body["turn"] == t.as_str()));
+    let (work, _) = read_back(api, agent, chat, records::WORK, claim, started).await.map_err(unread).ok()?;
+    // their causes in this chat: the chat read back to the oldest of them
+    let causes: Vec<u64> = work
+        .iter()
+        .filter(|r| r.principal == me && r.body["kind"] == "turn.start" && ts.forgotten.iter().any(|t| r.body["turn"] == t.as_str()))
+        .filter(|r| r.body["cause"]["fragment"] == chat && r.body["cause"]["channel"] == records::CHAT)
+        .filter_map(|r| r.body["cause"]["seq"].as_u64())
+        .collect();
+    let oldest = causes.iter().min().copied().unwrap_or(0);
+    let said = async {
+        let tail = api.channels(agent, chat).await?.into_iter().find(|c| c.name == records::CHAT).map_or(0, |c| c.seq);
+        read_back(api, agent, chat, records::CHAT, tail + 1, |rs| rs.first().is_some_and(|r| r.seq <= oldest)).await
+    };
+    let said: Vec<Record> = said.await.map_err(unread).map(|(rs, _)| rs).unwrap_or_default();
+    let items = note::forgotten(&work, &said, me, &ts.forgotten);
+    if items.is_empty() {
+        crate::ev!("note.unread", { "turn": ts.turn, "why": "no forgotten turn's start among the records read", "forgotten": ts.forgotten.len() });
+        return None;
+    }
+    let text = note::forgotten_text(&items, ts.forgotten_more);
+    crate::ev!("note", { "turn": ts.turn, "forgotten": items.len(), "more": ts.forgotten_more, "bytes": text.len() });
+    Some(text)
+}
+
+/// The note of a cut turn (note.rs), from its chat's journal alone: `work`
 /// back from the turn's claim to the agent's turn before it there; when a
 /// restart cut that turn, the record it answered and what it had replied
 /// (`chat` back from its tail to that turn's cause, or its start). `None`
-/// when nothing was cut, or the journal did not answer: a turn is never held
-/// back for its note.
-async fn note_for(api: &Api, ts: &TurnStart) -> Option<String> {
+/// when nothing was cut, or the journal did not answer.
+async fn cut_note(api: &Api, ts: &TurnStart) -> Option<String> {
     let claim = ts.claim_seq?;
     let (agent, chat, me) = (ts.agent.fragment.as_str(), ts.fragment.as_str(), ts.agent.identity.as_str());
     let unread = |e: ApiError| crate::ev!("note.unread", { "turn": ts.turn, "error": e.to_string() });

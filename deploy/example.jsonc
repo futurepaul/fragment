@@ -57,6 +57,10 @@
   // "vision_model": "@cf/zai-org/glm-5.3-flash",
   // A new person's plan: guest (the default), seat, or seat_always_on.
   // "default_plan": "guest",
+  // Where a person whose computer will not start gets help: an https page
+  // or a mailto address, linked from the shell's notice. Without it, the
+  // shell shows them what to tell whoever runs the deployment.
+  // "support_url": "mailto:help@example.dev",
   // The operators (npubs or identities): they grant credit, set plans,
   // release usernames, and wipe a person (docs/api.md, Operators). Wipe
   // with an operator key no person holds (`fragment operator key <file>`

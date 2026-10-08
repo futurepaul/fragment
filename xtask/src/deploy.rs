@@ -80,6 +80,10 @@ struct Deployment {
     vision_model: Option<String>,
     /// A new person's plan: `guest` (the default), `seat`, or `seat_always_on`.
     default_plan: Option<String>,
+    /// Where a person whose computer will not start gets help
+    /// (`FRAGMENT_SUPPORT_URL`): an `https:` page or a `mailto:` address
+    /// (`fragment_core::computer::support_url_ok`), linked from the shell.
+    support_url: Option<String>,
     /// Computers (docs/computers.md): the images they run, and the one a
     /// new computer is pinned to. Without it, the deployment makes none.
     computers: Option<Computers>,
@@ -403,6 +407,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
         }
     }
+    if let Some(u) = d.support_url.as_deref().filter(|u| !fragment_core::computer::support_url_ok(u)) {
+        bail!("support_url: {u:?} is no https: page or mailto: address of at most {} visible characters", fragment_core::computer::SUPPORT_URL_MAX_BYTES);
+    }
     Ok(d)
 }
 
@@ -601,6 +608,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, deploy_id: &str, roo
     if let Some(p) = &d.default_plan {
         v.insert("FRAGMENT_DEFAULT_PLAN".into(), json!(p));
     }
+    if let Some(u) = &d.support_url {
+        v.insert("FRAGMENT_SUPPORT_URL".into(), json!(u));
+    }
     if let Some(m) = &d.vision_model {
         v.insert("FRAGMENT_VISION_MODEL".into(), json!(m.trim()));
     }
@@ -725,6 +735,7 @@ mod tests {
             ai_gateway: None,
             vision_model: None,
             default_plan: None,
+            support_url: None,
             computers: None,
             providers: vec![],
             price_book_version: None,
@@ -1045,5 +1056,26 @@ mod tests {
         v["vision_model"] = json!("@cf/meta/llama-4-scout-17b-16e-instruct");
         let refused = load(&config_file("vision-unpriced", &v)).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(refused.contains("is not in the price book"), "{refused}");
+    }
+
+    /// The support link a person whose computer will not start is shown:
+    /// an https page or a mailto address, refused before a deploy
+    /// otherwise; named, it is the cell's `FRAGMENT_SUPPORT_URL`.
+    #[test]
+    fn a_support_link_is_checked_and_rendered() {
+        let with = |u: Option<&str>| {
+            let mut d = deployment(None, None);
+            d.support_url = u.map(str::to_string);
+            d
+        };
+        assert!(checked(with(Some("https://help.example.dev"))).is_ok() && checked(with(Some("mailto:help@example.dev"))).is_ok() && checked(with(None)).is_ok());
+        let refused = checked(with(Some("javascript:alert(1)"))).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(refused.contains("support_url: \"javascript:alert(1)\" is no https: page or mailto: address"), "{refused}");
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let mut v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        v["support_url"] = json!("mailto:help@example.dev");
+        let d = load(&config_file("support-named", &v)).unwrap();
+        let n = names(&d, Some("p5")).unwrap();
+        assert_eq!(worker_config(&d, &n, "0f0e0d0c", "abc123", &devstack::repo_root()).unwrap()["vars"]["FRAGMENT_SUPPORT_URL"], "mailto:help@example.dev");
     }
 }

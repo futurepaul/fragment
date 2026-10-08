@@ -570,6 +570,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "fragment-core",
+ "fragment-proto",
  "libc",
  "reqwest",
  "serde_json",

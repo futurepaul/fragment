@@ -3,11 +3,13 @@
 //! on the other. `engine` holds its rules, pure; `driver` its I/O; `runtime`
 //! the runtimes; `api` every route it calls; `ready` which agents the image
 //! has made ready, when it says; `note` what a turn after a cut one is told,
-//! from the journal.
+//! from the journal; `screen` each agent's screen, `screens` the image's
+//! map of their displays, `lease` who drives one.
 
 pub mod api;
 pub mod driver;
 pub mod engine;
+pub mod lease;
 pub mod limits;
 pub mod log;
 pub mod net;
@@ -16,3 +18,4 @@ pub mod ready;
 pub mod records;
 pub mod runtime;
 pub mod screen;
+pub mod screens;

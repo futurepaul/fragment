@@ -29,9 +29,9 @@
 //! vendor's error) finishes when it is run again, and a finished one run
 //! again finds nothing left.
 
-use fragment_core::wipe::{self as rules, Progress, Step, Whose};
+use fragment_core::wipe::{self as rules, LifeLeft, Progress, Step, Whose};
 use fragment_nip98::Payload;
-use fragment_proto::wipe::{ComputerFound, Found, Ran, WipeAsk, WipeReport, WipeState};
+use fragment_proto::wipe::{Cleaning, ComputerFound, Found, Ran, WipeAsk, WipeReport, WipeState};
 use fragment_proto::{limits, ErrorCode, IdentityKind, Role};
 use serde::Deserialize;
 use serde_json::json;
@@ -152,21 +152,28 @@ async fn run(env: &Env, person: &str, operator: &Operator, steps: Option<u32>, d
 /// for, or why it failed this time (the next call tries again).
 fn ran_of(step: Step, outcome: CellResult<Did>) -> Ran {
     match outcome {
-        Ok(did) => Ran { step: step.name().into(), done: did.done, deleted: did.deleted, note: did.note },
-        Err(e) => Ran { step: step.name().into(), done: false, deleted: 0, note: Some(format!("failed this time ({:?}): {}", e.code, e.message)) },
+        Ok(did) => Ran { step: step.name().into(), done: did.done, deleted: did.deleted, note: did.note, cleaning: did.cleaning },
+        Err(e) => Ran { step: step.name().into(), done: false, deleted: 0, note: Some(format!("failed this time ({:?}): {}", e.code, e.message)), cleaning: vec![] },
     }
 }
 
 /// What one step did in one call.
+#[derive(Default)]
 struct Did {
     done: bool,
     deleted: u64,
     note: Option<String>,
+    /// The `cleanup` step's: what each fragment not cleaned yet has left.
+    cleaning: Vec<Cleaning>,
 }
 
 impl Did {
     fn finished(deleted: u64) -> Did {
-        Did { done: true, deleted, note: None }
+        Did { done: true, deleted, ..Did::default() }
+    }
+
+    fn going(deleted: u64, note: String) -> Did {
+        Did { done: false, deleted, note: Some(note), ..Did::default() }
     }
 }
 
@@ -188,16 +195,16 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                     break;
                 }
             }
-            Ok(Did { done: false, deleted, note: Some("its saves' prefix holds more: the next call deletes on".into()) })
+            Ok(Did::going(deleted, "its saves' prefix holds more: the next call deletes on".into()))
         }
         Step::Fragments => {
             let names = theirs(env, facts, true).await?;
             let (mut ended, mut skipped) = (0u64, vec![]);
             for (i, name) in names.iter().enumerate() {
                 if i >= rules::FRAGMENTS_PER_CALL || js::now_ms() > deadline {
-                    return Ok(Did { done: false, deleted: ended, note: Some(format!("{} fragments left for the next call", names.len() - i)) });
+                    return Ok(Did::going(ended, format!("{} fragments left for the next call", names.len() - i)));
                 }
-                match crate::fragment::ask(env, name, "wipe/end", &json!({ "owner": person })).await {
+                match crate::fragment::ask(env, name, "wipe/end", &wipe_end(facts)).await {
                     Ok(v) => ended += u64::from(v["ended"] == true),
                     // someone else's: never touched (a wipe ends its person's only)
                     Err(e) if e.code == ErrorCode::Forbidden => skipped.push(name.clone()),
@@ -205,7 +212,7 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                 }
             }
             let note = (!skipped.is_empty()).then(|| format!("skipped, someone else's: {}", skipped.join(", ")));
-            Ok(Did { done: true, deleted: ended, note })
+            Ok(Did { done: true, deleted: ended, note, ..Did::default() })
         }
         Step::Memberships => {
             let mut left = 0u64;
@@ -216,7 +223,7 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                         continue;
                     }
                     if asked >= rules::FRAGMENTS_PER_CALL || js::now_ms() > deadline {
-                        return Ok(Did { done: false, deleted: left, note: Some("memberships left for the next call".into()) });
+                        return Ok(Did::going(left, "memberships left for the next call".into()));
                     }
                     asked += 1;
                     let v = crate::fragment::ask(env, &fragment, "wipe/leave", &json!({ "principal": principal, "kind": kind })).await?;
@@ -227,19 +234,30 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         }
         Step::Cleanup => {
             let names = theirs(env, facts, false).await?;
-            let mut busy = vec![];
+            // each fragment not cleaned yet, and what it has left (its ended
+            // lives' lists, app database and blobs, repo; their tries and
+            // last error), so a cleanup that cannot finish says why
+            let mut busy: Vec<Cleaning> = vec![];
             for (i, name) in names.iter().enumerate() {
                 if i >= rules::FRAGMENTS_PER_CALL * 4 || js::now_ms() > deadline {
-                    return Ok(Did { done: false, deleted: 0, note: Some(format!("{} fragments not looked at yet", names.len() - i)) });
+                    let mut note = format!("{} fragments not looked at yet", names.len() - i);
+                    if !busy.is_empty() {
+                        note = format!("{note}; {}", rules::cleanup_note(&busy));
+                    }
+                    return Ok(Did { done: false, note: Some(note), cleaning: shown(busy), ..Did::default() });
                 }
-                let v = crate::fragment::ask(env, name, "wipe/end", &json!({ "owner": person })).await?;
+                let v = crate::fragment::ask(env, name, "wipe/end", &wipe_end(facts)).await?;
                 if v["left"].as_u64() != Some(0) {
-                    busy.push(name.clone());
+                    let lives: Vec<LifeLeft> = match &v["lives"] {
+                        serde_json::Value::Null => vec![],
+                        lives => serde_json::from_value(lives.clone()).map_err(|e| CellError::host(format!("{name}'s ended lives: {e}")))?,
+                    };
+                    busy.push(rules::cleaning(name, &lives));
                 }
             }
             match busy.is_empty() {
                 true => Ok(Did::finished(names.len() as u64)),
-                false => Ok(Did { done: false, deleted: 0, note: Some(format!("still cleaning (members' lists, app databases, blobs, repos): {}", busy.join(", "))) }),
+                false => Ok(Did { done: false, note: Some(rules::cleanup_note(&busy)), cleaning: shown(busy), ..Did::default() }),
             }
         }
         Step::Ledger => {
@@ -265,6 +283,19 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         // its rows go as the registry records it done (`WipeStep`)
         Step::Registry => Ok(Did::finished(0)),
     }
+}
+
+/// `wipe/end`'s body for a fragment of the wiped person's: whose it is, and
+/// their agents, whose lists the wipe empties (so the fragment's cleanup
+/// does not wait to tell them: ended.rs).
+fn wipe_end(facts: &WipeFacts) -> serde_json::Value {
+    json!({ "owner": facts.identity, "agents": facts.agents })
+}
+
+/// The fragments a report names of those not cleaned yet: a bounded few.
+fn shown(mut busy: Vec<Cleaning>) -> Vec<Cleaning> {
+    busy.truncate(rules::NAMES_SHOWN_MAX);
+    busy
 }
 
 /// The person and each agent of theirs, with their kind.

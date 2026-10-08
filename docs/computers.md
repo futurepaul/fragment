@@ -62,10 +62,15 @@ container starts until someone asks again).
   awake, and the hold is let go (its owner's sleep goes on). A sleep whose
   save fails keeps its container: it is awake again, held no more, its
   view's `why` says so, and its sleep is tried again after a pause (a
-  minute, doubled each time, at most 15); after
-  `computers.unsaved_max_ms` (30 minutes by default) of failed tries it
-  sleeps unsaved, says so, and its next wake is a rollback. An idle stop
-  by the runtime is only the safety net.
+  minute, doubled each time, at most 15, the last try at the bound
+  itself); after `computers.unsaved_max_ms` (30 minutes, Paul's,
+  2026-10-08) of failed tries it sleeps unsaved, says so, and its next
+  wake is a rollback. An idle stop by the runtime is only the safety net.
+- **Restart** (its owner's: below, "What its owner is told"): running,
+  its sleep (the hold, the save, the stop) then a start at once; a save
+  that fails keeps no container, since its owner asked. Asleep or won't
+  wake, a start. Either way the start is fresh: from the image and the
+  newest good save, never the snapshot.
 - **Wake from a snapshot** when it caches the current save for the pinned
   image (`start({containerSnapshot})`; below, "Saves and what a wake
   restores"); otherwise start the image with `RESTORE_PENDING=1`, restore
@@ -80,13 +85,132 @@ container starts until someone asks again).
   none left, it is a strike like any.
 - **A crash** (the container stopped on its own while starting or awake)
   counts against its starts, and the computer starts again while
-  something wants it. A guest that died holding its keepalive (busy) is
+  something wants it. One that went while its sleep held or saved it,
+  before the sleep stopped it, ended on its own too: its life's end is an
+  exit, not a sleep. A guest that died holding its keepalive (busy) is
   held as a record holds it, so it starts again however long its turn
   ran, and its next life ends what was cut.
 - **A new isolate** that finds the container running attaches its
   monitor, timeout and intercepts again and never destroys it (lesson 6).
   After any `destroy()` it waits for `running` to be false before
   `start()`.
+
+## What its owner is told
+
+Paul, 2026-10-08, on the unsaved bound: "a user will be still using it and
+then it will die and they won't know why. need user-facing recovery so they
+can get back to working." Each way a computer stops, starts again, goes
+back to an older save or will not start, read from the code
+(`fragment_core::computer`, `cell/src/computer.rs`, `cell/shell/shell.js`,
+the bridge), what its person saw before 2026-10-08, and what they see now:
+
+| What happens | When | Before: the shell / the chat | Now |
+|---|---|---|---|
+| **An idle sleep**, saved | nothing holds it for 20 minutes | Settings' "State" only / nothing (a message wakes it) | the same: nothing is lost, nothing to tell |
+| **Its owner's sleep**, saved (the shell's update is one) | `POST …/sleep` | the same | the same |
+| **A sleep whose save fails** | any sleep; it is kept awake (I5) and tried again after 1, 2, 4, 8, 15 minutes | Settings' `why`, read only when Settings was opened after it / nothing; its owner charged for the time it was kept | an `unsaved` notice at once, over every chat and Settings, pushed to open pages: since when its work is in no save, the save a stop goes back to, the time the bound stops it, and Restart; the time it is kept, up to the bound, is free |
+| **Awake saves that keep failing** (a turn's end, every 15 minutes busy) | tried again after a growing pause, unbounded while awake | nothing anywhere: no `why` for an awake save | the `unsaved` notice once two fail in a row (no stop time: none is due until it would sleep) |
+| **The bound runs out**: put to sleep unsaved | the sleep tried at `unsaved_since + unsaved_max_ms` (exactly: the last try is the bound's), only when nothing holds it | Settings' `why` ("slept unsaved"), which then stayed for good (only a save of the same life cleared it) / nothing | a `went_back` notice (pending) while it is asleep: what it will go back to; the `why` goes at the next save that works |
+| **A crash**: the container stops on its own (out of memory, a host restart, the runtime's idle stop, or dying while its sleep held or saved it) | `Exited`; it starts again at once while anything wants it, else at its next wake | nothing (`restored` and `rollbacks` were in the API only) / a turn it cut ends quietly as "lost when the computer restarted"; the agent's next turn there is told what was cut (docs/bridge.md) | a `went_back` notice: stopped unexpectedly, back to its save of `HH:MM`, how much before it stopped; the chat and the agent as before |
+| **A wake past an unusable save** (its archive gone, or the image's check failed) | `RestoreFailed`, the save before it at once | nothing | a `went_back` notice: the newest save could not be restored |
+| **Its owner's restart** | `POST …/restart` | (no restart) | saved first: nothing to tell; its save failing, a `went_back` notice for the restart |
+| **A wake whose snapshot will not start** | the image and the same save, in the same wake | nothing | nothing: nothing is lost |
+| **Won't wake**: three failed starts in a row, three crashes, or no save left to fall back to | `Phase::Failed` | Settings' "State: wont wake" and the platform's words / messages go unanswered, nothing said; and the shell's own presence wake (an owner's) silently tried it again every minute the person was there | a `wont_wake` notice in plain words, the platform's beside them, and Restart; the shell no longer wakes it on presence; after a restart that fails again, "still won't start", and the deployment's support link, or the details to give whoever runs it |
+| **A slow or failed start** (fewer than three) | tried again in 5, 10 s | first run's "taking longer than usual" / nothing | the same (passing) |
+| **At zero credit, or a guest**: no wake starts | the ledger refuses (402, 403) | Settings' credit warning and `why` / unanswered | the same; the refusal's `why` now goes once a start comes up (it stayed for good); a restart is refused the same way |
+| **An image update** | its owner's pin, sleep, wake | the update pill | the same |
+
+**The notices** (`notices` in the owner's view, `fragment_core::computer::notices`,
+proto's `ComputerNotice`), the most pressing first, each derived from the
+Computer DO's own state with no clock, so the same state tells the same
+whoever reads it:
+
+- `wont_wake {why}`: its starts kept failing.
+- `unsaved {since, save, failingSince, failures, why, stopsAt}`: this
+  life's saves are failing (a sleep's at once; awake ones from the second
+  in a row, `UNSAVED_NOTICE_FAILURES`, since one is retried a minute later).
+  `since` is this life's newest save, or its start; `save` what a stop
+  goes back to; `stopsAt` when the bound puts it to sleep unsaved if no
+  save works first and nothing holds it, none while a port tab or a
+  keepalive is open (in use) or for an always-on computer.
+- `went_back {life, cause, endedAt, pending, save, savedAt, at}`: a start
+  went back to an older save (`crash`, `unsaved`, `restart`, `unusable`),
+  or will as it next starts (`pending`). Told until its owner says they
+  saw it (`POST …/notices/seen {life}`), whatever starts come after; the
+  newest loss only.
+
+When they change, the Computer DO tells its owner's open pages through
+their list's socket (`/api/fragments/watch`'s `changed`), so the shell
+reads the computer again and the warning is shown while there is still
+time, with no reload. The shell shows them in a band over the open chat
+and Settings, in plain words, the times in the person's own clock:
+"Your computer can't save right now. It hasn't saved since 14:05, so what
+its agents did after that isn't kept yet. It keeps trying. If it still
+can't by 14:35, it stops and starts again from that save." Its chats keep
+everything said (their records are the chat's own), so a notice says the
+work on the computer after the save is what went.
+
+**Not in the chat.** The chat's records are its agents' and people's: the
+platform posts none there (the rule; docs/chat-records.md), and a notice
+in it would need a new platform record kind every template is to show.
+Every chat is shown in the shell, under its band; a chat opened in a tab
+of its own shows the turn a crash cut, as before. Notices in a chat
+outside the shell are parked (Paul, 2026-10-08).
+
+**One way back: Restart** (`POST /api/computers/{id}/restart
+{generation}`; Settings' "Restart computer", asked once more, and every
+notice's Restart). Running, it is a sleep that saves if it can and stops
+whether or not it did (a failed save keeps no container: its owner
+asked), then a start at once; asleep, or won't wake, a start (lifting
+won't wake, as its owner's wake does). Its start is fresh: from the image
+and the newest good save, or past one that fails its check an older one,
+never the snapshot, which could carry what broke it outside `/data`; no
+snapshot is kept until a start comes up. It names the start its owner saw
+(`generation`, in the view): a restart of a start already restarted is
+nothing, so pressed twice, or in two tabs, it restarts once. It starts a
+container, so the ledger is asked first, as for a wake: at zero credit it
+is refused, and what runs runs on (decision 27). A restart asked as the
+computer starts is that start.
+
+**Does use extend the bound? No: it never stops a computer in use.** A
+computer is stopped for its bound only at a sleep, and a sleep is tried
+only when nothing holds it: no screen or other port tab open, no keepalive
+(a turn running, or waiting on its card), no record or page's presence
+within its hold (20 minutes after the last message), and no always-on
+plan. While anything holds it the sleep waits, and `stopsAt` moves past
+the hold or says none. So what the bound limits is the time a failing
+computer is kept, to `unsaved_max_ms` past its first failed sleep: a hard
+cap, which is also the cost's. Re-arming the bound after use would keep
+an idle container longer for a person who is not there, and could not
+save their work: a stop never saves, so a longer window only postpones
+the loss unless saves recover by then. So the bound is kept as decision
+18 has it.
+
+**The window is free** (Paul, 2026-10-08: the time a computer is kept
+for saves the platform failed is the platform's). Its awake time from a
+sleep's failed save to the bound is not metered: the lifecycle meters up
+to the failure, then passes the window over (`Lifecycle::unmetered`, its
+meters at most two intervals, before it and after it), so nothing is
+charged and nothing refunded. The window ends early when a save works,
+its owner restarts it, or its container goes; what comes after it, and
+whatever holds it past the bound (its person using it), is metered as
+any.
+
+**The agent.** A turn a restart cut ends as lost, and the agent's next
+turn there is told what was cut (docs/bridge.md, "The turn after a cut one
+is told"). After a rollback, the turns another life ran since the save its
+`/data` came from are in no memory of its runtime: our bridge finds them
+(their claims answer 409) and tells the agent's next turn in each chat what
+they were, from the chat's journal (docs/bridge.md, "What a rollback
+forgot"). The guest's own view also names what its last start restored
+(`restored`, `rollback`), for any image to use.
+
+**Getting help.** A deployment may name where a person whose computer will
+not start gets help (`support_url`: an `https:` page or a `mailto:`
+address; `FRAGMENT_SUPPORT_URL`, given with `GET /api/computers` as
+`support`). The shell links it once a restart has failed too; without
+one, the notice shows the computer's id and the platform's words, to give
+whoever runs it.
 
 ## The guest's contract
 
@@ -225,11 +349,13 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   crash loses what its life did since its last save, at most a turn and
   its settle, or 15 minutes of one.
 - **A sleep whose save fails** keeps its container (I5): it is awake
-  again, held no more, and its view's `why` says so; its sleep is tried
-  again after the same pause. Only after `computers.unsaved_max_ms` (30
-  minutes by default: a default for Paul to confirm) of failed tries does
-  it sleep unsaved, its `why` saying so until a save works, and its next
-  wake is a rollback.
+  again, held no more, and its view's `why` and its owner's notice say so
+  (above, "What its owner is told"); its sleep is tried again after the
+  same pause, the last try at the bound itself, so the time its owner is
+  told is the time it stops. Only after `computers.unsaved_max_ms` (30
+  minutes; Paul confirmed it on 2026-10-08) of failed tries does it sleep
+  unsaved, its `why` saying so until a save works, and its next wake is a
+  rollback. Its owner's restart keeps no container for a failed save.
 - **A wake restores the current save:** the newest one not found
   unusable. A start whose save will never restore (its archive gone or
   altered) marks it unusable and starts again at once from the save before
@@ -262,10 +388,12 @@ docs/durable-computers.md. A computer keeps its newest three saves of
   logs one line (`"restored"`) and shows it in its owner's view
   (`restored`, docs/api.md). A start that went back in time is a
   **rollback**, counted in the view's `rollbacks`: the life before it
-  ended by a crash, or by a sleep that slept unsaved, or its start fell
-  back to a save older than that life's newest, so what that life did
-  since some save is in none. A start from the save its life's sleep took
-  is none. Nothing's correctness depends on the guest reading either.
+  ended by a crash, or by a sleep that slept unsaved (a restart's
+  included), or its start fell back to a save older than that life's
+  newest, so what that life did since some save is in none. A start from
+  the save its life's sleep took is none. Its owner is told of the newest
+  until they say they saw it (`went_back`: "What its owner is told").
+  Nothing's correctness depends on the guest reading either.
 
 ### Deleted with its owner
 
@@ -407,6 +535,25 @@ expires within 30 days. The container application is the deployment's
   too. Before, a capture went to the agent's own tier's model, which on
   the medium tier reads no images. DeepSeek Flash's vision build is only
   on DeepSeek's own API (decision 23, its status).
+- **Its speech-to-text** goes to `whisper`, whatever the agent's tier.
+  - **Config.** Each profile has `stt: {provider: openai, language: "",
+    openai: {base_url: <route>/v1, api_key: "agent:<name>", model:
+    whisper}}`.
+  - **When it runs.** A voice note a person attaches is transcribed
+    before its turn, and the agent is given the words. Hermes does this
+    under the routed profile's scope for every inbound message, even
+    one that answers a question or arrives while the agent works.
+  - **No language is forced.** Whisper detects it; Hermes' default,
+    `en`, mangles the rest.
+  - **No transcript of its own.** The managed overlay's
+    `stt.echo_transcripts: false` keeps a memo to one reply a turn, with
+    no 🎙️ message before it.
+  - **Before (2026-10-07).** Hermes tried local Whisper first: a
+    person's first voice note installed faster-whisper and its model
+    into `/data`.
+
+  The Docker lane's `a_voice_memo_is_transcribed_through_the_route`
+  proves it.
 - A call is at most 6 MiB (`fragment_core::models::MODEL_BODY_MAX_BYTES`):
   Hermes shrinks a screenshot (a 1456-pixel long side for a capture) and
   sends it whole; one refused as too large (413) it shrinks to 5 MiB of
@@ -415,10 +562,33 @@ expires within 30 days. The container application is the deployment's
   so a 5 MiB screenshot holds about $1.25 of its payer's credit (at
   GLM-5.3 Flash's price, the fee and the margin) until it settles at what
   the model counted; a payer with less is refused it (402).
-- A call without `x-fragment-agent` is refused (401: no one to bill).
-  Our Hermes image sets it on every call of an agent's profile (its
-  `model.default_headers`), the main model's and the auxiliary ones'
-  (titles, the smart-approval guardian, vision).
+- `POST http://model.fragment.internal/v1/audio/transcriptions`,
+  OpenAI's multipart shape with `model` `whisper`: a voice memo
+  transcribed (decision 9, its status). It is the platform's
+  transcription route as the agent: Workers AI's Whisper, at most 10 MiB
+  of audio, metered to the agent's owner at 46.63 neurons a minute of
+  audio (docs/api.md, Models).
+- **Whose call it is**, one rule for both paths
+  (`fragment_core::models::agent_named`):
+  - its `x-fragment-agent`; or
+  - from a client that sends no header of its own (OpenAI's SDKs take a
+    base URL and a key, nothing more), its key: `Authorization: Bearer
+    agent:<label>.<username>`. Any other key (Hermes' `fragment-model`)
+    is the guest's own placeholder and names no one.
+
+  Named both ways, the two must agree. Refusals:
+  - none named, a malformed name, or two that disagree: 401;
+  - an agent that does not run on this computer: 403 (the computer signs
+    only for its own).
+
+  The guest's auth headers, its key among them, go no further than the
+  computer: only the agent's name, the content type and `accept` are
+  sent on, and nothing of them reaches the gateway, Workers AI or a log.
+- Our Hermes image sets `x-fragment-agent` on every call of an agent's
+  profile (its `model.default_headers`), the main model's and the
+  auxiliary ones' (titles, the smart-approval guardian, vision). Its
+  speech-to-text, whose client takes no header, names the agent by its
+  key (each profile's `stt.openai.api_key`, `agent:<name>`).
 - The intercept names no fragment, so a call bills its agent's owner
   and no fragment's cap applies (decision 36: an agent's model calls are
   its owner's).
@@ -581,10 +751,17 @@ a receiver reports (1005, none given; 1006, dropped), which workerd
 refuses to send: passed on as it was, it left the page's end open (p5,
 2026-10-05: a desktop that restarted froze its screen's page). Nothing else reaches the
 container from outside. By convention the screen is a page on port 6080
-(decision 11). The page is served at the
-port's root and reaches its sockets by relative URLs (our images':
-`websockify?viewer=` and `control?viewer=`), so it works under the
-port's prefix (`/p/6080/`).
+(decision 11), one for each agent: the shell opens an agent's at
+`/p/6080/?agent=<agent fragment>` (a ticket that lands there: `POST
+…/ports/6080/ticket {path: "/?agent=…"}`), from a chat with the agent
+("Its screen" in the chat's menu), or with the agent picked from a group
+chat's menu ("<name>'s screen"), or from settings. The platform carries
+the query and reads nothing in it: which desktop is that agent's, and
+the refusal of an agent the computer does not run, are the image's. The
+page is served at the port's root and reaches its sockets by relative
+URLs, naming the agent again (our images': `websockify?viewer=&agent=`
+and `control?viewer=&agent=`), so it works under the port's prefix
+(`/p/6080/`).
 
 ## Our images
 
@@ -598,8 +775,15 @@ settings and state):
 - `images/stub`: the bridge with `script`, and a screen page. 9.6 MB; a
   local start follows its chats in 0.3 s. The platform's own lanes run
   against it.
-- `images/hermes`: Hermes v0.21.5's desktop image, `hermes-boot`, the
-  bridge as Hermes' Relay connector, the screen. One Hermes
+- `images/hermes`: Hermes v0.21.6's desktop image, `hermes-boot`, the
+  bridge as Hermes' Relay connector, the screen. The base is pinned by
+  digest to the build upstream's `stable-desktop` named on 2026-10-08
+  (its versioned tag `rc.4-v0.21.6-desktop`; its install stamp says
+  0.21.6, commit `818c13be`); the tag named `v0.21.6-desktop` is an
+  earlier attempt's build, not that release. Hermes there is Python
+  3.14.7 in a venv its own package manager (PM) builds, its tools (its
+  Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
+  store at `/opt/hermes/tools`. One Hermes
   profile per agent (`juniper.paul` is `juniper-paul`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
@@ -639,7 +823,53 @@ settings and state):
   work, never Hermes' home (Paul, 2026-10-07). A hard cut: a profile's
   `home` that already had something in it is set aside in place as
   `home.before-work` (numbered when taken), unmoved, and the link made;
-  nothing is carried over or deleted (event `profile.home_set_aside`).
+  nothing is carried over or deleted (event `profile.set_aside`, `what`
+  naming it).
+  Its temp files are its work too (2026-10-07). Hermes (v0.21.5, and
+  v0.21.6 alike) gives each process it runs `TMPDIR`, `TMP` and `TEMP`
+  pointing at the scratch
+  directory of the home it runs it under
+  (`hermes_constants.apply_subprocess_home_env`, then
+  `apply_scratch_tmp_env`), an agent's being its profile's
+  `cache/scratch`; the image makes that a link to
+  `/data/work/<profile>/tmp`, by the same hard cut as its home (set aside
+  as `cache/scratch.before-work`). An agent still sees Hermes' path in
+  `$TMPDIR`; what it writes there is in its work. A link, and no
+  `TMPDIR` of the image's, because:
+  - Hermes re-points the temp variables only while they hold a value it
+    set itself (its `HERMES_SCRATCH_DIR` marker), and passes any other as
+    it is. So a `TMPDIR` in the gateway's environment would reach every
+    agent's commands unchanged: one directory for all of them.
+  - A profile cannot give its terminal one. `terminal.env_passthrough`
+    reads `TMPDIR` from the gateway's process, never from the profile's
+    `.env` (Hermes keeps the name process-wide, `agent/secret_scope.py`'s
+    `_GLOBAL_ENV_EXACT`). An export in `shell_init_files` reaches the
+    terminal's snapshot, so its foreground commands, but not a background
+    process: that is a `bash -lic` of the gateway's environment
+    (`tools/process_registry.py`).
+  - Hermes' own path is what its every way of starting a command reads, so
+    the link needs nothing else to agree with it.
+
+  Hermes' own uses of the scratch work through the link: its prune of
+  entries idle 24 hours (it compares real paths), and a file it sends from a
+  reply's `MEDIA:` tag (any file it can read that its denylist does not
+  name: `validate_media_delivery_path`, strict mode off). The gateway's own
+  scratch, `/data/hermes/cache/scratch`, stays where Hermes puts it: it is
+  the gateway process's (its terminal's session snapshots, its browser
+  tool's sockets, execute_code's staging), and it is what Hermes derives
+  each profile's from. The image's Chromium opts out of both on purpose: it
+  sets its own `TMPDIR`, the container's `/tmp` (below; `hermes.rs`,
+  `CHROMIUM_TMP`), so a browser's throwaway profile and shared memory are
+  in no save, the work's included. Kanban's "scratch" workspaces are not
+  this directory: they are `/data/hermes/kanban/workspaces/<task>`, one
+  board for every profile by Hermes' design, and unchanged. One way of
+  running misses: an execute_code script's temp files are in the gateway's
+  scratch, not its agent's, because Hermes' sandbox drops the marker
+  (docs/technical-debt-ledger.md, "An agent's execute_code makes its temp
+  files in Hermes' home"). The lower rung's `a_tools_temp_files_are_its_work`
+  asks each way: the terminal's `mktemp`, a background process's, and
+  execute_code's `tempfile` (pinned in the gateway's scratch), then a temp
+  file sent as `MEDIA:`.
   Its desktop browser's profile (`<profile>/bot-desktop/browser-profile`,
   where Hermes keeps it) is a link to `/data/work/<profile>/browser-profile`.
 
@@ -712,29 +942,80 @@ settings and state):
   running image answers its first message about a second after it is
   assigned. An agent unassigned leaves the ready file at once, so the
   bridge stops running it; its profile is retired at the next start, when
-  no Hermes could be winding down a turn in it. The screen is the first
-  agent's desktop through a link (`/var/lib/fragment-run/screen.sock`)
-  that moves with the first agent, started by `hermes-boot screen-start`
-  for the screen's first viewer (about a second on the lower rung, and
-  about 300 MiB more while it runs), or by Hermes at an agent's first
-  `computer_use` or browser call (`bot_desktop.auto_start`), never at
-  boot. The screen's page follows the desktop: a stream that ends (the
-  desktop stopped or restarted, its viewers' streams ending with it) is
-  opened again on its own, from 1 s backing off to 10 s, while the page's
-  control socket stays open, and the bridge starts the desktop for it at
-  once; Take over is kept. On that desktop an agent operates: Hermes'
+  no Hermes could be winding down a turn in it.
+
+  Each agent has a desktop of its own: Hermes v0.21.5 gives every profile
+  its Bot Desktop (its own Xvnc, browser profile, lease and activity
+  file, under `<profile>/bot-desktop/`), and each agent's screen is its
+  own (`images/hermes/boot/src/desktop.rs`). `hermes-boot` names each
+  agent's display, lease and activity file in the bridge's screens file
+  (`/var/lib/fragment-run/screens.json`, written with the ready file:
+  docs/bridge.md), so a socket that names an agent is that agent's
+  desktop, and one that names an agent not on this computer is refused.
+  A desktop starts for its screen's first viewer (`hermes-boot
+  screen-start <agent>`, which starts only an agent the ready file names:
+  about a second on the lower rung, and about 220 MiB more while it runs,
+  one Xvnc and Xfce per agent), or at the agent's first `computer_use` or
+  browser call (`bot_desktop.auto_start`), never at boot. Hermes refuses
+  to start one below 1.5 GB of free memory (`bot_desktop.min_free_memory_mb`),
+  which a 6 GiB computer reaches with a few agents' desktops, each with a
+  browser open.
+
+  Take over is the agent's own Bot Desktop lease (`lease.json`), which
+  Hermes' `computer_use` and browser tools read before every action: while
+  a person holds it they refuse (`human_has_control`, captures included),
+  and an action during which it changed hands is voided. The bridge
+  writes it as Hermes does, under its `lease.lock` flock with its epoch
+  bumped; Give back, or the taker's page leaving, gives it back to the
+  agent; a change by Hermes (its `screen stop --force`) reaches the
+  viewers within a quarter second, and the bridge's own input gate reads
+  the lease at each input. A lease a person held when the bridge last
+  stopped is given back as the next one starts: no viewer survives a
+  restart. Hermes' own lease RPCs (`display.lease.*`) are its TUI
+  gateway's, which this image does not run.
+
+  A desktop no one uses is stopped: up and unused for 10 minutes
+  (`desktop::IDLE_STOP_MS`: no `computer_use` action, no browser command
+  on it, no take over, and no one watching it, since the bridge touches
+  its activity file every 10 s while someone does), `hermes-boot` stops it
+  with Hermes' own `computer-use screen stop`, which refuses while a
+  person holds its lease (event `screen.idle_stopped`). Hermes stops an
+  idle desktop itself only from its TUI's gateway, which this image does
+  not run; the managed config names the same bound
+  (`bot_desktop.idle_stop_minutes`). Its next use starts it again, and
+  what it kept is there: its browser's profile is in the agent's work.
+
+  All of a computer's agents run as one user, the hermes user (decision
+  44: a person's agents are not fenced from each other), so nothing stops
+  one agent from driving another's display: the screen, the lease and
+  each agent's own tools keep each on its own desktop, and the platform
+  skill tells every agent never to touch another's.
+
+  The screen's page names the agent it shows (its `?agent=`, then the
+  name the control socket says) and follows the desktop: a stream that
+  ends (the desktop stopped or restarted, its viewers' streams ending with
+  it) is opened again on its own, from 1 s backing off to 10 s, while the
+  page's control socket stays open, and the bridge starts the desktop for
+  it at once; who holds it is the lease's, as the control socket says. On
+  that desktop an agent operates: Hermes'
   `computer_use` (its backend, cua-driver 0.28.3, is in the image, pinned, and named by
   `HERMES_CUA_DRIVER_CMD`; Hermes lists the tool in its `tool_search`
   bridge and the agent calls it through `tool_call`; each screenshot is
   described by the route's vision model: Models), and its built-in
   browser tools, headed there (`browser: {headed: true, backend: off}` in
   each profile's own config, the only place Hermes reads `browser` from;
-  with no backend named, Hermes would fetch the Browser Use CLI into
-  `/data` at the first call). Its browser, and the desktop's Browser icon a
+  with no backend named, Hermes would offer Browser Use's one
+  `browser_exec` tool instead), which drive `agent-browser` (Hermes'
+  image has none: the image installs the one Hermes' lock pins, through
+  Hermes' own PM, on PATH). Its browser, and the desktop's Browser icon a
   person uses after Take over, are the image's Chromium
   (`/opt/fragment/bin/chromium`, named to Hermes by
-  `AGENT_BROWSER_EXECUTABLE_PATH`): Playwright's, always started with
-  `--no-sandbox --disable-dev-shm-usage`. Hermes adds those itself only
+  `AGENT_BROWSER_EXECUTABLE_PATH`): the full Chromium Hermes' image pins
+  (its PM's, named in `/etc/hermes/agent-browser-executable-path`), always
+  started with `--no-sandbox --disable-dev-shm-usage`, its scratch
+  (`TMPDIR`: a headless one's temporary profile, and its shared memory)
+  the container's `/tmp`, never Hermes' home's `cache/scratch` under
+  `/data`. Hermes adds those flags itself only
   where it sees Docker's marker (`/.dockerenv`), and Containers gives a
   container neither that marker nor a `/dev/shm` (Docker mounts one in
   every container), so there Chromium died as it started (p5,
@@ -777,18 +1058,29 @@ and how a runtime finds them, is the image's.
   is an agent on a Fragment computer acting for its owner with no login,
   the apps and brain skills to load, its connections as placeholders in
   its environment, `GOOGLE_OAUTH_ACCESS_TOKEN` and the Google Workspace
-  skill, and its desktop, which its owner watches and can take over from
-  "Its computer's screen"), with a description for Hermes' skills index.
+  skill, and its own desktop, which its owner watches and can take over
+  from "Its screen", its computer-use and browser tools answering
+  `human_has_control` meanwhile, and never another agent's), with a
+  description for Hermes' skills index.
   `hermes-boot build-info` writes it at the image's build
   (`/opt/fragment/skills/platform/fragment/SKILL.md`, read-only to the
-  agents), so it is always the binary's in the image, and costs a boot
-  nothing; the build fails if `fragment skill` is no skill named
-  `fragment`. A missing `fragment skill` instruction belongs in cli/SKILL.md.
-- **Every profile** names the managed directory, then the platform skill's,
-  in `skills.external_dirs`, after its own `skills/` (its agent fragment's,
-  synced both ways: an agent's own skills are versioned in its fragment).
-  Hermes takes the first skill of a name, so an agent's own wins over a
-  managed one, and either over the platform skill. An agent's profile has
+  agents), so it is always the binary's in the image; the build fails if
+  `fragment skill` is no skill named `fragment`. A missing `fragment
+  skill` instruction belongs in cli/SKILL.md. The profiles find it in its
+  view, `/var/lib/fragment-run/platform-skills` (the boot's, read-only to
+  the agents, never saved): a copy `hermes-boot` makes at each start and
+  after each install of the managed set, unless a managed skill takes its
+  name (`fragment`), when it leaves the view (`skills.installed`'s
+  `platform`).
+- **Every profile** names the managed directory and the platform skill's
+  view in `skills.external_dirs`, below its own `skills/` (its agent
+  fragment's, synced both ways: an agent's own skills are versioned in its
+  fragment). Hermes ranks a profile's own skills above its external dirs,
+  so an agent's own wins over a managed one or the platform's; its
+  external dirs are one rank, in which two skills of one name are
+  ambiguous and Hermes finds neither by it (since v0.21.6; v0.21.5 took
+  the first dir's), so a managed `fragment` wins over the
+  platform skill by the platform skill leaving the view. An agent's profile has
   its own, the managed set, which is what the shell's Skills section
   lists, and the platform skill. The image carries none of Hermes' bundled
   skills: Hermes copies them only into the home its sync runs in, the
@@ -857,9 +1149,18 @@ persisted)".
   terminal works) and `/tmp` (`HERMES_WRITE_SAFE_ROOT`, which binds
   only them, not the terminal: defense in depth, as Hermes says), for the
   scratch an install is made from; they run as its user, so `/usr/local`
-  is not theirs. Lazy installs stay off, as upstream ships them: they are
+  is not theirs. Lazy installs are off (upstream's image turns them on;
+  `security.allow_lazy_installs: false` in the managed overlay): they are
   Hermes' own optional backends (providers, platforms, speech), which a
-  computer configures none of.
+  computer configures none of. What its agents use is in the image:
+  Edge's speech SDK, `text_to_speech`'s default provider, which Hermes'
+  image leaves to a first-use install (without it, with installs off,
+  Hermes offers no `text_to_speech`), is installed at build at its
+  `uv.lock` pins; local Whisper, a voice note's fallback, is never
+  installed. Nothing is installed under `/data` at run time (the Docker
+  lane's `nothing_is_installed_at_run_time`). npm's global prefix is `/usr/local`
+  (`npm_config_prefix`, which sudo keeps): npm's own, since Hermes' PM
+  ships Node, is its Node's directory in Hermes' tool store, on no PATH.
 - **The network.** apt reaches `deb.debian.org` over plain HTTP, which no
   intercept catches (decision 43); the image keeps apt's lists as of its
   build, and a `.deb` on disk installs offline. An intranet computer
@@ -910,7 +1211,9 @@ for a host) and finds the same `HOME`, `~` and modes.
   an interval every five minutes awake and one at each sleep, kept by the
   Computer DO until the owner's ledger has it (each once, by its
   reference `awake:<computer>:<from>`). A $200 seat's awake time is not
-  charged.
+  charged. Nor is the time a computer is kept for its failed saves: from
+  a sleep's failed save to `computers.unsaved_max_ms` after it, or to the
+  save that works first (Paul, 2026-10-08; "What its owner is told").
 - Model calls bill the agent's owner, through the platform's model
   route. Each operator key's call is held on the agent's owner's ledger
   before it is made, and settled once the provider answered, at the key's
@@ -938,7 +1241,23 @@ for a host) and finds the same `HOME`, `~` and modes.
   its rollbacks), under seeded interleavings with crashes, holds the
   guest answers or not, and saves that fail; among their invariants, a
   computer is never asleep with work newer than its newest save unless a
-  crash or the bounded failure put it there.
+  crash or the bounded failure put it there. What its owner is told
+  (`notices`): saves failing told from the second awake failure and a
+  sleep's first, with the stop at the bound itself, later while a record
+  holds it, never while in use or always on; a start that went back told
+  with its cause and save, pending while asleep, once until seen, a seen
+  older one hiding only itself, across a restart of the DO; won't wake
+  told until a restart. The restart: a sleep that saves then a start,
+  held as an owner's wake, never cancelled by a keepalive, asked twice
+  made once, an earlier start's nothing, an owner's sleep after it
+  winning; its failed save stopping unsaved and told as the restart's;
+  its start fresh from the image, no snapshot kept until one comes up.
+  The simulation restarts too, and checks every notice against the state
+  (a loss told is unseen and a life it had; never a stop before the bound),
+  and that no meter falls in a free window. The free window: nothing
+  metered from a sleep's failed save to its bound, before and after it as
+  any, a late report or an alarm again metering nothing twice, the same
+  across a restart of the DO.
 - The e2e on workerd: the Computer DO's routes and its intercepts,
   against `images/stub/` under `wrangler dev` with Docker. A crash is the
   lever's (`POST /api/test/computer {computer, op: "kill"}`: SIGKILL to
@@ -946,7 +1265,21 @@ for a host) and finds the same `HOME`, `~` and modes.
   save its last turn's end took; a failed save is the lever's
   (`fail-saves`), and so is an always-on plan (`always-on`). A check of
   what ran counts runs (the model fake's calls, the ledger's rows, the
-  computer's `uses`), never records, which a second run replays.
+  computer's `uses`), never records, which a second run replays. The
+  e2e's bound is 45 s (`crate::UNSAVED_MAX_MS`), so the `computers`
+  lane's recovery checks see it run out: a failed sleep told at once with
+  its stop time, a restart asked twice (its save failing too) going back
+  once and saying so until seen, the unsaved stop at the time it said and
+  the wake after told once, a restart of a sleeping computer, one
+  refused at zero credit, and no awake time on its owner's ledger in
+  either free window. The `shell-ui` lane sees the same in Chrome:
+  the warning on Settings with no reload, its Restart, the notice of what
+  it went back to and its OK (gone after a reload), and Settings' Restart
+  computer. On a preview, the hosted `agent-restart` section (by name)
+  restarts a real Hermes computer awake after a reply: it comes back
+  running from its newest save, the restart's own and held, from the image
+  and not a snapshot, with no rollback; the same press again restarts
+  nothing; and its agent answers after it, nothing left to tell its owner.
 - The e2e's `wipe` section (crates/e2e/src/lanes/wipe.rs): a computer
   whose `/data` holds a file its agent wrote and a save, wiped with its
   owner (its first step alone, then across a node's crash): no computer
@@ -972,7 +1305,10 @@ for a host) and finds the same `HOME`, `~` and modes.
   Hermes gateway; and, with Docker, both images built and run against
   the fake API and a scripted model on the host
   (`cargo test -p fragment-bridge --test docker -- --ignored`), real
-  Hermes included. These are lower rung: fakes at the platform's edge.
+  Hermes included. CI runs the Docker ones (images.yml's `docker`) on
+  pull requests and master's pushes that touch images/hermes,
+  images/bridge or images/stub, the rest on every change to `images/`.
+  These are lower rung: fakes at the platform's edge.
   Among them, saves of our Hermes image taken as the DO takes them
   (`a_save_taken_while_it_writes_opens`: during turns whose tool writes a
   SQLite database every few ms, half under the hold and half hot, each
@@ -984,3 +1320,25 @@ for a host) and finds the same `HOME`, `~` and modes.
   while held, which is why a save names what it copied: its kanban
   dispatcher makes its board's database some seconds after a first start,
   and opens it on a timer.
+  The screens: in process against fake displays (`tests/screen.rs`:
+  each agent's socket is its own display, and an agent not on the
+  computer, one the image names no screen for, or no name, is refused;
+  Take over writes the agent's lease as Hermes does, the input gate
+  follows it whoever changes it, and a person's lease from the bridge's
+  last life is given back at its start); and with Docker
+  (`two_agents_two_desktops`): two agents, two desktops, each served by
+  its agent; juniper's taken over, its lease reads `human` to Hermes' own
+  code and its `computer_use` answers `human_has_control` while fred's
+  captures its own; given back, juniper's works again; an unwatched,
+  unused desktop stops after the bound (30 s there:
+  `HERMES_BOOT_SCREEN_IDLE_MS`), a watched one does not, and the next
+  viewer starts it again with its browser's profile kept.
+- The platform's side, with the stub: the `computers` lane's ticket that
+  lands on `?agent=` and refuses a path off its port, and an agent's
+  screen's control socket through the port (refused for an agent not on
+  the computer, 404, and for no name, 400: the image's answers); the
+  `shell-ui` lane's chat menus (a direct chat's "Its screen", a group's
+  screen per agent), each frame landing on `?agent=<that agent>`. The
+  hosted `agent-smoke` checks that its chat's agent's screen is the one
+  served: the RFB stream's desktop is that agent's (`hermes:<profile>`),
+  the page names it, and another agent's is refused.

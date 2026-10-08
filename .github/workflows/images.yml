@@ -1,8 +1,14 @@
 # The computer images' Rust (images/: the bridge and hermes-boot,
-# docs/bridge.md): its own workspace, so its own job. Host tests and clippy,
-# warnings denied. The Docker lane (images/bridge/tests/docker.rs, real
-# Hermes included) builds 4 GB of images and is run by hand:
-# `cargo test -p fragment-bridge --test docker -- --ignored`.
+# docs/bridge.md): its own workspace, so its own jobs.
+#
+# - `check`: host tests and clippy, warnings denied, on every change here.
+# - `docker`: the Docker lane (images/bridge/tests/docker.rs): both images
+#   built for linux/amd64 and run in Docker against the fake API and a
+#   scripted model, real Hermes included (`cargo test -p fragment-bridge
+#   --test docker -- --ignored`). It runs only when a change touches what it
+#   builds or runs (`changes` below: images/hermes, images/bridge,
+#   images/stub, the images' manifest and lock, or this workflow), on pull
+#   requests and on master's pushes, and on every run by hand.
 name: images
 
 on:
@@ -11,6 +17,7 @@ on:
     paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
   pull_request:
     paths: ["images/**", "cli/SKILL.md", ".github/workflows/images.yml"]
+  workflow_dispatch:
 
 concurrency:
   group: images-${{ github.ref }}
@@ -37,3 +44,108 @@ jobs:
           restore-keys: images-${{ runner.os }}-
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  # Whether the Docker lane runs: a change to what it builds or runs. Its own
+  # job, since a job's `if` reads only another job's outputs. The changed
+  # files are the pull request's (as its `paths` filter reads them), or the
+  # push's from its `before`; a push the compare cannot list whole (a new
+  # branch, 300 files or more) and a run by hand run the lane.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docker: ${{ steps.paths.outputs.docker }}
+    steps:
+      - id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          lane='^(images/(hermes|bridge|stub)/|images/Cargo\.(toml|lock)$|\.github/workflows/images\.yml$)'
+          if [ "$EVENT" = pull_request ]; then
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
+          elif [ "$EVENT" = push ] && [ -n "${BEFORE//0/}" ]; then
+            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename')
+            [ "$(printf '%s\n' "$files" | grep -c .)" -lt 300 ] || files=".github/workflows/images.yml"
+          else
+            files=".github/workflows/images.yml"
+          fi
+          printf 'changed:\n%s\n' "$files"
+          if printf '%s\n' "$files" | grep -qE "$lane"; then echo docker=true; else echo docker=false; fi | tee -a "$GITHUB_OUTPUT"
+
+  # The Docker lane. The images are built first by the runner's own Docker
+  # (its BuildKit, straight into its image store, under the tags the tests
+  # run), then the tests run on them with FRAGMENT_DOCKER_SKIP_BUILD, in
+  # parallel (one per CPU). Measured on ubuntu-latest (4 CPUs, 16 GB, a
+  # 145 GB disk with about 85 GB free): the Hermes image builds in about
+  # 7 minutes (its two Rust stages, the CLI's and the bridge's, about
+  # 5.5 of them), the tests take about 3, and the job uses at most about
+  # 11 GB of the disk (71 GB used of 145 at its peak, 75 GB free).
+  #
+  # No layer cache, by measurement (PR #252): with BuildKit's layers in the
+  # Actions cache (mode=max), an image whose every input was unchanged built
+  # in 2 minutes, but that is a re-run's case. A change to the image changes
+  # its last layer (the whole image, 1.4 GB compressed); the CLI's stage, the
+  # build's longest, reads the root workspace, which 108 of master's 147
+  # commits from 2026-10-01 to 10-08 changed; and of the 33 pairs of
+  # master's image-touching commits in that time, the CLI's stage was
+  # unchanged across 6 and the image across none. What the cache would
+  # still hit (the Hermes base and its first layers) is off the build's
+  # critical path, which is the Rust. It cost 3.3 GB of the repository's
+  # 10 GB of caches, and about 1.5 GB more at each write, against the
+  # caches ci.yml reads on every run.
+  #
+  # The tests' container logs are kept on failure.
+  docker:
+    name: docker (real Hermes)
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: images
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # the check job's cache (the registry and images/target), read only
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            images/target
+          key: images-${{ runner.os }}-${{ hashFiles('images/Cargo.lock') }}
+          restore-keys: images-${{ runner.os }}-
+      - run: cargo test -p fragment-bridge --test docker --locked --no-run
+      - name: the runner
+        run: nproc; free -g; df -h /; docker version --format '{{.Server.Version}}'
+      # as the tests' own `build` does (docker.rs), the stub from images/, the
+      # Hermes image from the repo's root
+      - name: build the stub image
+        run: docker build --platform linux/amd64 -f stub/Dockerfile -t fragment-stub:test .
+      - name: build the Hermes image
+        working-directory: .
+        run: docker build --platform linux/amd64 -f images/hermes/Dockerfile -t fragment-hermes:test .
+      - name: disk, built
+        run: docker system df; df -h /
+      - name: the Docker lane
+        run: cargo test -p fragment-bridge --test docker --locked -- --ignored --show-output
+        env:
+          FRAGMENT_DOCKER_SKIP_BUILD: "1"
+          RUST_BACKTRACE: "1"
+      - if: always()
+        name: disk, after
+        run: df -h /
+      # each container's log (Container's drop) and the tests' own
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-lane-logs
+          path: images/target/tmp/**/*.log
+          retention-days: 7

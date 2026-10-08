@@ -226,6 +226,130 @@ function theme(frame) {
 }
 dark.addEventListener("change", () => { for (const f of document.querySelectorAll("iframe")) theme(f); });
 
+// ---- the person's agents, for a page of theirs that asks (a chat's @) ----
+// A frame of a fragment the person owns may ask for their agents
+// (`{fragment: "agents?"}`); the shell answers it, at that fragment's own
+// origin only (its status's canonical URL), `{fragment: "agents", agents:
+// [{identity, fragment, name, title}]}`, and again whenever they change.
+// It may then ask for one of them in its fragment (`{fragment: "add-agent",
+// identity, nonce}`): the shell asks its person, in its own dialog (never
+// in the frame: a page is code its author or an agent wrote, so it asks
+// and never grants), "Add Fred to <title>?", and only on their Add adds that
+// agent as an editor, as making a chat does (decision 36: an owner shares
+// their own fragment with their own agent). It answers `{fragment:
+// "agent-added", nonce, identity, ok, error?}`: `error` "declined" on
+// Cancel, "not answered" after ADD_CONFIRM_MS, "busy" while another ask is
+// open. Nothing is remembered: every add is asked. A frame of a fragment
+// the person does not own (shared with them) learns nothing and adds no
+// one, and no page adds anyone but the person's own agents. It names no
+// template: any page of theirs may use it.
+const ADD_CONFIRM_MS = 90_000;
+// Add arms this long after the dialog shows, so the click or key that sent
+// the page's message cannot confirm it (the share sheet's 800 ms).
+const ADD_ARM_MS = 800;
+const rosterTo = new Map(); // a frame's window -> its fragment's origin
+const origins = new Map(); // fragment name -> its origin (a promise)
+function originOf(name) {
+  if (!origins.has(name)) {
+    const asked = api("GET", `/api/f/${seg(name)}/status`).then((s) => new URL(s.urls.canonical).origin);
+    asked.catch(() => origins.delete(name));
+    origins.set(name, asked);
+  }
+  return origins.get(name);
+}
+const roster = () => [...state.agents.values()].map((a) => ({ identity: a.identity, fragment: a.fragment, name: a.name || labelOf(a.fragment), title: titleOf(a.fragment) }));
+let rosterSent = "";
+function rosterChanged() {
+  const agents = roster();
+  const now = JSON.stringify(agents);
+  if (now === rosterSent) return;
+  rosterSent = now;
+  const live = new Set([...document.querySelectorAll("iframe[data-fragment]")].map((f) => f.contentWindow));
+  for (const [win, origin] of rosterTo) {
+    if (!live.has(win)) rosterTo.delete(win);
+    else win.postMessage({ fragment: "agents", agents }, origin);
+  }
+}
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== "agents?" && d?.fragment !== "add-agent") return;
+  // the frame that sent it shows one of the person's own fragments, and
+  // the page in it is that fragment's
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const name = frame?.dataset.fragment;
+  if (!name || byName(name)?.role !== "owner") return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  if (d.fragment === "agents?") {
+    rosterTo.set(event.source, origin);
+    event.source.postMessage({ fragment: "agents", agents: roster() }, origin);
+    return;
+  }
+  const asker = event.source;
+  const answer = (ok, error) => asker.postMessage({ fragment: "agent-added", nonce: d.nonce, identity: d.identity, ok, ...(error ? { error } : {}) }, origin);
+  if (typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  const agent = state.agents.get(d.identity);
+  if (!agent) return answer(false, "that is not one of your agents");
+  const said = await confirmAdd(agent, name);
+  if (said !== "added") return answer(false, said);
+  // the frame may have gone, or shown another page, while its person read
+  if (frame.contentWindow !== asker || !frame.isConnected) return;
+  try {
+    await api("PUT", `/api/f/${seg(name)}/members/${seg(agent.identity)}`, { role: "editor" });
+    answer(true);
+  } catch (e) {
+    answer(false, e.message);
+  }
+});
+// The person's answer to one page's add, in the shell's own dialog:
+// "added" on Add; "declined" on Cancel or Escape; "not answered" when left
+// ADD_CONFIRM_MS. One at a time: another ask while it is open is "busy".
+const addDialog = $("add-agent-dialog");
+let adding = null; // { resolve, timer, arm, outcome }
+function confirmAdd(agent, name) {
+  if (adding) return Promise.resolve("busy");
+  return new Promise((resolve) => {
+    const who = titleOf(agent.fragment);
+    $("add-agent-title").textContent = `Add ${who}?`;
+    $("add-agent-text").textContent = `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`;
+    addDialog.dataset.agent = agent.identity;
+    addDialog.dataset.fragment = name;
+    $("add-agent-go").disabled = true;
+    adding = {
+      resolve,
+      outcome: "declined",
+      arm: setTimeout(() => { $("add-agent-go").disabled = false; }, ADD_ARM_MS),
+      timer: setTimeout(() => {
+        if (adding) adding.outcome = "not answered";
+        addDialog.close();
+      }, ADD_CONFIRM_MS),
+    };
+    addDialog.showModal();
+    $("add-agent-cancel").focus();
+  });
+}
+// whatever closes it (Add, Cancel, Escape, the timeout) settles the ask once
+addDialog.addEventListener("close", () => {
+  if (!adding) return;
+  const { resolve, timer, arm, outcome } = adding;
+  adding = null;
+  clearTimeout(timer);
+  clearTimeout(arm);
+  resolve(outcome);
+});
+$("add-agent-form").onsubmit = (e) => {
+  e.preventDefault();
+  if ($("add-agent-go").disabled || !adding) return;
+  adding.outcome = "added";
+  addDialog.close();
+};
+$("add-agent-cancel").onclick = () => addDialog.close();
+
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
 function badges(f) {
   const out = [];
@@ -348,11 +472,15 @@ $("agent-heading").onclick = () => {
   const profiles = group
     ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "agent", text: `${titleOf(a)}'s profile`, onClick: () => openApp(a) }))
     : agent ? [{ icon: "agent", text: "Its profile", onClick: () => openApp(agent) }] : [];
+  // each agent's own desktop: a group's agents each have one to pick from
+  const screens = !state.computer ? [] : group
+    ? agentsOf(name).map((id) => state.agents.get(id)?.fragment).filter(Boolean).map((a) => ({ icon: "screen", text: `${titleOf(a)}'s screen`, onClick: () => openScreen(a) }))
+    : agent ? [{ icon: "screen", text: "Its screen", onClick: () => openScreen(agent) }] : [];
   openMenu($("agent-heading"), [
     { icon: "rename", text: "Rename…", onClick: () => rename(name) },
     { icon: "invite", text: "Invite…", onClick: () => share(name) },
     ...profiles,
-    ...(state.computer ? [{ icon: "screen", text: group ? "Their computer's screen" : "Its computer's screen", onClick: () => openScreen() }] : []),
+    ...screens,
     archiveItem(name),
   ]);
 };
@@ -520,20 +648,25 @@ addEventListener("message", (e) => {
   show({ key: `file:${url.href}`, title: path.split("/").pop(), icon: paneIcon("folder"), body: frame });
 });
 
-// ---- its computer's screen: a port of its own origin, through a ticket ----
-async function openScreen() {
-  if (!state.computer) return;
+// ---- an agent's screen: its own desktop, a port of its computer's own
+// origin, through a ticket that lands on the agent's page (docs/computers.md, Ports) ----
+async function openScreen(agent) {
+  if (!state.computer || !agent) return;
   try {
-    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, {});
-    const frame = frameOf(t.url, "Its computer's screen");
-    show({ key: "screen", title: "Computer", subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
+    const t = await api("POST", `/api/computers/${seg(state.computer.computer)}/ports/6080/ticket`, { path: `/?agent=${encodeURIComponent(agent)}` });
+    const frame = frameOf(t.url, `${titleOf(agent)}'s screen`);
+    show({ key: `screen:${agent}`, title: titleOf(agent), subtitle: "screen", icon: paneIcon("screen"), body: frame, persist: false });
   } catch (e) {
     notice("Its screen did not open", e.message);
   }
 }
 
 // ---- making an agent: its fragment, its computer, its chat (decision 10, 16) ----
-const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "agent";
+// A label from a name, short enough that with freeLabel's `-<n>` and a
+// chat's `-chat` its address fits under any username (docs/api.md, Names:
+// every username leaves 29 bytes for labels); never ending in a dash.
+const LABEL_ROOM = 29;
+const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, LABEL_ROOM - "-99-chat".length).replace(/-+$/, "") || "agent";
 function freeLabel(base) {
   const taken = new Set(state.fragments.map((f) => labelOf(f.name)));
   for (let i = 1; ; i++) {
@@ -830,16 +963,153 @@ function computerOf() {
 }
 async function warmComputer() {
   const c = await computerOf();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
   return c;
 }
+// A computer that won't start is not woken by the person's presence: its
+// starts kept failing, so the next is theirs to ask for (Restart, in its
+// notice), never one every visit pays for unasked.
 function prewake() {
   const c = state.computer;
-  if (!c || document.hidden || Date.now() - woke < 60_000 || c.phase === "awake" || c.phase === "starting") return;
+  if (!c || document.hidden || Date.now() - woke < 60_000 || ["awake", "starting", "wont_wake"].includes(c.phase)) return;
   woke = Date.now();
-  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then((v) => { state.computer = v; }).catch(() => {});
+  api("POST", `/api/computers/${seg(c.computer)}/wake`, {}).then(computerIs).catch(() => {});
 }
 document.addEventListener("visibilitychange", prewake);
+// The computer as the platform last answered: shown at once.
+function computerIs(v) {
+  if (!v?.computer) return;
+  state.computer = v;
+  renderComputer();
+}
+
+// ---- what the person should know of their computer (docs/computers.md,
+// "What its owner is told"): the view's notices, the most pressing first,
+// each in plain words with the one way back to working. Its computer tells
+// this page's list socket when they change, so they show while there is
+// still time. Times are the person's own clock. ----
+const clock = (ms) => {
+  const d = new Date(ms);
+  const today = d.toDateString() === new Date().toDateString();
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return today ? time : `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+};
+const span = (ms) => {
+  const m = Math.max(1, Math.round(ms / 60_000));
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h} hour${h === 1 ? "" : "s"}` : `${Math.round(h / 24)} days`;
+};
+// why a computer won't start, in plain words (the platform's own words
+// stay beside them, for whoever helps)
+function wontStart(why) {
+  if (/not ready within/.test(why)) return "It didn't finish starting within a few minutes.";
+  if (/kept stopping/.test(why)) return "It kept stopping as soon as it started.";
+  if (/check/.test(why)) return "Its saved files didn't pass their check.";
+  if (/restore|archive|backup/i.test(why)) return "Its save couldn't be restored.";
+  return "It couldn't start.";
+}
+const LOST = {
+  crash: "Your computer stopped unexpectedly",
+  unsaved: "Your computer was stopped because it couldn't save",
+  restart: "Your restart couldn't save first",
+  unusable: "Your computer's newest save couldn't be restored",
+};
+// a restart the person asked for in this page, and of which start: a
+// computer that still won't start after one says where to get help
+let restarted = 0;
+function noticeRow(n) {
+  const row = el("div", "computer-notice");
+  row.dataset.kind = n.kind;
+  const copy = el("div", "notice-copy");
+  const actions = el("div", "notice-actions");
+  const say = (title, text, detail) => {
+    copy.append(el("strong", null, title), el("p", null, text));
+    if (detail) copy.append(el("p", "notice-detail", detail));
+  };
+  const restart = (label) => {
+    const b = el("button", "primary", label);
+    b.type = "button";
+    b.dataset.action = "restart";
+    b.onclick = () => restartComputer(b);
+    actions.append(b);
+  };
+  if (n.kind === "wont_wake") {
+    row.classList.add("warn");
+    const again = restarted && state.computer?.generation > restarted;
+    say(
+      again ? "Your computer still won't start" : "Your computer won't start",
+      `${wontStart(n.why)} Your agents can't answer until it does.${again ? " If restarting again doesn't help, get help and give them the details below." : ""}`,
+      `${state.computer?.computer ?? ""}: ${n.why}`,
+    );
+    restart(again ? "Try again" : "Restart");
+    if (again && state.support) {
+      const help = el("a", null, "Get help");
+      help.href = state.support;
+      help.target = "_blank";
+      help.rel = "noopener";
+      actions.append(help);
+    }
+  } else if (n.kind === "unsaved") {
+    row.classList.add("warn");
+    const then = n.save ? "starts again from that save" : "starts again with nothing kept";
+    const stop = n.stopsAt ? ` If it still can't by ${clock(n.stopsAt)}, it stops and ${then}.` : "";
+    say("Your computer can't save right now", `It hasn't saved since ${clock(n.since)}, so what its agents did after that isn't kept yet. It keeps trying.${stop} Restarting tries to save first.`, n.why);
+    restart("Restart now");
+  } else if (n.kind === "went_back") {
+    const back = n.save && n.savedAt
+      ? `${n.pending ? "It goes back" : "It went back"} to its save of ${clock(n.savedAt)}${n.endedAt ? `, ${span(n.endedAt - n.savedAt)} before it stopped` : ""}.`
+      : `${n.pending ? "It starts again" : "It started again"} with nothing kept from before.`;
+    say(LOST[n.cause] ?? "Your computer went back to an older save", `${back} Work on the computer after that is gone; your chats keep everything that was said.`);
+    const ok = el("button", null, "OK");
+    ok.type = "button";
+    ok.dataset.action = "seen";
+    ok.onclick = () => sawNotice(n.life, ok);
+    actions.append(ok);
+  } else return null;
+  row.append(copy, actions);
+  return row;
+}
+function renderComputer() {
+  const box = $("computer-notices");
+  const rows = (state.computer?.notices ?? []).map(noticeRow).filter(Boolean);
+  box.replaceChildren(...rows);
+  box.hidden = !rows.length;
+}
+// Restart: the computer saves if it can, then starts fresh from its newest
+// good save. It names the start the person saw, so pressed twice (or in two
+// tabs) it restarts once. What went wrong is said beside the button.
+async function restartComputer(button) {
+  const c = state.computer;
+  if (!c) return;
+  const buttons = [...document.querySelectorAll("[data-action=restart]")];
+  for (const b of buttons) b.disabled = true;
+  const label = button.textContent;
+  button.textContent = "Restarting…";
+  try {
+    restarted = c.generation || 0;
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/restart`, { generation: c.generation || 0 }));
+    if (state.page === "Settings") await openSettings(false);
+  } catch (e) {
+    button.textContent = label;
+    const said = button.parentElement.querySelector(".form-error") ?? el("p", "form-error");
+    said.textContent = `It did not restart: ${e.message}`;
+    button.parentElement.append(said);
+  } finally {
+    for (const b of buttons) b.disabled = false;
+  }
+}
+// The person read what a start went back to: told no more, anywhere.
+async function sawNotice(life, button) {
+  const c = state.computer;
+  if (!c) return;
+  button.disabled = true;
+  try {
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/notices/seen`, { life }));
+  } catch {
+    computerIs(await api("GET", `/api/computers/${seg(c.computer)}`).catch(() => null));
+  }
+}
 function renderUpdate() {
   const c = state.computer;
   const due = !!(c && state.defaultImage && c.image !== state.defaultImage);
@@ -855,7 +1125,7 @@ $("update-go").onclick = async () => {
   try {
     await api("PUT", `/api/computers/${seg(c.computer)}/image`, { image: state.defaultImage });
     await api("POST", `/api/computers/${seg(c.computer)}/sleep`, {});
-    state.computer = await api("POST", `/api/computers/${seg(c.computer)}/wake`, {});
+    computerIs(await api("POST", `/api/computers/${seg(c.computer)}/wake`, {}));
     $("update-confirm").hidden = true;
     $("update-pill").hidden = false;
     renderUpdate();
@@ -883,6 +1153,8 @@ addEventListener("popstate", () => {
 const usd = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD" });
 // what a standing short of `ok` stops, and why (crates/core/src/ledger.rs `Refused`)
 const STOPPED = { agents_stopped: "Your agents are stopped", read_only: "Your fragments are read-only, and your agents are stopped" };
+// a computer's phase, as a person reads it (proto's `ComputerPhase`)
+const PHASE = { asleep: "Asleep", starting: "Starting", awake: "Awake", sleeping: "Going to sleep", wont_wake: "Won't start" };
 const WHY = {
   guest: "a guest has no agents",
   seat_canceled: "the seat was canceled",
@@ -982,14 +1254,36 @@ async function openSettings(push = true) {
   const computer = section(
     "Computer",
     ...(c
-      ? [line("State", c.phase.replace("_", " ")), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
+      ? [line("State", PHASE[c.phase] ?? c.phase), line("Version", c.image), ...(c.why ? [el("p", "settings-warning", c.why)] : [])]
       : [el("p", "muted", "Your computer starts with your first agent.")]),
   );
-  if (c) {
-    const screen = el("button", "quiet", "Open its screen");
+  // each agent's own desktop
+  for (const a of c ? state.agents.values() : []) {
+    const screen = el("button", "quiet", `Open ${titleOf(a.fragment)}'s screen`);
     screen.type = "button";
-    screen.onclick = openScreen;
+    screen.onclick = () => openScreen(a.fragment);
     computer.append(screen);
+  }
+  // the way back to working when something is wrong with it: asked once
+  // more before it cuts what its agents are doing
+  if (c) {
+    computer.append(el("p", "muted", "Restarting saves your computer if it can, then starts it fresh from that save. Anything its agents are doing stops."));
+    const row = el("div", "settings-actions");
+    const go = el("button", "quiet", "Restart computer");
+    go.type = "button";
+    go.dataset.action = "restart-ask";
+    go.onclick = () => {
+      const sure = el("button", "quiet", "Restart now");
+      sure.type = "button";
+      sure.dataset.action = "restart";
+      sure.onclick = () => restartComputer(sure);
+      const cancel = el("button", "quiet", "Cancel");
+      cancel.type = "button";
+      cancel.onclick = () => row.replaceChildren(go);
+      row.replaceChildren(sure, cancel);
+    };
+    row.append(go);
+    computer.append(row);
   }
   const agents = section("Agents");
   const mine = [...state.agents.values()];
@@ -1125,7 +1419,7 @@ function connectionsSection(linked, uses) {
           const next = allowed ? now.filter((x) => x !== p.provider) : [...new Set([...now, p.provider])];
           const list = all.every((x) => next.includes(x)) ? null : next;
           try {
-            state.computer = await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list });
+            computerIs(await api("PUT", `/api/computers/${seg(state.computer.computer)}/agents/${seg(a.fragment)}/connections`, { connections: list }));
             state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
           } catch (e) {
             notice("That was not changed", e.message);
@@ -1404,11 +1698,14 @@ async function load(changed = false) {
   state.fragments = list.fragments ?? [];
   state.computer = computers.computers?.[0] ?? null;
   state.defaultImage = computers.defaultImage ?? null;
+  state.support = computers.support ?? null;
   state.agents = new Map((state.computer?.agents ?? []).map((a) => [a.identity, a]));
   renderChats();
   renderApps();
   renderHeading();
   renderUpdate();
+  renderComputer();
+  rosterChanged();
   const touched = changed ? new Set(state.fragments.filter((f) => before.get(f.name) !== JSON.stringify(f)).map((f) => f.name)) : null;
   cardsLoad.wait = 0;
   loadCards(touched).catch(() => {});

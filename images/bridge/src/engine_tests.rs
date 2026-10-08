@@ -392,6 +392,55 @@ fn a_restart_starts_nothing_twice() {
     assert_eq!(e2.state().boot, 2);
 }
 
+/// Goal (a rollback of `/data`): the turns a life reads again that another
+/// life ran (their claims answered 409) are ones its runtime does not
+/// remember: the agent's next turn in that chat carries them
+/// (`TurnStart::forgotten`, the newest `NOTE_FORGOTTEN_MAX` and how many
+/// more), said once; another chat's turn, or another agent's, carries none.
+/// Method: a life's claims answered as another's, then its own.
+#[test]
+fn turns_another_life_ran_are_told_once_to_the_next_turn() {
+    let a = agent("juniper");
+    let b = agent("rowan");
+    let v = view(&[&a, &b]);
+    let mut e = engine(&[a.clone(), b.clone()]);
+    let theirs = |e: &mut Engine, s: Step| -> Vec<String> {
+        let claims: Vec<String> = s.effects.iter().filter_map(|x| match x { Effect::Claim { turn, .. } => Some(turn.clone()), _ => None }).collect();
+        for turn in &claims {
+            let r = e.step(Input::Claimed { turn: turn.clone(), answer: ClaimAnswer::Theirs }, T0 + 1);
+            assert!(started(&r).is_none(), "another life's turn never runs here");
+            let owed: Vec<(String, String)> = r.effects.iter().filter_map(|x| match x { Effect::Owed { turn, id, .. } => Some((turn.clone(), id.clone())), _ => None }).collect();
+            for (turn, id) in owed {
+                // a 409 too: that life ended it
+                e.step(Input::Posted { turn, id }, T0 + 1);
+            }
+        }
+        claims
+    };
+    // the backlog a rollback sent the cursor back over: six of juniper's turns
+    let mut ran = vec![];
+    for seq in 1..=(limits::NOTE_FORGOTTEN_MAX as u64 + 2) {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "id:paul", json!({ "text": format!("old {seq}") })), view: Some(v.clone()), since: 0 }, T0);
+        ran.extend(theirs(&mut e, s));
+    }
+    assert_eq!(ran.len(), limits::NOTE_FORGOTTEN_MAX + 2);
+    // rowan's own turn there is told nothing of juniper's
+    let r = said(&mut e, &b, &v, 20, "id:paul", json!({ "text": "@rowan hi", "to": [b.identity] }), T0 + 2);
+    let rowans = started(&r).expect("rowan's runs");
+    assert!(rowans.forgotten.is_empty() && rowans.forgotten_more == 0, "{rowans:?}");
+    // juniper's next turn there is told of the newest four, and two more
+    let r = said(&mut e, &a, &v, 21, "id:paul", json!({ "text": "and now?" }), T0 + 3);
+    let next = started(&r).expect("juniper's runs");
+    assert_eq!(next.forgotten, ran[2..].to_vec(), "the newest, oldest first");
+    assert_eq!(next.forgotten_more, 2);
+    ev(&mut e, Event::Reply { turn: next.turn.clone(), part: 1, text: "ok".into() }, T0 + 4);
+    ev(&mut e, Event::End { turn: next.turn.clone(), outcome: Outcome::Idle }, T0 + 4);
+    // said once: the turn after it is told nothing
+    let r = said(&mut e, &a, &v, 22, "id:paul", json!({ "text": "again" }), T0 + 5);
+    let after = started(&r).expect("runs");
+    assert!(after.forgotten.is_empty() && after.forgotten_more == 0, "{after:?}");
+}
+
 /// Invalid state: a turn past its channel's cursor, or a wrong id, is
 /// refused at load rather than trusted.
 #[test]
@@ -637,6 +686,292 @@ fn a_question_waits_as_long_as_a_prompt() {
     // asker's next message is a turn of its own, queued behind it
     let after = said(&mut e, &a, &v, 4, "id:paul", json!({ "text": "never mind" }), T0 + 3_600_005);
     assert!(commands(&after).is_empty() && !e.state().turns.values().any(|t| t.asking), "queued, not told");
+}
+
+// ---- agents asking each other: the hop the bridge counts, the budget ----
+
+fn rec_at(seq: u64, at: i64, principal: &str, body: Value) -> Record {
+    Record { at, ..rec(seq, principal, body) }
+}
+
+/// One record of a chat read by each agent's follower there, as the driver
+/// feeds it: the turns it started, with their hops.
+fn to_all(e: &mut Engine, agents: &[&Agent], v: &ChatView, chat: &str, record: Record, now: u64) -> Vec<(TurnStart, u32)> {
+    let mut out = Vec::new();
+    for a in agents {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.into(), record: record.clone(), view: Some(v.clone()), since: 0 }, now);
+        if let Some(t) = started(&answered(e, s, now)) {
+            let hop = e.state().turns[&t.turn].hop;
+            out.push((t, hop));
+        }
+    }
+    out
+}
+
+/// The turn says `text` and ends: the reply it posts, its end answered (so
+/// the turn is let go before anyone reads the reply).
+fn reply_and_end(e: &mut Engine, turn: &str, text: &str, now: u64) -> Value {
+    ev(e, Event::Reply { turn: turn.into(), part: 1, text: text.into() }, now);
+    let end = ev(e, Event::End { turn: turn.into(), outcome: Outcome::Idle }, now);
+    assert!(!e.state().turns.contains_key(turn), "let go once its end was answered");
+    posts(&end).into_iter().find(|(id, _)| id.starts_with("rp:")).expect("its reply").1
+}
+
+/// Two agents told to hand off to each other until something stops them:
+/// the turns they ran, with their hops. Through the bridge, each turn's
+/// reply names the other (read after its turn was let go); `around`, each
+/// turn posts its hand-off itself while it runs, as the CLI or the API
+/// does: no `hop`, no `turn`.
+fn ping_pong(around: bool) -> Vec<(String, u32)> {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let mut ran = Vec::new();
+    let mut next = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(1, 10, "id:paul", json!({ "text": "keep handing off", "to": ["id:juniper"] })), T0);
+    // bounded: each pass reads one more record, and the hop cap ends it
+    for seq in 2..20u64 {
+        let Some((t, hop)) = next.pop() else { break };
+        assert!(next.is_empty(), "one turn a record");
+        ran.push((t.agent.name.clone(), hop));
+        let other = if t.agent.name == "juniper" { "rowan" } else { "juniper" };
+        let by = format!("id:{}", t.agent.name);
+        let text = format!("over to you @{other}");
+        next = if around {
+            let posted = json!({ "text": text, "to": [format!("id:{other}")] });
+            let started = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, posted), T0 + seq);
+            ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + seq);
+            started
+        } else {
+            let reply = reply_and_end(&mut e, &t.turn, &text, T0 + seq);
+            assert_eq!(reply["to"], json!([format!("id:{other}")]), "a mention of the other agent hands off");
+            to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, reply), T0 + seq)
+        };
+    }
+    ran
+}
+
+/// A turn just ended counts only for the reply that names it: an agent
+/// handed back to in a chat of two, its turn there ended, then asked again
+/// by its person elsewhere, asks the other with the CLI from that new turn
+/// at one hop, not one past the turn it finished. Invalid: a post naming
+/// the ended turn (a reply read late, or a forgery while it runs no turn)
+/// counts from it.
+#[test]
+fn an_ended_turn_counts_only_for_the_reply_that_names_it() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let (talk, pair) = ("talk.paul", "juniper-rowan.paul");
+    // in the pair chat: the person to juniper, juniper to rowan, rowan back to juniper
+    let j0 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(1, 10, "id:paul", json!({ "text": "start", "to": ["id:juniper"] })), T0);
+    let to_r = reply_and_end(&mut e, &j0[0].0.turn, "@rowan yours", T0 + 1);
+    let r1 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(2, 11, "id:juniper", to_r), T0 + 2);
+    let to_j = reply_and_end(&mut e, &r1[0].0.turn, "@juniper back to you", T0 + 3);
+    let j2 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(3, 12, "id:rowan", to_j), T0 + 4);
+    assert_eq!(j2[0].1, 2);
+    let j2_turn = j2[0].0.turn.clone();
+    reply_and_end(&mut e, &j2_turn, "thanks", T0 + 5);
+    // its person asks it again in talk: a turn at hop 0 there
+    let t0 = to_all(&mut e, &[&j, &r], &v, talk, rec_at(1, 13, "id:paul", json!({ "text": "ask rowan again", "to": ["id:juniper"] })), T0 + 6);
+    assert_eq!(t0[0].1, 0);
+    // from it, `fragment ask` into the pair chat: one hop, not three
+    let asked = to_all(&mut e, &[&j, &r], &v, pair, rec_at(4, 14, "id:juniper", json!({ "text": "and now?", "to": ["id:rowan"] })), T0 + 7);
+    assert_eq!(asked.iter().map(|(t, h)| (t.agent.name.as_str(), *h)).collect::<Vec<_>>(), vec![("rowan", 1)]);
+    e.step(Input::Runtime(Event::End { turn: asked[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    e.step(Input::Runtime(Event::End { turn: t0[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 8);
+    // naming the ended hop-2 turn (in no turn now) counts from it
+    let named = to_all(&mut e, &[&j, &r], &v, pair, rec_at(5, 15, "id:juniper", json!({ "text": "late", "to": ["id:rowan"], "turn": j2_turn })), T0 + 9);
+    assert_eq!(named[0].1, limits::HOPS_MAX, "one past the turn it names");
+}
+
+/// Goal (decision 8): two agents that hand off to each other stop at the
+/// hop cap: A, B, A, B, and the fourth hand-off starts nothing. Invalid:
+/// the same loop posted around the bridge (no `hop`, no `turn`: the CLI,
+/// the API) stops at the same place, because the answering bridge counts
+/// the hops from the turns it runs, not from what a record claims.
+#[test]
+fn a_hand_off_loop_stops_at_the_cap() {
+    let want: Vec<(String, u32)> = vec![("juniper".into(), 0), ("rowan".into(), 1), ("juniper".into(), 2), ("rowan".into(), limits::HOPS_MAX)];
+    assert_eq!(ping_pong(false), want, "through the bridge");
+    assert_eq!(ping_pong(true), want, "around it: a reset that no longer resets");
+}
+
+/// Goal: a post an agent of this computer makes around the bridge counts
+/// from the turn it is in. Valid: from its turn here, one past it; from a
+/// turn in another chat (`fragment ask` into a chat of two agents), one past
+/// that. Invalid: a claimed `hop: 0` from deep in a chain changes nothing,
+/// and a claim deeper than the bridge's count is kept. Out of any turn
+/// (something it left running), it is the last hop: answered once, and the
+/// answer hands on nothing.
+#[test]
+fn a_post_around_the_bridge_counts_from_its_turn() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let talk = "talk.paul";
+    let pair = "juniper-rowan.paul";
+    // juniper runs a turn in talk at hop 0 (its person asked)
+    let t = to_all(&mut e, &[&j, &r], &v, talk, rec_at(1, 10, "id:paul", json!({ "text": "ask rowan for me", "to": ["id:juniper"] })), T0);
+    let jt = t[0].0.turn.clone();
+    // ... and asks rowan in their own chat with the CLI: no hop, no turn
+    let asked = to_all(&mut e, &[&j, &r], &v, pair, rec_at(1, 11, "id:juniper", json!({ "text": "what's the weather?", "to": ["id:rowan"] })), T0 + 1);
+    assert_eq!(asked.len(), 1);
+    assert_eq!((asked[0].0.agent.name.as_str(), asked[0].1), ("rowan", 1), "one past juniper's turn in talk");
+    // a claim of hop 0 from a deep turn resets nothing
+    e.step(Input::Runtime(Event::End { turn: jt, outcome: Outcome::Idle }), T0 + 2);
+    let rt = asked[0].0.turn.clone();
+    reply_and_end(&mut e, &rt, "sunny", T0 + 3);
+    let deep = to_all(&mut e, &[&j, &r], &v, pair, rec_at(2, 12, "id:paul", json!({ "text": "@juniper and @rowan, chat", "to": ["id:juniper", "id:rowan"] })), T0 + 4);
+    assert_eq!(deep.iter().map(|(t, h)| (t.agent.name.as_str(), *h)).collect::<Vec<_>>(), vec![("juniper", 0), ("rowan", 0)], "a person's message is hop 0");
+    // drive juniper to hop 3 in the pair chat: rowan's turn hands to juniper twice
+    let (jt0, rt0) = (deep[0].0.turn.clone(), deep[1].0.turn.clone());
+    e.step(Input::Runtime(Event::End { turn: jt0, outcome: Outcome::Idle }), T0 + 5);
+    let to_j = reply_and_end(&mut e, &rt0, "@juniper yours", T0 + 6);
+    let j1 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(3, 13, "id:rowan", to_j), T0 + 7);
+    assert_eq!(j1[0].1, 1);
+    let to_r = reply_and_end(&mut e, &j1[0].0.turn, "@rowan back", T0 + 8);
+    let r2 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(4, 14, "id:juniper", to_r), T0 + 9);
+    assert_eq!(r2[0].1, 2);
+    ev(&mut e, Event::Reply { turn: r2[0].0.turn.clone(), part: 1, text: "@juniper last".into() }, T0 + 10);
+    let end = ev(&mut e, Event::End { turn: r2[0].0.turn.clone(), outcome: Outcome::Idle }, T0 + 10);
+    let to_j = posts(&end).into_iter().find(|(id, _)| id.starts_with("rp:")).expect("its reply").1;
+    let j3 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(5, 15, "id:rowan", to_j), T0 + 11);
+    assert_eq!(j3[0].1, limits::HOPS_MAX);
+    // juniper, in its hop-3 turn, posts to rowan with the API, claiming 0
+    let reset = to_all(&mut e, &[&j, &r], &v, pair, rec_at(6, 16, "id:juniper", json!({ "text": "again?", "to": ["id:rowan"], "hop": 0 })), T0 + 12);
+    assert!(reset.is_empty(), "past the cap whatever it claims: {reset:?}");
+    // a claim deeper than the count is kept
+    let claimed = to_all(&mut e, &[&j, &r], &v, pair, rec_at(7, 17, "id:juniper", json!({ "text": "deep", "to": ["id:rowan"], "hop": 9 })), T0 + 13);
+    assert!(claimed.is_empty());
+    e.step(Input::Runtime(Event::End { turn: j3[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 14);
+
+    // in no turn, long after its last one here: the last hop, once
+    let later = T0 + 14 + limits::ENDED_HOPS_MS + 1;
+    let stray = to_all(&mut e, &[&j, &r], &v, pair, rec_at(8, 18, "id:juniper", json!({ "text": "from a loop I left running", "to": ["id:rowan"] })), later);
+    assert_eq!(stray.len(), 1);
+    assert_eq!(stray[0].1, limits::HOPS_MAX, "answered once");
+    let back = reply_and_end(&mut e, &stray[0].0.turn, "@juniper ok", later + 1);
+    assert!(to_all(&mut e, &[&j, &r], &v, pair, rec_at(9, 19, "id:rowan", back), later + 2).is_empty(), "its answer hands on nothing");
+}
+
+/// Restart: what the bridge knew of its ended turns goes with its life, so
+/// a reply the next life reads first is the last hop (answered, handing on
+/// nothing), never a reset to the first.
+#[test]
+fn a_reply_read_by_the_next_life_resets_nothing() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let t = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(1, 10, "id:paul", json!({ "text": "hi", "to": ["id:juniper"] })), T0);
+    let reply = reply_and_end(&mut e, &t[0].0.turn, "@rowan over to you", T0 + 1);
+    // juniper's follower read it (its own); the life ends before rowan's did
+    e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk.paul".into(), record: rec_at(2, 11, "id:juniper", reply.clone()), view: Some(v.clone()), since: 0 }, T0 + 2);
+    let saved = e.state().clone();
+    let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    e2.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 3);
+    e2.recover(T0 + 3);
+    e2.step(Input::Runtime(Event::Connected(true)), T0 + 3);
+    let s = e2.step(Input::Record { agent: r.fragment.clone(), fragment: "talk.paul".into(), record: rec_at(2, 11, "id:juniper", reply), view: Some(v.clone()), since: 0 }, T0 + 4);
+    let rt = started(&answered(&mut e2, s, T0 + 4)).expect("rowan answers it");
+    assert_eq!(e2.state().turns[&rt.turn].hop, limits::HOPS_MAX);
+}
+
+/// Goal: a chat's agents start at most AGENT_TURNS_PER_CHAT_MAX turns of
+/// each other in the window, and the one past it is refused with both its
+/// records, its end saying why (the chat shows it). A person is never
+/// counted, nor refused. Replay: a record read again spends nothing.
+/// Restart: the count is kept. The window slides by the records' times.
+#[test]
+fn a_chats_agents_have_a_budget() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let max = limits::AGENT_TURNS_PER_CHAT_MAX as u64;
+    let at0 = 1_000_000i64;
+    // rowan, in no turn, asks juniper again and again (each the last hop)
+    let ask = |seq: u64, at: i64| rec_at(seq, at, "id:rowan", json!({ "text": "again", "to": ["id:juniper"] }));
+    for seq in 1..=max {
+        let s = to_all(&mut e, &[&j], &v, "talk.paul", ask(seq, at0 + seq as i64), T0 + seq);
+        assert_eq!(s.len(), 1, "within the budget: {seq}");
+        e.step(Input::Runtime(Event::End { turn: s[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + seq);
+    }
+    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    // replay: the last one read again spends nothing
+    assert!(to_all(&mut e, &[&j], &v, "talk.paul", ask(max, at0 + max as i64), T0 + max).is_empty());
+    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    // restart: the count is kept
+    let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
+    let mut e = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
+    e.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 100);
+    e.recover(T0 + 100);
+    e.step(Input::Runtime(Event::Connected(true)), T0 + 100);
+    // past it: refused, with both records, saying why
+    let over = e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk.paul".into(), record: ask(max + 1, at0 + max as i64 + 1), view: Some(v.clone()), since: 0 }, T0 + 101);
+    let over = answered(&mut e, over, T0 + 101);
+    assert!(started(&over).is_none());
+    assert_eq!(kinds(&over), vec!["turn.start", "turn.end"]);
+    assert_eq!(posts(&over)[1].1["error"], refused_budget());
+    // a person is never counted, nor refused
+    let person = to_all(&mut e, &[&j], &v, "talk.paul", rec_at(max + 2, at0 + max as i64 + 2, "id:paul", json!({ "text": "still there?" })), T0 + 102);
+    assert_eq!(person.len(), 1);
+    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    e.step(Input::Runtime(Event::End { turn: person[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 102);
+    // another chat has a budget of its own
+    let other = to_all(&mut e, &[&j], &v, "other.paul", ask(1, at0 + max as i64 + 3), T0 + 103);
+    assert_eq!(other.len(), 1);
+    e.step(Input::Runtime(Event::End { turn: other[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 103);
+    // the window slides: once the first is older than it, one more runs
+    let later = at0 + 1 + limits::AGENT_TURNS_WINDOW_MS;
+    let slid = to_all(&mut e, &[&j], &v, "talk.paul", ask(max + 3, later), T0 + 104);
+    assert_eq!(slid.len(), 1, "one ran out of the window");
+    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max, "and is let go");
+    assert!(e.state().agent_turns["talk.paul"].iter().all(|t| *t > later - limits::AGENT_TURNS_WINDOW_MS));
+}
+
+/// Invalid state: a budget out of order or past its bound, or a routine at
+/// a hop, is refused at load.
+#[test]
+fn a_corrupt_budget_is_refused() {
+    let mut s = State::default();
+    s.agent_turns.insert("talk.paul".into(), vec![3, 2]);
+    assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "out of order");
+    let mut s = State::default();
+    s.agent_turns.insert("talk.paul".into(), (0..=limits::AGENT_TURNS_PER_CHAT_MAX as i64).collect());
+    assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "past the bound");
+    let mut s = State::default();
+    s.agent_turns.insert("talk.paul".into(), vec![]);
+    assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "an empty one is never kept");
+    // a state from before the budget loads, with none
+    let mut old = serde_json::to_value(State::default()).expect("serializes");
+    old.as_object_mut().expect("an object").remove("agent_turns");
+    let old: State = serde_json::from_value(old).expect("an earlier bridge's state loads");
+    assert!(old.agent_turns.is_empty());
+}
+
+/// Goal: an agent's `tasks` hears its own fragment (its cron) and its
+/// owner. Invalid: another agent, acting for the owner (who may post there),
+/// starts no routine and announces no join.
+#[test]
+fn tasks_hear_only_the_owner_and_the_fragment() {
+    let a = agent("juniper");
+    let mut e = engine(std::slice::from_ref(&a));
+    let task = |seq, principal: &str, body| Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), kind: "message".into(), body };
+    let routine = json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" });
+    let feed = |e: &mut Engine, r: Record| {
+        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: r, view: None, since: 0 }, T0);
+        answered(e, s, T0)
+    };
+    let cron = feed(&mut e, task(1, "npub1juniperfragmentkey", routine.clone()));
+    let t = started(&cron).expect("its cron's routine runs");
+    assert_eq!(t.asker, "id:paul", "asked by its owner");
+    e.step(Input::Runtime(Event::End { turn: t.turn, outcome: Outcome::Idle }), T0);
+    let rowan = feed(&mut e, task(2, "id:rowan", routine.clone()));
+    assert!(rowan.effects.is_empty(), "another agent starts no routine: {:?}", rowan.effects);
+    assert_eq!(e.cursor(&a.fragment, &a.fragment, "tasks"), 2, "the cursor passes it");
+    let joined = feed(&mut e, task(3, "id:rowan", json!({ "kind": "joined", "fragment": "x.paul" })));
+    assert!(joined.effects.is_empty());
+    let owner = feed(&mut e, task(4, "id:paul", routine));
+    assert!(started(&owner).is_some(), "its owner's runs");
 }
 
 // ---- across lives (docs/explorations/pi-durable.md, rung 1) ----
