@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod admin;
 mod agent_ask;
 mod agent_restart;
 mod agent_smoke;
@@ -105,6 +106,8 @@ const LANES: &[Lane] = &[
     orgs::orgs,
     billing::billing,
     trials::trials,
+    admin::admin,
+    admin::admin_page,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -141,7 +144,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe", "orgs", "billing", "trials",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe", "orgs", "billing", "trials", "admin", "admin-page",
     ],
 ];
 

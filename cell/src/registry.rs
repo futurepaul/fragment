@@ -43,6 +43,7 @@ use crate::js;
 /// The identities one `/profiles` answers.
 pub(crate) const PROFILES_MAX: usize = 64;
 
+pub(crate) mod admin;
 pub(crate) mod billing;
 pub(crate) mod calls;
 mod invites;
@@ -109,6 +110,7 @@ impl DurableObject for RegistryCell {
         state.storage().sql().exec(billing::SCHEMA, None).expect("the billing schema applies");
         state.storage().sql().exec(seats::SCHEMA, None).expect("the seats' schema applies");
         state.storage().sql().exec(trials::SCHEMA, None).expect("the trials' schema applies");
+        state.storage().sql().exec(admin::SCHEMA, None).expect("the admin log's schema applies");
         let cfg = Config::from_env(&env);
         assert!(cfg.signins_pending_max >= 1, "a fresh sign-in always fits under the cap");
         RegistryCell { state, env, cfg, down: Cell::new(false), calls: Cell::new(0), hold_ms: Cell::new(0) }
@@ -688,6 +690,9 @@ impl RegistryCell {
             return answer;
         }
         if let Some(answer) = self.trials_route(&path, &bytes) {
+            return answer;
+        }
+        if let Some(answer) = self.admin_route(&path, &bytes) {
             return answer;
         }
         match path.as_str() {

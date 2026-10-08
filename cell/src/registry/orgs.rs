@@ -61,6 +61,7 @@ impl Call for CompSeatCall {
 /// `POST /orgs/comp/kind`: an operator changes a comped seat's kind.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CompKind {
+    pub by: String,
     pub seat: String,
     pub kind: SeatKind,
 }
@@ -74,6 +75,7 @@ impl Call for CompKind {
 /// place, seatless; anyone else's row goes. Answers the row as it was.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct EndComp {
+    pub by: String,
     pub seat: String,
 }
 
@@ -358,6 +360,7 @@ impl RegistryCell {
                     if let Some(p) = &m.person {
                         self.queue_sync(p)?;
                     }
+                    self.log_admin(&b.by, "comp", &m.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
                     let m = self.member(&m.id)?;
                     return Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: true, mailed: false });
                 }
@@ -375,6 +378,7 @@ impl RegistryCell {
         if let Some(p) = &person {
             self.queue_sync(p)?;
         }
+        self.log_admin(&b.by, "comp", &m.id, &format!("{} seat for {email} in {}", kind.as_str(), org_row.name))?;
         Ok(Comped { seat: m.wire(None)?, org: org_row.reference(), created: true, mailed: false })
     }
 
@@ -395,6 +399,7 @@ impl RegistryCell {
             if let Some(p) = &m.person {
                 self.queue_sync(p)?;
             }
+            self.log_admin(&b.by, "comp-kind", &m.id, &format!("{} to {} for {}", kind.as_str(), b.kind.as_str(), m.email))?;
         }
         self.member(&m.id)?.wire(None)
     }
@@ -409,6 +414,7 @@ impl RegistryCell {
         if let Some(p) = &m.person {
             self.queue_sync(p)?;
         }
+        self.log_admin(&b.by, "comp-end", &m.id, &format!("{} seat of {}", m.seat.as_deref().unwrap_or("?"), m.email))?;
         m.wire(None)
     }
 

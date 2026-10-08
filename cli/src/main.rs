@@ -181,7 +181,9 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
-    /// The deployment's operators: an operator key, and wiping a person
+    /// The deployment's operators: an operator key, wiping a person, and
+    /// the admin (people, orgs, comped seats, trial codes, billing's
+    /// health, the log of what operators did)
     Operator {
         #[command(subcommand)]
         sub: OperatorCmd,
@@ -364,6 +366,102 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// List people, a page at a time; --q finds them by the start of their email
+    People {
+        #[arg(long)]
+        q: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// One person: their seat, org, ledger and computer
+    Person {
+        npub: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// List orgs, a page at a time: seats, admins, Stripe status
+    Orgs {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Comp a seat for an email: in --org, else the org its person is in,
+    /// else a new org of one (the email is mailed)
+    Comp {
+        email: String,
+        /// seat ($100: a computer that sleeps) or always-on ($200)
+        #[arg(long, default_value = "seat")]
+        kind: String,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// End a comped seat (its row's id, as `comp` and `orgs` print it)
+    Uncomp {
+        seat: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Trial codes: list them, or make one (--name …), or mail one (--send <id> --to <email>)
+    Trials {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "seat")]
+        kind: String,
+        #[arg(long, default_value = "7")]
+        days: u32,
+        #[arg(long, default_value = "10")]
+        capacity: u64,
+        #[arg(long)]
+        send: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Billing's health: orgs paying, seats, the push queues, what is failing
+    Health {
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// What operators did, newest first
+    Log {
+        #[arg(long)]
+        before: Option<u64>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+/// A seat's kind as the CLI takes it.
+fn seat_kind(kind: &str) -> Result<&'static str> {
+    match kind {
+        "seat" => Ok("seat"),
+        "always-on" | "seat_always_on" => Ok("seat_always_on"),
+        other => Err(usage(format!("a seat's kind is seat or always-on, not {other:?}"))),
+    }
+}
+
+/// The client an operator's command signs with: the operator key's file
+/// (the flag, else FRAGMENT_OPERATOR_KEY_FILE), else this machine's key.
+fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::path::Path>) -> Result<api::Client> {
+    match operator::key_file(key_file, std::env::var(operator::KEY_FILE_ENV).ok()) {
+        Some(file) => {
+            let mut c = api::Client::new(&resolve_host(host, &load_config()), operator::read_key(&file)?);
+            c.verbose = verbose;
+            Ok(c)
+        }
+        None => require_client(host, verbose),
+    }
+}
+
+/// An admin call's answer as JSON, or its refusal.
+fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
+    c.call_as::<Value>(resp)
 }
 
 #[derive(Subcommand)]
@@ -870,6 +968,132 @@ fn run(cli: Cli) -> Result<()> {
             json_exit(j, &json!({ "report": r, "calls": calls }));
             operator::print(&r);
             println!("wiped in {calls} call(s): nothing of theirs is left; their next sign-in is a new person");
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let mut path = "/api/admin/people?".to_string();
+            if let Some(q) = &q {
+                path.push_str(&format!("q={}&", api::encode_q(q)));
+            }
+            if let Some(a) = &after {
+                path.push_str(&format!("after={}", api::encode_q(a)));
+            }
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for p in v["people"].as_array().into_iter().flatten() {
+                let seat = match &p["seat"] {
+                    Value::Null => "no seat".to_string(),
+                    s => format!("{} {}{}", s["kind"].as_str().unwrap_or("?"), if s["comped"] == true { "comped" } else { "paid" }, if s["good"] == true { "" } else { " (lapsed)" }),
+                };
+                println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
+            }
+            if let Some(next) = v["next"].as_str() {
+                println!("more: --after {next}");
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Person { npub, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.get(&format!("/api/admin/people/{npub}"))?)?;
+            json_exit(j, &v);
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Orgs { after, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = match &after {
+                Some(a) => format!("/api/admin/orgs?after={}", api::encode_q(a)),
+                None => "/api/admin/orgs".into(),
+            };
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for o in v["orgs"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {}  {} paid, {} comped, {} pending  {}",
+                    o["id"].as_str().unwrap_or("?"),
+                    o["name"].as_str().unwrap_or("?"),
+                    o["paidSeats"],
+                    o["compedSeats"],
+                    o["pending"],
+                    o["status"].as_str().unwrap_or("never paid")
+                );
+            }
+            if let Some(next) = v["next"].as_str() {
+                println!("more: --after {next}");
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Comp { email, kind, org, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.post_json("/api/admin/seats", &json!({ "email": email, "kind": seat_kind(&kind)?, "org": org }))?)?;
+            json_exit(j, &v);
+            let held = if v["seat"]["person"].is_null() { "waiting on the email" } else { "held" };
+            println!("{} {} for {} in {} ({held}{})", if v["created"] == true { "comped" } else { "already comped:" }, v["seat"]["seat"].as_str().unwrap_or("?"), email, v["org"]["name"].as_str().unwrap_or("?"), if v["mailed"] == true { ", mailed" } else { "" });
+            println!("seat {}", v["seat"]["id"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Uncomp { seat, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.delete(&format!("/api/admin/seats/{seat}"))?)?;
+            json_exit(j, &v);
+            println!("ended the comp of {}", v["email"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Trials { name, kind, days, capacity, send, to, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            if let Some(id) = send {
+                let to = to.ok_or_else(|| usage("--send <id> mails to --to <email>"))?;
+                let v = admin_answer(&c, c.post_json(&format!("/api/admin/trials/{id}/send"), &json!({ "email": to }))?)?;
+                json_exit(j, &v);
+                println!("mailed {}", v["to"].as_str().unwrap_or("?"));
+                return Ok(());
+            }
+            if let Some(name) = name {
+                let v = admin_answer(&c, c.post_json("/api/admin/trials", &json!({ "name": name, "kind": seat_kind(&kind)?, "days": days, "capacity": capacity }))?)?;
+                json_exit(j, &v);
+                println!("{}  {} ({} days of {}, {} places)  id {}", v["code"].as_str().unwrap_or("?"), v["name"].as_str().unwrap_or("?"), v["days"], v["kind"].as_str().unwrap_or("?"), v["capacity"], v["id"].as_str().unwrap_or("?"));
+                return Ok(());
+            }
+            let v = admin_answer(&c, c.get("/api/admin/trials")?)?;
+            json_exit(j, &v);
+            for t in v["codes"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {}  {} days of {}  {}/{} used, {} open{}  id {}",
+                    t["code"].as_str().unwrap_or("?"),
+                    t["name"].as_str().unwrap_or("?"),
+                    t["days"],
+                    t["kind"].as_str().unwrap_or("?"),
+                    t["subscribed"],
+                    t["capacity"],
+                    t["open"],
+                    if t["active"] == true { "" } else { ", off" },
+                    t["id"].as_str().unwrap_or("?")
+                );
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Health { key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.get("/api/admin/health")?)?;
+            json_exit(j, &v);
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Log { before, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = match before {
+                Some(b) => format!("/api/admin/log?before={b}"),
+                None => "/api/admin/log".into(),
+            };
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for e in v["entries"].as_array().into_iter().flatten() {
+                println!("{}  {}  {}  {}  {}", e["n"], e["operator"].as_str().unwrap_or("?"), e["action"].as_str().unwrap_or("?"), e["target"].as_str().unwrap_or("?"), e["detail"].as_str().unwrap_or(""));
+            }
+            if let Some(next) = v["next"].as_u64() {
+                println!("more: --before {next}");
+            }
             return Ok(());
         }
         Cmd::New { dir, template, list } => {

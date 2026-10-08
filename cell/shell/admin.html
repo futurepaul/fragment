@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fragment admin</title>
+<link rel="stylesheet" href="/__shell/admin.css">
+<script type="module" src="/__shell/admin.js"></script>
+</head>
+<body>
+<header>
+  <h1>fragment admin</h1>
+  <nav id="tabs">
+    <button data-tab="people" class="on">People</button>
+    <button data-tab="orgs">Orgs</button>
+    <button data-tab="trials">Trials</button>
+    <button data-tab="health">Health</button>
+    <button data-tab="log">Log</button>
+  </nav>
+  <span id="me"></span>
+</header>
+<p id="status" role="status"></p>
+<main>
+  <section id="people">
+    <form id="search"><input name="q" placeholder="email starts with…" autocomplete="off"> <button>Search</button></form>
+    <form id="comp"><input name="email" type="email" placeholder="email" required>
+      <select name="kind"><option value="seat">$100 seat</option><option value="seat_always_on">$200 always-on seat</option></select>
+      <button>Comp a seat</button></form>
+    <table><thead><tr><th>Email</th><th>Seat</th><th>Org</th><th>Joined</th><th>Last sign-in</th></tr></thead><tbody id="people-rows"></tbody></table>
+    <button id="people-more" hidden>More</button>
+    <aside id="person" hidden></aside>
+  </section>
+  <section id="orgs" hidden>
+    <table><thead><tr><th>Name</th><th>Status</th><th>Paid</th><th>Comped</th><th>Pending</th><th>Admins</th><th>Customer</th></tr></thead><tbody id="org-rows"></tbody></table>
+    <button id="orgs-more" hidden>More</button>
+    <aside id="org" hidden></aside>
+  </section>
+  <section id="trials" hidden>
+    <form id="trial-new"><input name="name" placeholder="name" required>
+      <select name="kind"><option value="seat">$100 seat</option><option value="seat_always_on">$200 always-on seat</option></select>
+      <input name="days" type="number" min="1" max="30" value="7" title="days"> days
+      <input name="capacity" type="number" min="1" max="10000" value="10" title="places"> places
+      <input name="code" placeholder="code (else one is made)">
+      <button>Make a code</button></form>
+    <table><thead><tr><th>Code</th><th>Name</th><th>Trial</th><th>Used</th><th>Open</th><th>On</th><th></th></tr></thead><tbody id="trial-rows"></tbody></table>
+  </section>
+  <section id="health" hidden><dl id="health-facts"></dl><table><thead><tr><th>Queue</th><th>For</th><th>Tries</th><th>Due</th></tr></thead><tbody id="failing-rows"></tbody></table></section>
+  <section id="log" hidden>
+    <table><thead><tr><th>#</th><th>When</th><th>Operator</th><th>Did</th><th>To</th><th>Detail</th></tr></thead><tbody id="log-rows"></tbody></table>
+    <button id="log-more" hidden>More</button>
+  </section>
+</main>
+</body>
+</html>

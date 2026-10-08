@@ -491,8 +491,9 @@ The first run starts once a seat is held, so a guest's first run is
    trial days.
 7. **Packs** (built 2026-10-08, branch `claude/billing-packs`): one
    $25 pack (decision 55).
-8. **The operator's admin:** the API, the CLI, `/admin`, and the audit
-   log. The API can start alongside 4.
+8. **The operator's admin** (built 2026-10-08, branch
+   `claude/operator-admin`; docs/api.md, Operators: the admin): the
+   API, the CLI (`fragment operator …`), `/admin`, and the audit log.
 9. **The shell's Billing page.**
 10. **Go live** (Paul's):
     - live Products, Prices, portal and endpoint (`xtask stripe setup`);

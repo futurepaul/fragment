@@ -497,6 +497,8 @@ fragment ledger                    # your credit, your plan, what is stopped, th
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
+fragment operator people --q ann@                 # operators: people, orgs, comps,
+fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 ```
 
 ## You and your keys

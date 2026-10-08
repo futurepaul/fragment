@@ -147,6 +147,20 @@ fn hex16(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A search as a SQL LIKE prefix (`ESCAPE '\'`): trimmed, lower case,
+/// its wildcards escaped.
+pub fn like_prefix(q: &str) -> String {
+    let mut p = String::with_capacity(q.len() + 1);
+    for c in q.trim().to_ascii_lowercase().chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            p.push('\\');
+        }
+        p.push(c);
+    }
+    p.push('%');
+    p
+}
+
 // ------------------------------------------------------------- trials
 
 /// A trial code's alphabet: base32 without O, I, 0 and 1, so a code read
@@ -290,5 +304,11 @@ mod tests {
         assert!(!trial_has_place(2, 1, 1), "the last place is held by an open Checkout");
         assert!(!trial_has_place(2, 2, 0));
         assert!(!trial_has_place(0, 0, 0));
+    }
+
+    #[test]
+    fn a_search_is_a_prefix_with_its_wildcards_escaped() {
+        assert_eq!(like_prefix(" Ann@"), "ann@%");
+        assert_eq!(like_prefix("a_b%c\\"), "a\\_b\\%c\\\\%");
     }
 }
