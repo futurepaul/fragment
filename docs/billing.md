@@ -473,7 +473,9 @@ The first run starts once a seat is held, so a guest's first run is
    - the plan pushed to ledgers, and always-on to computers.
 
    Launch could run on comped seats from here.
-5. **Stripe:**
+5. **Stripe** (a person's own seat built 2026-10-08, branch
+   `claude/billing-stripe`; docs/api.md, Billing; an org's admins'
+   seats next):
    - the client, the fake and the config;
    - `xtask stripe check|setup`;
    - Checkout;

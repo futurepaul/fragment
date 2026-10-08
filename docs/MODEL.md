@@ -254,7 +254,7 @@ Every change is checked against this table.
 | A person's wipe: how far it got, and that it locks them | the registry's `wipes` (docs/api.md, Operators) | a wiped person's ledger, list and computer each keep one row saying so, and take nothing more |
 | Secrets | the Durable Object that owns each, sealed for it; the deployment's own in its Secrets Store (docs/secrets.md) | never in a repo, a log, a command line, or an app's env |
 | Orgs, their admins and seats (held by an npub, or pending on an email; comped or paid) | the registry (docs/billing.md) | a seat holder's plan and standing on their ledger, and their computer's always-on, are pushed from it, each push read fresh and ordered (`SetSeat.seq`); the registry is their one writer |
-| A subscription's status | Stripe (docs/billing.md; not built) | the registry's copy is refreshed from Stripe, never built from an event's payload |
+| A subscription's status, items and periods; an org's Stripe customer | Stripe (docs/billing.md) | the registry's copy (`orgs`) is written only from a subscription fetched from Stripe (a Checkout's return, a webhook, the daily reconcile), never from an event's own copy; a newer subscription replaces one only once it has ended, and an older event changes nothing |
 | Money | each payer's ledger (docs/ledger.md) | meters batch usage rows to it, idempotently |
 | Audit trail | the `events` channel | pin moves recorded as events |
 

@@ -8,6 +8,7 @@ mod blobs;
 mod brain;
 mod chat;
 mod author;
+mod billing;
 mod computers;
 mod control;
 mod credentials;
@@ -98,6 +99,7 @@ const LANES: &[Lane] = &[
     deliver::ai,
     ledger::ledger_lane,
     orgs::orgs,
+    billing::billing,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -131,7 +133,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "orgs",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "orgs", "billing",
     ],
 ];
 
