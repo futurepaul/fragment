@@ -12,6 +12,18 @@
 //!   image in a result is replaced by a line saying where to look instead.
 //! - **Tools of ours** (`extra`) join the server's list and are answered
 //!   here.
+//! - **Only the tools offered** (`only`, when given) are listed, and a call
+//!   of another is refused here: a server with many tools a model without
+//!   eyes cannot use (cua-driver's screenshots, recordings, updates) offers
+//!   the few it can; each one's description cut to `DESCRIPTION_MAX_CHARS`.
+//! - **A result fits the model.** One past `RESULT_MAX_CHARS` of text is cut
+//!   there, saying how to read the rest (`cut_note`): a page's whole
+//!   accessibility snapshot can be 480k characters.
+//! - **Defaults the model need not know** (`defaults`) are filled into a
+//!   call's arguments when it names none (cua-driver's input on Xvnc works
+//!   only `foreground`).
+//! - **Its instructions are ours** (`instructions`, when given), in its
+//!   `initialize` answer: a server's own name tools it no longer offers.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -29,6 +41,10 @@ pub const HELD: &str = "human_has_control: your owner has taken over your screen
 pub const NO_IMAGE: &str = "(an image was left out here: you read no images. To ask what the screen shows, call screen_look with your question.)";
 /// The server is given this long to end once goose is gone.
 pub const END_GRACE_MS: u64 = 3_000;
+/// A result's text is cut here: about 10k tokens of a 128k context.
+pub const RESULT_MAX_CHARS: usize = 40_000;
+/// A tool's description is cut here (some servers' run to pages).
+pub const DESCRIPTION_MAX_CHARS: usize = 900;
 
 pub struct Proxy {
     /// The server: its program and arguments, and what it is given beyond
@@ -39,6 +55,52 @@ pub struct Proxy {
     pub desk: Option<Desk>,
     /// Tools of ours, beside the server's.
     pub extra: Option<Arc<dyn Tools>>,
+    /// The server's tools offered; none, all of them.
+    pub only: Option<&'static [&'static str]>,
+    /// What a cut result says to do next.
+    pub cut_note: &'static str,
+    /// (tool, argument, value) filled in when a call names no such argument.
+    pub defaults: &'static [(&'static str, &'static str, &'static str)],
+    /// What its `initialize` answer tells the model, in place of its own.
+    pub instructions: Option<&'static str>,
+}
+
+/// A result's texts cut to `max` characters in all, the cut said with
+/// `note`: whether it cut.
+pub fn cut_to(result: &mut Value, max: usize, note: &str) -> bool {
+    let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) else { return false };
+    let total: usize = content.iter().filter_map(|c| c["text"].as_str()).map(|t| t.chars().count()).sum();
+    if total <= max {
+        return false;
+    }
+    let (mut left, mut cut) = (max, false);
+    for c in content.iter_mut() {
+        let Some(text) = c["text"].as_str() else { continue };
+        let n = text.chars().count();
+        if cut {
+            c["text"] = Value::String(String::new());
+        } else if n <= left {
+            left -= n;
+        } else {
+            let kept: String = text.chars().take(left).collect();
+            c["text"] = Value::String(format!("{kept}\n\n(cut at {max} of its {total} characters: {note})"));
+            cut = true;
+        }
+    }
+    content.retain(|c| c["text"].as_str().is_none_or(|t| !t.is_empty()));
+    true
+}
+
+/// A call's arguments with `defaults` for `tool` filled in.
+pub fn with_defaults(tool: &str, args: &mut Value, defaults: &[(&str, &str, &str)]) {
+    for (_, key, value) in defaults.iter().filter(|(t, _, _)| *t == tool) {
+        if !args.is_object() {
+            *args = json!({});
+        }
+        if args.get(*key).is_none() {
+            args[*key] = Value::String(value.to_string());
+        }
+    }
 }
 
 /// A result with every image replaced by `NO_IMAGE` (once, however many).
@@ -51,6 +113,21 @@ pub fn without_images(result: &mut Value) -> bool {
         content.push(json!({ "type": "text", "text": NO_IMAGE }));
     }
     dropped
+}
+
+/// A `tools/list` answer's tools, less those not `only`, with `extra`'s.
+pub fn listed(tools: &mut Vec<Value>, only: Option<&[&str]>, extra: Option<&Arc<dyn Tools>>) {
+    if let Some(only) = only {
+        tools.retain(|t| t["name"].as_str().is_some_and(|n| only.contains(&n)));
+    }
+    for t in tools.iter_mut() {
+        if let Some(d) = t["description"].as_str().filter(|d| d.chars().count() > DESCRIPTION_MAX_CHARS) {
+            t["description"] = Value::String(format!("{}…", d.chars().take(DESCRIPTION_MAX_CHARS).collect::<String>()));
+        }
+    }
+    if let Some(extra) = extra {
+        tools.extend(extra.list());
+    }
 }
 
 /// The names `extra` answers.
@@ -84,11 +161,12 @@ impl Proxy {
         let from_server = child.stdout.take().expect("piped");
         let out = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
         let lists: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let inits: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let ours = names(&self.extra);
 
         // the server's lines, to goose
         let down = {
-            let (out, lists, extra) = (out.clone(), lists.clone(), self.extra.clone());
+            let (out, lists, inits, extra, only, note, instructions) = (out.clone(), lists.clone(), inits.clone(), self.extra.clone(), self.only, self.cut_note, self.instructions);
             tokio::spawn(async move {
                 let mut r = BufReader::new(from_server);
                 let mut buf = Vec::new();
@@ -96,13 +174,16 @@ impl Proxy {
                 while let Ok(Some(())) = mcp::read_line(&mut r, &mut buf, mcp::LINE_MAX_BYTES).await {
                     let Ok(mut m) = serde_json::from_slice::<Value>(&buf) else { continue };
                     let listed = m.get("id").is_some_and(|id| lists.lock().expect("lists").remove(&id.to_string()));
+                    let init = m.get("id").is_some_and(|id| inits.lock().expect("inits").remove(&id.to_string()));
+                    if let (true, Some(text), Some(result)) = (init, instructions, m.get_mut("result")) {
+                        result["instructions"] = Value::String(text.to_string());
+                    }
                     if let Some(result) = m.get_mut("result") {
-                        if listed {
-                            if let (Some(tools), Some(extra)) = (result.get_mut("tools").and_then(Value::as_array_mut), &extra) {
-                                tools.extend(extra.list());
-                            }
+                        if let (true, Some(tools)) = (listed, result.get_mut("tools").and_then(Value::as_array_mut)) {
+                            self::listed(tools, only, extra.as_ref());
                         }
                         without_images(result);
+                        cut_to(result, RESULT_MAX_CHARS, note);
                     }
                     if mcp::write(&out, &m).await.is_err() {
                         return;
@@ -117,11 +198,15 @@ impl Proxy {
         let mut calls = tokio::task::JoinSet::new();
         // bounded by stdin: one message per pass
         while let Ok(Some(())) = mcp::read_line(&mut input, &mut buf, mcp::LINE_MAX_BYTES).await {
-            let Ok(m) = serde_json::from_slice::<Value>(&buf) else { continue };
+            let Ok(mut m) = serde_json::from_slice::<Value>(&buf) else { continue };
             let id = m.get("id").cloned();
+            let mut line = buf.clone();
             match (m["method"].as_str(), &id) {
                 (Some("tools/list"), Some(id)) => {
                     lists.lock().expect("lists").insert(id.to_string());
+                }
+                (Some("initialize"), Some(id)) => {
+                    inits.lock().expect("inits").insert(id.to_string());
                 }
                 (Some("tools/call"), Some(id)) => {
                     let name = m["params"]["name"].as_str().unwrap_or("").to_string();
@@ -131,6 +216,10 @@ impl Proxy {
                             let result = extra.call(&name, args).await;
                             let _ = mcp::write(&out, &mcp::answer(&id, result)).await;
                         });
+                        continue;
+                    }
+                    if self.only.is_some_and(|only| !only.contains(&name.as_str())) {
+                        mcp::write(&out, &mcp::answer(id, mcp::text_result(&format!("{name} is not offered here"), true))).await?;
                         continue;
                     }
                     if let Some(desk) = &self.desk {
@@ -145,10 +234,13 @@ impl Proxy {
                             continue;
                         }
                     }
+                    if self.defaults.iter().any(|(t, _, _)| *t == name) {
+                        with_defaults(&name, &mut m["params"]["arguments"], self.defaults);
+                        line = m.to_string().into_bytes();
+                    }
                 }
                 _ => {}
             }
-            let mut line = buf.clone();
             line.push(b'\n');
             if to_server.write_all(&line).await.is_err() || to_server.flush().await.is_err() {
                 break;
@@ -174,8 +266,51 @@ mod tests {
         let mut r = json!({ "content": [{ "type": "text", "text": "took it" }, { "type": "image", "data": "AAAA", "mimeType": "image/png" }, { "type": "image", "data": "BB", "mimeType": "image/png" }] });
         assert!(without_images(&mut r));
         assert_eq!(r["content"], json!([{ "type": "text", "text": "took it" }, { "type": "text", "text": NO_IMAGE }]));
+        let mut tools = vec![json!({ "name": "click" }), json!({ "name": "start_recording" }), json!({ "name": "type_text" })];
+        listed(&mut tools, Some(&["click", "type_text"]), None);
+        assert_eq!(tools, vec![json!({ "name": "click" }), json!({ "name": "type_text" })], "only the tools offered");
+        let mut long = vec![json!({ "name": "x", "description": "d".repeat(DESCRIPTION_MAX_CHARS + 10) })];
+        listed(&mut long, None, None);
+        assert_eq!(long[0]["description"].as_str().unwrap().chars().count(), DESCRIPTION_MAX_CHARS + 1, "a long description cut");
         let mut plain = json!({ "content": [{ "type": "text", "text": "ok" }] });
         assert!(!without_images(&mut plain));
         assert!(!without_images(&mut json!({ "tools": [] })));
+    }
+}
+
+#[cfg(test)]
+mod more_tests {
+    use super::*;
+
+    /// A result past its bound is cut there and says how to read on; one
+    /// within it is as it was.
+    #[test]
+    fn results_fit_the_model() {
+        let mut r = json!({ "content": [{ "type": "text", "text": "a".repeat(30) }, { "type": "text", "text": "b".repeat(30) }, { "type": "text", "text": "c" }] });
+        assert!(cut_to(&mut r, 40, "use browser_find"));
+        let texts: Vec<&str> = r["content"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap()).collect();
+        assert_eq!(texts.len(), 2);
+        assert_eq!(texts[0], "a".repeat(30));
+        assert!(texts[1].starts_with(&"b".repeat(10)) && texts[1].ends_with("(cut at 40 of its 61 characters: use browser_find)"), "{}", texts[1]);
+        let mut small = json!({ "content": [{ "type": "text", "text": "ok" }] });
+        assert!(!cut_to(&mut small, 40, "x"));
+    }
+
+    /// A default fills only an argument the call does not name.
+    #[test]
+    fn defaults_fill_what_is_missing() {
+        let d = [("click", "delivery_mode", "foreground")];
+        let mut a = json!({ "x": 1 });
+        with_defaults("click", &mut a, &d);
+        assert_eq!(a, json!({ "x": 1, "delivery_mode": "foreground" }));
+        let mut b = json!({ "delivery_mode": "background" });
+        with_defaults("click", &mut b, &d);
+        assert_eq!(b["delivery_mode"], "background", "the model's own wins");
+        let mut c = Value::Null;
+        with_defaults("click", &mut c, &d);
+        assert_eq!(c, json!({ "delivery_mode": "foreground" }));
+        let mut other = json!({});
+        with_defaults("list_windows", &mut other, &d);
+        assert_eq!(other, json!({}));
     }
 }

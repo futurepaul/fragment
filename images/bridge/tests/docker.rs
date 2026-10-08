@@ -245,6 +245,8 @@ struct Mcp {
     stdin: std::process::ChildStdin,
     lines: std::sync::mpsc::Receiver<String>,
     next: u64,
+    /// Its `initialize` answer.
+    init: serde_json::Value,
 }
 
 impl Mcp {
@@ -269,9 +271,10 @@ impl Mcp {
                 }
             }
         });
-        let mut m = Mcp { child, stdin, lines, next: 1 };
+        let mut m = Mcp { child, stdin, lines, next: 1, init: serde_json::Value::Null };
         let init = m.call("initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test", "version": "1" } }), Duration::from_secs(60));
         assert!(init["result"]["protocolVersion"].is_string(), "{init}");
+        m.init = init;
         m.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
         m
     }
@@ -341,7 +344,9 @@ fn ref_of(snapshot: &str, what: &str) -> Option<String> {
 /// goose itself calls a browser tool through its session's MCP. Each
 /// technique's time is printed. As Containers runs the image; needs the
 /// internet.
-#[tokio::test]
+// several threads: an MCP call here blocks its thread while the fakes
+// (the model the screen tools call) answer on the others
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs Docker and the internet: cargo test -p fragment-bridge --test docker -- --ignored"]
 async fn the_goose_desktop_and_its_tools() {
     use fragment_bridge::net::Base;
@@ -425,11 +430,67 @@ async fn the_goose_desktop_and_its_tools() {
     let (_, err, _) = browser.tool("browser_snapshot", json!({}), Duration::from_secs(30));
     assert!(!err, "given back, the browser acts again");
 
-    // the computer: cua-driver's tools and ours, no image to the model
+    // the computer: cua-driver's tools offered and ours
     let mut computer = Mcp::start(&c, &agent, &["fragment-desktop", "mcp", "computer", "hands.paul"]);
     let tools = computer.tools();
     eprintln!("desktop: the computer's tools: {tools:?}");
-    assert!(tools.iter().any(|t| t == "screen_look") && tools.iter().any(|t| t == "screen_click") && tools.len() > 2, "{tools:?}");
+    for t in ["screen_look", "screen_click", "list_windows", "type_text", "hotkey", "press_key", "click"] {
+        assert!(tools.iter().any(|n| n == t), "{t} among {tools:?}");
+    }
+    for t in ["get_desktop_state", "browser_navigate", "start_recording", "install_ffmpeg"] {
+        assert!(!tools.iter().any(|n| n == t), "{t} is not offered: {tools:?}");
+    }
+    let told = computer.init["result"]["instructions"].as_str().unwrap_or("");
+    assert!(told.contains("screen_look") && !told.contains("get_window_state"), "its instructions are ours, naming only what it offers: {told}");
+    // cua-driver types into the desktop's Chromium: its address bar
+    let (windows, err, took) = computer.tool("list_windows", json!({ "on_screen_only": true }), Duration::from_secs(30));
+    eprintln!("bench: cua-driver list_windows {} ms: {}", took.as_millis(), windows.lines().take(3).collect::<Vec<_>>().join(" / "));
+    let line = windows.lines().find(|l| l.contains("Chromium")).unwrap_or_else(|| panic!("no Chromium window (error {err}): {windows}"));
+    let field = |k: &str| line.split_whitespace().find_map(|w| w.strip_prefix(k)).and_then(|v| v.parse::<u64>().ok()).unwrap();
+    let (pid, window) = (field("pid="), field("window_id="));
+    let t = Instant::now();
+    for (tool, args) in [("hotkey", json!({ "keys": ["ctrl", "l"] })), ("type_text", json!({ "text": "example.org" })), ("press_key", json!({ "key": "Return" }))] {
+        let mut args = args;
+        args["pid"] = json!(pid);
+        args["window_id"] = json!(window);
+        let (said, err, _) = computer.tool(tool, args, Duration::from_secs(30));
+        assert!(!err, "{tool}: {said}");
+    }
+    eprintln!("bench: cua-driver hotkey, type_text, press_key (an address typed) {} ms", t.elapsed().as_millis());
+    let mut landed = String::new();
+    for _ in 0..20 {
+        landed = browser.tool("browser_snapshot", json!({ "depth": 3 }), Duration::from_secs(30)).0;
+        if landed.contains("example.org") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(landed.contains("example.org"), "what cua-driver typed reached the browser:\n{landed}");
+
+    // screen_look: the screen, to the vision model, through the intercept
+    let (seen, err, took) = computer.tool("screen_look", json!({ "question": "What page is open?" }), Duration::from_secs(60));
+    eprintln!("bench: screen_look (scripted vision) {} ms: {seen}", took.as_millis());
+    assert!(!err && seen.starts_with("scripted:"), "{seen}");
+    // screen_click: Clef chooses a cell of a numbered grid, then one of a
+    // finer grid around it (the scripted Clef chooses the cell the target
+    // names, then the first), and the click lands at that cell's centre
+    let (clicked, err, took) = computer.tool("screen_click", json!({ "target": "the thing in cell 50" }), Duration::from_secs(60));
+    eprintln!("bench: screen_click (scripted Clef) {} ms: {clicked}", took.as_millis());
+    assert!(!err && clicked.contains("x=66, y=366"), "{clicked}");
+    let display = c.exec_out(&["fragment-desktop", "display", "hands.paul"]);
+    let at = c.exec_out(&["env", &format!("DISPLAY=:{}", display.trim()), "xdotool", "getmouselocation"]);
+    assert!(at.starts_with("x:66 y:366"), "the pointer is where Clef found it: {at}");
+    {
+        let calls = model.calls.lock().unwrap();
+        let vision: Vec<_> = calls.iter().filter(|c| c.model == "vision").collect();
+        assert!(vision.len() == 1 && vision[0].agent.as_deref() == Some("hands.paul"), "one vision call, the agent's");
+        assert!(vision[0].body.to_string().contains("data:image/jpeg;base64,"), "the screenshot went with it");
+        let decides: Vec<_> = calls.iter().filter(|c| c.path == "/v1/decide").collect();
+        assert_eq!(decides.len(), 2, "two choices: the grid, then the finer one");
+        let options = |c: &support::model::Call| c.body["questions"]["cell"]["criteria"].as_object().map(|o| o.len()).unwrap_or(0);
+        assert_eq!((options(decides[0]), options(decides[1])), (96, 48));
+        assert!(decides.iter().all(|d| d.body["images"][0].as_str().is_some_and(|i| i.starts_with("data:image/jpeg;base64,")) && d.agent.as_deref() == Some("hands.paul")));
+    }
     drop((viewer, watching, driving, web, browser, computer));
 
     // goose itself, through its session's browser
@@ -444,7 +505,7 @@ async fn the_goose_desktop_and_its_tools() {
     assert!(steps.iter().any(|s| s["tool"] == "browser_navigate"), "{steps:?}");
     {
         let calls = model.calls.lock().unwrap();
-        let first = calls.iter().find(|c| c.path == "/v1/chat/completions").unwrap();
+        let first = calls.iter().find(|c| c.path == "/v1/chat/completions" && c.model == "medium").unwrap();
         let tools = support::model::tools(&first.body);
         for t in ["browser__browser_navigate", "computer__screen_look", "web__web_read", "load_skill"] {
             assert!(tools.iter().any(|n| n == t), "{t} among {tools:?}");
@@ -455,4 +516,44 @@ async fn the_goose_desktop_and_its_tools() {
     let (took, code) = c.sigterm();
     eprintln!("desktop: SIGTERM to exit with a desktop up: {} ms (code {code})", took.as_millis());
     assert!(took < Duration::from_secs(5));
+}
+
+/// Goal: a desktop no one uses stops, and one someone watches does not.
+/// Started for its first viewer (the bridge's screen runs its start), it
+/// stays up while watched past the idle bound (here 12 s:
+/// `FRAGMENT_DESKTOP_IDLE_MS`; the screen touches its activity every 10 s),
+/// and stops once the viewer has gone that long; the next viewer starts it
+/// again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs Docker: cargo test -p fragment-bridge --test docker -- --ignored"]
+async fn an_unused_desktop_stops() {
+    use fragment_bridge::net::Base;
+    use support::rfb::Viewer;
+    let tag = goose_tag();
+    build(&repo_dir(), "images/goose/Dockerfile", &tag);
+    let fake = Fake::start("0.0.0.0:0", &["hands"]).await;
+    let model = Model::start("0.0.0.0:0").await;
+    let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[("FRAGMENT_DESKTOP_IDLE_MS", "12000")]);
+    fake.until(60_000, "the bridge to follow", |w| w.live_sockets() >= 1).await;
+    let base = Base::parse(&format!("http://127.0.0.1:{}", c.port(6080))).unwrap();
+    let up = || c.exec_out(&["sh", "-c", "pgrep -x Xvnc | wc -l"]).trim() == "1";
+    assert!(!up(), "no desktop before its first use");
+    let t = Instant::now();
+    let mut viewer = Viewer::open(&base, "w", "hands.paul", Duration::from_secs(30)).await.unwrap_or_else(|e| panic!("the screen: {e}\n{}", c.logs()));
+    eprintln!("idle: the first viewer's desktop up in {} ms", t.elapsed().as_millis());
+    for _ in 0..25 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(up(), "a watched desktop stays up");
+        let _ = viewer.frame().await;
+    }
+    drop(viewer);
+    let t = Instant::now();
+    // bounded: the idle bound, a look, and the stop's grace
+    while up() && t.elapsed() < Duration::from_secs(30) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    eprintln!("idle: stopped {} ms after its viewer left", t.elapsed().as_millis());
+    assert!(!up(), "an unused desktop stops\n{}", c.exec_out(&["sh", "-c", "tail -5 /run/desktop/*/desktop.log"]));
+    let again = Viewer::open(&base, "w", "hands.paul", Duration::from_secs(30)).await;
+    assert!(again.is_ok() && up(), "the next viewer starts it again: {:?}", again.err());
 }

@@ -13,6 +13,11 @@
 //!   `scripted: the tool said: <result>`;
 //! - anything else is answered `scripted: <the line>`.
 //!
+//! `/v1/decide` is Clef as the platform's fake decides (crates/fakes): a
+//! `choice` is the first option the state names as a word, else the first;
+//! a `noul` is 0.9 when a word of its question over 3 letters is in the
+//! state, else 0.1.
+//!
 //! It records each request's path, `model` and `x-fragment-agent`.
 
 #![allow(dead_code)]
@@ -125,6 +130,34 @@ pub fn answer(body: &Value) -> (String, Option<Value>) {
     (format!("scripted: {said}"), None)
 }
 
+/// A decision's answers, as the platform's Clef fake gives them.
+pub fn decide(input: &Value) -> Value {
+    let state = match &input["state"] {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let words: Vec<String> = state.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
+    let named = |w: &str| words.iter().any(|x| x == w);
+    let mut answers = serde_json::Map::new();
+    for (id, q) in input["questions"].as_object().cloned().unwrap_or_default() {
+        let a = match q["type"].as_str() {
+            Some("choice") => {
+                let options: Vec<String> = q["criteria"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+                let chosen = options.iter().find(|o| named(&o.to_lowercase())).or(options.first()).cloned().unwrap_or_default();
+                let probabilities: serde_json::Map<String, Value> = options.iter().map(|o| (o.clone(), json!(if *o == chosen { 0.9 } else { 0.0 }))).collect();
+                json!({ "type": "choice", "choice": chosen, "probabilities": probabilities, "confidence": 0.8 })
+            }
+            _ => {
+                let text = q["instructions"].as_str().unwrap_or("").to_lowercase();
+                let yes = text.split(|c: char| !c.is_alphanumeric()).any(|w| w.chars().count() > 3 && named(w));
+                json!({ "type": "noul", "noul": if yes { 0.9 } else { 0.1 } })
+            }
+        };
+        answers.insert(id, a);
+    }
+    json!({ "answers": answers, "model": format!("@cf/cloudflare/{}", input["model"].as_str().unwrap_or("clef-flash")), "usage": { "input_tokens": 100, "output_tokens": 1 } })
+}
+
 async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Response<Body> {
     let path = req.uri().path().to_string();
     let agent = req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -132,9 +165,12 @@ async fn handle(req: Request<Incoming>, calls: Arc<Mutex<Vec<Call>>>) -> Respons
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let stream = v["stream"] == json!(true);
     calls.lock().unwrap().push(Call { path: path.clone(), model: v["model"].as_str().unwrap_or("").into(), agent, stream, body: v.clone() });
-    // the platform's model route answers its completions alone (docs/computers.md, "Models")
+    if path.ends_with("/v1/decide") {
+        return net::json_answer(StatusCode::OK, &decide(&v));
+    }
+    // the platform's model route answers its completions and decisions alone (docs/computers.md, "Models")
     if !path.ends_with("/v1/chat/completions") {
-        return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions");
+        return net::refusal(StatusCode::NOT_FOUND, "not_found", "the scripted model answers /v1/chat/completions and /v1/decide");
     }
     let (text, tool) = answer(&v);
     let model = v["model"].as_str().unwrap_or("medium").to_string();
@@ -184,6 +220,8 @@ fn answers_are_the_transcripts() {
     assert_eq!((t.as_str(), call), ("scripted: the tool said: hi", None));
     let (_, call) = answer(&json!({ "messages": [{ "role": "user", "content": "call: web_read {\"url\": \"https://example.com\"}" }], "tools": [{ "type": "function", "function": { "name": "web__web_read" } }] }));
     assert_eq!(call.unwrap()["function"]["arguments"], json!({ "url": "https://example.com" }).to_string());
+    let d = decide(&json!({ "model": "clef", "state": "click the thing in cell 50", "questions": { "cell": { "type": "choice", "instructions": "which?", "criteria": { "1": null, "50": null } } } }));
+    assert_eq!(d["answers"]["cell"]["choice"], "50");
     // no such tool offered: answered in words
     assert_eq!(answer(&json!({ "messages": [{ "role": "user", "content": "run: echo hi" }] })).0, "scripted: run: echo hi");
 }

@@ -451,7 +451,10 @@ pub async fn run(desk: Desk) -> Result<(), String> {
         return Err(format!("display :{n} did not come up"));
     }
     ev!("desktop.display", { "agent": desk.agent, "display": n, "ms": t.elapsed().as_millis() as u64 });
-    let wm = Proc::spawn("window manager", tokio::process::Command::new(std::env::var("FRAGMENT_WM_BIN").unwrap_or_else(|_| "openbox".into())).env("DISPLAY", format!(":{n}")).env("HOME", &desk.dir)).ok();
+    // matchbox: every window full screen, no title bars (the screen is the
+    // browser), and a few hundred KiB where openbox pulls in ~100 MiB
+    let wm_bin = std::env::var("FRAGMENT_WM_BIN").unwrap_or_else(|_| "matchbox-window-manager".into());
+    let wm = Proc::spawn("window manager", tokio::process::Command::new(wm_bin).args(["-use_titlebar", "no"]).env("DISPLAY", format!(":{n}")).env("HOME", &desk.dir)).ok();
     desk.touch();
     let mut chromium = Some(browser(&desk, n)?);
     let mut browser_at = Instant::now();

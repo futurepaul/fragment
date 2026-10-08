@@ -4,7 +4,7 @@
 # runtime between it and the fragment API (docs/bridge.md), the fragment CLI
 # (its agents' `fragment`, and a mind's `fragment mcp`), sandbox-shim, the
 # tools an agent reaches for, and each agent's desktop (fragment-desktop:
-# Xvnc, openbox and a Chromium its browser tools drive, which its owner
+# Xvnc, matchbox and a Chromium its browser tools drive, which its owner
 # watches on its screen). Everything runs as root: the computer is one
 # person's VM with no secret in it (decisions 13, 43, 44), and what an agent
 # installs outside /data lasts until the next start from this image. The
@@ -86,8 +86,9 @@ ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a
 RUN mkdir /out && tar -C /out -xzf /tmp/cua-driver.tgz cua-driver
 
 # What an agent works with: git, curl, python3, ripgrep, jq, and procps;
-# its desktop: TigerVNC's Xvnc (RFB on a Unix socket, no TCP), openbox,
-# Chromium, fonts, xdotool (screen_click's clicks); tini as PID 1, which
+# its desktop: TigerVNC's Xvnc (RFB on a Unix socket, no TCP), matchbox
+# (each window full screen), Chromium (asked nothing at its first run: its
+# policy below), fonts, xdotool (screen_click's clicks); tini as PID 1, which
 # reaps what an agent's shell leaves behind (the bridge is its child, and
 # handles SIGTERM itself: gone within 3 s), and each desktop's supervisor,
 # detached once it starts. apt's lists are kept, fresh as of this build, so
@@ -96,8 +97,9 @@ FROM debian:trixie-slim
 RUN apt-get -o Acquire::Retries=3 update \
  && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
       ca-certificates curl git jq procps python3 ripgrep tini \
-      tigervnc-standalone-server openbox chromium fonts-dejavu-core fonts-liberation2 xdotool \
- && mkdir -p /run/computer /run/desktop
+      tigervnc-standalone-server matchbox-window-manager chromium fonts-dejavu-core fonts-liberation2 xdotool \
+ && mkdir -p /run/computer /run/desktop /etc/chromium/policies/managed
+COPY images/goose/chromium-policy.json /etc/chromium/policies/managed/fragment.json
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=build /out/fragment-bridge /out/fragment-desktop /usr/local/bin/
 COPY --from=cli /out/fragment /usr/local/bin/fragment

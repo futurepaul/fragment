@@ -7,8 +7,10 @@
 //!   body. Long pages come in parts of `PART_MAX_CHARS`, the next named by
 //!   `start`. A PDF or another file is saved to the work's downloads, and
 //!   its path said.
-//! - `web_search {query, max?}`: DuckDuckGo's HTML results (no key): title,
-//!   address and snippet of each.
+//! - `web_search {query, max?}`: a search engine's HTML results (no key):
+//!   title, address and snippet of each. DuckDuckGo first, then Bing when
+//!   it refuses (DuckDuckGo turns away an address that searched a dozen
+//!   times in a minute, for about ten minutes), then DuckDuckGo's lite page.
 //!
 //! The transport is curl (the image's, with its CA bundle and the
 //! computer's egress), bounded in time and size.
@@ -111,6 +113,31 @@ pub fn absolute(base: &str, href: &str) -> Option<String> {
     Some(format!("{origin}{dir}{href}"))
 }
 
+/// Markdown as a model reads it best: the serializer's escapes of plain
+/// punctuation (`13\\.7`, `\\(LTS\\)`) taken out, outside code fences.
+pub fn unescaped(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut fenced = false;
+    for line in md.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        if fenced || !line.contains('\\') {
+            out.push_str(line);
+            continue;
+        }
+        let mut chars = line.chars().peekable();
+        // bounded by the line
+        while let Some(c) = chars.next() {
+            if c == '\\' && chars.peek().is_some_and(|n| ".()[]{}!#*_+-`|>~<=".contains(*n)) {
+                continue;
+            }
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A page's Markdown: its main text (`article`), or its whole body.
 pub fn markdown(html: &str, url: &str, article: bool) -> (String, String) {
     if article {
@@ -118,7 +145,7 @@ pub fn markdown(html: &str, url: &str, article: bool) -> (String, String) {
         if let Ok(mut r) = dom_smoothie::Readability::new(html, Some(url), Some(cfg)) {
             if let Ok(a) = r.parse() {
                 if a.text_content.trim().len() > 200 {
-                    return (a.title, a.text_content.to_string());
+                    return (a.title, unescaped(&a.text_content));
                 }
             }
         }
@@ -130,7 +157,7 @@ pub fn markdown(html: &str, url: &str, article: bool) -> (String, String) {
         Some(body) => body.md(Some(&skip)).to_string(),
         None => doc.md(Some(&skip)).to_string(),
     };
-    (title, text)
+    (title, unescaped(&text))
 }
 
 /// The page's links, absolute, each once, at most `LINKS_MAX`.
@@ -256,6 +283,12 @@ pub async fn read(args: &Value) -> Value {
     mcp::text_result(&said, false)
 }
 
+/// A query in an address: letters and digits as they are, the rest
+/// percent-encoded.
+fn encode_query(q: &str) -> String {
+    q.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
 /// A file that is no page, saved under `DOWNLOADS` by its address's last
 /// part.
 fn save(f: &Fetched) -> std::io::Result<PathBuf> {
@@ -267,23 +300,91 @@ fn save(f: &Fetched) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Bing's address for a result: its redirect's `u`, `a1` then the address
+/// in base64url.
+fn unwrap_bing(href: &str) -> String {
+    use base64::Engine;
+    let Some(u) = href.split(['?', '&']).find_map(|kv| kv.strip_prefix("u=a1")) else { return href.to_string() };
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(u.trim_end_matches('=')).ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_else(|| href.to_string())
+}
+
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Bing's results page, read.
+pub fn bing_hits(html: &str) -> Vec<Hit> {
+    let doc = dom_query::Document::from(html);
+    let mut out = Vec::new();
+    for r in doc.select("li.b_algo").iter() {
+        let a = r.select("h2 a");
+        let Some(href) = a.attr("href") else { continue };
+        let url = unwrap_bing(&href);
+        if !url.starts_with("http") {
+            continue;
+        }
+        let snippet = r.select(".b_caption p");
+        let snippet = if snippet.exists() { snippet.text().to_string() } else { r.select("p").text().to_string() };
+        out.push(Hit { title: squash(&a.text()), url, snippet: squash(&snippet) });
+    }
+    out
+}
+
+/// DuckDuckGo's lite page, read: each result's link, and its snippet row.
+pub fn ddg_lite_hits(html: &str) -> Vec<Hit> {
+    let doc = dom_query::Document::from(html);
+    let links: Vec<(String, String)> = doc.select("a.result-link").iter().filter_map(|a| Some((squash(&a.text()), unwrap_ddg(&a.attr("href")?)))).collect();
+    let snippets: Vec<String> = doc.select("td.result-snippet").iter().map(|t| squash(&t.text())).collect();
+    links.into_iter().enumerate().filter(|(_, (_, u))| u.starts_with("http")).map(|(i, (title, url))| Hit { title, url, snippet: snippets.get(i).cloned().unwrap_or_default() }).collect()
+}
+
+/// The engines tried in turn: name, address (one ending `q=` takes the
+/// query in it; the others, posted as `q`), and how its page reads.
+type Engine = (&'static str, &'static str, fn(&str) -> Vec<Hit>);
+
+const ENGINES: [Engine; 3] = [
+    ("DuckDuckGo", "https://html.duckduckgo.com/html/", ddg_hits),
+    ("Bing", "https://www.bing.com/search?setlang=en&q=", bing_hits),
+    ("DuckDuckGo lite", "https://lite.duckduckgo.com/lite/", ddg_lite_hits),
+];
+
+/// Whether a results page with no results is a refusal (a challenge, a
+/// captcha, a rate limit) rather than none found.
+fn refused(status: u16, html: &str) -> bool {
+    status != 200 || ["anomaly", "challenge-form", "captcha", "unusual traffic"].iter().any(|w| html.contains(w))
+}
+
 pub async fn search(args: &Value) -> Value {
     let Some(q) = args["query"].as_str().map(str::trim).filter(|q| !q.is_empty() && q.len() <= QUERY_MAX_BYTES) else {
         return mcp::text_result(&format!("web_search needs `query`, at most {QUERY_MAX_BYTES} bytes"), true);
     };
     let max = (args["max"].as_u64().unwrap_or(RESULTS_DEFAULT as u64) as usize).clamp(1, RESULTS_MAX);
-    let f = match fetch("https://html.duckduckgo.com/html/", &[("q", q)]).await {
-        Ok(f) => f,
-        Err(e) => return mcp::text_result(&format!("the search did not answer: {e}"), true),
-    };
-    let html = String::from_utf8_lossy(&f.body).into_owned();
-    let hits = ddg_hits(&html);
-    if hits.is_empty() {
-        let refused = f.status != 200 || html.contains("anomaly") || html.contains("challenge");
-        let why = if refused { format!("the search engine refused this computer ({}): try again in a minute, or search in the browser tools", f.status) } else { "no results".to_string() };
-        return mcp::text_result(&format!("{why} for {q:?}"), refused);
+    let mut tried = Vec::new();
+    let mut found = None;
+    for (name, url, read) in ENGINES {
+        let got = if url.ends_with("q=") { fetch(&format!("{url}{}", encode_query(q)), &[]).await } else { fetch(url, &[("q", q)]).await };
+        let f = match got {
+            Ok(f) => f,
+            Err(e) => {
+                tried.push(format!("{name}: {e}"));
+                continue;
+            }
+        };
+        let html = String::from_utf8_lossy(&f.body).into_owned();
+        let hits = read(&html);
+        if !hits.is_empty() {
+            found = Some((name, hits));
+            break;
+        }
+        if !refused(f.status, &html) {
+            return mcp::text_result(&format!("no results for {q:?} ({name})"), false);
+        }
+        tried.push(format!("{name} refused ({})", f.status));
     }
-    let mut said = format!("Results for {q:?}:\n");
+    let Some((engine, hits)) = found else {
+        return mcp::text_result(&format!("every search engine refused this computer for now ({}): try again in a few minutes, or search in the browser tools", tried.join("; ")), true);
+    };
+    let mut said = format!("Results for {q:?} ({engine}):\n");
     for (i, h) in hits.iter().take(max).enumerate() {
         said.push_str(&format!("\n{}. {}\n   {}\n   {}\n", i + 1, h.title, h.url, h.snippet));
     }
@@ -365,6 +466,23 @@ mod tests {
             Hit { title: "Rust Programming Language".into(), url: "https://www.rust-lang.org/".into(), snippet: "A language empowering everyone.".into() },
             Hit { title: "The Book".into(), url: "https://doc.rust-lang.org/book/".into(), snippet: "Learn Rust".into() },
         ]);
+    }
+
+    /// Bing's and DuckDuckGo lite's pages, read: real addresses, snippets.
+    #[test]
+    fn other_engines_results_are_read() {
+        let bing = r#"<ol><li class="b_algo"><h2><a href="https://www.bing.com/ck/a?!&amp;&amp;p=x&amp;u=a1aHR0cHM6Ly93d3cucnVzdC1sYW5nLm9yZy8&amp;ntb=1">Rust Programming Language</a></h2><div class="b_caption"><p class="b_lineclamp2">Reliable and efficient.</p></div></li></ol>"#;
+        assert_eq!(bing_hits(bing), vec![Hit { title: "Rust Programming Language".into(), url: "https://www.rust-lang.org/".into(), snippet: "Reliable and efficient.".into() }]);
+        let lite = r#"<table><tr><td><a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2Fbook%2F&amp;rut=x">The Book</a></td></tr><tr><td class="result-snippet">Learn Rust.</td></tr></table>"#;
+        assert_eq!(ddg_lite_hits(lite), vec![Hit { title: "The Book".into(), url: "https://doc.rust-lang.org/book/".into(), snippet: "Learn Rust.".into() }]);
+        assert!(refused(202, "") && refused(200, "<div id=\"challenge-form\">") && !refused(200, "<p>nothing</p>"));
+        assert_eq!(encode_query("rust lang & c++"), "rust%20lang%20%26%20c%2B%2B");
+    }
+
+    /// The serializer's escapes go, outside code.
+    #[test]
+    fn markdown_reads_plainly() {
+        assert_eq!(unescaped("Debian 13\\.7 \\(LTS\\)\n```\na\\.b\n```\nC:\\dir"), "Debian 13.7 (LTS)\n```\na\\.b\n```\nC:\\dir");
     }
 
     /// An article's main text, and a whole page's, as Markdown.

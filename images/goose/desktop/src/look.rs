@@ -385,11 +385,15 @@ impl Screen {
         let Some(q) = args["question"].as_str().map(str::trim).filter(|q| !q.is_empty() && q.len() <= ASK_MAX_BYTES) else {
             return mcp::text_result(&format!("screen_look needs `question`, at most {ASK_MAX_BYTES} bytes"), true);
         };
+        let t = std::time::Instant::now();
         let img = match self.shot().await {
             Ok(i) => i,
             Err(e) => return mcp::text_result(&e, true),
         };
-        match ask_vision(&self.desk.agent, &img, q).await {
+        let shot_ms = t.elapsed().as_millis() as u64;
+        let said = ask_vision(&self.desk.agent, &img, q).await;
+        fragment_bridge::ev!("screen.look", { "agent": self.desk.agent, "shotMs": shot_ms, "ms": t.elapsed().as_millis() as u64, "ok": said.is_ok() });
+        match said {
             Ok(said) => mcp::text_result(&said, false),
             Err(e) => mcp::text_result(&format!("the vision model did not answer: {e}"), true),
         }
