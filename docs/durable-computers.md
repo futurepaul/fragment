@@ -49,7 +49,7 @@ file is the newer word, and decision 18 points here.
   the hold is a handshake (`held`, within 20 s); three saves are kept and
   a wake falls back to the save before one that will not restore; a sleep
   whose save fails keeps its container for at most
-  `computers.unsaved_max_ms` (30 minutes by default, Paul's to confirm).
+  `computers.unsaved_max_ms` (30 minutes; Paul confirmed it on 2026-10-08).
   Our Hermes image copies every database with SQLite's online backup
   (from Rust: Hermes' own covers a fixed list, and restarts a busy copy)
   and its answer names exactly what it copied, so the save leaves out the
@@ -103,6 +103,24 @@ file is the newer word, and decision 18 points here.
   model-catalog refresh is off and Node's compile cache is out of
   `/data`; the rest of what its gateway writes on its own timers is kept
   hot, each named, with why a save cannot tear it (below).
+- **Its owner is told, and can get back to working (2026-10-08).** Paul
+  confirmed the unsaved bound (30 minutes) and asked that no one's
+  computer die unexplained while they use it. It never did while in use:
+  the bound stops a computer only at a sleep, which waits while anything
+  holds it; the bound caps the idle time a failing computer is kept. What
+  was missing was telling them. The owner's view now carries `notices`
+  (its saves failing, since when, and when the bound stops it, its last
+  try now at the bound itself; a start that went back to an older save,
+  why and to which, told once until seen; won't wake), pushed to their
+  open pages, and the shell shows them over every chat with the way back:
+  Restart, a sleep that saves if it can and a fresh start from the newest
+  good save (never the snapshot), asked twice made once. The shell no
+  longer wakes a computer that won't on the person's presence. The agent
+  is told too: after a rollback, its next turn in a chat says what turns
+  another life ran there since the save (their claims answer 409), from
+  the journal (docs/bridge.md, "What a rollback forgot").
+  docs/computers.md, "What its owner is told", has every way a computer
+  stops and what its person sees.
 
 ## What changes under the hold (2026-10-07)
 

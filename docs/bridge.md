@@ -309,6 +309,29 @@ second call of the cut command, no card again, an answer, and the model's
 request ends with the note and the message after the boundary. Whether a
 real model, so told, checks before it redoes is a hosted run's to see.
 
+## What a rollback forgot
+
+A computer that went back to an older save (a crash, an unsaved stop, a
+restart whose save failed: docs/computers.md, "What its owner is told")
+restores a runtime that remembers nothing after that save, while the chat
+keeps every turn since. The bridge's state went back with it, so it reads
+those turns' records again; each claim answers 409 (the life that ran them
+claimed them: "State", above), so none runs twice. Those 409s are what the
+agent forgot, exactly: the engine keeps, per agent and chat and in this
+life only, the turns another life claimed (the newest `NOTE_FORGOTTEN_MAX`,
+4, and how many more), and the agent's next turn in that chat takes them
+(`TurnStart::forgotten`). Its note then says, from the chat's journal
+alone (`note::forgotten`: each turn's start on `work`, its end, and on
+`chat` its cause and its replies), that its memory of the chat is behind
+because the computer went back to an earlier save, to check before doing
+any of it again, and what each was asked and replied, after the cut
+turn's note when there is one (a turn a restart cut is that note's, never
+told twice), the two together at most 8 KiB. Said once in a life; a life that restores the same old
+`/data` again reads the 409s again, and is told again. Proven in
+`turns_another_life_ran_are_told_once_to_the_next_turn` (the engine),
+`forgotten_turns_are_told_from_the_journal` (note.rs), and on the platform
+by the `computers` lane's recovery checks, where the stub echoes it.
+
 ## Hermes' Relay, as the bridge speaks it
 
 Hermes v0.21.5 (tag `v2026.9.24`, the newest release on 2026-10-03;
