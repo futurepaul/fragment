@@ -24,7 +24,7 @@
 //!                                 approving adds the key at once
 //!   POST /cli/approve             (the form)
 //!
-//! The rest of a person's account (their picture, username, fragments,
+//! The rest of a person's account (their picture, email, fragments,
 //! credit) is the API's, which the shell calls with this session
 //! (docs/api.md, The shell).
 //!
@@ -84,8 +84,6 @@ const LINK_PROOF_MAX: usize = 4096;
 const APPROVE_FORM_MAX_BYTES: usize = 16 * 1024;
 const _: () = assert!(APPROVE_FORM_MAX_BYTES >= 3 * LINK_PROOF_MAX + 256, "the form holds the longest proof, encoded");
 
-/// A form of a few short fields: a username.
-const SHORT_FORM_MAX_BYTES: usize = 4 * 1024;
 
 /// The key an approval link's proof is by, if it is good: a NIP-98 event
 /// by that key for `POST <platform>/cli/approve`, made within ten minutes.
@@ -331,22 +329,6 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 None => to_login(&platform, "/auth/link"),
             },
             (Method::Get, ["auth", "callback"]) => callback(&req, env, cfg, url).await,
-            (Method::Post, ["auth", "username"]) => {
-                same_origin(&req, &platform)?;
-                let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return to_login(&platform, "/") };
-                // read before the registry says who is signed in: bounded as it arrives
-                let bytes = crate::read_body(&mut req, SHORT_FORM_MAX_BYTES).await?;
-                let username = url::form_urlencoded::parse(&bytes).find(|(k, _)| k == "username").map(|(_, v)| v.trim().to_string());
-                let Some(username) = username else { return Err(CellError::invalid("choose a username")) };
-                match ask_registry(env, &calls::ClaimUsername { by: calls::By::Session(token), username }).await {
-                    Ok(_) => redirect("/", &[]),
-                    Err(e) if e.code == ErrorCode::Unauthenticated => to_login(&platform, "/"),
-                    Err(e) if matches!(e.code, ErrorCode::AlreadyExists | ErrorCode::InvalidRequest) => {
-                        page(400, "Choose your username", &format!("<p>{}</p><p><a href=\"/\">Try another</a></p>", esc(&e.message)))
-                    }
-                    Err(e) => Err(e),
-                }
-            }
             (Method::Get, ["auth", "logout"]) => page(200, "Sign out", "<form method=\"post\" action=\"/auth/logout\"><button>Sign out</button></form>"),
             (Method::Post, ["auth", "logout"]) => {
                 same_origin(&req, &platform)?;
@@ -371,7 +353,7 @@ pub async fn platform(mut req: Request, env: &Env, cfg: &Config, url: &Url, segm
                 let Some(token) = cookie_of(&req, SESSION_COOKIE, secure(url), "/")? else { return signed_out() };
                 match mint_for(env, url, &token, &name, &back, None).await? {
                     Minting::Redeem(redeem) => to_signin(cfg, url, &name, &redeem),
-                    Minting::Ask(who) => consent_page(&token, &who, &name, &back),
+                    Minting::Ask(who, email) => consent_page(&token, &who, email.as_deref(), &name, &back),
                     Minting::SignedOut => signed_out(),
                 }
             }
@@ -446,8 +428,8 @@ enum Minting {
     /// A single-use redemption for its `__signin`.
     Redeem(String),
     /// Nothing yet: the fragment is not the person's, nor shared with them,
-    /// and they have not said yes to it (whom to ask).
-    Ask(Signed),
+    /// and they have not said yes to it (whom to ask, and their email).
+    Ask(Signed, Option<String>),
     /// The platform session ended, or never began.
     SignedOut,
 }
@@ -474,7 +456,7 @@ async fn mint_for(env: &Env, url: &Url, token: &str, name: &str, back: &str, emb
             let minted = ask_registry(env, &mint(Consent::Member)).await?;
             Ok(Minting::Redeem(minted.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?))
         }
-        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => Ok(Minting::Ask(who)),
+        Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::Unauthenticated) => Ok(Minting::Ask(who, minted.email)),
         Err(e) => Err(e),
     }
 }
@@ -514,7 +496,7 @@ async fn frame(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<
             Ok(resp)
         }
         // asking is a tab's: the question is a page no frame shows (`consent_page`)
-        Minting::Ask(_) => frame_note(&platform, &name, &back, Unsigned::Consent),
+        Minting::Ask(..) => frame_note(&platform, &name, &back, Unsigned::Consent),
         Minting::SignedOut => frame_note(&platform, &name, &back, Unsigned::SignedOut),
     }
 }
@@ -577,10 +559,10 @@ fn frame_note(platform: &str, name: &str, back: &str, why: Unsigned) -> CellResu
 /// sharing page's protections (share.rs): unframed, a form token, a button
 /// that arms after a moment. Its form redirects on to the fragment's
 /// origin, so it has no forms-here rule.
-fn consent_page(session: &str, who: &Signed, name: &str, back: &str) -> CellResult<Response> {
+fn consent_page(session: &str, who: &Signed, email: Option<&str>, name: &str, back: &str) -> CellResult<Response> {
     let label = share::label(name);
-    let you = match who.username.as_deref() {
-        Some(u) => format!("@{}", esc(u)),
+    let you = match email {
+        Some(e) => esc(e),
         None => format!("<code>{}</code>", esc(&who.id)),
     };
     let body = format!(
@@ -648,10 +630,8 @@ pub(crate) fn refused(cfg: &Config, url: &Url, name: &str, rest: &str, framed: b
     if signed_out && !framed && !link_changed && !signing_in {
         return redirect(&format!("{}/auth/fragment?name={name}&return={}", cfg.platform(), enc(&back)), &[]);
     }
-    let (label, ask) = match fragment_proto::split_fragment_name(name) {
-        Some((label, owner)) => (label, format!("its owner, <b>@{}</b>,", esc(owner))),
-        None => (name, "its owner".to_string()),
-    };
+    // its owner is not named: who owns it is theirs to tell, to whom they share it with
+    let (label, ask) = (crate::share::label(name), "its owner".to_string());
     let base = cfg.canonical(url, name);
     let tab = if framed { " target=\"_blank\" rel=\"noopener\"" } else { "" };
     let a = |href: &str, text: &str| format!("<a href=\"{}\"{tab}>{}</a>", esc(href), esc(text));

@@ -43,24 +43,13 @@ use crate::js;
 /// The identities one `/profiles` answers.
 pub(crate) const PROFILES_MAX: usize = 64;
 
-/// Joins an identity's row (`i`) to the username it makes fragments under
-/// (`u`): its own, or an agent's owner's. `usernames.identity` is UNIQUE,
-/// so the join adds no row. A macro, so each statement that reads an
-/// identity with its username stays one literal that spells it the same.
-macro_rules! username_join {
-    () => {
-        "LEFT JOIN usernames u ON u.identity = COALESCE(i.owner, i.id)"
-    };
-}
-
 pub(crate) mod calls;
 mod signin;
 pub(crate) mod wipe;
 use calls::{
-    Hold, SubjectOf,
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, EndSession, Exchange, FindUsername, Holder, Logout, Lookup, Mint,
-    Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, Released, ReleaseUsername,
-    Resolve, RevokeKey, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, EndSession, Exchange, Hold, Logout, Lookup, Mint, Picture, PictureOf, Profile, Profiles,
+    ProfilesAnswer, Redeem, RegisterAgent, Resolve, RevokeKey, Session, SetPicture, SubjectOf, TestHook, View, WipeBegin, WipeLook, WipeStep,
+    TEST_HOLD_MAX_MS,
 };
 pub use signin::SESSION_TTL_MS;
 
@@ -81,8 +70,6 @@ CREATE INDEX IF NOT EXISTS subjects_identity ON subjects (identity);
 CREATE INDEX IF NOT EXISTS subjects_email ON subjects (email);
 CREATE TABLE IF NOT EXISTS person_keys (
   identity TEXT PRIMARY KEY, sealed TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS usernames (
-  username TEXT PRIMARY KEY, identity TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS pictures (
   identity TEXT PRIMARY KEY, sha TEXT NOT NULL, mime TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS agent_fragments (
@@ -136,12 +123,11 @@ impl DurableObject for RegistryCell {
     }
 }
 
-/// `identities` (the row for an id), with its username (`username_join!`).
+/// `identities` (the row for an id).
 #[derive(Deserialize)]
 struct IdentityRow {
     kind: IdentityKind,
     owner: Option<String>,
-    username: Option<String>,
     held: Option<Role>,
 }
 
@@ -150,25 +136,24 @@ struct CreatedRow {
     created_at: i64,
 }
 
-/// A key's row, with its holder's identity and username in the same
-/// statement (`/resolve`). The holder's columns are `None` when the key
-/// names an identity that is not there.
+/// A key's row, with its holder's identity in the same statement
+/// (`/resolve`). The holder's columns are `None` when the key names an
+/// identity that is not there.
 #[derive(Deserialize)]
 struct KeyHolderRow {
     identity: String,
     revoked_at: Option<i64>,
     kind: Option<IdentityKind>,
     owner: Option<String>,
-    username: Option<String>,
     held: Option<Role>,
 }
 
 /// The identity a joined row names (a key's holder, a session's): its
 /// `identities` columns missing, the rows contradict each other, a host
 /// fault.
-fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, username: Option<String>, held: Option<Role>, named_by: &str) -> CellResult<Identity> {
+fn joined_identity(id: String, kind: Option<IdentityKind>, owner: Option<String>, held: Option<Role>, named_by: &str) -> CellResult<Identity> {
     match kind {
-        Some(kind) => Ok(Identity { id, kind, owner, username, held }),
+        Some(kind) => Ok(Identity { id, kind, owner, held }),
         None => Err(CellError::host(format!("{named_by} names a missing identity {id}"))),
     }
 }
@@ -206,11 +191,6 @@ struct HolderRow {
 }
 
 #[derive(Deserialize)]
-struct UsernameRow {
-    username: String,
-}
-
-#[derive(Deserialize)]
 struct CountRow {
     n: u64,
 }
@@ -234,6 +214,12 @@ fn check_key(key: &str) -> CellResult<()> {
 /// A call's body, decoded once.
 fn body<C: Call>(bytes: &[u8]) -> CellResult<C> {
     serde_json::from_slice(bytes).map_err(|e| CellError::invalid(format!("body: {e}")))
+}
+
+/// Where a person's picture is served, on the platform's origin: by their
+/// identity, its digest's start the cache's key.
+fn picture_path(identity: &str, p: &Picture) -> String {
+    format!("/api/identities/{identity}/picture?v={}", &p.sha[..12])
 }
 
 /// A call's answer: the type its `Call` names, so a route cannot answer
@@ -266,11 +252,9 @@ impl RegistryCell {
         self.row::<CountRow>(q, binds)?.map(|r| r.n).ok_or_else(|| CellError::host(format!("COUNT answered no row: {q}")))
     }
 
-    /// An identity with its username, in one statement.
     fn identity(&self, id: &str) -> CellResult<Option<Identity>> {
-        const Q: &str = concat!("SELECT i.kind, i.owner, i.held, u.username FROM identities i ", username_join!(), " WHERE i.id = ?");
-        let row = self.row::<IdentityRow>(Q, vec![id.into()])?;
-        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, username: r.username, held: r.held }))
+        let row = self.row::<IdentityRow>("SELECT kind, owner, held FROM identities WHERE id = ?", vec![id.into()])?;
+        Ok(row.map(|r| Identity { id: id.to_string(), kind: r.kind, owner: r.owner, held: r.held }))
     }
 
     /// An identity a request names: missing, it is 404.
@@ -278,14 +262,20 @@ impl RegistryCell {
         self.identity(id)?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no identity {id}")))
     }
 
-    /// An identity a row names (a key's holder, a session's, a username's):
+    /// An identity a row names (a key's holder, a session's, an email's):
     /// missing, the rows contradict each other, a host fault.
     fn stored_identity(&self, id: &str, named_by: &str) -> CellResult<Identity> {
         self.identity(id)?.ok_or_else(|| CellError::host(format!("{named_by} names a missing identity {id}")))
     }
 
-    fn username_of(&self, id: &str) -> CellResult<Option<String>> {
-        Ok(self.row::<UsernameRow>("SELECT username FROM usernames WHERE identity = ?", vec![id.into()])?.map(|r| r.username))
+    /// A person's email: their latest sign-in's (signin.rs).
+    fn email_of(&self, id: &str) -> CellResult<Option<String>> {
+        #[derive(Deserialize)]
+        struct Row {
+            email: String,
+        }
+        let q = "SELECT email FROM subjects WHERE identity = ? ORDER BY signed_in_at DESC LIMIT 1";
+        Ok(self.row::<Row>(q, vec![id.into()])?.map(|r| r.email))
     }
 
     /// Whoever asks, resolved in this turn (`calls::By`): never a person a
@@ -302,57 +292,6 @@ impl RegistryCell {
         Ok(who)
     }
 
-    /// A person's username, chosen once: taken names, reserved words, and one
-    /// too long for this deployment's hosts (`fragment_core::names`) are refused.
-    fn claim_username(&self, b: ClaimUsername) -> CellResult<Claimed> {
-        let who = self.by(&b.by)?;
-        if who.kind != IdentityKind::Person {
-            return Err(CellError::new(ErrorCode::Forbidden, "only a person chooses a username (an agent makes fragments under its owner's)"));
-        }
-        if !fragment_proto::valid_username(&b.username) {
-            return Err(CellError::invalid(format!(
-                "a username is {}-{} lowercase letters, digits, and single dashes, not starting or ending with one, and not a reserved word",
-                limits::USERNAME_MIN_BYTES,
-                limits::USERNAME_MAX_BYTES
-            )));
-        }
-        match who.username {
-            Some(u) if u == b.username => return Ok(Claimed { username: u, claimed: false }),
-            Some(u) => return Err(conflict(format!("you are {u}: a username is chosen once"))),
-            None => {}
-        }
-        // a new one leaves room for its labels in its fragments' hosts
-        fragment_core::names::username_fits(&b.username, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
-        if self.row::<HolderRow>("SELECT identity FROM usernames WHERE username = ?", vec![b.username.as_str().into()])?.is_some() {
-            return Err(conflict(format!("{} is taken", b.username)));
-        }
-        self.exec(
-            "INSERT INTO usernames (username, identity, claimed_at) VALUES (?, ?, ?)",
-            vec![b.username.as_str().into(), who.id.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
-        )?;
-        Ok(Claimed { username: b.username, claimed: true })
-    }
-
-    /// An operator's undo of a username taken by mistake: its person may
-    /// choose again (the router has checked they own nothing under it).
-    fn release_username(&self, b: ReleaseUsername) -> CellResult<Released> {
-        let Some(holder) = self.row::<HolderRow>("SELECT identity FROM usernames WHERE username = ?", vec![b.username.as_str().into()])? else {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no one is {}", b.username)));
-        };
-        self.exec("DELETE FROM usernames WHERE username = ?", vec![b.username.as_str().into()])?;
-        Ok(Released { username: b.username, identity: holder.identity, released: true })
-    }
-
-    /// Whoever holds a username, and their picture.
-    fn find_username(&self, b: FindUsername) -> CellResult<Holder> {
-        let Some(holder) = self.row::<HolderRow>("SELECT identity FROM usernames WHERE username = ?", vec![b.username.as_str().into()])? else {
-            return Err(CellError::new(ErrorCode::NotFound, format!("no one is {}", b.username)));
-        };
-        let identity = self.stored_identity(&holder.identity, &format!("the username {}", b.username))?;
-        let picture = self.picture_of(&holder.identity)?;
-        Ok(Holder { identity, picture })
-    }
-
     /// A person's picture, its SHA-256 checked as it was when it was set
     /// (its URLs are built from it).
     fn picture_of(&self, id: &str) -> CellResult<Option<Picture>> {
@@ -365,8 +304,8 @@ impl RegistryCell {
 
     fn set_picture(&self, b: SetPicture) -> CellResult<Picture> {
         let who = self.by(&b.by)?;
-        if who.kind != IdentityKind::Person || who.username.is_none() {
-            return Err(CellError::invalid("choose a username before a picture"));
+        if who.kind != IdentityKind::Person {
+            return Err(CellError::invalid("a picture is a person's"));
         }
         if !blob::valid_sha(&b.sha) || !matches!(b.mime.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
             return Err(CellError::invalid("a picture is a PNG, JPEG, WebP, or GIF, named by its SHA-256"));
@@ -384,13 +323,9 @@ impl RegistryCell {
     }
 
     /// The identity holding a key, in one statement: the key's row joined
-    /// with its holder and the holder's username.
+    /// with its holder.
     fn key_holder(&self, key: &str) -> CellResult<Identity> {
-        const Q: &str = concat!(
-            "SELECT k.identity, k.revoked_at, i.kind, i.owner, i.held, u.username FROM keys k LEFT JOIN identities i ON i.id = k.identity ",
-            username_join!(),
-            " WHERE k.key = ?"
-        );
+        const Q: &str = "SELECT k.identity, k.revoked_at, i.kind, i.owner, i.held FROM keys k LEFT JOIN identities i ON i.id = k.identity WHERE k.key = ?";
         check_key(key)?;
         match self.row::<KeyHolderRow>(Q, vec![key.into()])? {
             None => Err(unauthenticated(format!(
@@ -398,25 +333,29 @@ impl RegistryCell {
                 npub::encode(key)
             ))),
             Some(row) if row.revoked_at.is_some() => Err(unauthenticated(format!("the key {} was revoked", npub::encode(key)))),
-            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.username, row.held, &format!("the key {key}")),
+            Some(row) => joined_identity(row.identity, row.kind, row.owner, row.held, &format!("the key {key}")),
         }
     }
 
-    /// What anyone may know of identities, as a page shows a name: a
-    /// person's username and picture, or that it is someone's agent (and,
-    /// made from an agent fragment, its name and fragment). An id the
-    /// registry does not hold (an anonymous visitor's) is left out.
+    /// What a page shows of identities as names: a person's picture, and
+    /// their email when the caller named them in `emails_of` (it may show
+    /// it: calls.rs `Profiles`), or that it is someone's agent (and, made
+    /// from an agent fragment, its name and fragment). An id the registry
+    /// does not hold (an anonymous visitor's) is left out.
     fn profiles(&self, b: Profiles) -> CellResult<ProfilesAnswer> {
-        if b.ids.len() > PROFILES_MAX {
+        if b.ids.len() > PROFILES_MAX || b.emails_of.len() > PROFILES_MAX {
             return Err(CellError::invalid(format!("at most {PROFILES_MAX} identities at once")));
         }
         let mut profiles = BTreeMap::new();
         // bounded: at most PROFILES_MAX ids, just checked
         for id in b.ids {
             let Some(who) = self.identity(&id)? else { continue };
-            let picture = match (who.kind, &who.username) {
-                (IdentityKind::Person, Some(u)) => self.picture_of(&id)?.map(|p| format!("/api/users/{u}/picture?v={}", &p.sha[..12])),
-                _ => None,
+            let (picture, email) = match who.kind {
+                IdentityKind::Person => (
+                    self.picture_of(&id)?.map(|p| picture_path(&id, &p)),
+                    if b.emails_of.contains(&id) { self.email_of(&id)? } else { None },
+                ),
+                IdentityKind::Agent => (None, None),
             };
             let fragment = match who.kind {
                 IdentityKind::Agent => self.agent_fragment(&id)?,
@@ -424,8 +363,7 @@ impl RegistryCell {
             };
             // an agent's name is its fragment's label (docs/computers.md)
             let name = fragment.as_deref().and_then(fragment_proto::split_fragment_name).map(|(label, _)| label.to_string());
-            // an agent's identity carries its owner's username
-            profiles.insert(id, Profile { kind: who.kind, username: who.username, picture, name, fragment, title: None });
+            profiles.insert(id, Profile { kind: who.kind, email, picture, name, fragment, title: None });
         }
         Ok(ProfilesAnswer { profiles })
     }
@@ -464,17 +402,15 @@ impl RegistryCell {
         let row = self
             .row::<CreatedRow>("SELECT created_at FROM identities WHERE id = ?", vec![who.id.as_str().into()])?
             .ok_or_else(|| CellError::host(format!("the identity {} went missing during its view", who.id)))?;
-        // a person's own username (an agent's identity carries its owner's)
-        let username = if who.kind == IdentityKind::Person { who.username.clone() } else { None };
-        let picture = match &username {
-            Some(u) => self.picture_of(&who.id)?.map(|p| format!("/api/users/{u}/picture?v={}", &p.sha[..12])),
-            None => None,
+        let (email, picture) = match who.kind {
+            IdentityKind::Person => (self.email_of(&who.id)?, self.picture_of(&who.id)?.map(|p| picture_path(&who.id, &p))),
+            IdentityKind::Agent => (None, None),
         };
         Ok(IdentityView {
             id: who.id.clone(),
             kind: who.kind,
             owner: who.owner.clone(),
-            username,
+            email,
             picture,
             created_at: row.created_at,
             keys,
@@ -500,8 +436,7 @@ impl RegistryCell {
             "INSERT INTO keys (key, identity, added_at, added_by) VALUES (?, ?, ?, ?)",
             vec![key.into(), id.as_str().into(), SqlStorageValue::Integer(now), added_by.into()],
         )?;
-        let username = owner.map(|o| self.username_of(o)).transpose()?.flatten();
-        Ok(Identity { id, kind, owner: owner.map(str::to_string), username, held: None })
+        Ok(Identity { id, kind, owner: owner.map(str::to_string), held: None })
     }
 
     fn register_agent(&self, b: RegisterAgent) -> CellResult<IdentityView> {
@@ -511,7 +446,7 @@ impl RegistryCell {
             return Err(CellError::new(ErrorCode::Forbidden, "an agent's owner is a person"));
         }
         if b.fragment.as_deref().is_some_and(|f| !fragment_proto::valid_fragment_name(f)) {
-            return Err(CellError::invalid("an agent's fragment is <label>.<username>"));
+            return Err(CellError::invalid("an agent's fragment is named <label>--<suffix>"));
         }
         let (agent, created) = match self.key_row(&b.key)? {
             Some(row) if !row.active() => return Err(conflict("this key was revoked")),
@@ -624,21 +559,34 @@ impl RegistryCell {
         self.view(&who, Some(true))
     }
 
+    /// The person a verified email names (an email names at most one:
+    /// signin.rs), if anyone.
+    pub(crate) fn person_by_email(&self, email: &str) -> CellResult<Option<String>> {
+        let rows = self.rows::<HolderRow>("SELECT identity FROM subjects WHERE email = ? LIMIT 1", vec![email.to_ascii_lowercase().into()])?;
+        Ok(rows.into_iter().next().map(|r| r.identity))
+    }
+
     /// Who an npub (or 64 hex) names: the identity it is, or else the one
-    /// holding it as an active key.
+    /// holding it as an active key; or an email: the person it is verified
+    /// for.
     fn lookup(&self, b: Lookup) -> CellResult<Identity> {
         let who = b.who;
         let missing = || CellError::new(ErrorCode::NotFound, format!("{who} names no one on this fleet (they sign in, or register with `fragment login`)"));
-        let Some(key) = npub::parse(&who) else {
-            return Err(CellError::invalid(format!("{who:?} is not an npub or a 64-hex key")));
-        };
-        let found = match self.identity(&npub::identity_of(&key))? {
-            Some(identity) => identity,
-            None => match self.key_row(&key)? {
-                Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}"))?,
-                Some(_) => return Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
-                None => return Err(missing()),
-            },
+        let found = if fragment_core::mail::valid_address(&who) {
+            let id = self.person_by_email(&who)?.ok_or_else(missing)?;
+            self.stored_identity(&id, &format!("the email {who}"))?
+        } else {
+            let Some(key) = npub::parse(&who) else {
+                return Err(CellError::invalid(format!("{who:?} is not an npub, a 64-hex key, or an email")));
+            };
+            match self.identity(&npub::identity_of(&key))? {
+                Some(identity) => identity,
+                None => match self.key_row(&key)? {
+                    Some(row) if row.active() => self.stored_identity(&row.identity, &format!("the key {key}"))?,
+                    Some(_) => return Err(CellError::new(ErrorCode::NotFound, format!("the key {who} was revoked"))),
+                    None => return Err(missing()),
+                },
+            }
         };
         // no one adds a person being wiped (or their agent) to a fragment
         if self.wiping(found.owner.as_deref().unwrap_or(&found.id))? {
@@ -717,9 +665,7 @@ impl RegistryCell {
             RevokeKey::PATH => reply::<RevokeKey>(self.revoke(body(&bytes)?)),
             View::PATH => reply::<View>(self.view_for(body(&bytes)?)),
             CheckKey::PATH => reply::<CheckKey>(self.check(body(&bytes)?)),
-            ClaimUsername::PATH => reply::<ClaimUsername>(self.claim_username(body(&bytes)?)),
-            FindUsername::PATH => reply::<FindUsername>(self.find_username(body(&bytes)?)),
-            ReleaseUsername::PATH => reply::<ReleaseUsername>(self.release_username(body(&bytes)?)),
+            PictureOf::PATH => reply::<PictureOf>(self.picture_of(&body::<PictureOf>(&bytes)?.identity)),
             SetPicture::PATH => reply::<SetPicture>(self.set_picture(body(&bytes)?)),
             Begin::PATH => reply::<Begin>(self.begin(body(&bytes)?).await),
             Exchange::PATH => reply::<Exchange>(self.exchange(body(&bytes)?).await),

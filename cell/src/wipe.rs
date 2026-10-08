@@ -1,6 +1,6 @@
 //! An operator's wipe of a person (docs/api.md, Operators): everything that
-//! is theirs or their agents' deleted, and their username and sign-in
-//! freed, so their next sign-in is a new person (a new identity, so a new
+//! is theirs or their agents' deleted, and their email and sign-in freed,
+//! so their next sign-in is a new person (a new identity, so a new
 //! computer, ledger and list: each is named by it).
 //!
 //!   GET  /api/people/{person}/wipe   the dry run: what a wipe deletes, or
@@ -10,7 +10,7 @@
 //!                                    as one call goes; called again, it
 //!                                    goes on where it stopped
 //!
-//! `{person}` is a username or an identity. Only the deployment's operators
+//! `{person}` is an email or an identity. Only the deployment's operators
 //! ask (`operator`): a key `FRAGMENT_OPERATORS` lists, whether or not anyone
 //! holds it, or the key of an identity it lists. A key no one holds is the
 //! one to wipe with: a wipe ends the keys and sessions of whom it wipes, so
@@ -29,7 +29,7 @@
 //! vendor's error) finishes when it is run again, and a finished one run
 //! again finds nothing left.
 
-use fragment_core::wipe::{self as rules, LifeLeft, Progress, Step, Whose};
+use fragment_core::wipe::{self as rules, LifeLeft, Progress, Step};
 use fragment_nip98::Payload;
 use fragment_proto::wipe::{Cleaning, ComputerFound, Found, Ran, WipeAsk, WipeReport, WipeState};
 use fragment_proto::{limits, ErrorCode, IdentityKind, Role};
@@ -99,7 +99,7 @@ pub(crate) async fn route(mut req: Request, env: &Env, cfg: &Config, url: &Url, 
             rules::may_wipe(operator.identity.as_deref(), &facts.identity).map_err(refused)?;
             let deadline = js::now_ms() + rules::CALL_BUDGET_MS;
             let ran = run(env, &facts.identity, &operator, ask.steps, deadline).await?;
-            // read again by identity: a finished wipe frees the username
+            // read again by identity: a finished wipe frees the email
             let facts = ask_registry(env, &WipeLook { person: facts.identity.clone() }).await?;
             json_answer(&report(env, &facts, ran).await?)
         }
@@ -219,7 +219,8 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             let mut asked = 0usize;
             for (principal, kind) in whom(facts) {
                 for (fragment, role) in list(env, &principal).await? {
-                    if role.is_none() || rules::whose(&fragment, facts.username.as_deref()) == Whose::Theirs {
+                    // theirs are ended (`Fragments`), a row left is gone already
+                    if role.is_none_or(|r| r == Role::Owner) {
                         continue;
                     }
                     if asked >= rules::FRAGMENTS_PER_CALL || js::now_ms() > deadline {
@@ -246,7 +247,12 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                     }
                     return Ok(Did { done: false, note: Some(note), cleaning: shown(busy), ..Did::default() });
                 }
-                let v = crate::fragment::ask(env, name, "wipe/end", &wipe_end(facts)).await?;
+                let v = match crate::fragment::ask(env, name, "wipe/end", &wipe_end(facts)).await {
+                    Ok(v) => v,
+                    // a row they left, of someone else's: nothing of theirs to clean
+                    Err(e) if e.code == ErrorCode::Forbidden => continue,
+                    Err(e) => return Err(e),
+                };
                 if v["left"].as_u64() != Some(0) {
                     let lives: Vec<LifeLeft> = match &v["lives"] {
                         serde_json::Value::Null => vec![],
@@ -328,15 +334,16 @@ async fn list(env: &Env, principal: &str) -> CellResult<Vec<(String, Option<Role
     Err(CellError::host(format!("{principal}'s list holds more than {LIST_PAGES_MAX} pages")))
 }
 
-/// The fragments that are the person's (under their username) on their and
-/// their agents' lists (`live`: those a role still names; else every one,
-/// ended ones with their rows left), and the agent fragments the registry
-/// names: each once, sorted.
+/// The fragments that are the person's on their and their agents' lists
+/// (`live`: those they own; else also every row no role names now, an
+/// ended fragment's or one they left, which a fragment not theirs refuses
+/// to end: `Cleanup`), and the agent fragments the registry names: each
+/// once, sorted.
 async fn theirs(env: &Env, facts: &WipeFacts, live: bool) -> CellResult<Vec<String>> {
     let mut names = facts.agent_fragments.clone();
     for (principal, _) in whom(facts) {
         for (fragment, role) in list(env, &principal).await? {
-            if (role.is_some() || !live) && rules::whose(&fragment, facts.username.as_deref()) == Whose::Theirs {
+            if role == Some(Role::Owner) || (role.is_none() && !live) {
                 names.push(fragment);
             }
         }
@@ -359,7 +366,7 @@ async fn report(env: &Env, facts: &WipeFacts, ran: Vec<Ran>) -> CellResult<WipeR
     let found = survey(env, facts, state).await?;
     Ok(WipeReport {
         identity: facts.identity.clone(),
-        username: facts.username.clone(),
+        email: facts.email.clone(),
         state,
         next: progress.and_then(Progress::next).map(|s| s.name().to_string()),
         done: state == WipeState::Wiped && found.is_empty(),
@@ -375,10 +382,10 @@ async fn survey(env: &Env, facts: &WipeFacts, state: WipeState) -> CellResult<Fo
     for (principal, _) in whom(facts) {
         for (fragment, role) in list(env, &principal).await? {
             lists += 1;
-            let Some(role) = role else { continue };
-            match rules::whose(&fragment, facts.username.as_deref()) {
-                Whose::Theirs => fragments.push(fragment),
-                Whose::Elsewhere => memberships.push(format!("{fragment} ({}, {principal})", role.as_str())),
+            match role {
+                None => {}
+                Some(Role::Owner) => fragments.push(fragment),
+                Some(role) => memberships.push(format!("{fragment} ({}, {principal})", role.as_str())),
             }
         }
     }

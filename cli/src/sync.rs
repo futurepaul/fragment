@@ -975,14 +975,14 @@ mod tests {
     #[test]
     fn repo_files_that_do_not_sync_are_left_alone() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.md", b"a"), (".env.example", b"X=1"), ("node_modules/x.js", b"x")]);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a"), (".env.example", b"X=1"), ("node_modules/x.js", b"x")]);
         let c = client_for(&mock);
         let dir = tmpdir("left-alone");
-        let first = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let first = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(first.pulled, ["a.md"]);
-        let second = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let second = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(second.deleted_remote.is_empty() && second.pushed.is_empty(), "{second:?}");
-        assert_eq!(mock.paths("t", "main"), [".env.example", "a.md", "node_modules/x.js"]);
+        assert_eq!(mock.paths("t--k3x9", "main"), [".env.example", "a.md", "node_modules/x.js"]);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1083,25 +1083,25 @@ mod tests {
     #[test]
     fn a_pass_reads_the_head_and_the_listing_once() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"a"), ("b.txt", b"b")]);
         let c = client_for(&mock);
         let dir = tmpdir("reads-once");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         mock.take_requests("");
         let read_once = counts(&[("GET branch", 1), ("GET files/metadata", 1), ("GET storage-token", 1)]);
 
-        let idle = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let idle = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(idle.pushed.is_empty() && idle.pulled.is_empty() && !idle.landed, "{idle:?}");
         assert_eq!(mock.take_requests(""), read_once, "a mirror pass with nothing to do");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
         assert_eq!(mock.take_requests(""), read_once, "a pull pass with nothing to do");
 
         fs::write(dir.join("a.txt"), b"changed").unwrap();
         fs::remove_file(dir.join("b.txt")).unwrap();
-        let pushed = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let pushed = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!((pushed.pushed.as_slice(), pushed.deleted_remote.as_slice()), (&["a.txt".to_string()][..], &["b.txt".to_string()][..]));
         assert!(pushed.pulled.is_empty() && pushed.landed, "{pushed:?}");
-        assert_eq!(pushed.head, mock.branch("t", "main"), "the pass ends on its own commit");
+        assert_eq!(pushed.head, mock.branch("t--k3x9", "main"), "the pass ends on its own commit");
         assert_eq!(
             mock.take_requests(""),
             counts(&[("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("GET storage-token", 1), ("POST refresh", 1)]),
@@ -1109,7 +1109,7 @@ mod tests {
         );
 
         // the derived listing named our commit, so nothing reads as changed
-        let again = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.take_requests(""), read_once);
         fs::remove_dir_all(&dir).ok();
@@ -1124,18 +1124,18 @@ mod tests {
     fn the_journal_is_written_only_when_it_changed() {
         use std::os::unix::fs::MetadataExt;
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"a")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"a")]);
         let c = client_for(&mock);
         let dir = tmpdir("journal-writes");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         let journal = || fs::metadata(dir.join(".fragment/state.json")).unwrap().ino();
         let first = journal();
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(journal(), first, "an idle pass leaves it alone");
         fs::write(dir.join("b.txt"), b"b").unwrap();
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_ne!(journal(), first, "a pass that pushed wrote it");
-        assert!(load_state(&dir, "t").unwrap().files.contains_key("b.txt"));
+        assert!(load_state(&dir, "t--k3x9").unwrap().files.contains_key("b.txt"));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1146,9 +1146,9 @@ mod tests {
     #[test]
     fn a_derived_listing_is_the_listing_of_main() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"a"), ("b.txt", b"b"), ("c/d.txt", b"d")]);
         let c = client_for(&mock);
-        let storage = CodeStorage::connect(&c, "t").unwrap();
+        let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
         let before = list_main(&storage).unwrap();
         let changes = [
             Change::Upsert { path: "a.txt".into(), bytes: b"a, longer now".to_vec() },
@@ -1171,15 +1171,15 @@ mod tests {
         // competitor moves the tip once: our pack 409s, we refetch,
         // rebuild, and land on the new tip — both changes survive
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
+        mock.seed_repo("t--k3x9", &[]);
         mock.sabotage_commit_packs(1);
         let c = client_for(&mock);
         let dir = tmpdir("push-conflict-once");
         fs::write(dir.join("a.txt"), b"alpha").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap();
         assert_eq!(report.pushed.len(), 1);
-        assert!(mock.file_at("t", "main", "competitor.txt").is_some(), "competitor commit survives");
-        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"alpha");
+        assert!(mock.file_at("t--k3x9", "main", "competitor.txt").is_some(), "competitor commit survives");
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.txt").unwrap(), b"alpha");
         assert!(mock.commit_pack_count() >= 2, "one rejected attempt plus one landing");
         fs::remove_dir_all(&dir).ok();
     }
@@ -1188,12 +1188,12 @@ mod tests {
     fn push_conflicting_parent_forever_is_bounded() {
         // every attempt is sabotaged: explicit error after MAX_CAS_ATTEMPTS
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
+        mock.seed_repo("t--k3x9", &[]);
         mock.sabotage_commit_packs(99);
         let c = client_for(&mock);
         let dir = tmpdir("push-conflict-forever");
         fs::write(dir.join("a.txt"), b"alpha").unwrap();
-        let err = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap_err();
+        let err = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap_err();
         assert!(err.to_string().contains("branch kept moving"), "got: {err}");
         assert_eq!(mock.commit_pack_count(), MAX_CAS_ATTEMPTS, "exactly the bounded number of attempts");
         fs::remove_dir_all(&dir).ok();
@@ -1207,27 +1207,27 @@ mod tests {
     #[test]
     fn a_lost_commit_answer_adopts_what_landed() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("doc.md", b"base"), ("gone.md", b"g"), ("kept.md", b"k")]);
+        mock.seed_repo("t--k3x9", &[("doc.md", b"base"), ("gone.md", b"g"), ("kept.md", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("lost-answer");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         fs::write(dir.join("doc.md"), b"ours, changed").unwrap();
         fs::write(dir.join("new.md"), b"new").unwrap();
         fs::remove_file(dir.join("gone.md")).unwrap();
-        mock.drop_commit_answers("t", 1);
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        mock.drop_commit_answers("t--k3x9", 1);
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
         assert_eq!(report.exit_code(), 0);
         assert_eq!(mock.commit_pack_count(), 1, "the pack was sent once");
         let copies = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".conflict-")).count();
         assert_eq!(copies, 0, "no conflict copy");
-        assert_eq!(mock.file_at("t", "main", "doc.md").unwrap(), b"ours, changed");
-        assert_eq!(mock.file_at("t", "main", "new.md").unwrap(), b"new");
-        assert!(mock.file_at("t", "main", "gone.md").is_none());
+        assert_eq!(mock.file_at("t--k3x9", "main", "doc.md").unwrap(), b"ours, changed");
+        assert_eq!(mock.file_at("t--k3x9", "main", "new.md").unwrap(), b"new");
+        assert!(mock.file_at("t--k3x9", "main", "gone.md").is_none());
         assert_eq!(fs::read(dir.join("doc.md")).unwrap(), b"ours, changed");
-        let st = load_state(&dir, "t").unwrap();
+        let st = load_state(&dir, "t--k3x9").unwrap();
         assert!(!st.files.contains_key("gone.md"), "the landed deletion leaves no row");
-        let again = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let again = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(again.pushed.is_empty() && again.pulled.is_empty() && again.conflicts.is_empty(), "{again:?}");
         assert_eq!(mock.commit_pack_count(), 1, "and nothing is left to send");
         fs::remove_dir_all(&dir).ok();
@@ -1236,56 +1236,56 @@ mod tests {
     #[test]
     fn mirror_pushes_and_pulls() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("site/remote-only.txt", b"r")]);
+        mock.seed_repo("t--k3x9", &[("site/remote-only.txt", b"r")]);
         let c = client_for(&mock);
         let dir = tmpdir("mirror");
         fs::write(dir.join("local-only.txt"), b"l").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(report.pushed, vec!["local-only.txt"]);
         assert_eq!(report.pulled, vec!["site/remote-only.txt"]);
         assert_eq!(fs::read(dir.join("site/remote-only.txt")).unwrap(), b"r");
-        assert!(mock.file_at("t", "main", "local-only.txt").is_some());
+        assert!(mock.file_at("t--k3x9", "main", "local-only.txt").is_some());
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn live_is_pulled_not_main() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"a1"), ("gone.txt", b"g")]);
-        mock.set_branch("t", "live", &mock.branch("t", "main").unwrap());
-        mock.external_commit("t", "main", &[("a.txt", Some(b"a2")), ("new.txt", Some(b"n"))], "not deployed");
+        mock.seed_repo("t--k3x9", &[("a.txt", b"a1"), ("gone.txt", b"g")]);
+        mock.set_branch("t--k3x9", "live", &mock.branch("t--k3x9", "main").unwrap());
+        mock.external_commit("t--k3x9", "main", &[("a.txt", Some(b"a2")), ("new.txt", Some(b"n"))], "not deployed");
         let c = client_for(&mock);
         let dir = tmpdir("live");
         let live = SyncOptions { live: true, prune: true, ..opts(Mode::Pull) };
-        sync_once(&c, "t", &dir, &live).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &live).unwrap();
         assert_eq!((fs::read(dir.join("a.txt")).unwrap(), dir.join("new.txt").exists()), (b"a1".to_vec(), false), "live's files, not main's");
         fs::write(dir.join("local.txt"), b"l").unwrap();
         // a deploy moves live: the next pull brings it, deletions included, and pushes nothing
-        mock.external_commit("t", "main", &[("gone.txt", None)], "remove");
-        mock.set_branch("t", "live", &mock.branch("t", "main").unwrap());
-        let report = sync_once(&c, "t", &dir, &live).unwrap();
+        mock.external_commit("t--k3x9", "main", &[("gone.txt", None)], "remove");
+        mock.set_branch("t--k3x9", "live", &mock.branch("t--k3x9", "main").unwrap());
+        let report = sync_once(&c, "t--k3x9", &dir, &live).unwrap();
         assert_eq!((fs::read(dir.join("a.txt")).unwrap(), dir.join("new.txt").exists(), dir.join("gone.txt").exists()), (b"a2".to_vec(), true, false));
-        assert!(report.pushed.is_empty() && mock.file_at("t", "main", "local.txt").is_none());
+        assert!(report.pushed.is_empty() && mock.file_at("t--k3x9", "main", "local.txt").is_none());
         fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn deletion_pushes_and_propagates_back() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        mock.seed_repo("t--k3x9", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("delete");
         // first pass: adopt both files locally
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         // delete one locally, push the deletion
         fs::remove_file(dir.join("gone.txt")).unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap();
         assert_eq!(report.deleted_remote, vec!["gone.txt"]);
-        assert!(mock.file_at("t", "main", "gone.txt").is_none());
-        assert!(mock.file_at("t", "main", "kept.txt").is_some());
+        assert!(mock.file_at("t--k3x9", "main", "gone.txt").is_none());
+        assert!(mock.file_at("t--k3x9", "main", "kept.txt").is_some());
         // a second folder (fresh state) pulling sees the deletion
         let dir2 = tmpdir("delete-other");
-        sync_once(&c, "t", &dir2, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &dir2, &opts(Mode::Pull)).unwrap();
         assert!(dir2.join("kept.txt").exists());
         assert!(!dir2.join("gone.txt").exists(), "pull of an empty path must not create it");
         fs::remove_dir_all(&dir).ok();
@@ -1295,18 +1295,18 @@ mod tests {
     #[test]
     fn remote_deletion_propagates_in_mirror() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        mock.seed_repo("t--k3x9", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         // two folders adopt both files
         let dir = tmpdir("rdelete");
         let dir2 = tmpdir("rdelete-other");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         // dir2 pulls, deletes gone.txt, pushes the deletion
-        sync_once(&c, "t", &dir2, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &dir2, &opts(Mode::Pull)).unwrap();
         fs::remove_file(dir2.join("gone.txt")).unwrap();
-        sync_once(&c, "t", &dir2, &opts(Mode::Push)).unwrap();
+        sync_once(&c, "t--k3x9", &dir2, &opts(Mode::Push)).unwrap();
         // mirror folder: local untouched → deletion propagates locally
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(report.deleted_local, vec!["gone.txt"]);
         assert!(!dir.join("gone.txt").exists());
         fs::remove_dir_all(&dir).ok();
@@ -1319,20 +1319,20 @@ mod tests {
         // must apply it — dropping the state row on withhold made the
         // deletion unknowable (e2e: filesync modes sequence)
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
+        mock.seed_repo("t--k3x9", &[("gone.txt", b"g"), ("kept.txt", b"k")]);
         let c = client_for(&mock);
         let dir = tmpdir("prune-late");
         let other = tmpdir("prune-late-other");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &other, &opts(Mode::Pull)).unwrap();
         fs::remove_file(other.join("gone.txt")).unwrap();
-        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
+        sync_once(&c, "t--k3x9", &other, &opts(Mode::Push)).unwrap();
         // withhold first
-        let withheld = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        let withheld = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
         assert_eq!(withheld.withheld_deletions, vec!["gone.txt"]);
         assert!(dir.join("gone.txt").exists());
         // then apply
-        let report = sync_once(&c, "t", &dir, &SyncOptions { prune: true, ..opts(Mode::Pull) }).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &SyncOptions { prune: true, ..opts(Mode::Pull) }).unwrap();
         assert_eq!(report.deleted_local, vec!["gone.txt"]);
         assert!(!dir.join("gone.txt").exists());
         assert!(dir.join("kept.txt").exists());
@@ -1343,20 +1343,20 @@ mod tests {
     #[test]
     fn mass_deletion_guard_blocks_push() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
+        mock.seed_repo("t--k3x9", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
         let c = client_for(&mock);
         let dir = tmpdir("guard");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         // wipe the folder locally: full-wipe rule trips (3 known, 3 pending)
         fs::remove_file(dir.join("a")).unwrap();
         fs::remove_file(dir.join("b")).unwrap();
         fs::remove_file(dir.join("c")).unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap();
         assert!(report.mass_delete_guard.is_some());
         assert_eq!(report.exit_code(), 4);
-        assert!(mock.file_at("t", "main", "a").is_some(), "nothing deleted while guarded");
+        assert!(mock.file_at("t--k3x9", "main", "a").is_some(), "nothing deleted while guarded");
         // override applies it
-        let report = sync_once(&c, "t", &dir, &SyncOptions { apply_mass_delete: true, ..opts(Mode::Push) }).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &SyncOptions { apply_mass_delete: true, ..opts(Mode::Push) }).unwrap();
         assert_eq!(report.deleted_remote.len(), 3);
         fs::remove_dir_all(&dir).ok();
     }
@@ -1364,14 +1364,14 @@ mod tests {
     #[test]
     fn wiped_folder_in_pull_mode_re_downloads_not_guard() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
+        mock.seed_repo("t--k3x9", &[("a", b"1"), ("b", b"2"), ("c", b"3")]);
         let c = client_for(&mock);
         let dir = tmpdir("wipe-pull");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
         fs::remove_file(dir.join("a")).unwrap();
         fs::remove_file(dir.join("b")).unwrap();
         fs::remove_file(dir.join("c")).unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
         assert!(report.mass_delete_guard.is_none(), "pull must not trip on local deletions");
         assert_eq!(report.pulled.len(), 3, "everything re-downloads");
         fs::remove_dir_all(&dir).ok();
@@ -1380,18 +1380,18 @@ mod tests {
     #[test]
     fn conflict_both_changed_saves_remote_copy() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("shared.txt", b"base")]);
+        mock.seed_repo("t--k3x9", &[("shared.txt", b"base")]);
         let c = client_for(&mock);
         let dir = tmpdir("conflict");
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         // remote side changes it
         let other = tmpdir("conflict-other");
-        sync_once(&c, "t", &other, &opts(Mode::Pull)).unwrap();
+        sync_once(&c, "t--k3x9", &other, &opts(Mode::Pull)).unwrap();
         fs::write(other.join("shared.txt"), b"theirs").unwrap();
-        sync_once(&c, "t", &other, &opts(Mode::Push)).unwrap();
+        sync_once(&c, "t--k3x9", &other, &opts(Mode::Push)).unwrap();
         // local side changes it too
         fs::write(dir.join("shared.txt"), b"ours").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert_eq!(report.conflicts.len(), 1);
         assert_eq!(report.exit_code(), 3);
         assert_eq!(fs::read(dir.join("shared.txt")).unwrap(), b"ours", "local keeps ours");
@@ -1400,7 +1400,7 @@ mod tests {
         assert!(copy.is_some(), "remote copy saved beside it");
         let copy_bytes = fs::read(dir.join(copy.unwrap())).unwrap();
         assert_eq!(copy_bytes, b"theirs");
-        assert_eq!(mock.file_at("t", "main", "shared.txt").unwrap(), b"theirs", "remote untouched by our conflict");
+        assert_eq!(mock.file_at("t--k3x9", "main", "shared.txt").unwrap(), b"theirs", "remote untouched by our conflict");
         fs::remove_dir_all(&dir).ok();
         fs::remove_dir_all(&other).ok();
     }
@@ -1413,16 +1413,16 @@ mod tests {
     #[test]
     fn conflicts_are_tracked_by_path_not_report_text() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"theirs a"), ("a.md", b"theirs a.md")]);
+        mock.seed_repo("t--k3x9", &[("a", b"theirs a"), ("a.md", b"theirs a.md")]);
         let c = client_for(&mock);
         let dir = tmpdir("conflict-paths");
         fs::write(dir.join("a"), b"ours a").unwrap();
         fs::write(dir.join("a.md"), b"ours a.md").unwrap();
-        let storage = CodeStorage::connect(&c, "t").unwrap();
-        let blobs = crate::blobs::Blobs::new(&c, "t");
+        let storage = CodeStorage::connect(&c, "t--k3x9").unwrap();
+        let blobs = crate::blobs::Blobs::new(&c, "t--k3x9");
         let listing = list_main(&storage).unwrap();
         let (local, _) = scan_local(&dir, None, true).unwrap();
-        let mut state = SyncState { schema_version: 3, name: "t".into(), host: None, repo: None, files: BTreeMap::new() };
+        let mut state = SyncState { schema_version: 3, name: "t--k3x9".into(), host: None, repo: None, files: BTreeMap::new() };
         let mut report = Report::default();
         let mut recorded = HashSet::new();
         for path in ["a.md", "a", "a.md", "a"] {
@@ -1440,15 +1440,15 @@ mod tests {
     #[test]
     fn pull_records_both_a_and_a_md_conflicts() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a", b"base a"), ("a.md", b"base a.md")]);
+        mock.seed_repo("t--k3x9", &[("a", b"base a"), ("a.md", b"base a.md")]);
         let c = client_for(&mock);
         let dir = tmpdir("pull-conflict-paths");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        mock.external_commit("t", "main", &[("a", Some(b"theirs a")), ("a.md", Some(b"theirs a.md"))], "theirs");
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        mock.external_commit("t--k3x9", "main", &[("a", Some(b"theirs a")), ("a.md", Some(b"theirs a.md"))], "theirs");
         // a different size, so the scan re-hashes whatever the mtime says
         fs::write(dir.join("a"), b"ours, a").unwrap();
         fs::write(dir.join("a.md"), b"ours, a.md").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
         let mut paths: Vec<&str> = report.conflicts.iter().filter_map(|c| c.split(' ').next()).collect();
         paths.sort();
         assert_eq!(paths, vec!["a", "a.md"], "{:?}", report.conflicts);
@@ -1460,16 +1460,16 @@ mod tests {
     #[test]
     fn verify_catches_drift() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"same"), ("b.txt", b"will-drift")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"same"), ("b.txt", b"will-drift")]);
         let c = client_for(&mock);
         let dir = tmpdir("verify");
-        sync_once(&c, "t", &dir, &opts(Mode::Pull)).unwrap();
-        let clean = verify(&c, "t", &dir).unwrap();
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Pull)).unwrap();
+        let clean = verify(&c, "t--k3x9", &dir).unwrap();
         assert!(clean.conflicts.is_empty(), "{:?}", clean.conflicts);
         assert_eq!(clean.exit_code(), 0, "a folder in sync exits 0");
         // same size, different content — the exact lie the audit exists for
         fs::write(dir.join("b.txt"), b"went-drft").unwrap();
-        let report = verify(&c, "t", &dir).unwrap();
+        let report = verify(&c, "t--k3x9", &dir).unwrap();
         assert!(report.conflicts.iter().any(|c| c.starts_with("b.txt")), "{:?}", report.conflicts);
         assert!(report.conflicts.iter().all(|c| !c.starts_with("a.txt")));
         assert_eq!(report.exit_code(), 3, "drift exits as a conflict does");
@@ -1487,23 +1487,23 @@ mod tests {
         //     alone can't tell these apart when the service reports
         //     name-form identities)
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("old.txt", b"remote world")]);
+        mock.seed_repo("t--k3x9", &[("old.txt", b"remote world")]);
         let c = client_for(&mock);
         for (tag, journal) in [
             (
                 "other repo, same host",
-                format!("{{\"schemaVersion\":3,\"name\":\"t\",\"host\":\"{}\",\"repo\":\"urn:some-other-repo\",\"files\":{{}}}}", mock.url),
+                format!("{{\"schemaVersion\":3,\"name\":\"t--k3x9\",\"host\":\"{}\",\"repo\":\"urn:some-other-repo\",\"files\":{{}}}}", mock.url),
             ),
             (
                 "same repo, other host",
-                r#"{"schemaVersion":3,"name":"t","host":"https://fragment.club","repo":"t","files":{}}"#.to_string(),
+                r#"{"schemaVersion":3,"name":"t--k3x9","host":"https://fragment.club","repo":"t--k3x9","files":{}}"#.to_string(),
             ),
         ] {
             let dir = tmpdir("world-mismatch");
             fs::write(dir.join("local.txt"), b"local world").unwrap();
             fs::create_dir_all(dir.join(".fragment")).unwrap();
             fs::write(dir.join(".fragment/state.json"), journal).unwrap();
-            let err = match sync_once(&c, "t", &dir, &opts(Mode::Mirror)) {
+            let err = match sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)) {
                 Err(SyncError::Repo(msg)) => msg,
                 other => panic!("{tag}: expected Repo error, got {other:?}"),
             };
@@ -1521,23 +1521,23 @@ mod tests {
         // tree): the journal's files look remotely-deleted and the mirror
         // would delete them locally — the guard must refuse instead
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
+        mock.seed_repo("t--k3x9", &[]);
         let c = client_for(&mock);
         let dir = tmpdir("world-reset");
         for i in 0..5 {
             fs::write(dir.join(format!("f{i}.txt")), format!("content {i}").as_bytes()).unwrap();
         }
-        sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap(); // binds the journal
+        sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap(); // binds the journal
         assert_eq!(mock.refresh_count(), 1, "landing sync nudges the pin refresh");
-        mock.seed_repo("t", &[]); // server-side world reset, same repo id
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        mock.seed_repo("t--k3x9", &[]); // server-side world reset, same repo id
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(report.mass_delete_guard.is_some(), "5 of 5 remotely-deleted must trip the guard");
         for i in 0..5 {
             assert!(dir.join(format!("f{i}.txt")).exists(), "f{i}.txt must survive the refusal");
         }
         // the escape hatch applies it
         let o = SyncOptions { apply_mass_delete: true, ..opts(Mode::Mirror) };
-        let report = sync_once(&c, "t", &dir, &o).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &o).unwrap();
         assert!(report.mass_delete_guard.is_none());
         assert_eq!(report.deleted_local.len() + report.pushed.len(), 5, "re-seeded local files push back");
         fs::remove_dir_all(&dir).ok();
@@ -1549,14 +1549,14 @@ mod tests {
         // same-size different-content file silently never pushed (found
         // live). Content must decide.
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"aaaa")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"aaaa")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap-diff");
         fs::write(dir.join("a.txt"), b"bbbb").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap();
         assert_eq!(report.pushed, vec!["a.txt".to_string()], "equal size, different content must push");
-        assert_eq!(mock.file_at("t", "main", "a.txt").unwrap(), b"bbbb");
-        assert!(load_state(&dir, "t").unwrap().files.contains_key("a.txt"));
+        assert_eq!(mock.file_at("t--k3x9", "main", "a.txt").unwrap(), b"bbbb");
+        assert!(load_state(&dir, "t--k3x9").unwrap().files.contains_key("a.txt"));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1565,17 +1565,17 @@ mod tests {
         // the flip side: byte-identical files adopt into the journal with
         // no commit and no re-fetch on the next pass
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.txt", b"same")]);
+        mock.seed_repo("t--k3x9", &[("a.txt", b"same")]);
         let c = client_for(&mock);
         let dir = tmpdir("bootstrap-same");
         fs::write(dir.join("a.txt"), b"same").unwrap();
-        let report = sync_once(&c, "t", &dir, &opts(Mode::Push)).unwrap();
+        let report = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Push)).unwrap();
         assert!(report.pushed.is_empty(), "identical content is not a push");
         assert_eq!(mock.commit_pack_count(), 0, "no commit-packs sent — the seed commit is server-side");
-        let r2 = sync_once(&c, "t", &dir, &opts(Mode::Mirror)).unwrap();
+        let r2 = sync_once(&c, "t--k3x9", &dir, &opts(Mode::Mirror)).unwrap();
         assert!(r2.pushed.is_empty() && r2.pulled.is_empty(), "adopted file stays quiet");
-        let st = load_state(&dir, "t").unwrap();
-        assert_eq!(st.repo.as_deref(), Some("t"), "journal binds to the repo identity");
+        let st = load_state(&dir, "t--k3x9").unwrap();
+        assert_eq!(st.repo.as_deref(), Some("t--k3x9"), "journal binds to the repo identity");
         assert_eq!(st.host.as_deref(), Some(mock.url.as_str()), "journal binds to the host identity");
         fs::remove_dir_all(&dir).ok();
     }

@@ -509,7 +509,7 @@ mod tests {
         let c = Client::new("http://127.0.0.1:9", auth::fixed(7));
         let dir = tmpdir("burst");
         let o = opts();
-        let mut watcher = Watcher::new(&c, "t", &dir, &o);
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
         watcher.head = Some("b".repeat(40));
         for _ in 0..5 {
             tx.send(Wakeup::Events).unwrap();
@@ -533,11 +533,11 @@ mod tests {
     #[test]
     fn one_local_write_is_one_pass_and_its_echoes_none() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.md", b"a")]);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("one-write");
         let o = opts();
-        let mut watcher = Watcher::new(&c, "t", &dir, &o);
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
         assert!(matches!(watcher.serve(REMOTE, true).unwrap(), Served::Passed(r) if r.pulled == ["a.md"]));
         mock.take_requests("");
 
@@ -552,7 +552,7 @@ mod tests {
 
         // the feed's frame for our own commit, and the folder's events
         let mut due = Due::default();
-        watcher.note(&mut due, Wakeup::Head(mock.branch("t", "main")));
+        watcher.note(&mut due, Wakeup::Head(mock.branch("t--k3x9", "main")));
         watcher.note(&mut due, Wakeup::Events);
         assert!(matches!(watcher.serve(due, true).unwrap(), Served::Nothing));
         // an editor's workspace state changes nothing that syncs
@@ -572,11 +572,11 @@ mod tests {
     fn an_idle_sweep_reads_one_head_and_a_missed_move_is_pulled() {
         use std::os::unix::fs::MetadataExt;
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.md", b"a")]);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("sweep");
         let o = opts();
-        let mut watcher = Watcher::new(&c, "t", &dir, &o);
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
         watcher.serve(REMOTE, true).unwrap();
         let journal = || fs::metadata(dir.join(".fragment/state.json")).unwrap().ino();
         let written = journal();
@@ -587,14 +587,14 @@ mod tests {
         assert_eq!(journal(), written, "and writes no journal");
 
         // a commit whose frame never came: the sweep's head read finds it
-        mock.external_commit("t", "main", &[("b.md", Some(b"b"))], "missed");
+        mock.external_commit("t--k3x9", "main", &[("b.md", Some(b"b"))], "missed");
         assert!(matches!(watcher.serve(SWEEP, true).unwrap(), Served::Passed(r) if r.pulled == ["b.md"]));
         assert_eq!(fs::read(dir.join("b.md")).unwrap(), b"b");
 
         // with the feed down, a sweep is a full pass: a commit made while
         // the socket was down is pulled within one sweep
         mock.take_requests("");
-        mock.external_commit("t", "main", &[("c.md", Some(b"c"))], "while down");
+        mock.external_commit("t--k3x9", "main", &[("c.md", Some(b"c"))], "while down");
         assert!(matches!(watcher.serve(SWEEP, false).unwrap(), Served::Passed(r) if r.pulled == ["c.md"]));
         // one listing: three files are two of the fake's pages
         assert_eq!(mock.take_requests(""), counts(&[("GET branch", 1), ("GET files/metadata", 2), ("GET file", 1)]));
@@ -610,11 +610,11 @@ mod tests {
     #[test]
     fn a_refused_token_is_minted_again_by_the_next_pass() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[("a.md", b"a")]);
+        mock.seed_repo("t--k3x9", &[("a.md", b"a")]);
         let c = Client::new(&mock.url, auth::fixed(7));
         let dir = tmpdir("refused");
         let o = opts();
-        let mut watcher = Watcher::new(&c, "t", &dir, &o);
+        let mut watcher = Watcher::new(&c, "t--k3x9", &dir, &o);
         watcher.serve(REMOTE, true).unwrap();
         fs::write(dir.join("b.md"), "b").unwrap();
         watcher.serve(LOCAL, true).unwrap();
@@ -636,10 +636,10 @@ mod tests {
     #[test]
     fn the_feed_url_changes_only_the_scheme() {
         let key = crate::api::Signer::Key(auth::fixed(7));
-        assert_eq!(watch_url("https://httpbin.example/", &key, "t", Some("v")), "wss://httpbin.example/f/t/__watch?view=v");
-        assert_eq!(watch_url("http://http.local:8790", &key, "t", None), "ws://http.local:8790/f/t/__watch");
+        assert_eq!(watch_url("https://httpbin.example/", &key, "t--k3x9", Some("v")), "wss://httpbin.example/f/t--k3x9/__watch?view=v");
+        assert_eq!(watch_url("http://http.local:8790", &key, "t--k3x9", None), "ws://http.local:8790/f/t--k3x9/__watch");
         // an agent acting for its owner names them: a fragment's own route honors `for`
-        let agent = crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper.paul".into(), acting_for: Some("id:paul".into()) });
-        assert_eq!(watch_url("http://api.fragment.internal", &agent, "t", Some("v")), "ws://api.fragment.internal/f/t/__watch?view=v&for=id%3Apaul");
+        let agent = crate::api::Signer::Agent(crate::api::AgentMode { agent: "juniper--k3x9".into(), acting_for: Some("npub1paul".into()) });
+        assert_eq!(watch_url("http://api.fragment.internal", &agent, "t--k3x9", Some("v")), "ws://api.fragment.internal/f/t--k3x9/__watch?view=v&for=npub1paul");
     }
 }

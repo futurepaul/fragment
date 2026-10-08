@@ -444,7 +444,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     // one adds it from settings): its computer, awake, installs its managed set
     // within a minute, as it looks for one that often while there is none
     let skills_label = s.name("skills");
-    let r = api.create_with(&owner, json!({ "name": skills_label, "template": "skills" }))?;
+    let r = api.create_with(&owner, json!({ "label": skills_label, "template": "skills" }))?;
     let skills_name = r.body["name"].as_str().unwrap_or("").to_string();
     s.ok("its owner then has a skills fragment on the blessed template", r.status == 200 && !skills_name.is_empty(), &r);
     let appeared = std::time::Instant::now();
@@ -498,8 +498,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         Ok(reply_of(&turn))
     };
     let said = |reply: &Option<String>, mark: &str| reply.as_deref().is_some_and(|t| t.contains(mark));
-    let username = agent_name.split_once('.').map(|(_, u)| u.to_string()).unwrap_or_default();
-    let owner_name = |label: &str| format!("{label}.{username}");
+    // what the agent makes from a label is named by the platform: found by
+    // its label among its owner's own
+    let owner_name = |label: &str| -> String {
+        let listed = api.signed(&owner, "GET", "/api/fragments", None).map(|r| r.body).unwrap_or_default();
+        let labelled = |f: &&Value| f["role"] == "owner" && f["name"].as_str().and_then(fragment_proto::split_fragment_name).is_some_and(|(l, _)| l == label);
+        listed["fragments"].as_array().and_then(|l| l.iter().find(labelled)).and_then(|f| f["name"].as_str()).unwrap_or_default().to_string()
+    };
     let made = run(s, 60, "fragment create groceries --template todo --json | grep -c '\"ok\":true' | sed 's/^/made-/'")?;
     let wrote = run(s, 61, "fragment write groceries site/hello.html --text '<h1>Picked by the agent</h1>' --json | grep -c '\"ok\":true' | sed 's/^/wrote-/'")?;
     let live = run(s, 62, "fragment deploy groceries | grep -o 'view=[0-9a-f]*' | head -1 | sed 's/^/link-/'")?;

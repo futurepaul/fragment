@@ -1,5 +1,5 @@
 //! An operator's wipe of a person (docs/api.md, Operators), the whole round
-//! trip: a person with a username, an agent and its computer (the stub
+//! trip: a person, an agent and its computer (the stub
 //! locally, the deployment's own image hosted), a saved `/data`, an app, a
 //! picture, a membership in someone else's fragment, and a CLI key; the
 //! dry run, which changes nothing; the refusals; the person made as p5's
@@ -10,9 +10,8 @@
 //! across a node's crash, a code.storage refusal its report names, and an
 //! outage), then finished from the CLI with an operator key no one holds,
 //! never waiting on the lists it empties; and the same sign-in again, a new
-//! person: onboarding
-//! asks for a username, the old one is free, and a new agent and computer
-//! start empty, the agent's repo a fresh one under the same name.
+//! person (a new identity, named by a new key), and a new agent and
+//! computer start empty, the agent's repo a fresh one under the same name.
 //!
 //! The wipe takes only what was the person's: the other person's fragment
 //! keeps itself and its other members (an agent of theirs among them), and
@@ -87,7 +86,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     // call: the run's spend reads no ledger of theirs once they are wiped)
     let paul = api.person()?;
     let email = Api::email_of(&paul);
-    let (paul_id, username) = (api.identity(&paul)?, api.username(&paul)?);
+    let paul_id = api.identity(&paul)?;
     let bob = api.person()?;
     let bob_id = api.identity(&bob)?;
     // bob's own agent (a CLI's), in bob's fragment and in paul's app
@@ -145,7 +144,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let mut repos: Vec<String> = [&agent, &chat, &app].iter().map(|c| c["repo"].as_str().unwrap_or("").to_string()).collect();
 
     // ---- the dry run: what a wipe deletes, and nothing changes
-    let dry = cli_wipe(s, api, &file, &[&username, "--dry-run"]);
+    let dry = cli_wipe(s, api, &file, &[&email, "--dry-run"]);
     let d = dry.as_ref().map(Value::clone).unwrap_or(Value::Null);
     let f = &d["found"];
     let owned = names(&f["fragments"]);
@@ -172,21 +171,23 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let me = api.signed(&paul, "GET", "/api/identities/me", None)?;
     let app_status = api.status(&paul, &app_name)?;
-    s.ok("the dry run changed nothing", me.status == 200 && me.body["username"] == username.as_str() && app_status.status == 200, format!("{me} {app_status}"));
+    s.ok("the dry run changed nothing", me.status == 200 && me.body["email"] == email.as_str() && app_status.status == 200, format!("{me} {app_status}"));
 
     // ---- refusals, each changing nothing
-    let not_operator = [dry_run(api, &bob, &username)?, wipe_call(api, &bob, &username, &json!({ "confirm": paul_id }))?];
+    let not_operator = [dry_run(api, &bob, &email)?, wipe_call(api, &bob, &email, &json!({ "confirm": paul_id }))?];
     s.ok("someone not an operator is refused (403)", not_operator.iter().all(|r| r.status == 403), json!(not_operator.iter().map(|r| r.to_string()).collect::<Vec<_>>()));
-    let r = api.unsigned("GET", &format!("/api/people/{username}/wipe"), None)?;
+    let r = api.unsigned("GET", &format!("/api/people/{email}/wipe"), None)?;
     s.ok("unsigned is 401", r.status == 401, &r);
-    let r = wipe_call(api, &wiper, &username, &json!({ "confirm": bob_id }))?;
+    let r = wipe_call(api, &wiper, &email, &json!({ "confirm": bob_id }))?;
     s.ok("a wipe confirmed for someone else is refused (409)", r.status == 409 && r.message().contains("dry run"), &r);
-    let r = wipe_call(api, &wiper, &username, &json!({}))?;
+    let r = wipe_call(api, &wiper, &email, &json!({}))?;
     s.ok("a wipe with no confirmation is refused (400)", r.status == 400, &r);
     let r = dry_run(api, &wiper, &agent_id)?;
     s.ok("an agent is wiped with its person, never alone (400)", r.status == 400 && r.message().contains("agent"), &r);
+    let r = dry_run(api, &wiper, "nobody-here@e2e.test")?;
+    s.ok("no one by that email is 404", r.status == 404, &r);
     let r = dry_run(api, &wiper, "nobody-here")?;
-    s.ok("no one by that name is 404", r.status == 404, &r);
+    s.ok("neither an email nor an identity is 400", r.status == 400, &r);
     let me = api.signed(&paul, "GET", "/api/identities/me", None)?;
     s.ok("and the person is as they were", me.status == 200, &me);
 
@@ -212,8 +213,9 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{r} / {theirs_now}"),
     );
     if scripted {
-        // the repo a fragment made before 2026-10-07 kept: `<label>--<username>`
-        let old = fragment_proto::flat_name(&app_name).context("a fragment's flat name")?;
+        // the repo a fragment made before 2026-10-07 kept: named as the
+        // fragment's host was, without its owner
+        let old = app_name.clone();
         s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
         let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
         s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
@@ -223,7 +225,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // ---- a wipe stopped after one step: the person is locked meanwhile
-    let r = wipe_call(api, &wiper, &username, &json!({ "confirm": paul_id, "steps": 1 }))?;
+    let r = wipe_call(api, &wiper, &email, &json!({ "confirm": paul_id, "steps": 1 }))?;
     s.ok(
         "one step (its computer), and it stops: the person is being wiped",
         r.status == 200 && r.body["state"] == "wiping" && r.body["next"] == "fragments" && r.body["ran"][0]["step"] == "computer" && r.body["ran"][0]["done"] == true,
@@ -233,9 +235,6 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("their CLI key is no one's at once (401)", me.status == 401, &me);
     let signed_in = api.sign_in(&email);
     s.ok("their sign-in signs in no one while it runs", signed_in.is_err(), format!("{signed_in:?}"));
-    let nameless = api.person_without_username()?;
-    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })))?;
-    s.ok("no one takes their username while it runs", r.status == 409, &r);
     let r = api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
     s.ok("no one adds them or their agent to a fragment while it runs", r.status == 404, &r);
     let r = lever(api, &computer, "saves")?;
@@ -261,7 +260,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     // "still cleaning"
     if scripted {
         s.fake.refuse_repo_deletes(true);
-        let r = wipe_call(api, &wiper, &username, &json!({ "confirm": paul_id }))?;
+        let r = wipe_call(api, &wiper, &email, &json!({ "confirm": paul_id }))?;
         let cleanup = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "cleanup")).cloned().unwrap_or(Value::Null);
         let cleaning = cleanup["cleaning"].as_array().cloned().unwrap_or_default();
         let named: Vec<&str> = cleaning.iter().filter_map(|c| c["fragment"].as_str()).collect();
@@ -287,7 +286,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     }
 
     // ---- the wipe, from the CLI, with an operator key no one holds
-    let wiped = cli_wipe(s, api, &file, &[&username, "--yes"]);
+    let wiped = cli_wipe(s, api, &file, &[&email, "--yes"]);
     let w = wiped.as_ref().map(Value::clone).unwrap_or(Value::Null);
     // locally the outage holds one repo's delete back a call or more: the
     // cleanup waits for it, and the CLI calls until it is done
@@ -304,7 +303,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
         "wiped: nothing of theirs is left (the dry run by identity)",
         after.status == 200
             && after.body["done"] == true
-            && after.body["username"].is_null()
+            && after.body["email"].is_null()
             && f["fragments"] == empty
             && f["memberships"] == empty
             && f["keys"] == 0
@@ -321,10 +320,8 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let again = cli_wipe(s, api, &file, &[&paul_id, "--yes"]);
     s.ok("a wipe again finds nothing left", again.as_ref().is_ok_and(|v| v["report"]["done"] == true), format!("{again:?}"));
-    let r = dry_run(api, &wiper, &username)?;
-    s.ok("their username names no one (404)", r.status == 404, &r);
-    let r = api.unsigned("GET", &format!("/api/users/{username}"), None)?;
-    s.ok("and anyone sees it is free", r.status == 404, &r);
+    let r = dry_run(api, &wiper, &email)?;
+    s.ok("their email names no one (404)", r.status == 404, &r);
     let cleaned: Vec<(bool, String)> = ours.iter().map(|n| s.ended_cleaned(api, n)).collect();
     s.ok("each of their fragments is gone, cleaned up (members' lists, app database, blobs, repo)", cleaned.iter().all(|c| c.0), json!(cleaned.iter().map(|c| c.1.clone()).collect::<Vec<_>>()));
     if scripted {
@@ -354,12 +351,10 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let me = api.signed(&fresh, "GET", "/api/identities/me", None)?;
     let fresh_id = me.body["id"].as_str().unwrap_or("").to_string();
     s.ok(
-        "the same sign-in is a new person, whom onboarding asks for a username",
-        approved.status == 200 && me.status == 200 && fragment_core::npub::is_identity(&fresh_id) && fresh_id != paul_id && me.body["username"].is_null() && me.body["agents"].as_array().is_none_or(Vec::is_empty),
+        "the same sign-in is a new person, named by a new key, with the same email and nothing else",
+        approved.status == 200 && me.status == 200 && fragment_core::npub::is_identity(&fresh_id) && fresh_id != paul_id && me.body["email"] == email.as_str() && me.body["agents"].as_array().is_none_or(Vec::is_empty),
         &me,
     );
-    let r = api.signed(&fresh, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })))?;
-    s.ok("their old username is free: they take it again", r.status == 200 && r.body["claimed"] == true, &r);
     let ledger = api.signed(&fresh, "GET", "/api/ledger", None)?;
     s.ok("a new ledger, on the deployment's plan for a new person", ledger.status == 200 && ledger.body["plan"] == crate::DEFAULT_PLAN && ledger.body["fragments"] == json!([]), &ledger);
     let r = api.signed(&fresh, "POST", "/api/computers", Some(&json!({})))?;

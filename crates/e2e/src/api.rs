@@ -1,5 +1,5 @@
 //! Signed and unsigned HTTP against the node, the way the CLI and a
-//! browser call it. Fragment hosts (`<label>--<username>.<suffix>`) are reached by
+//! browser call it. Fragment hosts (`<name>.<suffix>`) are reached by
 //! sending the node the right `Host` header; a hosted run's, at their own
 //! names over https (`Target::Hosted`).
 
@@ -170,7 +170,7 @@ pub enum Target {
     Local,
     /// A branch deployment (a preview), over https at its own hosts: the
     /// platform at `<branch>.<zone>`, a fragment at
-    /// `<label>--<username>--<branch>.<zone>`.
+    /// `<name>--<branch>.<zone>`.
     Hosted(Preview),
 }
 
@@ -194,9 +194,9 @@ impl Preview {
         format!("{}://{}.{}{}", self.scheme, self.branch, self.zone, self.port_part())
     }
 
-    /// A fragment's origin (`name` is `<label>.<username>`).
-    pub fn fragment(&self, name: &str) -> Option<String> {
-        Some(format!("{}://{}--{}.{}{}", self.scheme, fragment_proto::flat_name(name)?, self.branch, self.zone, self.port_part()))
+    /// A fragment's origin (`name` is `<label>--<suffix>`).
+    pub fn fragment(&self, name: &str) -> String {
+        format!("{}://{name}--{}.{}{}", self.scheme, self.branch, self.zone, self.port_part())
     }
 
     fn port_part(&self) -> String {
@@ -373,15 +373,11 @@ impl Api {
         }
     }
 
-    /// The URL of `path` on a fragment's own host (`<label>--<username>.<suffix>`).
+    /// The URL of `path` on a fragment's own host (`<name>.<suffix>`).
     pub fn site_url(&self, name: &str, path: &str) -> String {
-        let host = fragment_proto::flat_name(name).unwrap_or_else(|| name.to_string());
         match &self.target {
-            Target::Hosted(preview) => match preview.fragment(name) {
-                Some(origin) => format!("{origin}/{path}"),
-                None => format!("{}://{host}--{}.{}{}/{path}", preview.scheme, preview.branch, preview.zone, preview.port_part()),
-            },
-            Target::Local => format!("http://{host}{}.{}:{}/{path}", self.label_suffix, self.suffix, self.port),
+            Target::Hosted(preview) => format!("{}/{path}", preview.fragment(name)),
+            Target::Local => format!("http://{name}{}.{}:{}/{path}", self.label_suffix, self.suffix, self.port),
         }
     }
 
@@ -576,43 +572,17 @@ impl Api {
     pub fn approve(&self, session: &str, keys: &Keys) -> Result<Reply> {
         let r = self.approve_link(session, &self.approval_link(keys, 0))?;
         anyhow::ensure!(r.status == 200, "approving a key: {r}");
-        let me = self.signed(keys, "GET", "/api/identities/me", None)?;
-        // every person the e2e makes takes a username at once (decision R16),
-        // named after their identity
-        if me.status == 200 && me.body["kind"] == "person" && me.body["username"].is_null() {
-            let id = me.body["id"].as_str().unwrap_or("npub10000000000");
-            let username = format!("p{}", &id.trim_start_matches("npub1")[..10]);
-            let r = self.signed(keys, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })))?;
-            anyhow::ensure!(r.status == 200, "taking a username: {r}");
-            return self.signed(keys, "GET", "/api/identities/me", None);
-        }
-        Ok(me)
+        self.signed(keys, "GET", "/api/identities/me", None)
     }
 
-    /// A person with an approved key and no username yet.
-    pub fn person_without_username(&self) -> Result<Keys> {
-        let keys = Keys::generate();
-        let session = self.sign_in(&format!("n-{}@e2e.test", &keys.pubkey_hex()[..12]))?;
-        let r = self.approve_link(&session, &self.approval_link(&keys, 0))?;
-        anyhow::ensure!(r.status == 200, "approving a key: {r}");
-        Ok(keys)
-    }
-
-    /// The username of the person `keys` belongs to (an agent's owner's).
-    pub fn username(&self, keys: &Keys) -> Result<String> {
-        let r = self.signed(keys, "GET", "/api/identities/me", None)?;
-        anyhow::ensure!(r.status == 200, "GET /api/identities/me: {r}");
-        if let Some(u) = r.body["username"].as_str() {
-            return Ok(u.to_string());
-        }
-        let owner = r.body["owner"].as_str().context("no username, and no owner")?;
-        let v = self.signed(keys, "GET", &format!("/api/identities/{owner}"), None)?;
-        Ok(v.body["username"].as_str().context("the owner has no username")?.to_string())
-    }
-
-    /// `label`'s full name under the username of whoever `keys` is.
+    /// `label`'s full name for whoever `keys` is, as the e2e names its
+    /// fragments: the label, and a suffix drawn from a digest of the key and
+    /// the label, so a lane knows a name before it creates it (a create
+    /// names it in full: `create`), and two people's are two.
     pub fn qualified(&self, keys: &Keys, label: &str) -> Result<String> {
-        Ok(fragment_proto::fragment_name(label, &self.username(keys)?))
+        anyhow::ensure!(fragment_proto::valid_label(label), "{label:?} is no label");
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("e2e name\0{}\0{label}", keys.pubkey_hex()).as_bytes());
+        Ok(fragment_proto::fragment_name(label, [digest[0], digest[1], digest[2]]))
     }
 
     /// Someone who signs: a person signed in through WorkOS (the fake),
@@ -643,8 +613,13 @@ impl Api {
         new.proof(method, &format!("{}{path}", self.base), signer.pubkey_hex(), now_s())
     }
 
+    /// A create of `name`: a name in full as it is, or a label the
+    /// platform names (as the CLI's create does).
     pub fn create(&self, keys: &Keys, name: &str) -> Result<Reply> {
-        self.create_with(keys, json!({ "name": name }))
+        match fragment_proto::valid_fragment_name(name) {
+            true => self.create_with(keys, json!({ "name": name })),
+            false => self.create_with(keys, json!({ "label": name })),
+        }
     }
 
     pub fn create_with(&self, keys: &Keys, body: Value) -> Result<Reply> {

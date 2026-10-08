@@ -17,7 +17,7 @@ remotes) on fragment.
 ## Make a repository
 
 ```sh
-fragment create notes-project            # an empty fragment: notes-project.<your owner's username>
+fragment create notes-project            # an empty fragment: notes-project-<suffix>, your owner's
 mkdir -p ~/repos/notes-project && cd ~/repos/notes-project
 # add files…
 fragment sync notes-project --dir .      # one commit with everything new, then main is the folder

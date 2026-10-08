@@ -793,7 +793,7 @@ pub fn browser(s: &mut Suite, api: &Api) -> Result<()> {
     }
     // the template's list is bounded to its newest 500, oldest first as the page shows them
     let owner = api.person()?;
-    let name = s.name("todo-cap");
+    let name = s.named(api, &owner, "todo-cap")?;
     let c = s.create(api, &owner, &name)?;
     let changes: Vec<(&str, Option<&[u8]>)> = TODO_FILES.iter().map(|(p, b)| (*p, Some(*b))).collect();
     s.commit(&c, &changes);

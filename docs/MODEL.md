@@ -212,7 +212,7 @@ kind, body, op_id}`, append-only, with a per-channel retention policy.
   as a viewer. Operation ids belong to their caller: the ledger keys a
   mutation by principal and id.
 - Origins: each fragment is served from
-  `<label>--<username>.fragment.boats`; the platform (login, the share
+  `<name>.fragment.boats`; the platform (login, the share
   sheet, invites) from `fragment.club`, another site
   (docs/cloudflare-v1.md, decision 5). The router checks the hostname against the configured
   suffix before it trusts it.
@@ -276,7 +276,7 @@ No file bytes persist in the cell's SQLite: a file lives in git or, at
 | inbox pending | 1000 | overload is a 429, not memory pressure |
 | hop depth | 16 | carried from fragment's loop guard |
 | `public`-role calls | 60 per minute per anonymous principal, 600 per minute per fragment | public writes must not become an abuse amplifier; tunable per operation |
-| a fragment's host label | 63 bytes: `<label>--<username>` and a branch's mark; every username leaves 29 for labels | one DNS label under one wildcard certificate; refused at create (and a username that would leave less, where it is chosen), never cut (docs/api.md, Names) |
+| a fragment's host label | 63 bytes: its name, `<label>--<suffix>`, and a branch's mark; every deployment leaves 39 for labels | one DNS label under one wildcard certificate; refused at create, never cut (docs/api.md, Names) |
 
 ## Answered (2026-09-23)
 

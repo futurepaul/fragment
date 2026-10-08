@@ -664,15 +664,17 @@ runaround".
     - A person's CLIs keep their own keys, paired as today (`fragment
       login`).
 47. **No usernames.** A fragment's name is one DNS label: the label its
-    maker gives it and a short random suffix the platform adds at
-    create (`todo-k3x9`). It is unique in the fleet and fixed for the
-    fragment's life, and served at `todo-k3x9.fragment.boats`
-    (`todo-k3x9--<branch>.<zone>` on a branch copy). The suffix makes
-    names unique without a namespace to claim: nobody squats a label,
-    and nothing in a URL ties one person's fragments together. Where
-    the CLI or the API takes a fragment, a bare label means the
-    caller's own fragment with that label; two such are an error that
-    names both. R16 keeps the one-DNS-label rule.
+    maker gives it, `--`, and a short random suffix the platform adds at
+    create (`todo--k3x9`; `--`, which no label holds, so no label reads
+    as a name: `reader-chat` would, with one dash). It is unique in the
+    fleet and fixed for the fragment's life, and served at
+    `todo--k3x9.fragment.boats` (`todo--k3x9--<branch>.<zone>` on a
+    branch copy). The suffix makes names unique without a namespace to
+    claim: nobody squats a label, and nothing in a URL ties one person's
+    fragments together. The API names a fragment in full; in the CLI a
+    bare label means the caller's own fragment with that label (of
+    several, the one they own; else an error that names them). R16
+    keeps the one-DNS-label rule.
 48. **Sharing is by email** (Paul: shared fragments "feel like sharing
     google docs"). The share sheet and the CLI take an email and a
     role.
@@ -1032,7 +1034,7 @@ exit says.
    - Built:
      - **The shell** at `/` and `/settings` (cell/shell/; the server's
        pages went):
-       - First run: a username, then "Creating your agent…". The person's
+       - First run: "Creating your agent…" (no username since decision 47). The person's
          default agent, in charge, is made with its computer and its chat,
          and the chat opens once the agent follows it (Paul, 2026-10-03:
          no job asked, and no wait in the chat).

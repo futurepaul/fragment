@@ -19,7 +19,7 @@
 //! A branch deployment (`--branch b`) is a complete copy beside the others
 //! in one account and zone: its Worker, Durable Objects, Workflow, queues
 //! and bucket are named for it, its platform is `b.<zone>`, and its
-//! fragments are `<label>--<username>--b.<zone>` (one wildcard DNS record
+//! fragments are `<name>--b.<zone>` (one wildcard DNS record
 //! and certificate cover them all). Its repos are named `b--…` in the
 //! code.storage org, so it never touches another deployment's.
 
@@ -64,7 +64,7 @@ struct Deployment {
     host_secret_previous: Option<String>,
     codestorage: CodeStorage,
     workos: WorkOs,
-    /// Who may grant credit, set plans, release usernames, and wipe a
+    /// Who may grant credit, set plans, and wipe a
     /// person (npubs, or identities). The hosted e2e's `wipe` signs with an
     /// operator key among them, its file named on its command line
     /// (`--operator-key-file`), never here: the key is the runner's.
@@ -530,7 +530,7 @@ pub fn deploy(rest: &[String]) -> Result<()> {
     if test_secret.is_some() {
         println!("  test levers   on (test_secret_file): cargo xtask e2e --hosted --config <this config> --branch {}", branch.as_deref().unwrap_or(""));
     }
-    println!("  fragments     https://<label>--<username>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
+    println!("  fragments     https://<name>{}.{}/", n.label_suffix.as_deref().unwrap_or(""), n.suffix);
     println!("  check         curl -sI {platform_url}/healthz | grep x-fragment-deploy");
     Ok(())
 }

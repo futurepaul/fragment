@@ -334,7 +334,7 @@ impl Caller {
 /// names its row here, so each key is spelled once (`key`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MetaKey {
-    /// `<label>.<username>`, written when a create claims it.
+    /// `<label>--<suffix>`, written when a create claims it.
     Name,
     /// When a create in progress claimed the name (the claim expires).
     ClaimedAt,
@@ -1063,7 +1063,7 @@ impl FragmentCell {
     async fn create(&self, caller: &Caller, body: CreateFragment) -> CellResult<Response> {
         let owner = self.caller_id(caller)?.to_string();
         if !valid_fragment_name(&body.name) {
-            return Err(CellError::invalid("a fragment's name is <label>.<username> (docs/api.md, Names)"));
+            return Err(CellError::invalid("a fragment's name is <label>--<suffix> (docs/api.md, Names)"));
         }
         // the create door checked it (lib.rs); a fragment no host reaches is never made
         fragment_core::names::host_fits(&body.name, self.cfg.host_label_suffix()).map_err(CellError::invalid)?;
@@ -1093,9 +1093,9 @@ impl FragmentCell {
         // the fragment's own key; its secret is kept sealed for this cell
         let made = async {
             // the one place a repo's name is derived: its owner's, so a
-            // username held later by another identity never finds it
+            // name another identity makes later never finds it
             let repo_name = fragment_core::codestorage::repo_name(&cs_cfg.repo_prefix, &body.name, &owner)
-                .ok_or_else(|| CellError::invalid("a fragment's name is <label>.<username>, and its owner an identity"))?;
+                .ok_or_else(|| CellError::invalid("a fragment's name is <label>--<suffix>, and its owner an identity"))?;
             let repo = Cs::new(cs_cfg, &self.env).ensure_repo(&repo_name).await?;
             let (pubkey, sealed) = crate::keys::nostr_keypair(&self.env, &self.scope()).await?;
             Ok::<_, CellError>((repo, pubkey, sealed))

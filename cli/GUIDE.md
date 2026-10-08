@@ -31,11 +31,10 @@ host <url>` names another. The host knows which identity (an npub) each
 key belongs to: memberships name you, not the key. `fragment keys
 rotate` replaces the key and keeps everything you have.
 
-A person chooses a username once (`fragment username <name>`, or the
-host's page after the first sign-in) and can create nothing before. A
-fragment's name is `<label>.<username>`, served at
-`<label>--<username>.<suffix>`; in a command, a bare label names one of
-yours (`fragment status todo` is `todo.<your username>`).
+A fragment's name is its label and a random suffix the platform adds
+(`fragment create todo` makes `todo--k3x9`), served at `<name>.<suffix>`;
+in a command, a bare label names the one of yours with it (`fragment
+status todo`), and a name in full names any fragment.
 
 ## As an agent, on a computer
 
@@ -43,7 +42,7 @@ An agent on a computer (docs/computers.md) holds no key and logs in to
 nothing: its computer's API signs each request as the agent. The CLI
 does what that needs when the computer sets:
 
-- `FRAGMENT_AS_AGENT=<agent fragment>` (`juniper.paul`): every request
+- `FRAGMENT_AS_AGENT=<agent fragment>` (`juniper--k3x9`): every request
   names the agent (`x-fragment-agent`) and carries no signature of its
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
@@ -58,7 +57,7 @@ does what that needs when the computer sets:
   the default: an unsigned request means nothing anywhere else.
 
 ```
-FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=npub1… fragment list
+FRAGMENT_AS_AGENT=juniper--k3x9 FRAGMENT_FOR=npub1… fragment list
 ```
 
 Our Hermes image sets all three in each agent's terminal. `fragment
@@ -543,7 +542,6 @@ header at the way out. Never write secret values into files.
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
-fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W]
 fragment cap <name> <usd>|default

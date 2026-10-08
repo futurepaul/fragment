@@ -80,7 +80,8 @@ async function api(method, path, body) {
 }
 
 const byName = (name) => state.fragments.find((f) => f.name === name);
-const labelOf = (name) => name.split(".")[0];
+// a name is its label and a random suffix (decision 47): `todo--k3x9`
+const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
 const titleOf = (name) => byName(name)?.title || labelOf(name);
 const own = (f) => f.role === "owner";
 const chats = () => state.fragments.filter((f) => f.kind === "chat");
@@ -665,9 +666,10 @@ async function openScreen(agent) {
 
 // ---- making an agent: its fragment, its computer, its chat (decision 10, 16) ----
 // A label from a name, short enough that with freeLabel's `-<n>` and a
-// chat's `-chat` its address fits under any username (docs/api.md, Names:
-// every username leaves 29 bytes for labels); never ending in a dash.
-const LABEL_ROOM = 29;
+// chat's `-chat` its address fits any deployment's hosts (docs/api.md,
+// Names: every deployment leaves 39 bytes for labels); never ending in a
+// dash.
+const LABEL_ROOM = 39;
 const slug = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, LABEL_ROOM - "-99-chat".length).replace(/-+$/, "") || "agent";
 function freeLabel(base) {
   const taken = new Set(state.fragments.map((f) => labelOf(f.name)));
@@ -688,7 +690,7 @@ function pickName() {
 async function makeAgent(job, chosen) {
   const name = chosen?.trim() || pickName();
   const label = freeLabel(slug(name));
-  const agent = await api("POST", "/api/fragments", { name: label, template: "agent", title: name });
+  const agent = await api("POST", "/api/fragments", { label, template: "agent", title: name });
   const computer = await warmComputer();
   const assigned = await api("PUT", `/api/computers/${seg(computer.computer)}/agents/${seg(agent.name)}`, {});
   const id = assigned.agents.find((a) => a.fragment === agent.name)?.identity;
@@ -699,7 +701,7 @@ async function makeAgent(job, chosen) {
     files: [{ path: "SOUL.md", text: `${job.trim()}\n` }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  const chat = await api("POST", "/api/fragments", { name: `${label}-chat`, template: "chat", title: name });
+  const chat = await api("POST", "/api/fragments", { label: `${label}-chat`, template: "chat", title: name });
   if (id) await api("PUT", `/api/f/${chat.name}/members/${seg(id)}`, { role: "editor" });
   await api("POST", `/api/f/${chat.name}/channels/chat`, { id: "job", body: { text: job.trim() } });
   return chat.name;
@@ -744,7 +746,7 @@ async function makeGroup(picked, chosen) {
   if (picked.length < 2) throw new Error("A group chat has two agents or more.");
   const name = chosen?.trim() ?? "";
   const title = name || picked.map((a) => titleOf(a.fragment)).join(", ");
-  const chat = await api("POST", "/api/fragments", { name: freeLabel(slug(name || "group")), template: "chat", title });
+  const chat = await api("POST", "/api/fragments", { label: freeLabel(slug(name || "group")), template: "chat", title });
   for (const a of picked) await api("PUT", `/api/f/${chat.name}/members/${seg(a.identity)}`, { role: "editor" });
   if (state.computer) api("POST", `/api/computers/${seg(state.computer.computer)}/wake`, {}).catch(() => {});
   return chat.name;
@@ -849,7 +851,7 @@ function showCatalog() {
       error.textContent = "";
       try {
         const label = input.value.trim();
-        const made = await api("POST", "/api/fragments", { name: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
+        const made = await api("POST", "/api/fragments", { label: label || freeLabel(t.template), template: t.template, ...(t.blessed ? { title: label || t.name } : {}) });
         await load();
         viewer.close("catalog");
         openApp(made.name);
@@ -1204,7 +1206,6 @@ async function openSettings(push = true) {
   id.lastChild.classList.add("mono");
   const account = section(
     "Account",
-    line("Username", `@${state.me.username}`),
     line(emails.length > 1 ? "Sign-ins" : "Signed in as", emails.join(", ") || "—"),
     id,
   );
@@ -1473,7 +1474,7 @@ const skillsFragmentOf = () => state.fragments.find((f) => f.kind === "skills" &
 async function skillsFragment() {
   const have = skillsFragmentOf();
   if (have) return have.name;
-  const made = await api("POST", "/api/fragments", { name: freeLabel("skills"), template: "skills" });
+  const made = await api("POST", "/api/fragments", { label: freeLabel("skills"), template: "skills" });
   await load();
   return made.name;
 }
@@ -1543,7 +1544,7 @@ function credited(photo) {
 }
 $("settings").onclick = () => openSettings().catch((e) => notice("Settings did not open", e.message));
 
-// ---- first run: sign in, a username, then the default agent is made (decision 10) ----
+// ---- first run: sign in, then the default agent is made (decision 10) ----
 function firstRun(...children) {
   $("layout").hidden = true;
   $("first-run").hidden = false;
@@ -1554,46 +1555,16 @@ function signIn() {
   go.href = `/auth/login?return=${encodeURIComponent(location.pathname)}`;
   firstRun(el("h1", null, "Agents that work for you, and the apps they make."), el("p", "muted", "Sign in to start."), go);
 }
-function chooseUsername() {
-  const form = el("form", "first-run-form");
-  const input = el("input");
-  input.name = "username";
-  input.required = true;
-  input.autocomplete = "username";
-  input.placeholder = "yourname";
-  input.pattern = "[a-z0-9]([a-z0-9]|-(?=[a-z0-9])){2,31}";
-  input.maxLength = 32;
-  const error = el("p", "form-error");
-  error.hidden = true;
-  const go = el("button", "primary", "Continue");
-  go.type = "submit";
-  form.append(el("label", null, "Choose a username"), input, el("p", "muted", "Your apps live at addresses with it; it can't change later."), error, go);
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    go.disabled = true;
-    try {
-      await api("PUT", "/api/identities/me/username", { username: input.value.trim() });
-      await start();
-    } catch (err) {
-      error.textContent = err.message;
-      error.hidden = false;
-    } finally {
-      go.disabled = false;
-    }
-  };
-  firstRun(el("h1", null, "Welcome."), form);
-  input.focus();
-}
 // The first agent (Paul, 2026-10-03): no question asked. It is the
 // person's default agent, in charge, made with its computer and its chat
 // while this screen waits, so the chat opens with it ready and the first
 // message is answered at once, not after a computer's first start.
 const SETUP_WAIT_MS = 4 * 60_000;
-const firstSoul = (name, username) => `You are ${name}, ${username}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
+const firstSoul = (name, owner) => `You are ${name}, ${owner}'s default agent: the first one they talk to, and in charge of the rest. Help with whatever they ask. When a job would be better as an app, or as an agent of its own, say so and offer to set it up. The first time you talk, say hello briefly and ask what they'd like to start with.\n`;
 // Each step reuses what an earlier try made: a retry picks up where it stopped.
 async function defaultAgent(step) {
   await load();
-  const username = state.me.username;
+  const owner = state.me.email || "your person";
   step("agent");
   // the managed skills its computer installs at its first start (decision 17)
   await skillsFragment();
@@ -1601,7 +1572,7 @@ async function defaultAgent(step) {
   let agent = state.fragments.find((f) => f.kind === "agent" && f.role === "owner");
   if (!agent) {
     const title = pickName();
-    const made = await api("POST", "/api/fragments", { name: freeLabel(slug(title)), template: "agent", title });
+    const made = await api("POST", "/api/fragments", { label: freeLabel(slug(title)), template: "agent", title });
     agent = { name: made.name, title };
   }
   const title = agent.title || labelOf(agent.name);
@@ -1612,11 +1583,14 @@ async function defaultAgent(step) {
   await api("POST", `/api/f/${agent.name}/files`, {
     key: "agent-default",
     message: "the default agent",
-    files: [{ path: "SOUL.md", text: firstSoul(title, username) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
+    files: [{ path: "SOUL.md", text: firstSoul(title, owner) }, { path: "agent.json", text: JSON.stringify({ tier: DEFAULT_AGENT_TIER, color: colorOf(id) }, null, 2) + "\n" }],
   });
   await api("POST", `/api/f/${agent.name}/deploy`, {});
-  const chatName = `${labelOf(agent.name)}-chat.${username}`;
-  if (!byName(chatName)) await api("POST", "/api/fragments", { name: `${labelOf(agent.name)}-chat`, template: "chat", title });
+  // its chat, by its label (a retry finds the one an earlier try made)
+  const chatLabel = `${labelOf(agent.name)}-chat`;
+  const chatName =
+    state.fragments.find((f) => f.kind === "chat" && f.role === "owner" && labelOf(f.name) === chatLabel)?.name ??
+    (await api("POST", "/api/fragments", { label: chatLabel, template: "chat", title })).name;
   // adding it to its chat is what wakes the computer (the platform's `joined`)
   await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
   api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).catch(() => {});
@@ -1763,7 +1737,6 @@ async function start(open) {
     throw e;
   }
   state.me = me;
-  if (!me.username) return chooseUsername();
   await load();
   watchList();
   // the first agent is asked for at home; settings open as asked, chats or not

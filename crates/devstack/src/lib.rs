@@ -42,7 +42,8 @@ pub const CACHE_DIR: &str = "target/cache";
 /// What a branch deployment's name may be (`cargo xtask deploy --branch`,
 /// and the hosted e2e's): the wire contract's, which the cell checks its
 /// mark (`--<branch>`) against as it starts, and whose length every
-/// username's room for labels allows for (`fragment_proto::username_max`).
+/// deployment's room for labels allows for
+/// (`fragment_proto::limits::LABEL_ROOM_MIN_BYTES`).
 pub use fragment_proto::valid_branch;
 
 pub fn repo_root() -> PathBuf {
@@ -264,10 +265,10 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>`.
+    /// Fragments are served from `<name>.<suffix>`.
     pub host_suffix: String,
     /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
-    /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
+    /// `<name>--<branch>.<suffix>`), which also scopes its
     /// test levers to the e2e's own things (the hosted lane's rehearsal).
     pub host_label_suffix: Option<String>,
     pub poll_interval_s: u32,

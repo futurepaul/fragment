@@ -538,7 +538,7 @@ async fn list_follows(api: &Api, agent: &Agent) -> Result<Vec<(String, String)>,
     let mut fragments = api.fragments(&agent.fragment).await?;
     fragments.truncate(limits::DISCOVER_FRAGMENTS_MAX);
     if !fragments.iter().any(|f| f.name == agent.fragment) {
-        fragments.push(api::FragmentEntry { name: agent.fragment.clone(), role: String::new(), kind: String::new() });
+        fragments.push(api::FragmentEntry { name: agent.fragment.clone(), role: String::new(), kind: String::new(), owned: false });
     }
     let mut out = Vec::new();
     for f in fragments {

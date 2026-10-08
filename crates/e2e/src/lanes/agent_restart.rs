@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
@@ -80,21 +80,21 @@ pub fn agent_restart(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let (session, owner_id) = api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?;
     let me = api.approve(&session, &keys)?;
-    let username = me.body["username"].as_str().context("the person takes a username")?.to_string();
-    println!("      ({} as {username}, lent {PAID_CALLS} paid calls)", Api::email_of(&keys));
+    anyhow::ensure!(me.status == 200, "an approved key works: {me}");
+    println!("      ({}, lent {PAID_CALLS} paid calls)", Api::email_of(&keys));
 
     // its computer, one agent, and their chat
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let label = s.name("rowan");
-    let agent = api.create_with(&keys, json!({ "name": label, "template": "agent", "title": "Rowan" }))?;
+    let agent = api.create_with(&keys, json!({ "label": label, "template": "agent", "title": "Rowan" }))?;
     let agent_name = agent.body["name"].as_str().unwrap_or("").to_string();
     let assigned = api.signed(&keys, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == agent_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    let soul = json!({ "key": SECTION, "message": "its job", "files": [{ "path": "SOUL.md", "text": format!("You are Rowan, {username}'s agent. Answer in one short sentence.\n") }, { "path": "agent.json", "text": "{\n  \"tier\": \"medium\"\n}\n" }] });
+    let soul = json!({ "key": SECTION, "message": "its job", "files": [{ "path": "SOUL.md", "text": format!("You are Rowan, {}'s agent. Answer in one short sentence.\n", Api::email_of(&keys)) }, { "path": "agent.json", "text": "{\n  \"tier\": \"medium\"\n}\n" }] });
     let wrote = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/files"), Some(&soul))?;
     let deployed = api.signed(&keys, "POST", &format!("/api/f/{agent_name}/deploy"), Some(&json!({})))?;
-    let chat = api.create_with(&keys, json!({ "name": format!("{label}-chat"), "template": "chat", "title": "Rowan" }))?;
+    let chat = api.create_with(&keys, json!({ "label": format!("{label}-chat"), "template": "chat", "title": "Rowan" }))?;
     let chat_name = chat.body["name"].as_str().unwrap_or("").to_string();
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));

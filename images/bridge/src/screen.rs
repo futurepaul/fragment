@@ -1,6 +1,6 @@
 //! A computer's screens (decision 11; docs/computers.md, Ports): a page on
 //! its port (6080 by convention), and a screen for each agent the bridge
-//! runs, named by the agent's fragment (`agent=juniper.paul`): its own
+//! runs, named by the agent's fragment (`agent=juniper--k3x9`): its own
 //! display, when the image names one (screens.rs), and who drives it.
 //!
 //! - `GET /` and the page's files, from a directory; the page is opened at
@@ -127,13 +127,13 @@ pub const AGENT_MAX_BYTES: usize = crate::ready::READY_NAME_MAX_BYTES;
 
 const _: () = assert!(TICK_MS * 4 <= ACTIVITY_EVERY_MS, "a watched display is touched at most once every few looks");
 
-/// Whether `a` can be an agent fragment's name (`<label>.<username>`:
-/// lowercase letters, digits and `-`, one `.`). Which agent it is, if any,
-/// is the bridge's agents' to say.
+/// Whether `a` can be an agent fragment's name (`<label>--<suffix>`:
+/// lowercase letters, digits and `-`, one `--`, between the two). Which
+/// agent it is, if any, is the bridge's agents' to say.
 pub fn agent_name_ok(a: &str) -> bool {
-    let chars = a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.');
-    let dots = a.bytes().filter(|b| *b == b'.').count();
-    !a.is_empty() && a.len() <= AGENT_MAX_BYTES && chars && dots == 1 && !a.starts_with('.') && !a.ends_with('.')
+    let chars = a.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let parts = a.split_once("--").filter(|(l, s)| !l.is_empty() && !s.is_empty() && !s.contains('-') && !l.contains("--"));
+    !a.is_empty() && a.len() <= AGENT_MAX_BYTES && chars && parts.is_some() && !a.starts_with('-') && !a.ends_with('-')
 }
 
 fn viewer_ok(v: &str) -> bool {
@@ -157,7 +157,7 @@ pub fn asked(query: Option<&str>) -> Result<(String, String), String> {
         return Err(format!("?viewer= is letters, digits, - and _, at most {} of them", lease::VIEWER_MAX_BYTES));
     }
     if !agent_name_ok(agent) {
-        return Err("?agent= names an agent fragment (<label>.<username>)".into());
+        return Err("?agent= names an agent fragment (<label>--<suffix>)".into());
     }
     Ok((viewer.to_string(), agent.to_string()))
 }
@@ -916,21 +916,21 @@ mod tests {
     /// missing, named twice, escaped or out of shape, which is no name.
     #[test]
     fn a_socket_names_its_viewer_and_agent() {
-        assert_eq!(asked(Some("viewer=v_1-a&agent=juniper.paul")), Ok(("v_1-a".into(), "juniper.paul".into())));
-        assert_eq!(asked(Some("agent=fred-2.ann&viewer=x&other=1")), Ok(("x".into(), "fred-2.ann".into())), "in any order, among others");
+        assert_eq!(asked(Some("viewer=v_1-a&agent=juniper--k3x9")), Ok(("v_1-a".into(), "juniper--k3x9".into())));
+        assert_eq!(asked(Some("agent=fred-2--p2m4&viewer=x&other=1")), Ok(("x".into(), "fred-2--p2m4".into())), "in any order, among others");
         for bad in [
             None,
             Some("viewer=v"),
-            Some("agent=juniper.paul"),
-            Some("viewer=&agent=juniper.paul"),
+            Some("agent=juniper--k3x9"),
+            Some("viewer=&agent=juniper--k3x9"),
             Some("viewer=v&agent="),
             Some("viewer=v&agent=juniper"),
-            Some("viewer=v&agent=juniper.paul.x"),
-            Some("viewer=v&agent=Juniper.paul"),
+            Some("viewer=v&agent=juniper--k3x9.x"),
+            Some("viewer=v&agent=Juniper--k3x9"),
             Some("viewer=v&agent=juniper%2Epaul"),
-            Some("viewer=v&agent=../x.paul"),
-            Some("viewer=v&agent=juniper.paul&agent=fred.paul"),
-            Some("viewer=v v&agent=juniper.paul"),
+            Some("viewer=v&agent=../x--k3x9"),
+            Some("viewer=v&agent=juniper--k3x9&agent=fred--k3x9"),
+            Some("viewer=v v&agent=juniper--k3x9"),
         ] {
             assert!(asked(bad).is_err(), "{bad:?}");
         }
@@ -943,7 +943,7 @@ mod tests {
     /// holder gives it back, and taking or giving again changes nothing.
     #[test]
     fn a_screens_own_lease_follows_the_leases_rules() {
-        let s = Screen::new("juniper.paul", None);
+        let s = Screen::new("juniper--k3x9", None);
         assert_eq!(s.control.holder(), Holder::Agent);
         s.change("take", |l| lease::take(l, "v1", 1.0));
         assert!(s.control.holder().is("v1"));
@@ -969,12 +969,12 @@ mod tests {
         file.change(|l| lease::take(l, "gone", 1.0)).unwrap();
         assert!(file.read().holder.is("gone"));
         let display = |lease: PathBuf| Some(Display { rfb: Target::Unix(d.join("rfb.sock")), lease: Some(lease), activity: None });
-        let s = Screen::new("juniper.paul", display(path.clone()));
+        let s = Screen::new("juniper--k3x9", display(path.clone()));
         assert_eq!(s.control.holder(), Holder::Agent);
         assert_eq!(file.read().epoch, 2, "given back once");
-        let _ = Screen::new("juniper.paul", display(path.clone()));
+        let _ = Screen::new("juniper--k3x9", display(path.clone()));
         assert_eq!(file.read().epoch, 2, "the agent's already: nothing written");
-        let _ = Screen::new("fred.paul", display(d.join("missing/lease.json")));
+        let _ = Screen::new("fred--k3x9", display(d.join("missing/lease.json")));
         assert!(!d.join("missing").exists());
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -268,7 +268,7 @@ pub fn sweep_on(api: &Api, scope: &Scope, now_ms: i64) -> Result<Swept> {
             let (mut chosen, mut spared) = (0usize, 0usize);
             for f in listed.body["fragments"].as_array().into_iter().flatten().filter(|f| f["role"] == "owner") {
                 let name = f["name"].as_str().unwrap_or("");
-                let label = name.split_once('.').map_or(name, |(label, _)| label);
+                let label = fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label);
                 match choose(scope, label, || created_ms(api, &session, name), now_ms) {
                     Choice::Keep(Kept::NotE2e) => swept.not_e2e += 1,
                     Choice::Keep(why) => {
@@ -311,7 +311,7 @@ pub fn sweep_on(api: &Api, scope: &Scope, now_ms: i64) -> Result<Swept> {
     }
     anyhow::ensure!(left.is_empty(), "the sweep left {} (sweep again):\n  {}", left.len(), left.join("\n  "));
     if let Scope::Run(run) = scope {
-        assert!(swept.spared.iter().all(|(n, _)| run_of(n.split('.').next().unwrap_or("")) != Some(run.as_str())), "a run's sweep spares none of its run's");
+        assert!(swept.spared.iter().all(|(n, _)| run_of(fragment_proto::split_fragment_name(n).map_or("", |(label, _)| label)) != Some(run.as_str())), "a run's sweep spares none of its run's");
     }
     Ok(swept)
 }

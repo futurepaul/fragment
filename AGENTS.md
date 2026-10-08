@@ -183,7 +183,7 @@ prebuilt bundle is in the debt ledger).
   Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
-  `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
+  `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
   the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
   image steps; dev never calls a real model), which spend their payer's
@@ -230,7 +230,7 @@ prebuilt bundle is in the debt ledger).
   is missing (naming the `secret set` for each); it binds them by name
   and uploads no secret but a branch's test secret. A branch is a complete
   copy at `<branch>.<zone>`, its fragments at
-  `<label>--<username>--<branch>.<zone>`. `cargo xtask teardown --config
+  `<name>--<branch>.<zone>`. `cargo xtask teardown --config
   <file> --branch <name>` removes one (irreversible: ask Paul).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,

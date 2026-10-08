@@ -29,9 +29,9 @@ fragment guide             # the whole manual: read it before your first app
 ```
 
 - What you make is your owner's: `fragment create garden` makes
-  `garden.<owner's username>`, owned by them, with you as its editor. A
-  bare label in any command names one of your owner's (`fragment status
-  garden`).
+  `garden-<suffix>` (the platform adds the suffix), owned by them, with
+  you as its editor. A bare label in any command names the one of your
+  owner's with it (`fragment status garden`).
 - Its hosting and its AI bill your owner, as do your own model calls.
 - `fragment login` and `fragment keys` are not for you: you have no key.
 

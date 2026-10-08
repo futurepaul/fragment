@@ -70,7 +70,7 @@ fn within<T>(bound: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
 /// SOUL, assigned to the computer, and its own chat with it in it. Its
 /// fragment, identity and chat.
 fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul: &str) -> Result<(String, String, String)> {
-    let made = api.create_with(keys, json!({ "name": label, "template": "agent", "title": title }))?;
+    let made = api.create_with(keys, json!({ "label": label, "template": "agent", "title": title }))?;
     anyhow::ensure!(made.status == 200, "the agent {label}: {made}");
     let name = made.body["name"].as_str().context("a fragment's name")?.to_string();
     let assigned = api.signed(keys, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
@@ -80,7 +80,7 @@ fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul:
     let wrote = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
     anyhow::ensure!(wrote.status == 200 && deployed.status == 200, "{name}'s SOUL: {wrote} {deployed}");
-    let chat = api.create_with(keys, json!({ "name": format!("{label}-chat"), "template": "chat", "title": title }))?;
+    let chat = api.create_with(keys, json!({ "label": format!("{label}-chat"), "template": "chat", "title": title }))?;
     let chat_name = chat.body["name"].as_str().context("its chat's name")?.to_string();
     let joined = api.signed(keys, "PUT", &format!("/api/f/{chat_name}/members/{identity}"), Some(&json!({ "role": "editor" })))?;
     anyhow::ensure!(chat.status == 200 && joined.status == 200, "{name}'s chat: {chat} {joined}");
@@ -116,13 +116,13 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let (session, owner_id) = api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?;
     let me = api.approve(&session, &keys)?;
-    let username = me.body["username"].as_str().context("the person takes a username")?.to_string();
-    println!("      ({} as {username}, lent {PAID_CALLS} paid calls)", Api::email_of(&keys));
-    let skills = api.create_with(&keys, json!({ "name": s.name("skills"), "template": "skills" }))?;
+    let email = me.body["email"].as_str().context("the person has an email")?.to_string();
+    println!("      ({email}, lent {PAID_CALLS} paid calls)");
+    let skills = api.create_with(&keys, json!({ "label": s.name("skills"), "template": "skills" }))?;
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
-    let (juniper, juniper_id, jchat) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {username}'s agent. You talk with {username} and hand building work to your teammates.\n"))?;
-    let (maple, maple_id, mchat) = agent(api, &keys, &id, &s.name("maple"), "Maple", &format!("You are Maple, {username}'s builder. You make and publish small web apps (fragments) with the fragment CLI, and show them in the browser on your desktop.\n"))?;
+    let (juniper, juniper_id, jchat) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {email}'s agent. You talk with {email} and hand building work to your teammates.\n"))?;
+    let (maple, maple_id, mchat) = agent(api, &keys, &id, &s.name("maple"), "Maple", &format!("You are Maple, {email}'s builder. You make and publish small web apps (fragments) with the fragment CLI, and show them in the browser on your desktop.\n"))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let set_up = made.status == 200 && skills.status == 200;
     s.ok("two agents of one person on one computer, each with its own chat, as the shell makes them", set_up, json!({ "computer": made.body, "juniper": juniper, "maple": maple }));
@@ -154,7 +154,6 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     // Juniper has Maple make and publish an app, and show it on her desktop
     let calls = paid(api, &owner_id);
     let app_label = s.name("todo");
-    let app_name = format!("{app_label}.{username}");
     let ask = format!(
         "Use message_agent to ask Maple to make me a todo app from the todo template called {app_label}, deploy it, and open it in the browser on her desktop. Then tell me what she says when she answers."
     );
@@ -184,7 +183,7 @@ pub fn bot_mode(s: &mut Suite, api: &Api) -> Result<()> {
     let manswer: Vec<String> = agent_replies(&records(api, &keys, &mchat, "chat"), &maple_id).into_iter().filter(|r| r["body"]["turn"] == mturn.as_str()).filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect();
     println!("      (Maple's turn: {:.1?}, steps {:?})", t1.elapsed(), mwork.iter().filter(|w| w["kind"] == "turn.step").map(|w| w["tool"].clone()).collect::<Vec<_>>());
     s.ok("Maple takes it as a turn of hers in her chat, and answers there (model-dependent)", mend.is_some() && !manswer.is_empty(), json!({ "end": mend, "answer": manswer }));
-    let live = within(REPLY, || live_app(api, &keys, &app_name));
+    let live = within(REPLY, || live_app(api, &keys, &app_label));
     s.ok(&format!("the app {app_label} is theirs and live (model-dependent)"), live.is_some(), live.clone().unwrap_or(Value::Null));
 
     // Juniper says Maple's answer in her own chat, after her turn

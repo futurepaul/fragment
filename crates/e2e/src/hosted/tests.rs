@@ -189,7 +189,7 @@ fn the_plan_names_the_preview_and_each_skip() {
     assert_eq!(unknown, ["nonesuch"]);
     assert_eq!(plan.iter().map(|p| p.section.as_str()).collect::<Vec<_>>(), ["ops", "computers"], "only what --only names, in the lanes' order");
     let text = render(&h, &plan, &unknown);
-    for part in ["https://p5.finite.place", "<label>--<username>--p5.finite.place", "labels e2e-<run>-…", "/s/test", "would run (1)", "would skip (1)", "computers", "needs computers, models", "no section is named nonesuch"] {
+    for part in ["https://p5.finite.place", "<name>--p5.finite.place", "labels e2e-<run>-…", "/s/test", "would run (1)", "would skip (1)", "computers", "needs computers, models", "no section is named nonesuch"] {
         assert!(text.contains(part), "{part} in:\n{text}");
     }
     assert!(!text.contains(SECRET));
@@ -278,12 +278,12 @@ fn preview_answer(req: &Seen) -> (u16, String) {
 }
 
 const ZONE: &str = "preview.e2e-tests.invalid";
-const FRAGMENT: &str = "e2e-todo-1.puser";
+const FRAGMENT: &str = "e2e-todo-1--p2m4";
 
 /// A hosted API at the recorder, as the preview `p5` of `ZONE`.
 fn api_at(addr: SocketAddr, run: &Arc<Run>) -> Api {
     let preview = Preview::local_http(ZONE, "p5", addr.port());
-    let hosts = [format!("p5.{ZONE}"), format!("e2e-todo-1--puser--p5.{ZONE}")];
+    let hosts = [format!("p5.{ZONE}"), format!("e2e-todo-1--p2m4--p5.{ZONE}")];
     Api::hosted_at(&preview, run, &hosts, addr)
 }
 
@@ -303,7 +303,7 @@ fn the_secret_goes_to_the_platforms_levers_alone() {
     assert_eq!((seen[0].method.as_str(), seen[0].path.as_str(), seen[0].host.as_str()), ("POST", "/api/test/people", format!("p5.{ZONE}:{}", addr.port()).as_str()));
     assert_eq!(seen[0].header(fragment_core::levers::SECRET_HEADER), Some(SECRET));
     assert_eq!(seen[1].header(fragment_core::levers::SECRET_HEADER), None, "another platform route");
-    assert_eq!(seen[2].host, format!("e2e-todo-1--puser--p5.{ZONE}:{}", addr.port()), "the fragment's own host, by its name");
+    assert_eq!(seen[2].host, format!("e2e-todo-1--p2m4--p5.{ZONE}:{}", addr.port()), "the fragment's own host, by its name");
     assert_eq!(seen[2].header(fragment_core::levers::SECRET_HEADER), None, "a fragment's host never gets the secret");
 }
 
@@ -361,12 +361,12 @@ fn a_preview_names_its_hosts() {
     let run = Run::signing_in_by_levers(SECRET.into(), 0);
     let api = Api::hosted(&preview, &run);
     assert_eq!(api.base, "https://p5.finite.place");
-    assert_eq!(api.site_url("todo.paul", "x?y=1"), "https://todo--paul--p5.finite.place/x?y=1");
-    assert_eq!(api.site_origin("todo.paul"), "https://todo--paul--p5.finite.place");
+    assert_eq!(api.site_url("todo--k3x9", "x?y=1"), "https://todo--k3x9--p5.finite.place/x?y=1");
+    assert_eq!(api.site_origin("todo--k3x9"), "https://todo--k3x9--p5.finite.place");
     assert!(api.signs_in_by_levers());
     let local = Api::new(8790, "fragment.localhost", &Run::new(SECRET.into(), 0));
-    assert_eq!(local.site_url("todo.paul", ""), "http://todo--paul.fragment.localhost:8790/");
-    assert_eq!(local.branch("rh").site_url("todo.paul", ""), "http://todo--paul--rh.fragment.localhost:8790/", "a rehearsal's node is shaped as a branch");
+    assert_eq!(local.site_url("todo--k3x9", ""), "http://todo--k3x9.fragment.localhost:8790/");
+    assert_eq!(local.branch("rh").site_url("todo--k3x9", ""), "http://todo--k3x9--rh.fragment.localhost:8790/", "a rehearsal's node is shaped as a branch");
 }
 
 // ---- the sweep: what it chooses, and the whole of one against a fake preview
@@ -467,21 +467,21 @@ fn fake_preview(req: &Seen) -> (u16, String) {
     let who = req.header("cookie").and_then(|c| c.strip_prefix("fragment_session=s-")).unwrap_or("").to_string();
     let owned = |names: &[(&str, i64)]| names.iter().map(|(n, _)| json!({ "name": n, "role": "owner" })).collect::<Vec<_>>();
     let fragments: &[(&str, i64)] = match who.as_str() {
-        "a" => &[("e2e-c58b2a-todo.pa", 2 * H), ("e2e-c58b2a-agent-chat.pa", 2 * H), ("notes.pa", 9 * H)],
-        "b" => &[("e2e-c58c01-todo.pb", 5 * MIN_MS)],
-        "c" => &[("e2e-todo-c5065a.pc", 48 * H), ("e2e-0a0a0a-files.pc", 3 * H)],
-        "d" => &[("e2e-c58b2a-x.pd", 2 * H), ("e2e-c58c01-y.pd", 10 * MIN_MS)],
+        "a" => &[("e2e-c58b2a-todo--pa22", 2 * H), ("e2e-c58b2a-agent-chat--pa22", 2 * H), ("notes--pa22", 9 * H)],
+        "b" => &[("e2e-c58c01-todo--pb22", 5 * MIN_MS)],
+        "c" => &[("e2e-todo-c5065a--pc22", 48 * H), ("e2e-0a0a0a-files--pc22", 3 * H)],
+        "d" => &[("e2e-c58b2a-x--pd22", 2 * H), ("e2e-c58c01-y--pd22", 10 * MIN_MS)],
         _ => &[],
     };
     let all: &[(&str, i64)] = &[
-        ("e2e-c58b2a-todo.pa", 2 * H),
-        ("e2e-c58b2a-agent-chat.pa", 2 * H),
-        ("notes.pa", 9 * H),
-        ("e2e-c58c01-todo.pb", 5 * MIN_MS),
-        ("e2e-todo-c5065a.pc", 48 * H),
-        ("e2e-0a0a0a-files.pc", 3 * H),
-        ("e2e-c58b2a-x.pd", 2 * H),
-        ("e2e-c58c01-y.pd", 10 * MIN_MS),
+        ("e2e-c58b2a-todo--pa22", 2 * H),
+        ("e2e-c58b2a-agent-chat--pa22", 2 * H),
+        ("notes--pa22", 9 * H),
+        ("e2e-c58c01-todo--pb22", 5 * MIN_MS),
+        ("e2e-todo-c5065a--pc22", 48 * H),
+        ("e2e-0a0a0a-files--pc22", 3 * H),
+        ("e2e-c58b2a-x--pd22", 2 * H),
+        ("e2e-c58c01-y--pd22", 10 * MIN_MS),
     ];
     let body: Value = serde_json::from_str(&req.body).unwrap_or_default();
     match (req.method.as_str(), req.path.as_str()) {
@@ -500,7 +500,7 @@ fn fake_preview(req: &Seen) -> (u16, String) {
         ("GET", "/api/fragments") => {
             let mut listed = owned(fragments);
             if who == "b" {
-                listed.push(json!({ "name": "e2e-c58b2a-todo.pa", "role": "editor" }));
+                listed.push(json!({ "name": "e2e-c58b2a-todo--pa22", "role": "editor" }));
             }
             (200, json!({ "fragments": listed }).to_string())
         }
@@ -543,7 +543,7 @@ fn a_sweep_against_a_shared_preview() {
 
     let ours = sweep_on(&api, &Scope::Run("c58b2a".into()), NOW_MS).unwrap();
     let (deleted, slept, aged) = asked(&seen);
-    assert_eq!(deleted, ["e2e-c58b2a-agent-chat.pa", "e2e-c58b2a-todo.pa", "e2e-c58b2a-x.pd"], "the run's, and none of another run's (b is an editor of one: not theirs to delete)");
+    assert_eq!(deleted, ["e2e-c58b2a-agent-chat--pa22", "e2e-c58b2a-todo--pa22", "e2e-c58b2a-x--pd22"], "the run's, and none of another run's (b is an editor of one: not theirs to delete)");
     assert_eq!(slept, ["ca"], "a's computer alone: d also owns another run's fragment, and b and c are not the run's");
     assert!(!aged, "a run's sweep asks no fragment's age");
     assert_eq!((ours.people, ours.deleted, ours.slept, ours.not_e2e, ours.awake), (4, 3, 1, 1, 1));
@@ -552,10 +552,10 @@ fn a_sweep_against_a_shared_preview() {
     assert_eq!(
         spared,
         [
-            ("e2e-0a0a0a-files.pc".to_string(), Kept::OtherRun(Some("0a0a0a".into()))),
-            ("e2e-c58c01-todo.pb".to_string(), Kept::OtherRun(Some("c58c01".into()))),
-            ("e2e-c58c01-y.pd".to_string(), Kept::OtherRun(Some("c58c01".into()))),
-            ("e2e-todo-c5065a.pc".to_string(), Kept::OtherRun(None)),
+            ("e2e-0a0a0a-files--pc22".to_string(), Kept::OtherRun(Some("0a0a0a".into()))),
+            ("e2e-c58c01-todo--pb22".to_string(), Kept::OtherRun(Some("c58c01".into()))),
+            ("e2e-c58c01-y--pd22".to_string(), Kept::OtherRun(Some("c58c01".into()))),
+            ("e2e-todo-c5065a--pc22".to_string(), Kept::OtherRun(None)),
         ]
     );
     let report = ours.report();
@@ -565,13 +565,13 @@ fn a_sweep_against_a_shared_preview() {
 
     let all = sweep_on(&api, &Scope::All { spared_for_ms: sweep::SPARED_FOR_MS }, NOW_MS).unwrap();
     let (deleted, slept, aged) = asked(&seen);
-    assert_eq!(deleted, ["e2e-0a0a0a-files.pc", "e2e-c58b2a-agent-chat.pa", "e2e-c58b2a-todo.pa", "e2e-c58b2a-x.pd", "e2e-todo-c5065a.pc"], "every run's an hour old, and none's");
+    assert_eq!(deleted, ["e2e-0a0a0a-files--pc22", "e2e-c58b2a-agent-chat--pa22", "e2e-c58b2a-todo--pa22", "e2e-c58b2a-x--pd22", "e2e-todo-c5065a--pc22"], "every run's an hour old, and none's");
     assert_eq!(slept, ["ca", "cc"], "b's and d's own a young fragment: a run may be using their computers");
     assert!(aged);
     assert_eq!((all.deleted, all.slept, all.not_e2e, all.awake), (5, 2, 1, 2));
-    assert_eq!(all.spared_for(|k| matches!(k, Kept::Young(_))), ["e2e-c58c01-todo.pb", "e2e-c58c01-y.pd"]);
+    assert_eq!(all.spared_for(|k| matches!(k, Kept::Young(_))), ["e2e-c58c01-todo--pb22", "e2e-c58c01-y--pd22"]);
     let report = all.report();
-    for part in ["kept 2 e2e- fragments", "2 younger than 60 min (a run may be using them): e2e-c58c01-todo.pb (5 min old), e2e-c58c01-y.pd (10 min old)", "left 2 computers awake"] {
+    for part in ["kept 2 e2e- fragments", "2 younger than 60 min (a run may be using them): e2e-c58c01-todo--pb22 (5 min old), e2e-c58c01-y--pd22 (10 min old)", "left 2 computers awake"] {
         assert!(report.contains(part), "{part} in:\n{report}");
     }
 }

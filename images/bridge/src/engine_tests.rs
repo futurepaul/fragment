@@ -17,7 +17,7 @@ const T0: u64 = 1_000_000;
 const LIFE: &str = "0123456789abcdef0123456789abcdef";
 
 fn agent(label: &str) -> Agent {
-    Agent { fragment: format!("{label}.paul"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![] }
+    Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.to_string(), owner: "npub1paul".into(), credentials: vec![] }
 }
 
 /// A fresh engine whose runtime can take turns.
@@ -60,7 +60,7 @@ fn view(agents: &[&Agent]) -> ChatView {
 }
 
 fn said(e: &mut Engine, a: &Agent, v: &ChatView, seq: u64, principal: &str, body: Value, now: u64) -> Step {
-    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, principal, body), view: Some(v.clone()), since: 0 }, now);
     answered(e, s, now)
 }
 
@@ -101,12 +101,12 @@ fn a_message_starts_one_turn() {
     assert!(s.dirty, "admission is persisted before it is acted on");
     let t = started(&s).expect("handed to the runtime");
     assert_eq!((t.text.as_str(), t.asker.as_str(), t.asker_name.as_str(), t.seq), ("hi", "npub1paul", "paul", 1));
-    assert_eq!(t.turn, records::turn_id(&a.fragment, "talk.paul", "chat", 1));
+    assert_eq!(t.turn, records::turn_id(&a.fragment, "talk--k3x9", "chat", 1));
     assert_eq!(kinds(&s), vec!["turn.start"]);
     assert_eq!(posts(&s)[0].0, records::work_id(&t.turn, "start"));
     assert_eq!(posts(&s)[0].1["life"], LIFE, "claimed as this life");
     assert_eq!(keepalive(&s), Some(true));
-    assert_eq!(e.cursor(&a.fragment, "talk.paul", "chat"), 1);
+    assert_eq!(e.cursor(&a.fragment, "talk--k3x9", "chat"), 1);
 
     // replay: the same record again (a catch-up, a reconnect) does nothing
     let again = said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0 + 1);
@@ -135,7 +135,7 @@ fn what_starts_nothing() {
         let s = said(&mut e, &a, &v, seq, who, body.clone(), T0);
         assert!(started(&s).is_none(), "{who} {body}");
         assert!(posts(&s).is_empty(), "{who} {body}");
-        assert_eq!(e.cursor(&a.fragment, "talk.paul", "chat"), seq, "the cursor passes it anyway");
+        assert_eq!(e.cursor(&a.fragment, "talk--k3x9", "chat"), seq, "the cursor passes it anyway");
     }
     // a record for an agent this computer does not run is refused whole
     let stranger = agent("rowan");
@@ -153,7 +153,7 @@ fn a_reply_streams_then_posts() {
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "hi" }), T0)).expect("started").turn;
     let d = ev(&mut e, Event::Draft { turn: turn.clone(), text: "He".into() }, T0 + 2);
-    assert_eq!(d.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: Some("He".into()) }]);
+    assert_eq!(d.effects, vec![Effect::Draft { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), turn: turn.clone(), text: Some("He".into()) }]);
     assert!(!d.dirty, "drafts are never stored");
     let r = ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Hello".into() }, T0 + 3);
     assert!(posts(&r).is_empty(), "a reply waits for its turn's end, or a later part");
@@ -161,7 +161,7 @@ fn a_reply_streams_then_posts() {
     let p = posts(&end);
     assert_eq!(p[0], (records::reply_id(&turn, 1), json!({ "text": "Hello", "turn": turn })));
     assert_eq!(p[1], (records::work_id(&turn, "end"), json!({ "kind": "turn.end", "turn": turn, "outcome": "idle" })));
-    assert!(end.effects.contains(&Effect::Draft { agent: a.fragment.clone(), fragment: "talk.paul".into(), turn: turn.clone(), text: None }));
+    assert!(end.effects.contains(&Effect::Draft { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), turn: turn.clone(), text: None }));
     assert_eq!(keepalive(&end), Some(false));
     // its end is owed: the turn is kept, ended, until the lane is done with it
     let t = &e.state().turns[&turn];
@@ -223,8 +223,8 @@ fn one_turn_at_a_time() {
     }
     let over = said(&mut e, &a, &v, 100, "npub1paul", json!({ "text": "too many" }), T0);
     assert_eq!(kinds(&over), vec!["turn.start", "turn.end"]);
-    let refused = records::turn_id(&a.fragment, "talk.paul", "chat", 100);
-    assert_eq!(posts(&over)[0], (records::work_id(&refused, "start"), json!({ "kind": "turn.start", "turn": refused, "asker": "npub1paul", "agent": "npub1juniper", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 100 }, "life": LIFE })));
+    let refused = records::turn_id(&a.fragment, "talk--k3x9", "chat", 100);
+    assert_eq!(posts(&over)[0], (records::work_id(&refused, "start"), json!({ "kind": "turn.start", "turn": refused, "asker": "npub1paul", "agent": "npub1juniper", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 100 }, "life": LIFE })));
     assert_eq!(posts(&over)[1].1["outcome"], "error");
     assert!(started(&over).is_none());
     assert!(!e.state().turns.contains_key(&refused), "held only until both its records were answered");
@@ -252,7 +252,7 @@ fn stop_is_the_askers() {
     // a queued turn, stopped by name
     let running = started(&said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "a" }), T0 + 5)).expect("started").turn;
     said(&mut e, &a, &v, 6, "npub1paul", json!({ "text": "b" }), T0 + 5);
-    let queued = records::turn_id(&a.fragment, "talk.paul", "chat", 6);
+    let queued = records::turn_id(&a.fragment, "talk--k3x9", "chat", 6);
     let s = said(&mut e, &a, &v, 7, "npub1paul", json!({ "kind": "stop", "turn": queued }), T0 + 6);
     assert_eq!(kinds(&s), vec!["turn.start", "turn.end"]);
     assert_eq!((posts(&s)[0].0.as_str(), &posts(&s)[0].1["life"]), (records::work_id(&queued, "start").as_str(), &json!(LIFE)));
@@ -450,7 +450,7 @@ fn a_corrupt_state_is_refused() {
     let mut e = engine(std::slice::from_ref(&a));
     said(&mut e, &a, &v, 5, "npub1paul", json!({ "text": "x" }), T0);
     let mut behind = e.state().clone();
-    behind.cursors.insert(cursor_key(&a.fragment, "talk.paul", "chat"), 4);
+    behind.cursors.insert(cursor_key(&a.fragment, "talk--k3x9", "chat"), 4);
     assert!(Engine::new(behind, Settings::default(), LIFE).is_err());
     let mut renamed = e.state().clone();
     let (id, mut t) = renamed.turns.pop_first().expect("one");
@@ -476,14 +476,14 @@ fn a_group_picks_who_answers() {
         (started(&sj).is_some(), started(&sr).is_some())
     };
     assert_eq!(both(&mut e, 1, "npub1paul", json!({ "text": "hello all" })), (true, false), "the lead answers");
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&j.fragment, "talk.paul", "chat", 1), outcome: Outcome::Idle }), T0);
+    e.step(Input::Runtime(Event::End { turn: records::turn_id(&j.fragment, "talk--k3x9", "chat", 1), outcome: Outcome::Idle }), T0);
     assert_eq!(both(&mut e, 2, "npub1paul", json!({ "text": "@Rowan what do you think?" })), (false, true), "a mention picks rowan");
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk.paul", "chat", 2), outcome: Outcome::Idle }), T0);
+    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 2), outcome: Outcome::Idle }), T0);
     assert_eq!(both(&mut e, 3, "npub1paul", json!({ "text": "you two", "to": ["npub1juniper", "npub1rowan"] })), (true, true), "to names both");
 
     // juniper hands off to rowan
-    let jt = records::turn_id(&j.fragment, "talk.paul", "chat", 3);
-    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk.paul", "chat", 3), outcome: Outcome::Idle }), T0);
+    let jt = records::turn_id(&j.fragment, "talk--k3x9", "chat", 3);
+    e.step(Input::Runtime(Event::End { turn: records::turn_id(&r.fragment, "talk--k3x9", "chat", 3), outcome: Outcome::Idle }), T0);
     e.step(Input::Runtime(Event::Reply { turn: jt.clone(), part: 1, text: "@rowan can take this".into() }), T0);
     let end = e.step(Input::Runtime(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0);
     let reply = posts(&end)[0].1.clone();
@@ -505,11 +505,11 @@ fn two_agents_run_at_once() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let mut e = engine(&[j.clone(), r.clone()]);
     let s1 = said(&mut e, &j, &view(&[&j]), 1, "npub1paul", json!({ "text": "a" }), T0);
-    let s2 = e.step(Input::Record { agent: r.fragment.clone(), fragment: "notes.paul".into(), record: rec(1, "npub1paul", json!({ "text": "b" })), view: Some(view(&[&r])), since: 0 }, T0);
+    let s2 = e.step(Input::Record { agent: r.fragment.clone(), fragment: "notes--k3x9".into(), record: rec(1, "npub1paul", json!({ "text": "b" })), view: Some(view(&[&r])), since: 0 }, T0);
     let s2 = answered(&mut e, s2, T0);
     let (t1, t2) = (started(&s1).expect("juniper"), started(&s2).expect("rowan"));
     assert_ne!(t1.turn, t2.turn);
-    assert_eq!((t1.agent.fragment.as_str(), t2.agent.fragment.as_str()), ("juniper.paul", "rowan.paul"));
+    assert_eq!((t1.agent.fragment.as_str(), t2.agent.fragment.as_str()), ("juniper--k3x9", "rowan--k3x9"));
 }
 
 /// Goal: a routine on the agent's `tasks` channel is a turn in its chat, as
@@ -519,16 +519,16 @@ fn tasks_start_routines() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
     let task = |seq, body| Record { channel: "tasks".into(), seq, at: 0, principal: "npub1paul".into(), kind: "message".into(), body };
-    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(1, json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" })), view: None, since: 0 }, T0);
+    let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(1, json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" })), view: None, since: 0 }, T0);
     let s = answered(&mut e, s, T0);
     let t = started(&s).expect("a routine turn");
     assert!(t.routine);
-    assert_eq!((t.fragment.as_str(), t.asker.as_str()), ("talk.paul", "npub1paul"));
+    assert_eq!((t.fragment.as_str(), t.asker.as_str()), ("talk--k3x9", "npub1paul"));
     assert_eq!(t.turn, records::turn_id(&a.fragment, &a.fragment, "tasks", 1));
-    let j = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(2, json!({ "kind": "joined", "fragment": "new.paul" })), view: None, since: 0 }, T0);
-    assert!(j.effects.contains(&Effect::Discover { agent: a.fragment.clone(), joined: Some("new.paul".into()) }));
+    let j = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: task(2, json!({ "kind": "joined", "fragment": "new--k3x9" })), view: None, since: 0 }, T0);
+    assert!(j.effects.contains(&Effect::Discover { agent: a.fragment.clone(), joined: Some("new--k3x9".into()) }));
     // a `tasks` record on another fragment is no task
-    let other = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: task(3, json!({ "kind": "joined" })), view: None, since: 0 }, T0);
+    let other = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: task(3, json!({ "kind": "joined" })), view: None, since: 0 }, T0);
     assert!(other.effects.is_empty());
 }
 
@@ -553,7 +553,7 @@ fn gone_drops_turns() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let turn = started(&said(&mut e, &a, &v, 1, "npub1paul", json!({ "text": "x" }), T0)).expect("started").turn;
-    let g = e.step(Input::Gone { agent: a.fragment.clone(), fragment: "talk.paul".into() }, T0);
+    let g = e.step(Input::Gone { agent: a.fragment.clone(), fragment: "talk--k3x9".into() }, T0);
     assert_eq!(commands(&g), vec![Command::Forget { turn }]);
     assert!(posts(&g).is_empty(), "it can no longer post there");
     assert!(e.state().turns.is_empty());
@@ -567,11 +567,11 @@ fn history_is_not_for_a_new_agent() {
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
     let at = |seq: u64, at: i64| Record { at, ..rec(seq, "npub1paul", json!({ "text": "hi @juniper" })) };
-    let old = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: at(1, 500), view: Some(v.clone()), since: 1000 }, T0);
+    let old = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: at(1, 500), view: Some(v.clone()), since: 1000 }, T0);
     assert!(started(&old).is_none());
     assert!(old.dirty, "its cursor still moves");
-    assert_eq!(e.cursor(&a.fragment, "talk.paul", "chat"), 1);
-    let new = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: at(2, 1000), view: Some(v), since: 1000 }, T0);
+    assert_eq!(e.cursor(&a.fragment, "talk--k3x9", "chat"), 1);
+    let new = e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: at(2, 1000), view: Some(v), since: 1000 }, T0);
     let new = answered(&mut e, new, T0);
     assert!(started(&new).is_some());
 }
@@ -644,7 +644,7 @@ fn a_question_is_answered_by_the_next_message() {
     // lost: a new life never tells a turn an earlier life ran
     let t2 = started(&said(&mut e, &a, &v, 7, "npub1paul", json!({ "text": "x" }), T0 + 10));
     assert!(t2.is_none(), "behind the others");
-    let skylers = records::turn_id(&a.fragment, "talk.paul", "chat", 2);
+    let skylers = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
     ev(&mut e, Event::Reply { turn: skylers.clone(), part: 1, text: "Which tomatoes?".into() }, T0 + 11);
     ev(&mut e, Event::Asked { turn: skylers.clone() }, T0 + 11);
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
@@ -727,7 +727,7 @@ fn ping_pong(around: bool) -> Vec<(String, u32)> {
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
     let mut ran = Vec::new();
-    let mut next = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(1, 10, "npub1paul", json!({ "text": "keep handing off", "to": ["npub1juniper"] })), T0);
+    let mut next = to_all(&mut e, &[&j, &r], &v, "talk--k3x9", rec_at(1, 10, "npub1paul", json!({ "text": "keep handing off", "to": ["npub1juniper"] })), T0);
     // bounded: each pass reads one more record, and the hop cap ends it
     for seq in 2..20u64 {
         let Some((t, hop)) = next.pop() else { break };
@@ -738,13 +738,13 @@ fn ping_pong(around: bool) -> Vec<(String, u32)> {
         let text = format!("over to you @{other}");
         next = if around {
             let posted = json!({ "text": text, "to": [format!("npub1{other}")] });
-            let started = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, posted), T0 + seq);
+            let started = to_all(&mut e, &[&j, &r], &v, "talk--k3x9", rec_at(seq, 10 + seq as i64, &by, posted), T0 + seq);
             ev(&mut e, Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }, T0 + seq);
             started
         } else {
             let reply = reply_and_end(&mut e, &t.turn, &text, T0 + seq);
             assert_eq!(reply["to"], json!([format!("npub1{other}")]), "a mention of the other agent hands off");
-            to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(seq, 10 + seq as i64, &by, reply), T0 + seq)
+            to_all(&mut e, &[&j, &r], &v, "talk--k3x9", rec_at(seq, 10 + seq as i64, &by, reply), T0 + seq)
         };
     }
     ran
@@ -761,7 +761,7 @@ fn an_ended_turn_counts_only_for_the_reply_that_names_it() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
-    let (talk, pair) = ("talk.paul", "juniper-rowan.paul");
+    let (talk, pair) = ("talk--k3x9", "juniper-rowan--k3x9");
     // in the pair chat: the person to juniper, juniper to rowan, rowan back to juniper
     let j0 = to_all(&mut e, &[&j, &r], &v, pair, rec_at(1, 10, "npub1paul", json!({ "text": "start", "to": ["npub1juniper"] })), T0);
     let to_r = reply_and_end(&mut e, &j0[0].0.turn, "@rowan yours", T0 + 1);
@@ -808,8 +808,8 @@ fn a_post_around_the_bridge_counts_from_its_turn() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
-    let talk = "talk.paul";
-    let pair = "juniper-rowan.paul";
+    let talk = "talk--k3x9";
+    let pair = "juniper-rowan--k3x9";
     // juniper runs a turn in talk at hop 0 (its person asked)
     let t = to_all(&mut e, &[&j, &r], &v, talk, rec_at(1, 10, "npub1paul", json!({ "text": "ask rowan for me", "to": ["npub1juniper"] })), T0);
     let jt = t[0].0.turn.clone();
@@ -862,16 +862,16 @@ fn a_reply_read_by_the_next_life_resets_nothing() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
-    let t = to_all(&mut e, &[&j, &r], &v, "talk.paul", rec_at(1, 10, "npub1paul", json!({ "text": "hi", "to": ["npub1juniper"] })), T0);
+    let t = to_all(&mut e, &[&j, &r], &v, "talk--k3x9", rec_at(1, 10, "npub1paul", json!({ "text": "hi", "to": ["npub1juniper"] })), T0);
     let reply = reply_and_end(&mut e, &t[0].0.turn, "@rowan over to you", T0 + 1);
     // juniper's follower read it (its own); the life ends before rowan's did
-    e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk.paul".into(), record: rec_at(2, 11, "npub1juniper", reply.clone()), view: Some(v.clone()), since: 0 }, T0 + 2);
+    e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk--k3x9".into(), record: rec_at(2, 11, "npub1juniper", reply.clone()), view: Some(v.clone()), since: 0 }, T0 + 2);
     let saved = e.state().clone();
     let mut e2 = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
     e2.step(Input::Agents(vec![j.clone(), r.clone()]), T0 + 3);
     e2.recover(T0 + 3);
     e2.step(Input::Runtime(Event::Connected(true)), T0 + 3);
-    let s = e2.step(Input::Record { agent: r.fragment.clone(), fragment: "talk.paul".into(), record: rec_at(2, 11, "npub1juniper", reply), view: Some(v.clone()), since: 0 }, T0 + 4);
+    let s = e2.step(Input::Record { agent: r.fragment.clone(), fragment: "talk--k3x9".into(), record: rec_at(2, 11, "npub1juniper", reply), view: Some(v.clone()), since: 0 }, T0 + 4);
     let rt = started(&answered(&mut e2, s, T0 + 4)).expect("rowan answers it");
     assert_eq!(e2.state().turns[&rt.turn].hop, limits::HOPS_MAX);
 }
@@ -891,14 +891,14 @@ fn a_chats_agents_have_a_budget() {
     // rowan, in no turn, asks juniper again and again (each the last hop)
     let ask = |seq: u64, at: i64| rec_at(seq, at, "npub1rowan", json!({ "text": "again", "to": ["npub1juniper"] }));
     for seq in 1..=max {
-        let s = to_all(&mut e, &[&j], &v, "talk.paul", ask(seq, at0 + seq as i64), T0 + seq);
+        let s = to_all(&mut e, &[&j], &v, "talk--k3x9", ask(seq, at0 + seq as i64), T0 + seq);
         assert_eq!(s.len(), 1, "within the budget: {seq}");
         e.step(Input::Runtime(Event::End { turn: s[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + seq);
     }
-    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
     // replay: the last one read again spends nothing
-    assert!(to_all(&mut e, &[&j], &v, "talk.paul", ask(max, at0 + max as i64), T0 + max).is_empty());
-    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    assert!(to_all(&mut e, &[&j], &v, "talk--k3x9", ask(max, at0 + max as i64), T0 + max).is_empty());
+    assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
     // restart: the count is kept
     let saved: State = serde_json::from_str(&serde_json::to_string(e.state()).expect("serializes")).expect("deserializes");
     let mut e = Engine::new(saved, Settings::default(), "fedcba9876543210fedcba9876543210").expect("whole");
@@ -906,26 +906,26 @@ fn a_chats_agents_have_a_budget() {
     e.recover(T0 + 100);
     e.step(Input::Runtime(Event::Connected(true)), T0 + 100);
     // past it: refused, with both records, saying why
-    let over = e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk.paul".into(), record: ask(max + 1, at0 + max as i64 + 1), view: Some(v.clone()), since: 0 }, T0 + 101);
+    let over = e.step(Input::Record { agent: j.fragment.clone(), fragment: "talk--k3x9".into(), record: ask(max + 1, at0 + max as i64 + 1), view: Some(v.clone()), since: 0 }, T0 + 101);
     let over = answered(&mut e, over, T0 + 101);
     assert!(started(&over).is_none());
     assert_eq!(kinds(&over), vec!["turn.start", "turn.end"]);
     assert_eq!(posts(&over)[1].1["error"], refused_budget());
     // a person is never counted, nor refused
-    let person = to_all(&mut e, &[&j], &v, "talk.paul", rec_at(max + 2, at0 + max as i64 + 2, "npub1paul", json!({ "text": "still there?" })), T0 + 102);
+    let person = to_all(&mut e, &[&j], &v, "talk--k3x9", rec_at(max + 2, at0 + max as i64 + 2, "npub1paul", json!({ "text": "still there?" })), T0 + 102);
     assert_eq!(person.len(), 1);
-    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max);
+    assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max);
     e.step(Input::Runtime(Event::End { turn: person[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 102);
     // another chat has a budget of its own
-    let other = to_all(&mut e, &[&j], &v, "other.paul", ask(1, at0 + max as i64 + 3), T0 + 103);
+    let other = to_all(&mut e, &[&j], &v, "other--k3x9", ask(1, at0 + max as i64 + 3), T0 + 103);
     assert_eq!(other.len(), 1);
     e.step(Input::Runtime(Event::End { turn: other[0].0.turn.clone(), outcome: Outcome::Idle }), T0 + 103);
     // the window slides: once the first is older than it, one more runs
     let later = at0 + 1 + limits::AGENT_TURNS_WINDOW_MS;
-    let slid = to_all(&mut e, &[&j], &v, "talk.paul", ask(max + 3, later), T0 + 104);
+    let slid = to_all(&mut e, &[&j], &v, "talk--k3x9", ask(max + 3, later), T0 + 104);
     assert_eq!(slid.len(), 1, "one ran out of the window");
-    assert_eq!(e.state().agent_turns["talk.paul"].len() as u64, max, "and is let go");
-    assert!(e.state().agent_turns["talk.paul"].iter().all(|t| *t > later - limits::AGENT_TURNS_WINDOW_MS));
+    assert_eq!(e.state().agent_turns["talk--k3x9"].len() as u64, max, "and is let go");
+    assert!(e.state().agent_turns["talk--k3x9"].iter().all(|t| *t > later - limits::AGENT_TURNS_WINDOW_MS));
 }
 
 /// Invalid state: a budget out of order or past its bound, or a routine at
@@ -933,13 +933,13 @@ fn a_chats_agents_have_a_budget() {
 #[test]
 fn a_corrupt_budget_is_refused() {
     let mut s = State::default();
-    s.agent_turns.insert("talk.paul".into(), vec![3, 2]);
+    s.agent_turns.insert("talk--k3x9".into(), vec![3, 2]);
     assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "out of order");
     let mut s = State::default();
-    s.agent_turns.insert("talk.paul".into(), (0..=limits::AGENT_TURNS_PER_CHAT_MAX as i64).collect());
+    s.agent_turns.insert("talk--k3x9".into(), (0..=limits::AGENT_TURNS_PER_CHAT_MAX as i64).collect());
     assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "past the bound");
     let mut s = State::default();
-    s.agent_turns.insert("talk.paul".into(), vec![]);
+    s.agent_turns.insert("talk--k3x9".into(), vec![]);
     assert!(Engine::new(s, Settings::default(), LIFE).is_err(), "an empty one is never kept");
     // a state from before the budget loads, with none
     let mut old = serde_json::to_value(State::default()).expect("serializes");
@@ -957,7 +957,7 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
     let a = agent("juniper");
     let mut e = engine(std::slice::from_ref(&a));
     let task = |seq, principal: &str, body| Record { channel: "tasks".into(), seq, at: 0, principal: principal.into(), kind: "message".into(), body };
-    let routine = json!({ "kind": "routine", "text": "water the plants", "chat": "talk.paul" });
+    let routine = json!({ "kind": "routine", "text": "water the plants", "chat": "talk--k3x9" });
     let feed = |e: &mut Engine, r: Record| {
         let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: a.fragment.clone(), record: r, view: None, since: 0 }, T0);
         answered(e, s, T0)
@@ -969,7 +969,7 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
     let rowan = feed(&mut e, task(2, "npub1rowan", routine.clone()));
     assert!(rowan.effects.is_empty(), "another agent starts no routine: {:?}", rowan.effects);
     assert_eq!(e.cursor(&a.fragment, &a.fragment, "tasks"), 2, "the cursor passes it");
-    let joined = feed(&mut e, task(3, "npub1rowan", json!({ "kind": "joined", "fragment": "x.paul" })));
+    let joined = feed(&mut e, task(3, "npub1rowan", json!({ "kind": "joined", "fragment": "x--k3x9" })));
     assert!(joined.effects.is_empty());
     let owner = feed(&mut e, task(4, "npub1paul", routine));
     assert!(started(&owner).is_some(), "its owner's runs");
@@ -985,7 +985,7 @@ fn tasks_hear_only_the_owner_and_the_fragment() {
 // (`Command::Start`) are counted, never records: a second run's records
 // are replays of the first's.
 
-const CHAT: &str = "talk.paul";
+const CHAT: &str = "talk--k3x9";
 
 /// The platform's answer to a post (docs/api.md: the same id and body again
 /// is a replay; another body, or another channel, is 409).
@@ -1633,14 +1633,14 @@ fn a_claim_the_agent_may_not_post_drops_the_turn() {
     let a = agent("juniper");
     let v = view(&[&a]);
     let mut e = engine(std::slice::from_ref(&a));
-    let say = |e: &mut Engine, seq: u64, text: &str| e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk.paul".into(), record: rec(seq, "npub1paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, T0);
+    let say = |e: &mut Engine, seq: u64, text: &str| e.step(Input::Record { agent: a.fragment.clone(), fragment: "talk--k3x9".into(), record: rec(seq, "npub1paul", json!({ "text": text })), view: Some(v.clone()), since: 0 }, T0);
     let one = say(&mut e, 1, "one");
-    let t1 = records::turn_id(&a.fragment, "talk.paul", "chat", 1);
+    let t1 = records::turn_id(&a.fragment, "talk--k3x9", "chat", 1);
     assert_eq!(kinds(&one), vec!["turn.start"]);
     assert!(say(&mut e, 2, "two").effects.iter().all(|x| !matches!(x, Effect::Claim { .. })), "two waits behind one's claim");
     let r = e.step(Input::Claimed { turn: t1.clone(), answer: ClaimAnswer::Refused }, T0 + 1);
     assert!(started(&r).is_none(), "refused: not run");
-    let t2 = records::turn_id(&a.fragment, "talk.paul", "chat", 2);
+    let t2 = records::turn_id(&a.fragment, "talk--k3x9", "chat", 2);
     assert_eq!(posts(&r), vec![(records::work_id(&t2, "start"), posts(&r)[0].1.clone())], "no end for one (it cannot be posted), and two is claimed");
     assert!(r.dirty && !e.state().turns.contains_key(&t1), "one is dropped");
     let r2 = e.step(Input::Claimed { turn: t2.clone(), answer: ClaimAnswer::Refused }, T0 + 2);
