@@ -1255,17 +1255,41 @@ hand-off spend, measured on the preview with real models by the hosted
   `thinking` (its milliseconds) as its call is made, and once a second
   while it reasons with no words yet; the page shows "Thinking… 4s".
 
-**Measured** (the preview, each the hosted lane's whole run; p50 / p90):
+**Measured** (the preview, 2026-10-08, each column one whole run of the
+hosted lane; p50 / p90, or each sample):
+- **before**: GLM-5.3 (`medium`) for turns and goose, none of the above;
+- **A**: GLM-5.3 Flash, the ladder, fewer steps, sessions made ahead, a
+  hedge at 4.5 s on the same model;
+- **B**: A with the hedge at 3.5 s, an agent's on a session of its own;
+- **C**: B with the hedge's second call on the tier's next model (what
+  runs now).
 
-| | before (2026-10-08, medium) | after |
-| --- | --- | --- |
-| a turn in words, logged → answered | 5.2 s / 13.7 s (n=12) | |
-| the mind's model calls, first data line | 3.6 s / 10.3 s (n=20, none hedged) | |
-| platform steps a turn in words | ~1.6 s | |
-| a simple hand-off (computer awake), ask → report | 22.2 s / 27.7 s (n=3) | |
-| a follow-up, report → talk | 3.1 s / 25.4 s (n=4) | |
-| goose's model calls | 4.8 s / 15.5 s (n=10) | |
-| goose's session and MCP servers | 1.3 to 1.8 s | |
+| | before | A | B | C |
+| --- | --- | --- | --- | --- |
+| a turn in words, logged → answered | 5.2 / 13.7 s (n=12) | 2.4 / 8.0 s (n=14) | 3.5 / 5.4 s (n=14) | 5.3 / 11.2 s (n=14) |
+| a message said → logged (the trigger, the steps before `hear`) | | 1.2 / 1.8 s | 1.3 / 1.9 s | 1.4 / 2.5 s |
+| the mind's model calls, first data line | 3.6 / 10.3 s, max 23.5 (n=20) | 1.1 / 6.8 s, max 8.3 (n=28) | 1.1 / 5.4 s, max 15.4 | 2.0 / 6.9 s, max 14.7 |
+| the mind's calls hedged | 0 of 20 | 7 of 28 | 8 of 28 | 14 of 28 |
+| platform steps a turn in words | ~1.6 s (8 steps) | ~0.5 s (4) | ~0.5 s | ~0.5 s |
+| a simple hand-off, computer awake, ask → report | 22.2, 18.3, 27.7 s | 16.4, 13.1, 7.6 s | 12.7, 12.9, 7.0 s | 14.5, 8.5, 10.6 s |
+| a simple hand-off from asleep: cold, pre-woken | | 13.2, 8.9 s | 12.9, 12.4 s | 23.6, 15.3 s |
+| a follow-up, report → talk | 3.1 / 25.4 s (n=4) | 2.4 / 4.2 s (n=6) | 3.0 / 9.3 s (n=6) | 3.8 / 16.1 s (n=6) |
+| goose's model calls (its steps' waits) | 4.8 / 15.5 s (n=10) | 1.6 / 3.1 s (n=14) | 1.7 / 3.3 s (n=14) | 3.1 / 7.4 s (n=18) |
+| goose's session and MCP servers | 1.3 to 1.8 s each | 0 (made ahead), 1.2 s the first | the same | the same |
+| the run's charge (paid calls lent) | $0.28 (60) | $0.11 (120) | $0.08 (120) | $0.11 (120) |
+
+The runs differ most in GLM-5.3 Flash's own latency at the time: in C half
+the mind's first calls had no data line at 3.5 s (a quarter in A and B),
+and the next model (DeepSeek V4 Flash) began 0.6 to 1.5 s after it was
+asked. No call was refused as busy in A, B or C for the mind; one of
+goose's answered on DeepSeek V4 Flash after a busy refusal (A).
+
+**What is left:** a message's trigger and the steps before its turn
+(about 1.3 s: a run's Workflow made, `members`, then `hear`); each job
+step's two Workflow steps (about a quarter of a second each); GLM-5.3
+Flash's own first data line when it is slow (a hedge bounds it at 3.5 s
+plus the next model's second or so); and goose's first hand-off after a
+wake (its skills and its session, 2.5 s).
 
 ## Deploy
 
