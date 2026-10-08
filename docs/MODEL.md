@@ -143,7 +143,8 @@ leaves the run pending for a later try (docs/api.md, Apps).
 
 Triggers: an HTTP call from the UI (`POST /__op/<name>`), `fragment call`
 from the CLI, an agent tool call (an operation's schema *is* its tool
-schema), a cron entry, an inbox webhook, a channel message, and a pin
+schema: an MCP client's `tools/call` at the fragment's own `__mcp`, as
+the person who connected it, docs/api.md), a cron entry, an inbox webhook, a channel message, and a pin
 move (file change). Cron entries, channel messages, and pin moves are
 declared in `fragment.json`'s `triggers` and start runs as the fragment's own key;
 a triggered mutation is a run of one step, so it retries and is held

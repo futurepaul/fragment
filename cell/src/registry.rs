@@ -58,7 +58,7 @@ mod signin;
 pub(crate) mod wipe;
 use calls::{
     Hold, SubjectOf,
-    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, Disconnect, EndSession, Exchange, FindClient, FindUsername, GrantCode,
+    Active, AddKey, ApproveKey, Begin, By, Call, CheckKey, ClaimUsername, Claimed, Connected, Disconnect, EndSession, Exchange, FindClient, FindUsername, GrantCode,
     Holder, IssueTokens, ListConnections, Logout, Lookup, Mint, Picture, Profile, Profiles, ProfilesAnswer, Redeem, RegisterAgent, RegisterClient,
     Released, ReleaseUsername, Resolve, RevokeKey, RevokeToken, Session, SetPicture, TestHook, View, WipeBegin, WipeLook, WipeStep, TEST_HOLD_MAX_MS,
 };
@@ -727,6 +727,7 @@ impl RegistryCell {
             RevokeToken::PATH => reply::<RevokeToken>(self.revoke_token(body(&bytes)?)),
             ListConnections::PATH => reply::<ListConnections>(self.list_connections(body(&bytes)?)),
             Disconnect::PATH => reply::<Disconnect>(self.disconnect(body(&bytes)?)),
+            Connected::PATH => reply::<Connected>(self.connected(body(&bytes)?)),
             WipeLook::PATH => reply::<WipeLook>(self.wipe_look(body(&bytes)?)),
             WipeBegin::PATH => reply::<WipeBegin>(self.wipe_begin(body(&bytes)?)),
             WipeStep::PATH => reply::<WipeStep>(self.wipe_step(body(&bytes)?)),

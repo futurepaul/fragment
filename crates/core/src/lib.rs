@@ -23,6 +23,7 @@ pub mod ledger;
 pub mod levers;
 pub mod live;
 pub mod manifest;
+pub mod mcp;
 pub mod media;
 pub mod models;
 pub mod npub;

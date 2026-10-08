@@ -345,6 +345,12 @@ mod tests {
         for bad in [&br#"{"operations":{"q":{"kind":"query","ephemeral":true}}}"#[..], br#"{"operations":{"j":{"kind":"job","ephemeral":true}}}"#, br#"{"operations":{"m":{"kind":"mutation","ephemeral":1}}}"#] {
             assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".ephemeral"), "only a mutation is ephemeral, with a boolean");
         }
+        let said = parse(br#"{"operations":{"add":{"kind":"mutation","description":"Adds a todo."}}}"#).unwrap().operations;
+        assert_eq!(said["add"].description.as_deref(), Some("Adds a todo."));
+        let long = format!(r#"{{"operations":{{"add":{{"kind":"mutation","description":"{}"}}}}}}"#, "x".repeat(limits::OP_DESCRIPTION_MAX_CHARS + 1));
+        for bad in [&br#"{"operations":{"add":{"kind":"mutation","description":" "}}}"#[..], br#"{"operations":{"add":{"kind":"mutation","description":3}}}"#, long.as_bytes()] {
+            assert!(parse(bad).expect_err(&String::from_utf8_lossy(bad)).contains(".description"), "a description is 1 to the limit's characters");
+        }
         assert_eq!(m.meta.unwrap().title.as_deref(), Some("T"));
         assert_eq!(m.ignored, vec!["visibility", "editors"]);
         assert_eq!(parse(b"{}").unwrap(), Manifest::default());

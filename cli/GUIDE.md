@@ -481,6 +481,15 @@ as the agent, with no key: name the fragment in full.
 FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_API=http://api.fragment.internal fragment mcp mind.paul
 ```
 
+From a chat client (Claude, ChatGPT) or any MCP client, a fragment is an
+MCP server at `https://<label>--<username>.<its domain>/__mcp`: added
+as a custom connector, it asks its person to sign in and allow it, then
+lists the operations they may call as tools. A tool's arguments are a
+call's, `{id, input}`: the input under `input`, and, for a mutation or a
+job, an id the client chooses (the same id again is a replay). What it
+does names the client in `fragment events`; its person ends it in their
+settings, under Connected clients.
+
 ## People
 
 ```

@@ -35,6 +35,7 @@
 //!   POST   /api/channels/<channel>        the channel's post role ({id, body}: the platform appends)
 //!   PUT    /api/channels/<channel>/draft  the channel's post role ({turn, text}: shown live, never stored)
 //!   POST   /api/ops/<operation>           the operation's role (a job answers its run)
+//!   GET    /mcp/tools                     the operations the caller may call, as MCP tools (the router's, for `__mcp`)
 //!   GET    /api/runs?status=&op=  /api/runs/<id>   viewer
 //!   POST   /api/replay  POST /api/pause   editor
 //!   GET    /api/triggers                  viewer
@@ -1019,6 +1020,8 @@ impl FragmentCell {
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
             }
+            // the router's own, for a connected client (cell/src/mcp.rs): never routed from outside
+            (Method::Get, ["mcp", "tools"]) => self.mcp_tools(&caller),
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
                 self.put_blob(&caller, &sha, &req).await

@@ -648,6 +648,52 @@ each token's SHA-256 only, and sweeps expired codes and connections on
 its alarm. A wipe ends a person's connections as it begins (Operators).
 These endpoints answer no CORS: a client is a program or a server.
 
+### A fragment's MCP server
+
+Each fragment serves its operations as MCP tools at its own origin
+(cell/src/mcp.rs; the protocol's envelope `fragment_core::mcp`), beside
+`__op`, for a client connected to it:
+
+| method & path (a fragment's origin) | what |
+| --- | --- |
+| `GET /.well-known/oauth-protected-resource/__mcp`, `GET /.well-known/oauth-protected-resource` | its protected resource's metadata (RFC 9728): `{resource: "<origin>/__mcp", authorization_servers: [<platform>], bearer_methods_supported: ["header"], resource_name}` |
+| `POST /__mcp` | one JSON-RPC message, with `Authorization: Bearer <access token>` → one JSON object (`application/json`; no stream). Without a token, 401 with `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/__mcp"`, where a client starts its authorization; a token that is not live, or is another resource's (another fragment's, the platform's), 401 with `error="invalid_token"`. A request with an `Origin` (a page's, its own included) is 403; cookies count for nothing; `GET` and `DELETE` are 405 |
+
+Both eras of the spec are spoken. A modern request (2026-07-28) carries
+its version in `params._meta["io.modelcontextprotocol/protocolVersion"]`
+and mirrors it, its method and its tool's name in `MCP-Protocol-Version`,
+`Mcp-Method` and `Mcp-Name` (a mismatch is 400, -32020; another version
+400, -32022, naming the supported); its results say `resultType:
+"complete"`, and `server/discover` answers what it supports. A legacy one
+(2025-03-26 to 2025-11-25) opens with `initialize` (answered with its
+version, or the newest legacy one; no session is minted) and may `ping`;
+its notifications are 202. The methods: `tools/list` and `tools/call`.
+
+- **`tools/list`**: the operations of the live code the person may call
+  (their role, as `__op` decides it), by name, deterministic. Each tool's
+  arguments are `__op`'s body, `{id, input}`: `input` is the operation's
+  `input` schema as declared (required when it declares one), and `id`
+  (`^[A-Za-z0-9._:-]{1,128}$`) is required of a mutation and a job and
+  absent from a query. Annotations: a query `readOnlyHint`; a mutation
+  `idempotentHint` (by its id; an ephemeral one not); a job
+  `idempotentHint` and `openWorldHint`. Its description is the
+  operation's own (`description` in `fragment.json`), or says only its
+  kind. A modern answer may be kept a minute (`ttlMs`, `cacheScope:
+  "private"`).
+- **`tools/call`**: `POST /api/f/{name}/ops/{op}` as the person, with the
+  same checks (visibility, role, schema, the overdraft, the public
+  budget), ledger and replay: `structuredContent` is its answer,
+  `{result, replayed}`, and `content` the same as text. A call that names
+  no id gets a fresh one. A refusal the
+  model may act on (a role, a schema, a conflicting body, a budget) is
+  the result, `isError: true`, its text `<error code>: <message>`; an
+  operation the code lacks is -32602, and the platform's own failure
+  -32603.
+- **What it does names the client**: each mutation or job a connected
+  client runs (not its replays) appends `client.called` to `events`,
+  `{op, id, principal, client, connection}`, "add a1 by id:… through
+  Claude". Its records, runs and ledger name the person, as theirs.
+
 ## Control API
 
 | method & path | who | body → answer |
@@ -742,6 +788,8 @@ the code the fragment's own.
   `constructor`, `fetch`, and `alarm` are not operation names (the App
   class's own; `fragment_proto::RESERVED_OP_NAMES`): a manifest naming one
   is refused at deploy.
+- `description` (optional, 1 to 1024 characters) says what it does, to a
+  model: its MCP tool's description (A fragment's MCP server, above).
 - `input` is a JSON Schema in a bounded subset (`crates/core/src/schema.rs`:
   types, `enum`, `const`, lengths, ranges, `items`, `properties`,
   `required`, `additionalProperties`, counts; annotations allowed; any
@@ -1303,6 +1351,7 @@ API answers on the platform's host):
 | `POST __op/{op}` | a browser's call: `application/json` `{id, input}`; a signed-in browser (`fragment_site`) calls as its person; an unsigned caller gets an anonymous principal cookie; callers holding only `public` get 60 calls a minute each, 600 per fragment (a page's live views re-run over `__live`, outside this) |
 | `POST __op/channels/{channel}` | a browser's post (`fragment.post`), through the call's door and its checks: `{id, input}` with the record's body as `input` → `{result: record, replayed}`, as `POST /api/f/{name}/channels/{channel}` answers it; a post spends the public budget as a call does (no operation name holds a `/`) |
 | `__signin`, `__signout` | this origin's session (Sign-in, above) |
+| `POST __mcp`, `/.well-known/oauth-protected-resource[/__mcp]` | its MCP server, for a connected client, and its metadata (Connected clients, A fragment's MCP server, above): the platform's, before the site and the app |
 | `__fragment.js` | the browser library (below) |
 | `__people?id=…&id=…` | anyone who can see the fragment: `{profiles: {<id>: {kind, username, picture, name?, fragment?}}}` for up to 64 identities (an agent's `username` is its owner's; a picture is a person's, an absolute platform URL; an agent made from an agent fragment, a computer's, has that `fragment` and its label as its `name`, which `@mentions` it); an id the registry does not hold is left out |
 | `__files` | the files viewer, the platform's page (`__files.js`, `__files.css`): the content files (live and main) as a tree beside a reader (markdown with `[[wikilinks]]`, other text with line numbers, pictures, downloads), reading each through `__file`, following `__watch` where it may; asked for `application/json`, the list it reads, `{type: "files", count, files: [{path, size}]}` (a path on both is live's). Framed, the reader's bar asks the page around it to open a file as a pane (`postMessage({fragment: "open", url, title})`) |

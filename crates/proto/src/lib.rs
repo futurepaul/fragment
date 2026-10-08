@@ -22,6 +22,9 @@ pub mod limits {
     pub const OP_ID_MAX_BYTES: usize = 128;
     /// An operation name: `^[a-z][a-z0-9_]{0,63}$`.
     pub const OP_NAME_MAX_BYTES: usize = 64;
+    /// An operation's `description` (its MCP tool's, to a model), in
+    /// characters.
+    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// Operation input is a request, not an upload.
     pub const INPUT_MAX_BYTES: usize = 256 * 1024;
     /// Operation results must fit a Workflows step result.
@@ -32,9 +35,6 @@ pub mod limits {
     pub const MANIFEST_MAX_BYTES: usize = 256 * 1024;
     /// Declared operations per fragment.
     pub const OPERATIONS_MAX: usize = 256;
-    /// An operation's `description`, in characters (it makes the
-    /// operation an MCP tool: `fragment mcp`).
-    pub const OP_DESCRIPTION_MAX_CHARS: usize = 1024;
     /// CPU per call into author code.
     pub const APP_CPU_MS: u32 = 30_000;
     /// Subrequests per call into author code.
@@ -1080,8 +1080,9 @@ pub struct OpDecl {
     /// no replay (the same id runs again) and no effects (docs/MODEL.md).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
-    /// What it does, for an agent (1 to `limits::OP_DESCRIPTION_MAX_CHARS`
-    /// characters): an operation with one is a tool `fragment mcp` serves.
+    /// What it does, in words a model reads (1 to
+    /// `limits::OP_DESCRIPTION_MAX_CHARS` characters): an operation with one
+    /// is an MCP tool, of the fragment's `__mcp` and of `fragment mcp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
