@@ -27,6 +27,7 @@ mod mcp;
 mod members;
 mod mind;
 mod mind_live;
+mod mind_timing;
 mod notes;
 mod plane;
 mod posts;
