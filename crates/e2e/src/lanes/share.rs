@@ -1,13 +1,16 @@
 //! Sharing (docs/api.md, Sharing): the
-//! share sheet and the join page on the platform's origin, on a node
+//! share sheet on the platform's origin, and invites by email, on a node
 //! shaped as fragment.club is (the platform cross-site from every fragment,
 //! so its session reaches a fragment's page only on a top-level visit), in
 //! Chrome where the browser is the point.
 //!
-//! The owner shares a todo list by username; the guest accepts at `/join`,
-//! sees it live, and adds to it; the owner removes them, and their socket
-//! closes and the list answers them 403. A member sees who is in and
-//! changes nothing. A fragment's page (its author's code, or an agent's)
+//! The owner shares a todo list by email with someone who has never signed
+//! in: they are mailed its address, their first sign-in as that email makes
+//! them a member, and the mailed link opens it for them; they see it live,
+//! and add to it; the owner removes them, and their socket closes and the
+//! list answers them 403. Someone who signs in already is in at once; a
+//! revoked invite admits no one. A member sees who is in and changes
+//! nothing. A fragment's page (its author's code, or an agent's)
 //! cannot share: not by fetching the sheet or the API, not by framing the
 //! sheet, not with a signed call (it holds no key), and not by scripting
 //! the window it opens on the sheet (only the platform's own page frames
@@ -22,7 +25,7 @@ use fragment_nip98::Keys;
 use serde_json::{json, Value};
 
 use super::signin::{site_cookie, unframed, with_session};
-use super::templates::person;
+use super::templates::{email_of, person};
 use crate::api::{url_enc, Api, Call, Reply};
 use crate::browser::{Browser, Page};
 use crate::Suite;
@@ -30,7 +33,7 @@ use crate::Suite;
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
 pub fn share(s: &mut Suite, _: &Api) -> Result<()> {
-    if !s.section("share", &[crate::Need::Node, crate::Need::Chrome, crate::Need::Levers]) {
+    if !s.section("share", &[crate::Need::Node, crate::Need::Chrome, crate::Need::Levers, crate::Need::Fakes]) {
         return Ok(());
     }
     s.stop()?;
@@ -106,11 +109,13 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let wait = Duration::from_secs(20);
     let platform = api.base.clone();
     let (owner, owner_session) = person(api)?;
-    let (guest, guest_session) = person(api)?;
+    // the guest has never signed in: the owner's invite waits on their email
+    let guest = Keys::generate();
     let (stranger, stranger_session) = person(api)?;
     let (member, member_session) = person(api)?;
-    let (owner_name, guest_name, stranger_name) = (api.username(&owner)?, api.username(&guest)?, api.username(&stranger)?);
-    let (guest_id, stranger_id) = (api.identity(&guest)?, api.identity(&stranger)?);
+    // people are shown, and invited, by email (decisions 45 and 48)
+    let (owner_name, guest_name, stranger_name, member_name) = (email_of(&owner), email_of(&guest), email_of(&stranger), email_of(&member));
+    let stranger_id = api.identity(&stranger)?;
     let make = |label: &str, template: &str| -> Result<String> {
         let name = api.qualified(&owner, label)?;
         let r = api.create_with(&owner, json!({ "name": name, "template": template }))?;
@@ -126,11 +131,10 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = r.body["id"].as_str().unwrap_or("").to_string();
     let r = api.signed(&owner, "PUT", &format!("/api/f/{chat}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
     anyhow::ensure!(r.status == 200, "the owner's agent joins {chat}: {r}");
-    let chat_label = chat.split('.').next().unwrap_or("").to_string();
     let sheet = format!("/share/{chat}");
-    let invites_for = |id: &str| -> Result<Vec<Value>> {
+    let invites_for = |email: &str| -> Result<Vec<Value>> {
         let r = api.signed(&owner, "GET", &format!("/api/f/{chat}/invites"), None)?;
-        Ok(r.body["invites"].as_array().into_iter().flatten().filter(|i| i["invitee"] == id).cloned().collect())
+        Ok(r.body["invites"].as_array().into_iter().flatten().filter(|i| i["email"] == email).cloned().collect())
     };
     let role_of = |id: &str| -> Result<Option<String>> {
         let r = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?;
@@ -142,8 +146,8 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the share sheet sends a signed-out browser to sign in first, and back", r.status == 302 && r.header("location").contains(&format!("/auth/login?return={}", url_enc(&sheet))), &r);
     let r = with_session(api, "GET", &sheet, &owner_session)?;
     s.ok(
-        "the owner's sheet shows who is in, by username (their agent too), and the owner's controls",
-        r.status == 200 && r.text.contains(&format!("@{owner_name}")) && r.text.contains(&format!("{owner_name}'s agent")) && r.text.contains("name=\"username\"") && r.text.contains("General access"),
+        "the owner's sheet shows who is in, by email (their agent too), and the owner's controls",
+        r.status == 200 && r.text.contains(&owner_name) && r.text.contains("(an agent)") && r.text.contains("name=\"email\"") && r.text.contains("General access"),
         &r,
     );
     s.ok(
@@ -153,7 +157,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     );
     s.ok("its buttons and selects come disabled: they arm a moment after the page shows", r.text.contains("data-arm disabled") && !r.text.contains("data-arm>"), "");
     s.ok("and it offers the share link to copy", r.text.contains(&format!("{}?view=", api.site_url(&chat, ""))), "");
-    let r = with_session(api, "GET", &format!("{sheet}?username={guest_name}&role=editor&action=invite&visibility=public&form=1"), &owner_session)?;
+    let r = with_session(api, "GET", &format!("{sheet}?email={}&role=editor&action=invite&visibility=public&form=1", url_enc(&guest_name)), &owner_session)?;
     s.ok(
         "it takes nothing from its URL: a link cannot prefill what a click would approve",
         r.status == 200 && !r.text.contains(&guest_name) && r.text.contains("value=\"link\" selected") && !r.text.contains("value=\"public\" selected"),
@@ -163,102 +167,102 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("someone who is not in it gets a 403 page", r.status == 403 && r.text.contains("Not yours to share") && !r.text.contains("name=\"form\"") && unframed(&r), &r);
     // ---- its forms: the page's own token, from the platform's origin, after a moment
     let invite = |form: &str, session: &str, origin: &str| {
-        post(api, &sheet, session, origin, &[("form", form), ("action", "invite"), ("username", guest_name.as_str()), ("role", "editor")])
+        post(api, &sheet, session, origin, &[("form", form), ("action", "invite"), ("email", guest_name.as_str()), ("role", "editor")])
     };
     let fresh = form_of(&with_session(api, "GET", &sheet, &owner_session)?);
     let r = invite(&fresh, &owner_session, &platform)?;
     s.ok(
         "a form sent before its buttons arm is refused (403): the click that opened the sheet cannot confirm in it",
-        r.status == 403 && r.text.contains("too quick") && invites_for(&guest_id)?.is_empty(),
+        r.status == 403 && r.text.contains("too quick") && invites_for(&guest_name)?.is_empty() && s.mail.sent_to(&guest_name).is_empty(),
         &r,
     );
     std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
     let r = invite("", &owner_session, &platform)?;
-    s.ok("a POST without the form's token is refused (403)", r.status == 403 && invites_for(&guest_id)?.is_empty(), &r);
+    s.ok("a POST without the form's token is refused (403)", r.status == 403 && invites_for(&guest_name)?.is_empty(), &r);
     let other_session = api.sign_in(&format!("t-{}@e2e.test", &owner.pubkey_hex()[..12]))?;
     let others = armed(api, &sheet, &other_session)?;
     let r = invite(&others, &owner_session, &platform)?;
-    s.ok("and one with another session's token (the same person's other browser)", r.status == 403 && invites_for(&guest_id)?.is_empty(), &r);
+    s.ok("and one with another session's token (the same person's other browser)", r.status == 403 && invites_for(&guest_name)?.is_empty(), &r);
     let r = invite(&fresh, &owner_session, &api.site_origin(&chat))?;
-    s.ok("a POST from a fragment's page is refused (403), with a good token too", r.status == 403 && invites_for(&guest_id)?.is_empty(), &r);
-    let r = post(api, &sheet, &owner_session, &platform, &[("form", &fresh), ("action", "invite"), ("username", "nobody-here-e2e"), ("role", "viewer")])?;
-    s.ok("inviting a username no one holds says so", r.status == 404 && r.text.contains("no one is @nobody-here-e2e"), &r);
-
-    // ---- the owner shares the chat by username
-    let r = invite(&fresh, &owner_session, &platform)?;
-    let link = value_of(&r, "id=\"invite-link\"");
-    let token = link.split("token=").nth(1).unwrap_or("").to_string();
-    s.ok(
-        "the owner shares the chat with a second person by username: the sheet answers the link to send them",
-        r.status == 200 && link.starts_with(&format!("{platform}/join/{chat}?token=")) && token.len() == 48,
-        &r,
-    );
-    let pending = invites_for(&guest_id)?;
-    let r = with_session(api, "GET", &sheet, &owner_session)?;
-    s.ok(
-        "an invite for them alone, one use, pending on the sheet",
-        pending.len() == 1 && pending[0]["role"] == "editor" && pending[0]["usesLeft"] == 1 && r.text.contains("invited as editor") && r.text.contains(&format!("@{guest_name}")),
-        json!(pending),
-    );
-
-    // ---- the join page
-    let join = link.trim_start_matches(&platform).to_string();
-    let join_path = format!("/join/{chat}");
-    let r = api.unsigned("GET", &join, None)?;
-    s.ok("the join link sends a signed-out browser to sign in first, keeping the invite", r.status == 302 && r.header("location").contains("/auth/login?return=") && r.header("location").contains(&token), &r);
-    let r = with_session(api, "GET", &join, &stranger_session)?;
-    s.ok(
-        "someone else who holds the link is told it is not theirs (403), and offered no button",
-        r.status == 403 && r.text.contains("for someone else") && r.text.contains(&format!("@{guest_name}")) && !r.text.contains("name=\"token\""),
-        &r,
-    );
-    let r = api.signed(&stranger, "POST", &format!("/api/f/{chat}/join"), Some(&json!({ "token": token })))?;
-    s.ok("nor can they join with it through the API: an invite by username is its invitee's alone (403)", r.status == 403 && role_of(&stranger_id)?.is_none(), &r);
-    let r = with_session(api, "GET", &join, &guest_session)?;
-    s.ok(
-        "the guest sees what it grants, from whom, and a Join button that arms after a moment",
-        r.status == 200 && r.text.contains("as an editor") && r.text.contains(&format!("@{owner_name}")) && r.text.contains("data-arm disabled") && unframed(&r) && unopened(&r),
-        &r,
-    );
-    let joining = form_of(&r);
-    let r = post(api, &join_path, &guest_session, &platform, &[("form", &joining), ("token", &token)])?;
-    s.ok("accepting before the button arms is refused (403)", r.status == 403 && role_of(&guest_id)?.is_none(), &r);
-    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
-    let r = post(api, &join_path, &guest_session, &api.site_origin(&chat), &[("form", &joining), ("token", &token)])?;
-    s.ok("and accepting from a fragment's page (403)", r.status == 403 && role_of(&guest_id)?.is_none(), &r);
+    s.ok("a POST from a fragment's page is refused (403), with a good token too", r.status == 403 && invites_for(&guest_name)?.is_empty(), &r);
     let mut portless = reqwest::Url::parse(&platform)?;
     let _ = portless.set_port(None);
-    let r = post(api, &join_path, &guest_session, &portless.origin().ascii_serialization(), &[("form", &joining), ("token", &token)])?;
-    s.ok("and from the platform's host on another port (another origin, whose name begins the same)", r.status == 403 && role_of(&guest_id)?.is_none(), &r);
-    let r = post(api, &join_path, &guest_session, &platform, &[("token", &token)])?;
-    s.ok("and without the page's token (403)", r.status == 403 && role_of(&guest_id)?.is_none(), &r);
-    let on_chat = site_cookie(api, &owner_session, &chat)?;
-    let r = api.page(&chat, &format!("__join?invite={token}"), Some(&format!("fragment_site={on_chat}")))?;
-    s.ok("a fragment's origin accepts no invites (its __join is gone; /join/<name> is the platform's)", r.status == 404 && !r.text.contains("Join"), &r);
+    let r = invite(&fresh, &owner_session, &portless.origin().ascii_serialization())?;
+    s.ok("and one from the platform's host on another port (another origin, whose name begins the same)", r.status == 403 && invites_for(&guest_name)?.is_empty(), &r);
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &fresh), ("action", "invite"), ("email", "not an email"), ("role", "viewer")])?;
+    s.ok("an invite to what is not an email says so (400)", r.status == 400 && r.text.contains("is not an email"), &r);
 
-    // ---- in Chrome: the guest accepts, sees the chat live, and posts in it
+    // ---- the owner shares the chat by email with someone who has never signed in
+    let r = invite(&fresh, &owner_session, &platform)?;
+    let pending = invites_for(&guest_name)?;
+    s.ok(
+        "the owner invites a person by email who has never signed in: the sheet says they were mailed, and the invite waits on their email",
+        r.status == 200 && r.text.contains("we mailed them a link") && pending.len() == 1 && pending[0]["role"] == "editor",
+        &r,
+    );
+    let mailed = s.mail.sent_to(&guest_name);
+    let link = api.site_url(&chat, "");
+    s.ok(
+        "they are mailed, from the deployment's address: who shares it, and the fragment's own address, which holds no secret",
+        mailed.len() == 1
+            && mailed[0].from == crate::MAIL_FROM
+            && mailed[0].subject.starts_with(&format!("{owner_name} shared "))
+            && mailed[0].text.contains(&format!("Open it: {link}\n"))
+            && mailed[0].text.contains(&format!("Sign in as {guest_name}"))
+            && !mailed[0].text.contains("?view=")
+            && !mailed[0].text.contains("token"),
+        mailed.first().map(|m| format!("{} / {}", m.subject, m.text)).unwrap_or_default(),
+    );
+    let r = with_session(api, "GET", &sheet, &owner_session)?;
+    s.ok("it waits on the owner's sheet, by email, with its role", r.text.contains(&guest_name) && r.text.contains("invited as editor"), &r);
+    let form = armed(api, &sheet, &owner_session)?;
+    let r = invite(&form, &owner_session, &platform)?;
+    s.ok(
+        "the same invite again renews it: still one waiting, mailed again",
+        r.status == 200 && invites_for(&guest_name)?.len() == 1 && s.mail.sent_to(&guest_name).len() == 2,
+        &r,
+    );
+    // a sign-in as another email meets nothing addressed to this one
+    api.sign_in(&stranger_name)?;
+    s.ok("someone else's sign-in meets none of it", role_of(&stranger_id)?.is_none() && invites_for(&guest_name)?.len() == 1, "");
+
+    // ---- their first sign-in as that email makes them a member
+    let guest_session = api.sign_in(&guest_name)?;
+    api.approve(&guest_session, &guest)?;
+    let guest_id = api.identity(&guest)?;
+    s.ok(
+        "their first sign-in as that email makes them a member, at the role it said, and spends the invite",
+        role_of(&guest_id)?.as_deref() == Some("editor") && invites_for(&guest_name)?.is_empty(),
+        json!({ "role": role_of(&guest_id)?, "waiting": invites_for(&guest_name)? }),
+    );
+    let members_before = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
+    api.sign_in(&guest_name)?;
+    let members_after = api.signed(&owner, "GET", &format!("/api/f/{chat}/members"), None)?.body["members"].as_array().map_or(0, Vec::len);
+    s.ok("signing in again meets nothing more", members_after == members_before && role_of(&guest_id)?.as_deref() == Some("editor"), format!("{members_before} → {members_after}"));
+    let r = api.signed(&owner, "GET", &format!("/api/f/{chat}/events?tail=50"), None)?;
+    s.ok(
+        "the events say an invite was made and they joined, by npub, and name no email (a link's viewers read them)",
+        r.text.contains("invite.created") && r.text.contains("member.joined") && r.text.contains(&guest_id) && !r.text.contains(&guest_name),
+        &r,
+    );
+    let on_chat = site_cookie(api, &owner_session, &chat)?;
+    let r = api.page(&chat, "__join?invite=x", Some(&format!("fragment_site={on_chat}")))?;
+    s.ok("a fragment's origin accepts no invites (there is no page to accept one on)", r.status == 404 && !r.text.contains("Join"), &r);
+    let r = api.unsigned("GET", &format!("/join/{chat}?token={}", "0".repeat(48)), None)?;
+    s.ok("nor does the platform: invites by link are gone (an unguessable link is `link` visibility)", r.status == 404, &r);
+
+    // ---- in Chrome: the mailed link opens the chat; they see it live, and post in it
     let Some(mut chrome) = s.browser()? else {
         s.ok("Chrome is installed for the share lane (set CHROME_BIN)", false, "no Chrome found");
         return Ok(());
     };
     chrome.set_cookie(&format!("{platform}/"), "fragment_session", &guest_session)?;
     let page = chrome.open(&link)?;
-    let button = "document.querySelector('button[data-arm]')";
-    anyhow::ensure!(chrome.until(&page, &format!("!!{button}"), wait), "the join page did not show: {}", chrome.eval(&page, "document.body?.innerText ?? ''")?);
-    // clicked at once, as a double-click's second half would be
-    let early = chrome.eval(&page, &format!("{button}.disabled"))?;
-    chrome.click(&page, "button[data-arm]")?;
-    std::thread::sleep(Duration::from_millis(300));
-    let stayed = chrome.eval(&page, "location.pathname.startsWith('/join/')")? == json!(true);
-    s.ok("in a browser, the Join button is disabled as the page shows: a click then does nothing", early == json!(true) && stayed && role_of(&guest_id)?.is_none(), &early);
-    let armed_in_time = chrome.until(&page, &format!("{button} && !{button}.disabled"), Duration::from_secs(3));
-    chrome.screenshot(&page, &s.scratch.join("share-join.png"))?;
-    chrome.click(&page, "button[data-arm]")?;
-    let chat_host = format!("{chat_label}--");
-    let landed = chrome.until(&page, &format!("location.host.startsWith({chat_host:?}) && document.title === 'Todo'"), wait);
+    let landed = chrome.until(&page, &format!("location.host.startsWith({chat:?}) && document.title === 'Todo'"), wait);
+    chrome.screenshot(&page, &s.scratch.join("share-mailed-link.png"))?;
     s.ok(
-        "a moment later it arms; the guest accepts at /join and lands in the chat, signed in on its origin",
-        armed_in_time && landed && role_of(&guest_id)?.as_deref() == Some("editor"),
+        "the mailed link opens the chat for them, signed in on its origin, asking nothing: it is shared with them",
+        landed,
         chrome.eval(&page, "location.href + ' ' + document.title").unwrap_or_default(),
     );
     // the list's page is live once it knows who is here
@@ -330,18 +334,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and the chat answers them 403: their reload, a page saying they have no access", r.status == 403 && refused, &r);
     drop(chrome);
 
-    // ---- an invite anyone may use (the CLI's `fragment invite`) is
-    // accepted on the same page
+    // ---- someone who signs in already is in at once, and mailed nothing
     let member_id = api.identity(&member)?;
-    let open = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "role": "viewer" })))?;
-    let open_token = open.body["token"].as_str().unwrap_or("").to_string();
-    let r = with_session(api, "GET", &format!("{join_path}?token={open_token}"), &member_session)?;
-    let shown = r.status == 200 && r.text.contains("as a viewer") && r.text.contains("name=\"token\"");
-    std::thread::sleep(Duration::from_millis(form::DELAY_MS as u64 + 100));
-    let r = post(api, &join_path, &member_session, &platform, &[("form", &form_of(&r)), ("token", &open_token)])?;
+    let form = armed(api, &sheet, &owner_session)?;
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &member_name.to_uppercase()), ("role", "viewer")])?;
     s.ok(
-        "an invite for anyone who holds it (the CLI's) is accepted at /join too, and sends them to the fragment",
-        shown && r.status == 303 && r.header("location") == format!("/auth/fragment?name={chat}&return=/") && role_of(&member_id)?.as_deref() == Some("viewer"),
+        "an email someone signs in as already makes them a member at once (as typed, in any case), and mails no one",
+        r.status == 200 && r.text.contains(&format!("Added <b>{member_name}</b>")) && role_of(&member_id)?.as_deref() == Some("viewer") && invites_for(&member_name)?.is_empty() && s.mail.sent_to(&member_name).is_empty(),
+        &r,
+    );
+
+    // ---- a revoked invite admits no one
+    let late = Keys::generate();
+    let late_name = email_of(&late);
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "invite"), ("email", &late_name), ("role", "viewer")])?;
+    let waited = r.status == 200 && invites_for(&late_name)?.len() == 1;
+    let r = post(api, &sheet, &owner_session, &platform, &[("form", &form), ("action", "uninvite"), ("email", &late_name)])?;
+    let late_session = api.sign_in(&late_name)?;
+    api.approve(&late_session, &late)?;
+    let late_id = api.identity(&late)?;
+    s.ok(
+        "the owner revokes an invite from the sheet: it waits no more, and their sign-in after makes them no member",
+        waited && r.status == 303 && invites_for(&late_name)?.is_empty() && role_of(&late_id)?.is_none(),
         &r,
     );
 
@@ -349,23 +363,24 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     let r = with_session(api, "GET", &sheet, &member_session)?;
     s.ok(
         "a member sees who is in, and no controls and no link",
-        r.status == 200 && r.text.contains(&format!("@{owner_name}")) && !r.text.contains("name=\"action\"") && !r.text.contains("?view=") && !r.text.contains("name=\"form\""),
+        r.status == 200 && r.text.contains(&owner_name) && !r.text.contains("name=\"action\"") && !r.text.contains("?view=") && !r.text.contains("name=\"form\""),
         &r,
     );
     // a good token for the member's own session (the harness holds the
     // cookie a browser would), so only the fragment's rule is left to refuse
     let token_of_member = form::issue(&member_session, &format!("share:{chat}"), now_ms() - form::DELAY_MS - 50);
-    let open = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "role": "viewer" })))?;
-    let open_id = open.body["id"].as_str().unwrap_or("").to_string();
+    let waiting = format!("w-{}@e2e.test", &Keys::generate().pubkey_hex()[..12]);
+    let r = api.signed(&owner, "POST", &format!("/api/f/{chat}/invites"), Some(&json!({ "email": waiting, "role": "viewer" })))?;
+    anyhow::ensure!(r.status == 200 && !r.body["invited"].is_null(), "an invite waiting on {waiting}: {r}");
     let before = api.status(&owner, &chat)?;
     let mut answers = vec![];
     for fields in [
-        vec![("action", "invite"), ("username", stranger_name.as_str()), ("role", "editor")],
+        vec![("action", "invite"), ("email", stranger_name.as_str()), ("role", "editor")],
         vec![("action", "visibility"), ("visibility", "public")],
         vec![("action", "rotate")],
         vec![("action", "role"), ("member", agent.as_str()), ("role", "viewer")],
         vec![("action", "remove"), ("member", agent.as_str())],
-        vec![("action", "uninvite"), ("invite", open_id.as_str())],
+        vec![("action", "uninvite"), ("email", waiting.as_str())],
     ] {
         let action = fields[0].1;
         let mut all = vec![("form", token_of_member.as_str())];
@@ -373,15 +388,15 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         answers.push((action, post(api, &sheet, &member_session, &platform, &all)?.status));
     }
     let after = api.status(&owner, &chat)?;
-    let invites = api.signed(&owner, "GET", &format!("/api/f/{chat}/invites"), None)?;
     s.ok(
         "a member's every change is refused (403), their own good form token and all, and nothing changes",
         answers.iter().all(|(_, status)| *status == 403)
             && after.body["visibility"] == before.body["visibility"]
             && after.body["viewToken"] == before.body["viewToken"]
             && role_of(&agent)?.as_deref() == Some("editor")
-            && invites_for(&stranger_id)?.is_empty()
-            && invites.body["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["id"] == open_id.as_str())),
+            && role_of(&stranger_id)?.is_none()
+            && invites_for(&stranger_name)?.is_empty()
+            && invites_for(&waiting)?.len() == 1,
         format!("{answers:?}"),
     );
 
@@ -411,7 +426,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         &page,
         &format!("fetch({:?}, {{ credentials: 'include' }}).then(r => r.text()).then(t => 'read ' + t.length, e => 'refused ' + e.name)", format!("{platform}{sheet}")),
     );
-    let forged = format!("action=invite&username={stranger_name}&role=editor&form={}", url_enc(&token_of_member));
+    let forged = format!("action=invite&email={}&role=editor&form={}", url_enc(&stranger_name), url_enc(&token_of_member));
     let posted = attempt(
         &mut chrome,
         &page,
@@ -423,7 +438,7 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
     std::thread::sleep(Duration::from_millis(300));
     s.ok(
         "a fragment's page cannot read the sheet (no CORS: it never holds the form's token), and what it posts to it invites no one",
-        read.as_str().is_some_and(|r| r.starts_with("refused")) && invites_for(&stranger_id)?.is_empty(),
+        read.as_str().is_some_and(|r| r.starts_with("refused")) && role_of(&stranger_id)?.is_none(),
         format!("{read} / {posted}"),
     );
     let members_api = format!("{platform}/api/f/{chat}/members");
@@ -440,14 +455,14 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         &mut chrome,
         &page,
         &format!(
-            "fetch({:?}, {{ method: 'POST', mode: 'no-cors', credentials: 'include', headers: {{ 'content-type': 'text/plain' }}, body: '{{\"role\":\"editor\",\"invitee\":\"{stranger_id}\"}}' }}).then(() => 'sent', e => 'refused ' + e.name)",
+            "fetch({:?}, {{ method: 'POST', mode: 'no-cors', credentials: 'include', headers: {{ 'content-type': 'text/plain' }}, body: '{{\"role\":\"editor\",\"email\":\"{stranger_name}\"}}' }}).then(() => 'sent', e => 'refused ' + e.name)",
             format!("{platform}/api/f/{chat}/invites")
         ),
     );
     std::thread::sleep(Duration::from_millis(300));
     s.ok(
         "nor fetch the signed API: it cannot read who is in, and its calls change nothing",
-        listed.as_str().is_some_and(|r| r.starts_with("refused")) && role_of(&stranger_id)?.is_none() && invites_for(&stranger_id)?.is_empty(),
+        listed.as_str().is_some_and(|r| r.starts_with("refused")) && role_of(&stranger_id)?.is_none() && invites_for(&stranger_name)?.is_empty(),
         format!("{listed} / {put} / {invited}"),
     );
     let r = api.call(Call {

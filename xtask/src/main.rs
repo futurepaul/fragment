@@ -3,7 +3,7 @@
 //!   build            build cell/ for wasm32 (worker-build 0.8.5: build.rs)
 //!   dev [--clean]    build, then run the stack in the foreground under
 //!                    `wrangler dev`: the cell on :8790 (fragments at
-//!                    <label>--<username>.fragment.localhost:8790), the
+//!                    <name>.fragment.localhost:8790), the
 //!                    code.storage fake on :8792, and the Workers AI fake on :8796
 //!                    behind the model route (its calls spend their payer's
 //!                    ledger; new people are seats with the month's included
@@ -43,6 +43,10 @@
 //!                    <branch>.<zone> (xtask/src/deploy.rs)
 //!   teardown --config <file> --branch <name>
 //!                    remove a branch deployment (irreversible)
+//!   stripe check|setup --config <file> [--branch <name>] [--webhook-secret-file <path>]
+//!                    the deployment's Stripe as docs/billing.md wants it, on the
+//!                    account its stripe.key_file names: check reads and says what
+//!                    is wrong; setup makes what is missing (xtask/src/stripe.rs)
 //!
 //! dev, e2e, secret, deploy and teardown run wrangler and npm on the pinned Node,
 //! and check runs `node --check` on it, fetched into target/tools on first
@@ -64,6 +68,7 @@ mod deploy;
 mod dns;
 mod js_syntax;
 mod secret;
+mod stripe;
 
 const DEV_PORT: u16 = 8790;
 const DEV_CODESTORAGE_PORT: u16 = 8792;
@@ -71,6 +76,16 @@ const DEV_WORKOS_PORT: u16 = 8794;
 /// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
 /// never calls real models.
 const DEV_AI_PORT: u16 = 8796;
+/// The mail fake (`FRAGMENT_MAIL_URL`): dev never sends real mail, and
+/// prints each message instead.
+const DEV_MAIL_PORT: u16 = 8798;
+/// The Stripe fake (docs/billing.md): dev never charges a card; its
+/// Checkout is a page with a Pay button.
+const DEV_STRIPE_PORT: u16 = 8800;
+const DEV_STRIPE_KEY: &str = "sk_test_fragment_dev";
+const DEV_STRIPE_WEBHOOK: &str = "whsec_fragment_dev";
+/// Where dev's mail says it comes from.
+const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
@@ -133,6 +148,9 @@ fn dev(args: &[String]) -> Result<()> {
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
+    let stripe = fragment_fakes::stripe::Stripe::start(DEV_STRIPE_PORT, DEV_STRIPE_KEY)?;
+    stripe.set_endpoint(&format!("http://127.0.0.1:{DEV_PORT}/api/stripe/webhook"), DEV_STRIPE_WEBHOOK);
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -152,10 +170,20 @@ fn dev(args: &[String]) -> Result<()> {
         // text and images: the Workers AI fake (dev never calls a real model)
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
+        // the mail fake, which prints each message (dev never sends real mail)
+        mail_url: Some(mailer.url.clone()),
+        mail_from: Some(DEV_MAIL_FROM.into()),
         // a dev person is a seat, with the month's included credit
         default_plan: Some("seat".into()),
         delivery_retry_s: None,
         workos: Some(workos),
+        stripe: Some(devstack::StripeVars {
+            key: DEV_STRIPE_KEY.into(),
+            webhook_secret: DEV_STRIPE_WEBHOOK.into(),
+            api_url: Some(stripe.url.clone()),
+            portal: None,
+            tax: false,
+        }),
         // the CLI's host: sign-in and approvals happen where it points
         platform_url: format!("http://127.0.0.1:{DEV_PORT}"),
         operators: None,
@@ -182,9 +210,10 @@ fn dev(args: &[String]) -> Result<()> {
     let (node, took) = devstack::Node::start(&tools, &opts)?;
     println!("fragment dev: {} (ready in {took:.1?}; Ctrl-C stops it)", node.base);
     println!("  node log:     {}", node.log.display());
-    println!("  fragments:    http://<label>--<username>.fragment.localhost:{DEV_PORT}/");
+    println!("  fragments:    http://<name>.fragment.localhost:{DEV_PORT}/");
     println!("  code.storage: {} (the fake)", fake.url);
     println!("  models:       {} (the Workers AI fake: echoes, never a real model)", ai.url);
+    println!("  seats:        {} (the Stripe fake: its Checkout is a Pay button)", stripe.url);
 
     println!("  sign-in:      http://127.0.0.1:{DEV_PORT}/ via {workos_label}");
     println!("  try one:      cargo xtask try todo | inbox   (in another terminal)");
@@ -407,6 +436,7 @@ fn main() -> Result<()> {
         Some("secret") => secret::secret(&args[1..]),
         Some("deploy") => deploy::deploy(&args[1..]),
         Some("teardown") => deploy::teardown(&args[1..]),
+        Some("stripe") => deploy::stripe(&args[1..]),
         _ => bail!("usage: cargo xtask build | dev [--clean] | try <template> [name] | e2e [--build-only | --no-build] [--only | --except <section>[,...] | --shard <k>/<n>] [--rehearse] | e2e --hosted --config <file> --branch <name> [--dry-run | --sweep] | check | secret set <name> | gen <name> | list --config <file> | deploy --config <file> [--branch <name>] | teardown --config <file> --branch <name>"),
     }
 }

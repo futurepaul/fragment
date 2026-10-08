@@ -14,8 +14,10 @@
 //! Hermes' live owner, and posts each teammate's message into the bot's own
 //! chat as a hand-off, so its answer is a turn of the bridge's.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use fragment_bridge::api::FragmentEntry;
 use fragment_bridge::runtime::relay::wire;
 use fragment_bridge::runtime::Agent;
 use serde_json::json;
@@ -37,18 +39,25 @@ fn q(s: &str) -> String {
     serde_json::to_string(s).expect("a string serializes")
 }
 
+/// A fragment name's label: `todo` of `todo--k3x9` (decision 47).
+fn label(name: &str) -> &str {
+    name.rsplit_once("--").map_or(name, |(label, _)| label)
+}
+
 /// An agent's Bot Chat: its own chat with its owner, the chat fragment the
-/// shell makes with it (cell/shell/shell.js, `makeAgent`: `<label>-chat`
-/// beside the agent's `<label>`), which `fragment ask` finds as a person's
-/// direct chat with it too (cli/src/ask.rs, `direct_label`). The image
-/// names it here alone. An agent made some other way, with no such chat,
-/// has no Bot Chat: Hermes then makes one of its own for a teammate's
-/// message (Hermes' `chat -c "Bot Chat" --create-if-missing`).
-pub fn bot_chat(agent_fragment: &str) -> String {
-    match agent_fragment.split_once('.') {
-        Some((label, owner)) => format!("{label}-chat.{owner}"),
-        None => format!("{agent_fragment}-chat"),
-    }
+/// shell makes with it (cell/shell/shell.js, `makeAgent`: labelled
+/// `<label>-chat` beside the agent's `<label>`), which `fragment ask` finds
+/// as a person's direct chat with it too (cli/src/ask.rs, `direct_label`).
+/// A chat's name has a random suffix of its own, so it is found, never
+/// derived: in the agent's list for its owner (`fragments`), the chat its
+/// owner owns with that label. None until there is one: an agent made some
+/// other way has no Bot Chat (Hermes then makes one of its own for a
+/// teammate's message, `chat -c "Bot Chat" --create-if-missing`), and one
+/// whose chat is made after it is assigned has it at a later look
+/// (main.rs, `find_bot_chats`).
+pub fn bot_chat(agent_fragment: &str, fragments: &[FragmentEntry]) -> Option<String> {
+    let want = format!("{}-chat", label(agent_fragment));
+    fragments.iter().find(|f| f.kind == "chat" && f.owned && label(&f.name) == want).map(|f| f.name.clone())
 }
 
 /// What a bot does, from its job (its `SOUL.md`): the first line that says
@@ -72,7 +81,7 @@ pub fn description(soul: &str) -> String {
 /// assigned while the computer runs.
 pub fn profile_yaml(agent: &Agent, soul: Option<&str>) -> String {
     let name = agent.name.trim();
-    let name = if name.is_empty() { agent.fragment.split('.').next().unwrap_or(&agent.fragment) } else { name };
+    let name = if name.is_empty() { label(&agent.fragment) } else { name };
     let about = soul.map(description).unwrap_or_default();
     let mut y = format!("# Written by hermes-boot for {} at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n", agent.fragment);
     y.push_str(&format!("display_name: {}\n", q(name)));
@@ -111,23 +120,25 @@ pub fn link_hook(profile: &Path, hook: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(hook, &link)
 }
 
-/// The bots file: for each agent, its profile's home, its Bot Chat
-/// (`bot_chat`), and the session key Hermes keeps that chat's session
-/// under (`wire::session_key`), whose session the hook titles `Bot Chat`.
-pub fn bots_file(agents: &[Agent], home: &Path) -> String {
+/// The bots file: for each agent whose Bot Chat is found (`chats`, by
+/// `bot_chat`), its profile's home, that chat, and the session key Hermes
+/// keeps that chat's session under (`wire::session_key`), whose session the
+/// hook titles `Bot Chat`. An agent with none yet is left out: the hook and
+/// the keeper leave it alone.
+pub fn bots_file(agents: &[Agent], home: &Path, chats: &BTreeMap<String, String>) -> String {
     let bots: Vec<serde_json::Value> = agents
         .iter()
-        .map(|a| {
+        .filter_map(|a| {
             let profile = wire::profile(&a.fragment);
-            let chat = bot_chat(&a.fragment);
-            json!({
+            let chat = chats.get(&a.fragment)?;
+            Some(json!({
                 "agent": a.fragment,
                 "owner": a.owner,
                 "profile": profile,
                 "home": crate::hermes::profile_dir(home, &a.fragment).display().to_string(),
                 "chat": chat,
-                "sessionKey": wire::session_key(&profile, &wire::chat_id(&chat, &a.fragment)),
-            })
+                "sessionKey": wire::session_key(&profile, &wire::chat_id(chat, &a.fragment)),
+            }))
         })
         .collect();
     json!({ "bots": bots }).to_string()
@@ -138,15 +149,31 @@ mod tests {
     use super::*;
 
     fn agent(label: &str, name: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: name.into(), owner: "id:paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: name.into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
-    /// The shell's own chat with an agent, as makeAgent names it.
+    fn listed(name: &str, kind: &str, owned: bool) -> FragmentEntry {
+        FragmentEntry { name: name.into(), role: "editor".into(), kind: kind.into(), owned }
+    }
+
+    /// Valid: the chat its owner owns labelled `<label>-chat`, whatever its
+    /// suffix. Invalid: none, an app of that label, a chat of someone
+    /// else's of it, another agent's chat, or a chat whose label only
+    /// starts the same: no Bot Chat.
     #[test]
     fn a_bot_chat_is_the_agents_own_chat() {
-        assert_eq!(bot_chat("juniper.paul"), "juniper-chat.paul");
-        assert_eq!(bot_chat("maple-2.skyler"), "maple-2-chat.skyler");
-        assert_eq!(bot_chat("loner"), "loner-chat");
+        let list = [
+            listed("juniper-chat--p2m4", "app", true),
+            listed("juniper-chat--r7t5", "chat", false),
+            listed("juniper-chats--b3c4", "chat", true),
+            listed("maple-chat--z8w6", "chat", true),
+            listed("juniper-chat--h6j7", "chat", true),
+        ];
+        assert_eq!(bot_chat("juniper--k3x9", &list).as_deref(), Some("juniper-chat--h6j7"));
+        assert_eq!(bot_chat("maple--q4w5", &list).as_deref(), Some("maple-chat--z8w6"), "a chat's suffix is its own");
+        assert_eq!(bot_chat("maple-2--q4w5", &list), None);
+        assert_eq!(bot_chat("juniper--k3x9", &list[..4]), None, "only its owner's chat of that label");
+        assert_eq!(bot_chat("loner--k3x9", &[]), None);
     }
 
     /// Valid: the job's first line that says anything; invalid: none, or
@@ -175,7 +202,7 @@ mod tests {
         let y = profile_yaml(&agent("juniper", "Juniper"), Some("You tend the garden: \"weeds\" first.\n"));
         assert_eq!(
             y,
-            "# Written by hermes-boot for juniper.paul at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n\
+            "# Written by hermes-boot for juniper--k3x9 at every boot: its Bot Mode identity (images/hermes/boot/src/bots.rs).\n\
              display_name: \"Juniper\"\n\
              description: \"You tend the garden: \\\"weeds\\\" first.\"\n\
              ui_meta:\n  hermes-bots:\n    title: \"Juniper\"\n    description: \"You tend the garden: \\\"weeds\\\" first.\"\n"
@@ -195,7 +222,7 @@ mod tests {
     fn a_profile_links_the_hook() {
         let root = std::env::temp_dir().join(format!("bots-hook-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (profile, hook) = (root.join("profiles/juniper-paul"), root.join("opt/hooks/fragment-bot-chat"));
+        let (profile, hook) = (root.join("profiles/juniper--k3x9"), root.join("opt/hooks/fragment-bot-chat"));
         std::fs::create_dir_all(&profile).unwrap();
         std::fs::create_dir_all(&hook).unwrap();
         let link = profile.join("hooks/fragment-bot-chat");
@@ -217,22 +244,26 @@ mod tests {
     }
 
     /// The hook's file: each agent's home, Bot Chat, and the key Hermes'
-    /// gateway keeps that chat's session under (the bridge's own).
+    /// gateway keeps that chat's session under (the bridge's own); an agent
+    /// whose Bot Chat is not found yet is left out.
     #[test]
     fn the_bots_file_names_each_bot_chats_session() {
-        let f: serde_json::Value = serde_json::from_str(&bots_file(&[agent("juniper", "Juniper"), agent("fred", "Fred")], Path::new("/data/hermes"))).unwrap();
+        let chats: BTreeMap<String, String> = [("juniper--k3x9".to_string(), "juniper-chat--h6j7".to_string()), ("fred--k3x9".into(), "fred-chat--b3c4".into())].into();
+        let agents = [agent("juniper", "Juniper"), agent("maple", "Maple"), agent("fred", "Fred")];
+        let f: serde_json::Value = serde_json::from_str(&bots_file(&agents, Path::new("/data/hermes"), &chats)).unwrap();
         assert_eq!(
             f["bots"][0],
             json!({
-                "agent": "juniper.paul",
-                "owner": "id:paul",
-                "profile": "juniper-paul",
-                "home": "/data/hermes/profiles/juniper-paul",
-                "chat": "juniper-chat.paul",
-                "sessionKey": "agent:juniper-paul:relay:group:juniper-chat.paul/juniper.paul",
+                "agent": "juniper--k3x9",
+                "owner": "npub1paul",
+                "profile": "juniper--k3x9",
+                "home": "/data/hermes/profiles/juniper--k3x9",
+                "chat": "juniper-chat--h6j7",
+                "sessionKey": "agent:juniper--k3x9:relay:group:juniper-chat--h6j7/juniper--k3x9",
             })
         );
-        assert_eq!(f["bots"][1]["chat"], "fred-chat.paul");
-        assert_eq!(bots_file(&[], Path::new("/data/hermes")), r#"{"bots":[]}"#);
+        assert_eq!(f["bots"].as_array().map(Vec::len), Some(2), "maple, with no chat found, is left out");
+        assert_eq!(f["bots"][1]["chat"], "fred-chat--b3c4");
+        assert_eq!(bots_file(&[], Path::new("/data/hermes"), &chats), r#"{"bots":[]}"#);
     }
 }

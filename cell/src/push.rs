@@ -65,7 +65,7 @@ impl FragmentCell {
         // a who that names an identity is that identity's own browser: what
         // is pushed to a person (a chat's reply) reaches them alone
         if npub::is_identity(who) && who != principal {
-            return Err(CellError::new(ErrorCode::Forbidden, "a who that is an identity (id:…) is the subscriber's own: sign in as them to subscribe for them"));
+            return Err(CellError::new(ErrorCode::Forbidden, "a who that is an identity (an npub) is the subscriber's own: sign in as them to subscribe for them"));
         }
         let url = egress::check(endpoint, self.cfg.egress_local).map_err(|e| CellError::invalid(format!("endpoint: {e}")))?;
         if url.scheme() != "https" && !self.cfg.egress_local {

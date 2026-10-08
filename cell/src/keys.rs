@@ -125,13 +125,32 @@ pub async fn open(env: &Env, scope: &str, sealed: &str) -> CellResult<Opened> {
 
 /// A new nostr key: (public key hex, its secret sealed for `scope`).
 pub async fn nostr_keypair(env: &Env, scope: &str) -> CellResult<(String, String)> {
-    let keys = loop {
+    let keys = new_nostr_keys();
+    Ok((keys.pubkey_hex().to_string(), seal(env, scope, keys.secret_hex().as_bytes()).await?))
+}
+
+fn new_nostr_keys() -> fragment_nip98::Keys {
+    loop {
         // a 32-byte string outside the curve's order is astronomically rare; draw again
         if let Some(k) = fragment_nip98::Keys::from_secret_hex(&js::random_hex::<32>()) {
             break k;
         }
-    };
-    Ok((keys.pubkey_hex().to_string(), seal(env, scope, keys.secret_hex().as_bytes()).await?))
+    }
+}
+
+/// What a person's own key is sealed for: that person alone, so a sealed
+/// key moved to another person's row does not open.
+pub fn person_scope(identity: &str) -> String {
+    format!("person:{identity}")
+}
+
+/// A new person's own key (docs/cloudflare-v1.md, decisions 45 and 46):
+/// (its public key hex, its secret sealed for the person it makes).
+pub async fn person_keypair(env: &Env) -> CellResult<(String, String)> {
+    let keys = new_nostr_keys();
+    let pubkey = keys.pubkey_hex().to_string();
+    let sealed = seal(env, &person_scope(&fragment_core::npub::identity_of(&pubkey)), keys.secret_hex().as_bytes()).await?;
+    Ok((pubkey, sealed))
 }
 
 /// A code.storage JWT for the configured org: (token, expiry in ms).
@@ -166,6 +185,27 @@ impl WorkOs<'_> {
     /// environment) is another issuer (docs/finite-integration.md).
     pub fn issuer(&self) -> String {
         format!("workos:{}", self.client_id)
+    }
+}
+
+/// The account's restricted Stripe key (bound as `STRIPE_KEY`).
+pub async fn stripe_key(env: &Env) -> CellResult<String> {
+    required(env, store::STRIPE_KEY).await
+}
+
+/// This deployment's webhook endpoint's signing secret: bound as
+/// `STRIPE_WEBHOOK`, or, on a branch deployment, the Worker secret its
+/// deploy uploads with its own endpoint's (`FRAGMENT_STRIPE_WEBHOOK`;
+/// decision 58), as it does the test secret.
+pub async fn stripe_webhook_secret(env: &Env) -> CellResult<String> {
+    if let Some(s) = secret(env, store::STRIPE_WEBHOOK).await? {
+        return Ok(s);
+    }
+    let branch = !crate::config::Config::from_env(env).host_label_suffix().is_empty();
+    let worker = env.secret("FRAGMENT_STRIPE_WEBHOOK").ok().map(|s| s.to_string().trim().to_string()).filter(|s| !s.is_empty());
+    match (branch, worker) {
+        (true, Some(s)) => Ok(s),
+        _ => Err(CellError::host(format!("no secret is bound as {} (cargo xtask deploy binds it from the config)", store::STRIPE_WEBHOOK))),
     }
 }
 

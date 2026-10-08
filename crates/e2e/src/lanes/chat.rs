@@ -71,7 +71,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&agent);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{computer}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    anyhow::ensure!(r.status == 200 && identity.starts_with("id:"), "assigning the agent: {r}");
+    anyhow::ensure!(r.status == 200 && fragment_core::npub::is_identity(&identity), "assigning the agent: {r}");
     let chat_name = s.named(api, &owner, "talk")?;
     let r = api.create_with(&owner, json!({ "name": chat_name, "template": "chat" }))?;
     anyhow::ensure!(r.status == 200, "making the chat on the template: {r}");
@@ -120,7 +120,7 @@ pub fn chat(s: &mut Suite, api: &Api) -> Result<()> {
     let member_site = format!("fragment_site={}", site_cookie(api, &member_session, &chat_name)?);
     let served = s.eventually(Duration::from_secs(20), || api.page(&chat_name, "", Some(&owner_site)).is_ok_and(|r| r.status == 200 && r.text.contains("./chat.js")));
     s.ok("the chat serves the template's page", served, "");
-    let label = agent_name.split('.').next().unwrap_or("").to_string();
+    let label = fragment_proto::split_fragment_name(&agent_name).map_or("", |(l, _)| l).to_string();
     let r = api.page(&chat_name, &format!("__people?id={identity}"), Some(&owner_site))?;
     let profile = &r.body["profiles"][identity.as_str()];
     s.ok(

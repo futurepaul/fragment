@@ -11,7 +11,7 @@ use fragment_nip98::Keys;
 use fragment_proto::{limits, routed, ErrorCode};
 use serde_json::json;
 
-use crate::api::{now_s, second_start, Api, Call};
+use crate::api::{now_s, second_start, Api, Call, Reply};
 use crate::Suite;
 
 /// A POST whose body is sent chunked (no length) and never finished:
@@ -72,14 +72,14 @@ pub fn auth(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let keys = api.person()?;
     let name = s.name("auth");
-    let body = json!({ "name": name });
+    let body = json!({ "label": name });
     let bytes = body.to_string().into_bytes();
     let r = api.unsigned("POST", "/api/fragments", Some(&body))?;
     s.ok("an unsigned create is 401", r.status == 401 && r.error() == "unauthenticated", &r);
     // behind a proxy that ends TLS (Fly's), the client signed the https URL
     let proxied = api.person()?;
     let https = format!("{}/api/fragments", api.base.replacen("http://", "https://", 1));
-    let pbody = json!({ "name": s.name("proxied") });
+    let pbody = json!({ "label": s.name("proxied") });
     let pbytes = pbody.to_string().into_bytes();
     let r = api.call(Call {
         method: "POST",
@@ -148,70 +148,31 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("create", &[crate::Need::Fakes, crate::Need::Deployment]) {
         return Ok(());
     }
-    // a person takes a username before they make anything (decision R16)
-    let nameless = api.person_without_username()?;
-    let r = api.create(&nameless, &s.name("nameless"))?;
-    s.ok("a person without a username cannot create", r.status == 400 && r.message().contains("username"), &r);
-    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": "www" })))?;
-    s.ok("a reserved word is not a username", r.status == 400, &r);
-    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": "to--do" })))?;
-    s.ok("a username has no double dash", r.status == 400, &r);
     let owner = api.person()?;
     let other = api.person()?;
-    let (owner_u, other_u) = (api.username(&owner)?, api.username(&other)?);
-    let r = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": owner_u })))?;
-    s.ok("a taken username is 409", r.status == 409, &r);
-    let r = api.signed(&owner, "PUT", "/api/identities/me/username", Some(&json!({ "username": format!("{owner_u}x") })))?;
-    s.ok("a username is chosen once", r.status == 409 && r.message().contains("once"), &r);
-    let r = api.signed(&owner, "PUT", "/api/identities/me/username", Some(&json!({ "username": owner_u })))?;
-    s.ok("taking your own username again is a no-op", r.status == 200 && r.body["claimed"] == false, &r);
-
-    // an operator undoes a username taken by mistake, while its person owns nothing under it
-    let mistaken = api.person()?;
-    let mistaken_u = api.username(&mistaken)?;
-    let r = api.signed(&owner, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
-    s.ok("only the fleet's operators release a username", r.status == 403, &r);
-    let op_session = api.sign_in("operator@e2e.test")?;
-    api.approve(&op_session, &s.operator)?;
-    let owned = s.named(api, &mistaken, "mine")?;
-    let mine = s.create(api, &mistaken, &owned)?;
-    let r = api.signed(&s.operator, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
-    s.ok("not while its person owns a fragment under it (its URLs name it)", r.status == 409 && r.message().contains(&owned), &r);
-    api.signed(&mistaken, "DELETE", &format!("/api/f/{owned}"), None)?;
-    let r = api.signed(&s.operator, "DELETE", &format!("/api/users/{mistaken_u}"), None)?;
-    let chosen = format!("{mistaken_u}b");
-    let again = api.signed(&mistaken, "PUT", "/api/identities/me/username", Some(&json!({ "username": chosen })))?;
-    s.ok("released, its person chooses again", r.status == 200 && r.body["released"] == true && again.status == 200 && again.body["username"] == chosen.as_str(), format!("{r} {again}"));
-    // the username's next holder makes the same label under it: a repo of
-    // their own, never its earlier holder's (a repo's name carries its owner)
-    let took = api.signed(&nameless, "PUT", "/api/identities/me/username", Some(&json!({ "username": mistaken_u })))?;
-    let remade = api.create(&nameless, &owned)?;
-    let theirs = fragment_core::codestorage::repo_name("", &owned, &api.identity(&nameless)?).unwrap_or_default();
-    s.ok(
-        "another identity under a released username, the same label: a fresh repo, named for its owner",
-        took.status == 200
-            && remade.status == 200
-            && remade.body["repo"] != mine["repo"]
-            && s.fake.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
-        format!("{took} {remade} (the earlier holder's repo {})", mine["repo"]),
-    );
-    let r = api.unsigned("GET", &format!("/api/users/{owner_u}"), None)?;
-    s.ok("anyone sees who a username is", r.status == 200 && r.body["id"] == api.identity(&owner)?.as_str() && r.body["picture"].is_null(), &r);
+    // a person's picture, served by their identity
+    let owner_id = api.identity(&owner)?;
+    let picture_url = format!("/api/identities/{owner_id}/picture");
+    let r = api.unsigned("GET", &picture_url, None)?;
+    s.ok("a person with no picture has none (404)", r.status == 404, &r);
     let png: &[u8] = b"\x89PNG\r\n\x1a\n-a-tiny-picture";
     let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(png.to_vec()), keys: Some(&owner), ..Call::default() })?;
     s.ok("a person sets a picture", r.status == 200 && r.body["mime"] == "image/png", &r);
-    let r = api.unsigned("GET", &format!("/api/users/{owner_u}/picture"), None)?;
-    s.ok("and anyone sees it", r.status == 200 && r.bytes == png && r.header("content-type") == "image/png", &r);
+    let r = api.unsigned("GET", &picture_url, None)?;
+    s.ok("and anyone sees it, by their identity", r.status == 200 && r.bytes == png && r.header("content-type") == "image/png", &r);
+    let me = api.signed(&owner, "GET", "/api/identities/me", None)?;
+    s.ok("their identity names it, with their email", me.body["picture"].as_str().is_some_and(|p| p.starts_with(&picture_url)) && me.body["email"] == Api::email_of(&owner).as_str(), &me);
     let r = api.call(Call { method: "PUT", url: format!("{}/api/identities/me/picture", api.base), body: Some(b"<svg/>".to_vec()), keys: Some(&owner), ..Call::default() })?;
     s.ok("a picture that is not an image is refused", r.status == 400, &r);
 
+    // a name is a label and a random suffix (decision 47)
     let label = s.name("create");
-    let name = fragment_proto::fragment_name(&label, &owner_u);
-    let r = api.create(&owner, &label)?;
+    let r = api.create_with(&owner, json!({ "label": label }))?;
     let c = &r.body;
+    let name = c["name"].as_str().unwrap_or("").to_string();
     s.ok("a signed create succeeds", r.status == 200, &r);
-    s.ok("a bare label goes under the creator's username", c["name"] == name.as_str(), &r);
-    s.ok("create names the owner by identity", c["owner"] == api.identity(&owner)?.as_str(), &r);
+    s.ok("a label is made a name: the label, and a random suffix", fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label), &r);
+    s.ok("create names the owner by identity", c["owner"] == owner_id.as_str(), &r);
     s.ok("create returns the fragment's own npub", c["npub"].as_str().is_some_and(|n| n.starts_with("npub1")), &r);
     s.ok("create defaults to link visibility", c["visibility"] == "link", &r);
     s.ok(
@@ -222,87 +183,94 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     let repo = c["repo"].as_str().unwrap_or("").to_string();
     s.ok("create returns the url-form repo identity", repo.len() == 36 && repo.matches('-').count() == 4, &r);
     // the one derivation of a repo's name (crates/core codestorage.rs):
-    // `<label>--<username>--<12 hex of its owner>`; a local node has no prefix
-    let named = fragment_core::codestorage::repo_name("", &name, &api.identity(&owner)?).unwrap_or_default();
+    // `<name>--<12 hex of its owner>`; a local node has no prefix
+    let named = fragment_core::codestorage::repo_name("", &name, &owner_id).unwrap_or_default();
     s.ok(
-        "the repo exists in code.storage as <label>--<username>--<its owner's 12 hex>",
-        named.starts_with(&format!("{label}--{owner_u}--")) && s.fake.repo_url(&named).as_deref() == Some(repo.as_str()),
+        "the repo exists in code.storage as <name>--<its owner's 12 hex>",
+        named.starts_with(&format!("{name}--")) && s.fake.repo_url(&named).as_deref() == Some(repo.as_str()),
         format!("{repo} ({named})"),
     );
-    s.ok(
-        "create returns the fragment's own origin",
-        c["canonical"] == api.site_url(&name, ""),
-        &r,
-    );
+    s.ok("create returns the fragment's own origin", c["canonical"] == api.site_url(&name, ""), &r);
 
-    let r = api.create(&owner, &label)?;
+    let r = api.create_with(&owner, json!({ "label": label }))?;
+    s.ok("the same label again is another fragment, under another suffix", r.status == 200 && r.body["name"] != name.as_str(), &r);
+    let r = api.create(&owner, &name)?;
     s.ok("creating an existing name is 409", r.status == 409 && r.error() == "already_exists", &r);
     let r = api.create(&other, &name)?;
-    s.ok("no one makes a fragment under someone else's username", r.status == 403, &r);
-    let r = api.create(&other, &label)?;
+    s.ok("a name someone made is theirs: anyone else's create of it is 409", r.status == 409, &r);
+    let exact = s.named(api, &other, "create")?;
+    let r = api.create(&other, &exact)?;
+    s.ok("a name made in full is made as it is", r.status == 200 && r.body["name"] == exact.as_str(), &r);
+    let refused: Vec<Reply> = [
+        api.create_with(&owner, json!({ "name": "Bad_Name--k3x9" }))?,
+        api.create_with(&owner, json!({ "name": label }))?,
+        api.create_with(&owner, json!({ "label": "Bad_Name" }))?,
+        api.create_with(&owner, json!({ "label": label, "name": exact }))?,
+        api.create_with(&owner, json!({}))?,
+    ]
+    .into();
     s.ok(
-        "two people each make the same label: two fragments",
-        r.status == 200 && r.body["name"] == fragment_proto::fragment_name(&label, &other_u).as_str(),
-        &r,
+        "a create names a name in full or a label, one of the two: an invalid one, a label as a name, both, or neither is 400",
+        refused.iter().all(|r| r.status == 400 && r.error() == "invalid_request"),
+        refused.iter().map(ToString::to_string).collect::<Vec<_>>().join(" / "),
     );
-    let r = api.create(&owner, "Bad_Name")?;
-    s.ok("an invalid name is 400", r.status == 400 && r.error() == "invalid_request", &r);
+    let r = api.status(&owner, &label)?;
+    s.ok("a path names a fragment in full: a bare label there is 404, saying so", r.status == 404 && r.message().contains("in full"), &r);
 
-    // a fragment's host label, `<label>--<username>` and a branch's mark,
-    // is one DNS label (docs/api.md, Names): every username leaves 29
-    // bytes for its labels, and a branch's mark shortens the longest
+    // a fragment's host label, its name and a branch's mark, is one DNS
+    // label (docs/api.md, Names): a label as long as this deployment
+    // leaves room for makes one of exactly 63 bytes, and a byte more is
+    // refused, never cut
     let mark = api.host_mark();
-    let max = fragment_proto::username_max(&mark);
-    let hex = Keys::generate().pubkey_hex().to_string();
-    let longest = api.person_without_username()?;
-    let claim = |username: &str| api.signed(&longest, "PUT", "/api/identities/me/username", Some(&json!({ "username": username })));
-    if max < limits::USERNAME_MAX_BYTES {
-        let r = claim(&format!("u{}", &hex[..max]))?;
-        s.ok(
-            "on a branch, a username past the longest its hosts leave room for is refused (400), saying why",
-            r.status == 400 && r.error() == "invalid_request" && r.message().contains("one DNS label") && r.message().contains(&format!("at most {max} bytes")),
-            &r,
-        );
-    }
-    let longest_u = format!("u{}", &hex[..max - 1]);
-    let r = claim(&longest_u)?;
-    s.ok(&format!("the longest username this deployment takes ({max} bytes) is taken"), r.status == 200 && r.body["username"] == longest_u.as_str(), &r);
-    let room = fragment_proto::label_room(&longest_u, &mark);
-    s.ok("and leaves 29 bytes for its labels", room == limits::LABEL_ROOM_MIN_BYTES, room);
+    let room = fragment_proto::label_room(&mark);
+    s.ok("this deployment leaves a label at least the room every deployment does", room >= limits::LABEL_ROOM_MIN_BYTES, room);
     let base = s.name("edge");
     let edge = |len: usize| format!("{base}-{}", "x".repeat(len - base.len() - 1));
     let (fits, over) = (edge(room), edge(room + 1));
-    let r = api.create(&longest, &fits)?;
+    let r = api.create_with(&owner, json!({ "label": fits }))?;
+    let made = r.body["name"].as_str().unwrap_or_default().to_string();
     let host = r.body["canonical"].as_str().and_then(|c| reqwest::Url::parse(c).ok()).and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default();
     let host_label = host.split('.').next().unwrap_or_default();
     s.ok(
         "a label whose host label is exactly 63 bytes is made",
-        r.status == 200 && host_label.len() == 63 && host_label == format!("{fits}--{longest_u}{mark}"),
+        r.status == 200 && host_label.len() == limits::HOST_LABEL_MAX_BYTES && host_label == format!("{made}{mark}"),
         format!("{host_label} ({} bytes): {r}", host_label.len()),
     );
-    let made = fragment_proto::fragment_name(&fits, &longest_u);
     let view = r.body["viewToken"].as_str().unwrap_or_default().to_string();
     let r = api.page(&made, &format!("?view={view}"), None)?;
     s.ok("and its host reaches it (the fragment answers: nothing deployed yet)", r.status == 404 && r.message().contains("deploy first"), &r);
-    let refused = |r: &crate::api::Reply| {
-        r.status == 400
-            && r.error() == "invalid_request"
-            && r.message().contains(&format!("{over}--{longest_u}{mark}"))
-            && r.message().contains("at most 63 bytes")
-            && r.message().contains(&format!("at most {room} bytes"))
-    };
-    let r = api.create(&longest, &over)?;
+    let refused = |r: &Reply| r.status == 400 && r.error() == "invalid_request" && r.message().contains(&format!("at most {room} bytes"));
+    let r = api.create_with(&owner, json!({ "label": over }))?;
     s.ok("one byte longer is refused (400), saying why: never cut to fit", refused(&r), &r);
-    let unmade = fragment_proto::fragment_name(&over, &longest_u);
-    let status = api.status(&longest, &unmade)?;
-    let again = api.create(&longest, &unmade)?;
-    s.ok("nothing is made, and asked again (in full) it is refused the same", status.status == 404 && refused(&again), format!("{status} {again}"));
+    if fragment_proto::valid_label(&over) {
+        // on a branch: a label that fits a name, not the name's host
+        let unmade = api.qualified(&owner, &over)?;
+        let again = api.create(&owner, &unmade)?;
+        let status = api.status(&owner, &unmade)?;
+        s.ok(
+            "asked in full it is refused the same, naming the address and its 63 bytes, and nothing is made",
+            refused(&again) && again.message().contains(&format!("{unmade}{mark}")) && again.message().contains("at most 63 bytes") && status.status == 404,
+            format!("{again} {status}"),
+        );
+    }
     // the fragment's own key is made by the node's KEYS; no client sends one
-    let r = api.create_with(&owner, json!({ "name": s.name("oldsecret"), "fragmentSecret": Keys::generate().secret_hex() }))?;
+    let r = api.create_with(&owner, json!({ "label": s.name("oldsecret"), "fragmentSecret": Keys::generate().secret_hex() }))?;
     s.ok("a create that sends a fragmentSecret is refused naming it", r.status == 400 && r.message().contains("fragmentSecret"), &r);
-    let public = fragment_proto::fragment_name(&s.name("create-pub"), &owner_u);
+    let public = s.named(api, &owner, "create-pub")?;
     let r = api.create_with(&owner, json!({ "name": public, "visibility": "public" }))?;
     s.ok("create takes a visibility", r.status == 200 && r.body["visibility"] == "public", &r);
+    // a name deleted, made again by someone else: a repo of their own,
+    // never its earlier maker's (a repo's name carries its owner)
+    let reused = s.named(api, &owner, "reused")?;
+    let first = s.create(api, &owner, &reused)?;
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{reused}"), None)?;
+    let remade = api.create(&other, &reused)?;
+    let theirs = fragment_core::codestorage::repo_name("", &reused, &api.identity(&other)?).unwrap_or_default();
+    s.ok(
+        "a name deleted and made again by someone else: a fresh repo, named for its new owner",
+        deleted.status == 200 && remade.status == 200 && remade.body["repo"] != first["repo"] && s.fake.repo_url(&theirs).as_deref() == remade.body["repo"].as_str(),
+        format!("{deleted} {remade} (the earlier maker's repo {})", first["repo"]),
+    );
 
     let r = api.status(&owner, &name)?;
     s.ok(
@@ -338,7 +306,7 @@ pub fn create(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a deleted fragment leaves the owner's list", !r.text.contains(&format!("\"{name}\"")), &r);
     // a busy org: the repo is on a later page of the org's newest-first list
     s.fake.seed_filler(150);
-    let r = api.create(&owner, &label)?;
+    let r = api.create(&owner, &name)?;
     s.ok("a deleted name can be created again", r.status == 200 && r.body["owner"] == api.identity(&owner)?.as_str(), &r);
     s.ok("created again, it keeps its repo (found past the list's first page)", r.body["repo"] == repo.as_str(), &r);
     Ok(())
@@ -355,8 +323,7 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
     // every header the router sets for a fragment, forged to name the owner
     let owner_id = api.identity(&owner)?;
-    let username = name.split_once('.').map_or("", |(_, u)| u);
-    let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "username": username, "key": owner.pubkey_hex() }).to_string();
+    let claims_owner = json!({ "id": owner_id, "kind": "person", "owner": null, "key": owner.pubkey_hex() }).to_string();
     let owner_key_unsigned = json!({ "key": owner.pubkey_hex() }).to_string();
     let forged_headers = || {
         routed::ALL
@@ -386,10 +353,10 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("GET on a fragment's root is 404", r.status == 404, &r);
     let r = api.call(Call { method: "GET", url: format!("http://evil.example.com:{}/index.html", api.port), ..Call::default() })?;
     s.ok("a host outside the suffix is the platform, not a fragment", r.status == 404 && r.message().contains("no route"), &r);
-    let label = name.split('.').next().unwrap_or("");
-    // a fragment's host is one label, <label>--<username>; any other name
-    // under the suffix is no one's (never the platform's)
-    for host in ["Bad_Name", "a.b", label, name.as_str(), "a--b"] {
+    let label = fragment_proto::split_fragment_name(&name).map_or("", |(l, _)| l);
+    // a fragment's host is its name, one label; any other label under the
+    // suffix is no one's (never the platform's)
+    for host in ["Bad_Name", "a.b", label, "a--b", "lock--k3l9", "lock---k3x9", "lock-k3x9"] {
         let r = api.call(Call { method: "GET", url: format!("http://{host}.{}:{}/index.html", crate::SUFFIX, api.port), ..Call::default() })?;
         s.ok(&format!("host {host}.<suffix> is not a fragment, nor the platform"), r.status == 404 && r.message().contains("no fragment here"), &r);
     }
@@ -399,11 +366,11 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     // connection closing while it is still sending. That one is a create
     // that would succeed but for its size (whitespace is JSON).
     let big = s.name("big");
-    let padded = |n: usize| json!({ "name": big, "padding": "x".repeat(n) });
+    let padded = |n: usize| json!({ "label": big, "padding": "x".repeat(n) });
     let edge = limits::BODY_MAX_BYTES - padded(0).to_string().len();
     let r = api.create_with(&owner, padded(edge))?;
     s.ok("a body of exactly the limit is read", r.code() == Some(ErrorCode::InvalidRequest), &r);
-    let body = format!("{{\"name\":\"{big}\"}}{}", " ".repeat(limits::BODY_MAX_BYTES));
+    let body = format!("{{\"label\":\"{big}\"}}{}", " ".repeat(limits::BODY_MAX_BYTES));
     let sent = api.call(Call { method: "POST", url: format!("{}/api/fragments", api.base), body: Some(body.into_bytes()), content_type: Some("application/json"), keys: Some(&owner), ..Call::default() });
     let refused = match sent {
         Ok(r) => r.status == 413 && r.code() == Some(ErrorCode::TooLarge),
@@ -412,8 +379,9 @@ pub fn lockdown(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("a create over the limit is refused unread (413)", refused, "");
     // a connection that closed because the router fell over would pass as a
     // reset too: the node answers after it, and made nothing from the body
-    let (alive, made) = (api.unsigned("GET", "/healthz", None)?, api.status(&owner, &api.qualified(&owner, &big)?)?);
-    s.ok("after it the node answers, and no fragment was made", alive.status == 200 && made.status == 404 && made.code() == Some(ErrorCode::NotFound), format!("{alive} / {made}"));
+    let (alive, listed) = (api.unsigned("GET", "/healthz", None)?, api.signed(&owner, "GET", "/api/fragments", None)?);
+    let made = listed.body["fragments"].as_array().is_some_and(|l| l.iter().any(|f| f["name"].as_str().and_then(fragment_proto::split_fragment_name).is_some_and(|(l, _)| l == big)));
+    s.ok("after it the node answers, and no fragment was made", alive.status == 200 && listed.status == 200 && !made, format!("{alive} / {listed}"));
     // a body without a length is measured as it arrives: refused at the
     // chunk that crosses the limit, not after it has all been buffered
     let wait = Duration::from_secs(15);

@@ -6,7 +6,7 @@
 //! `GET /api/computer`'s, in the platform's order. Without the setting it
 //! runs every agent the platform lists (the stub).
 //!
-//! The file is `{"agents": ["juniper.paul", …]}`, the host's, written whole
+//! The file is `{"agents": ["juniper--k3x9", …]}`, the host's, written whole
 //! and renamed into place, so a read never sees half of one. A missing
 //! file is no agent ready. One that does not read keeps the set before it
 //! (a host's bug must not stop the agents it had made ready), and says so.
@@ -23,7 +23,7 @@ use crate::runtime::Agent;
 /// The file is at most this many bytes: `AGENTS_MAX` names, each a
 /// fragment's name (at most 128 bytes), with room for the JSON.
 pub const READY_FILE_MAX_BYTES: usize = 16 * 1024;
-/// A name in it is at most this long (a fragment's `<label>.<username>`).
+/// A name in it is at most this long (a fragment's `<label>--<suffix>`).
 pub const READY_NAME_MAX_BYTES: usize = 128;
 
 const _: () = assert!(limits::AGENTS_MAX * (READY_NAME_MAX_BYTES + 4) < READY_FILE_MAX_BYTES);
@@ -113,7 +113,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
     /// Valid: the file names the agents ready; the gate keeps the
@@ -121,9 +121,9 @@ mod tests {
     /// platform no longer lists.
     #[test]
     fn the_gate_runs_the_ready_agents_in_the_platforms_order() {
-        let ready = parse(br#"{"agents": ["maple.paul", "juniper.paul", "gone.paul"]}"#).unwrap();
+        let ready = parse(br#"{"agents": ["maple--k3x9", "juniper--k3x9", "gone--k3x9"]}"#).unwrap();
         let got = gate(vec![agent("juniper"), agent("oak"), agent("maple")], &ready);
-        assert_eq!(got.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), ["juniper.paul", "maple.paul"]);
+        assert_eq!(got.iter().map(|a| a.fragment.as_str()).collect::<Vec<_>>(), ["juniper--k3x9", "maple--k3x9"]);
         assert!(gate(vec![agent("juniper")], &BTreeSet::new()).is_empty(), "nothing ready, nothing run");
     }
 
@@ -131,9 +131,9 @@ mod tests {
     /// fragment's.
     #[test]
     fn a_file_out_of_shape_is_refused() {
-        let many: Vec<String> = (0..=limits::AGENTS_MAX).map(|i| format!("a{i}.paul")).collect();
+        let many: Vec<String> = (0..=limits::AGENTS_MAX).map(|i| format!("a{i}--k3x9")).collect();
         let too_many = serde_json::to_vec(&serde_json::json!({ "agents": many })).unwrap();
-        for bad in [&b"not json"[..], br#"{"agents": "juniper.paul"}"#, br#"{"agents": [], "more": 1}"#, br#"{"agents": [""]}"#, br#"{"agents": ["a b"]}"#, &too_many[..]] {
+        for bad in [&b"not json"[..], br#"{"agents": "juniper--k3x9"}"#, br#"{"agents": [], "more": 1}"#, br#"{"agents": [""]}"#, br#"{"agents": ["a b"]}"#, &too_many[..]] {
             assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
         }
         assert!(parse(&vec![b' '; READY_FILE_MAX_BYTES + 1]).is_err());
@@ -157,19 +157,19 @@ mod tests {
         };
         let mut r = Ready::new(path.clone());
         assert!(!r.refresh() && r.agents().is_empty(), "no file: no agent ready");
-        write(r#"{"agents": ["juniper.paul"]}"#);
+        write(r#"{"agents": ["juniper--k3x9"]}"#);
         assert!(r.refresh());
-        assert_eq!(r.agents().iter().collect::<Vec<_>>(), ["juniper.paul"]);
+        assert_eq!(r.agents().iter().collect::<Vec<_>>(), ["juniper--k3x9"]);
         assert!(!r.refresh(), "unchanged: not read again");
-        write(r#"{"agents": ["juniper.paul"]}"#);
+        write(r#"{"agents": ["juniper--k3x9"]}"#);
         assert!(!r.refresh(), "the same agents again: no change");
-        write(r#"{"agents": ["juniper.paul", "maple.paul"]}"#);
+        write(r#"{"agents": ["juniper--k3x9", "maple--k3x9"]}"#);
         assert!(r.refresh() && r.agents().len() == 2);
         write("{half");
         assert!(!r.refresh() && r.agents().len() == 2, "a file that does not read keeps the set before it");
         let mut restarted = Ready::new(path.clone());
-        write(r#"{"agents": ["maple.paul"]}"#);
-        assert!(restarted.refresh() && restarted.agents().iter().collect::<Vec<_>>() == ["maple.paul"]);
+        write(r#"{"agents": ["maple--k3x9"]}"#);
+        assert!(restarted.refresh() && restarted.agents().iter().collect::<Vec<_>>() == ["maple--k3x9"]);
         std::fs::remove_file(&path).unwrap();
         assert!(restarted.refresh() && restarted.agents().is_empty(), "removed: no agent ready");
         let _ = std::fs::remove_dir_all(&dir);

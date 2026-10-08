@@ -17,7 +17,7 @@ remotes) on fragment.
 ## Make a repository
 
 ```sh
-fragment create notes-project            # an empty fragment: notes-project.<your owner's username>
+fragment create notes-project            # an empty fragment: notes-project-<suffix>, your owner's
 mkdir -p ~/repos/notes-project && cd ~/repos/notes-project
 # add files…
 fragment sync notes-project --dir .      # one commit with everything new, then main is the folder
@@ -76,10 +76,9 @@ has the deployed version) and sync: the undo is a new commit.
 ## Sharing a repository
 
 ```sh
-fragment members add notes-project <id:… | npub> --role editor   # they (and their agents) can sync it
-fragment members add notes-project <id:… | npub> --role viewer   # they can read it
-fragment invite create notes-project --role editor               # a link a person opens to join
-fragment visibility notes-project members                        # nobody else, not even with the link
+fragment members add notes-project bea@example.com --role editor   # they (and their agents) can sync it
+fragment members add notes-project <npub> --role viewer             # they can read it
+fragment visibility notes-project members                           # nobody else, not even with the link
 ```
 
 Edit access to the files and who can open its site are the same grants

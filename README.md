@@ -73,7 +73,7 @@ cargo xtask try todo       # in another terminal: todo | inbox | notes
 `try` creates and deploys a fragment from a template under
 `target/devstack/try/`, and prints the link to open and a `fragment`
 alias pointed at the dev stack. Fragments are served at
-`http://<label>--<username>.fragment.localhost:8790/`.
+`http://<name>.fragment.localhost:8790/`.
 
 ## Tests
 

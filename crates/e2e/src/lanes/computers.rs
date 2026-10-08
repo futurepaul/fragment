@@ -649,7 +649,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&agent);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent_name}"), Some(&json!({})))?;
     let identity = r.body["agents"][0]["identity"].as_str().unwrap_or("").to_string();
-    s.ok("its owner assigns the agent fragment to it", r.status == 200 && identity.starts_with("id:") && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
+    s.ok("its owner assigns the agent fragment to it", r.status == 200 && fragment_core::npub::is_identity(&identity) && r.body["agents"][0]["fragment"] == agent_name.as_str(), &r);
     s.ok(
         "by default the agent may use every connection its owner has (decision 44)",
         r.body["agents"][0].get("connections").is_some_and(Value::is_null),
@@ -955,7 +955,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     s.deploy(&maple);
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{maple_name}"), Some(&json!({})))?;
     let maple_id = r.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == maple_name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    s.ok("a second agent runs on the same computer", r.status == 200 && maple_id.starts_with("id:") && maple_id != identity, &r);
+    s.ok("a second agent runs on the same computer", r.status == 200 && fragment_core::npub::is_identity(&maple_id) && maple_id != identity, &r);
     api.signed(&owner, "PUT", &format!("/api/f/{chat_name}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
     // the stub's bridge reads its agents again every minute (the Hermes lane
     // proves the seconds of our Hermes image): a sleep and a wake follows the
@@ -1055,7 +1055,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
     );
     // an agent this computer does not run, or no agent's name, is refused
     // by the image: the platform carries the query and reads nothing in it
-    let (absent, malformed) = (control(&format!("nobody.{}", api.username(&owner)?)).map(|_| ()), control("Not%20A%20Name").map(|_| ()));
+    let (absent, malformed) = (control("nobody--k3x9").map(|_| ()), control("Not%20A%20Name").map(|_| ()));
     s.ok(
         "an agent's screen the computer does not run is refused (404), and a query that names no agent (400): the image's answers, through its port",
         absent.as_ref().is_err_and(|e| format!("{e:#}").contains("404")) && malformed.as_ref().is_err_and(|e| format!("{e:#}").contains("400")),
@@ -1200,14 +1200,26 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         json!(replies),
     );
     std::thread::sleep(QUEUE_DRAIN);
+
+    // a $200 seat's computer stays awake unless its owner lets it sleep
+    // (decision 57): an operator comps its owner one (docs/billing.md)
+    let op_session = api.sign_in("operator@e2e.test")?;
+    // the ledger section approves the operator's key when it runs first
+    let _ = api.approve(&op_session, &s.operator);
+    let me = api.signed(&owner, "GET", "/api/identities/me", None)?;
+    let email = me.body["subjects"][0]["email"].as_str().unwrap_or("").to_string();
+    let r = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": email, "kind": "seat_always_on" })))?;
+    let view = |api: &Api| api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    let on = r.status == 200 && s.eventually(Duration::from_secs(20), || view(&api)["alwaysOn"] == true);
+    s.ok("comped a $200 seat, its owner's computer stays awake", on && view(&api)["phase"] == "awake", json!([r.body, view(&api)]));
+    let r = api.signed(&owner, "PUT", "/api/seat", Some(&json!({ "sleeps": true })))?;
+    let off = r.status == 200 && s.eventually(Duration::from_secs(20), || view(&api)["alwaysOn"] == false);
+    s.ok("its owner lets it sleep: it is awake only while something is open", off, view(&api));
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})))?;
     s.ok("it sleeps at the end", r.body["phase"] == "asleep", &r);
 
     // at zero credit agents stop, and no wake starts (decision 27): an
     // operator makes its owner a guest
-    let op_session = api.sign_in("operator@e2e.test")?;
-    // the ledger section approves the operator's key when it runs first
-    let _ = api.approve(&op_session, &s.operator);
     let r = api.signed(&s.operator, "POST", &format!("/api/ledger/{owner_id}/plan"), Some(&json!({ "id": "computers-guest", "plan": "guest" })))?;
     s.ok("an operator makes its owner a guest", r.status == 200, &r);
     let r = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;

@@ -428,8 +428,8 @@ impl FragmentCell {
         Ok(match body["op"].as_str() {
             Some("repo") => {
                 // the repo it names, as one made before repos were named for
-                // their owner kept (`<prefix><label>--<username>`), or one
-                // code.storage never had: a wipe deletes what it names
+                // their owner kept (`<prefix><name>`), or one code.storage
+                // never had: a wipe deletes what it names
                 let repo = body["repo"]
                     .as_str()
                     .filter(|r| (1..=200).contains(&r.len()) && r.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'))

@@ -364,7 +364,7 @@ class Job {
   // What the fragment's own page reads, as steps: its members as
   // `__members` lists them ([{ principal, role, kind, … }], the first added
   // first), names for at most PEOPLE_MAX identities as `__people` answers
-  // ({ [id]: { kind, username, name?, … } }), and who is here now, as the
+  // ({ [id]: { kind, email?, picture, name?, fragment? } }), and who is here now, as the
   // pages' presence lists hold them ([{ id, principal, data }]).
   members() {
     return this.#step("members", {}).then((v) => v.members);

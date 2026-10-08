@@ -626,8 +626,8 @@ mod tests {
         let data = Path::new("/data");
         let copy = |p: &str| Copied { file: "0.sqlite".into(), path: p.into(), bytes: 4096, uid: 0, gid: 0, mode: 0o600 };
         assert_eq!(
-            answer(data, &[copy("/data/hermes/state.db"), copy("/data/hermes/profiles/juniper-paul/state.db")]),
-            "/hermes/state.db\n/hermes/state.db-wal\n/hermes/state.db-shm\n/hermes/state.db-journal\n/hermes/profiles/juniper-paul/state.db\n/hermes/profiles/juniper-paul/state.db-wal\n/hermes/profiles/juniper-paul/state.db-shm\n/hermes/profiles/juniper-paul/state.db-journal\n"
+            answer(data, &[copy("/data/hermes/state.db"), copy("/data/hermes/profiles/juniper--k3x9/state.db")]),
+            "/hermes/state.db\n/hermes/state.db-wal\n/hermes/state.db-shm\n/hermes/state.db-journal\n/hermes/profiles/juniper--k3x9/state.db\n/hermes/profiles/juniper--k3x9/state.db-wal\n/hermes/profiles/juniper--k3x9/state.db-shm\n/hermes/profiles/juniper--k3x9/state.db-journal\n"
         );
         for bad in ["/data/a b.db", "/data/a*.db", "/data/[x].db", "/elsewhere/a.db", "/data/é.db"] {
             assert!(!nameable(data, Path::new(bad)), "{bad}");

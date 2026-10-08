@@ -1,5 +1,6 @@
 //! The sections, in the order they run.
 
+mod admin;
 mod agent_ask;
 mod agent_restart;
 mod agent_smoke;
@@ -10,6 +11,7 @@ mod bot_mode;
 mod brain;
 mod chat;
 mod author;
+mod billing;
 mod computers;
 mod control;
 mod credentials;
@@ -26,6 +28,7 @@ mod ledger;
 mod limits;
 mod members;
 mod notes;
+mod orgs;
 mod plane;
 mod posts;
 mod restart;
@@ -35,6 +38,7 @@ mod signin;
 mod site;
 mod sync;
 mod templates;
+mod trials;
 mod wipe;
 
 use std::panic::{self, AssertUnwindSafe};
@@ -99,6 +103,12 @@ const LANES: &[Lane] = &[
     deliver::ai,
     ledger::ledger_lane,
     ledger::transcribe_lane,
+    orgs::orgs,
+    billing::billing,
+    billing::billing_page,
+    trials::trials,
+    admin::admin,
+    admin::admin_page,
     shell::shell_platform,
     computers::computers,
     chat::chat,
@@ -135,7 +145,7 @@ pub const SHARDS: [&[&str]; 4] = [
     &["facet-cap", "app-lockdown", "site", "watch", "schemas", "channels", "live", "routes", "cli", "browser", "jobs", "triggers"],
     &[
         "auth", "create", "lockdown", "keys", "members", "identities", "signin", "levers", "secrets", "delegation", "files", "deploy", "templates", "share", "isolation", "frames",
-        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe",
+        "ops", "public", "effects", "appfiles", "blobs", "notes", "brain", "push", "ai", "ledger", "transcribe", "orgs", "billing", "billing-page", "trials", "admin", "admin-page",
     ],
 ];
 

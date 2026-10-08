@@ -91,11 +91,12 @@ fn text_field(o: &Map<String, Value>, key: &str) -> Option<String> {
     }
 }
 
-/// Whether a record's principal is an identity (`id:…`: a person or an
-/// agent), not a fragment's own key (an npub: its cron's and the
-/// platform's records), `platform`, or an anonymous visitor.
+/// Whether a record's principal is an identity: an npub (a person, an
+/// agent, or a fragment's own key: its cron's and the platform's records,
+/// and on an agent's fragment its agent's identity), not `platform` or an
+/// anonymous visitor.
 pub fn is_identity(principal: &str) -> bool {
-    principal.starts_with("id:")
+    principal.starts_with("npub1")
 }
 
 /// Whether `s` is an id of the alphabet records use for prompts and
@@ -169,7 +170,7 @@ fn message(o: &Map<String, Value>) -> Said {
     let to = match o.get("to") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(ids)) if ids.len() <= 16 => {
-            let parsed: Vec<String> = ids.iter().filter_map(|v| v.as_str()).filter(|s| s.starts_with("id:") && s.len() <= 128).map(str::to_string).collect();
+            let parsed: Vec<String> = ids.iter().filter_map(|v| v.as_str()).filter(|s| is_identity(s) && s.len() <= 128).map(str::to_string).collect();
             if parsed.len() != ids.len() {
                 return Said::Other;
             }
@@ -455,19 +456,19 @@ mod tests {
         assert_eq!(said(&json!({ "kind": "message", "text": "hi" })), Said::Message(Message { text: "hi".into(), ..Message::default() }));
         assert_eq!(said(&json!("plain")), Said::Message(Message { text: "plain".into(), ..Message::default() }));
         let sha = "a".repeat(64);
-        let m = said(&json!({ "text": "look", "to": ["id:aa"], "attachments": [{ "sha256": sha, "size": 3, "type": "image/png", "name": "a.png" }] }));
+        let m = said(&json!({ "text": "look", "to": ["npub1aa"], "attachments": [{ "sha256": sha, "size": 3, "type": "image/png", "name": "a.png" }] }));
         let Said::Message(m) = m else { panic!("a message") };
-        assert_eq!(m.to, vec!["id:aa".to_string()]);
+        assert_eq!(m.to, vec!["npub1aa".to_string()]);
         assert_eq!(m.attachments.len(), 1);
         // a reply names its turn and may hand off
-        let Said::Message(r) = said(&json!({ "text": "ok", "turn": "abc", "to": ["id:b"], "hop": 2 })) else { panic!() };
+        let Said::Message(r) = said(&json!({ "text": "ok", "turn": "abc", "to": ["npub1b"], "hop": 2 })) else { panic!() };
         assert_eq!((r.turn.as_deref(), r.hop), (Some("abc"), 2));
         // invalid shapes are never guessed at
         for bad in [
             json!(12),
             json!({ "text": 3 }),
             json!({}),
-            json!({ "text": "x", "to": "id:a" }),
+            json!({ "text": "x", "to": "npub1a" }),
             json!({ "text": "x", "to": ["someone"] }),
             json!({ "text": "x", "attachments": [{ "sha256": "zz", "size": 1, "type": "a", "name": "b" }] }),
             json!({ "text": "x", "attachments": [{ "sha256": "A".repeat(64), "size": 1, "type": "a", "name": "b" }] }),
@@ -494,8 +495,8 @@ mod tests {
 
     #[test]
     fn tasks_read() {
-        assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c.paul" })), Task::Routine { text: "water".into(), chat: "c.paul".into() });
-        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c.paul" })), Task::Joined { fragment: Some("c.paul".into()) });
+        assert_eq!(task(&json!({ "kind": "routine", "text": "water", "chat": "c--k3x9" })), Task::Routine { text: "water".into(), chat: "c--k3x9".into() });
+        assert_eq!(task(&json!({ "kind": "joined", "fragment": "c--k3x9" })), Task::Joined { fragment: Some("c--k3x9".into()) });
         assert_eq!(task(&json!({ "kind": "joined" })), Task::Joined { fragment: None }, "a join naming no fragment still lists them again");
         assert_eq!(task(&json!({ "kind": "joined", "fragment": "" })), Task::Joined { fragment: None });
         assert_eq!(task(&json!({ "kind": "routine", "text": "water" })), Task::Other);
@@ -513,11 +514,11 @@ mod tests {
 
     #[test]
     fn ids_are_stable_and_valid() {
-        let t = turn_id("juniper.paul", "talk.paul", "chat", 12);
+        let t = turn_id("juniper--k3x9", "talk--k3x9", "chat", 12);
         assert_eq!(t.len(), 24);
-        assert_eq!(t, turn_id("juniper.paul", "talk.paul", "chat", 12), "the same record, the same turn");
-        assert_ne!(t, turn_id("rowan.paul", "talk.paul", "chat", 12), "another agent, another turn");
-        assert_ne!(t, turn_id("juniper.paul", "talk.paul", "chat", 13));
+        assert_eq!(t, turn_id("juniper--k3x9", "talk--k3x9", "chat", 12), "the same record, the same turn");
+        assert_ne!(t, turn_id("rowan--k3x9", "talk--k3x9", "chat", 12), "another agent, another turn");
+        assert_ne!(t, turn_id("juniper--k3x9", "talk--k3x9", "chat", 13));
         for id in [work_id(&t, "start"), work_id(&t, "7"), work_id(&t, "p:ab12cd.0011aabb"), work_id(&t, "end"), reply_id(&t, 1)] {
             assert!(valid_post_id(&id), "{id}");
         }
@@ -532,16 +533,16 @@ mod tests {
 
     #[test]
     fn bodies_are_the_docs() {
-        let c = Cause { fragment: "talk.paul".into(), channel: "chat".into(), seq: 4 };
+        let c = Cause { fragment: "talk--k3x9".into(), channel: "chat".into(), seq: 4 };
         let life = "0123456789abcdef0123456789abcdef";
-        assert_eq!(turn_start("t", "id:p", "id:a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "id:p", "agent": "id:a", "cause": { "fragment": "talk.paul", "channel": "chat", "seq": 4 }, "life": life }));
+        assert_eq!(turn_start("t", "npub1p", "npub1a", &c, life), json!({ "kind": "turn.start", "turn": "t", "asker": "npub1p", "agent": "npub1a", "cause": { "fragment": "talk--k3x9", "channel": "chat", "seq": 4 }, "life": life }));
         let s = Step { tool: "terminal".into(), args: "ls".into(), ok: true, excerpt: String::new(), text: String::new() };
         assert_eq!(turn_step("t", 1, &s), json!({ "kind": "turn.step", "turn": "t", "step": 1, "tool": "terminal", "args": "ls", "ok": true, "excerpt": "" }));
         assert_eq!(turn_end("t", &Outcome::Error("x".repeat(400))).get("error").and_then(Value::as_str).map(|e| e.chars().count()), Some(limits::ERROR_MAX_CHARS));
-        assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "id:p"))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "id:p" }));
+        assert_eq!(turn_prompt_closed("t", "p", Closed::Answered, Some(("once", "npub1p"))), json!({ "kind": "turn.prompt.closed", "turn": "t", "prompt": "p", "outcome": "answered", "option": "once", "by": "npub1p" }));
         assert_eq!(turn_prompt_closed("t", "p", Closed::Expired, None)["outcome"], "expired");
         assert_eq!(reply("hi", "t", &[], 0), json!({ "text": "hi", "turn": "t" }));
-        assert_eq!(reply("hi @b", "t", &["id:b".to_string()], 1), json!({ "text": "hi @b", "turn": "t", "to": ["id:b"], "hop": 1 }));
+        assert_eq!(reply("hi @b", "t", &["npub1b".to_string()], 1), json!({ "text": "hi @b", "turn": "t", "to": ["npub1b"], "hop": 1 }));
     }
 
     #[test]

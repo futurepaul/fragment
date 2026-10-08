@@ -1,4 +1,4 @@
-//! Membership as live cell state: grants, invites, leaving, the
+//! Membership as live cell state: grants, invites by email, leaving, the
 //! per-person list, and secrets sealed in the cell.
 
 use std::time::{Duration, Instant};
@@ -56,39 +56,55 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&bob, "GET", &path("members"), None)?;
     s.ok("a member lists members", r.status == 200 && r.body["members"].as_array().map_or(0, |a| a.len()) == 2, &r);
 
-    // invites
-    let r = api.signed(&bob, "POST", &path("invites"), Some(&json!({ "role": "viewer" })))?;
-    s.ok("an editor cannot make invites", r.status == 403, &r);
-    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer", "ttlS": 10 })))?;
-    s.ok("an invite shorter than a minute is 400", r.status == 400, &r);
-    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer", "uses": 2 })))?;
-    let token = r.body["token"].as_str().unwrap_or("").to_string();
-    s.ok("the owner makes a two-use invite and sees its token once", r.status == 200 && token.len() == 48 && r.body["usesLeft"] == 2, &r);
-    let r = api.signed(&owner, "GET", &path("invites"), None)?;
-    s.ok("listed invites never show tokens", r.status == 200 && !r.text.contains(&token) && r.text.contains("usesLeft"), &r);
-    let join = |k: &Keys, t: &str| api.signed(k, "POST", &path("join"), Some(&json!({ "token": t })));
-    let r = join(&carol, &token)?;
-    s.ok("a stranger joins with the invite", r.status == 200 && r.body["joined"] == true && r.body["role"] == "viewer", &r);
-    let r = join(&carol, &token)?;
-    s.ok("joining twice does not spend a use", r.status == 200 && r.body["joined"] == false, &r);
-    let r = join(&dave, &token)?;
-    s.ok("the second person joins", r.status == 200 && r.body["joined"] == true, &r);
-    let r = join(&erin, &token)?;
-    s.ok("a used-up invite is 404", r.status == 404, &r);
-    let r = join(&erin, "not-a-token")?;
-    s.ok("an unknown invite is 404", r.status == 404, &r);
-    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "editor" })))?;
-    let (upgrade, upgrade_id) = (r.body["token"].as_str().unwrap_or("").to_string(), r.body["id"].as_str().unwrap_or("").to_string());
-    let r = join(&carol, &upgrade)?;
-    s.ok("an editor invite upgrades a viewer", r.status == 200 && r.body["role"] == "editor", &r);
-    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer" })))?;
-    let (revoked, revoked_id) = (r.body["token"].as_str().unwrap_or("").to_string(), r.body["id"].as_str().unwrap_or("").to_string());
-    let r = api.signed(&owner, "DELETE", &path(&format!("invites/{revoked_id}")), None)?;
-    s.ok("the owner revokes an invite", r.status == 200, &r);
-    let r = join(&erin, &revoked)?;
-    s.ok("a revoked invite is 404", r.status == 404, &r);
-    let r = api.signed(&owner, "DELETE", &path(&format!("invites/{upgrade_id}")), None)?;
-    s.ok("revoking a spent invite is 404", r.status == 404, &r);
+    // invites by email (decision 48)
+    let invite = |email: &str, role: &str| api.signed(&owner, "POST", &path("invites"), Some(&json!({ "email": email, "role": role })));
+    let waiting = |email: &str| -> Result<bool> {
+        let r = api.signed(&owner, "GET", &path("invites"), None)?;
+        Ok(r.body["invites"].as_array().is_some_and(|a| a.iter().any(|i| i["email"] == email)))
+    };
+    // a person who signs in for the first time as `keys`' email
+    let first_sign_in = |keys: &Keys| -> Result<()> {
+        let session = api.sign_in(&Api::email_of(keys))?;
+        api.approve(&session, keys)?;
+        Ok(())
+    };
+    let r = api.signed(&bob, "POST", &path("invites"), Some(&json!({ "email": Api::email_of(&carol), "role": "viewer" })))?;
+    s.ok("an editor cannot invite", r.status == 403, &r);
+    let refused = [invite("not an email", "viewer")?, invite("x@e2e.test", "owner")?, api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer" })))?];
+    s.ok("an invite names an email and a role it may grant (400 otherwise)", refused.iter().all(|r| r.status == 400), format!("{} / {} / {}", refused[0], refused[1], refused[2]));
+    let r = invite(&Api::email_of(&carol), "viewer")?;
+    s.ok(
+        "an invite to an email someone signs in as makes them a member at once",
+        r.status == 200 && r.body["member"]["principal"] == api.identity(&carol)?.as_str() && r.body["member"]["role"] == "viewer" && listed(api, &carol, &name)?.as_deref() == Some("viewer"),
+        &r,
+    );
+    let r = invite(&Api::email_of(&carol), "editor")?;
+    s.ok("again with another role, it changes their role, as a PUT does", r.status == 200 && r.body["member"]["role"] == "editor", &r);
+    let newcomer = Keys::generate();
+    let r = invite(&Api::email_of(&newcomer), "viewer")?;
+    s.ok(
+        "an invite to an email no one signs in as yet waits on it",
+        r.status == 200 && r.body["invited"]["email"] == Api::email_of(&newcomer).as_str() && r.body["invited"]["role"] == "viewer" && waiting(&Api::email_of(&newcomer))?,
+        &r,
+    );
+    first_sign_in(&newcomer)?;
+    s.ok(
+        "their first sign-in as it makes them a member, and the invite waits no more",
+        listed(api, &newcomer, &name)?.as_deref() == Some("viewer") && !waiting(&Api::email_of(&newcomer))?,
+        "",
+    );
+    let gone = Keys::generate();
+    invite(&Api::email_of(&gone), "editor")?;
+    let r = api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&gone))), None)?;
+    s.ok("the owner revokes an invite", r.status == 200 && r.body["revoked"] == Api::email_of(&gone).as_str() && !waiting(&Api::email_of(&gone))?, &r);
+    let r = api.signed(&owner, "DELETE", &path(&format!("invites/{}", Api::email_of(&gone))), None)?;
+    s.ok("revoking it again is 404", r.status == 404, &r);
+    first_sign_in(&gone)?;
+    s.ok("a revoked invite is met by no one: their sign-in makes them no member", listed(api, &gone, &name)?.is_none(), "");
+    let r = api.signed(&owner, "PUT", &path(&format!("members/{}", Api::email_of(&dave))), Some(&json!({ "role": "viewer" })))?;
+    s.ok("a PUT names a person by their email too", r.status == 200 && r.body["principal"] == api.identity(&dave)?.as_str(), &r);
+    let r = api.signed(&owner, "PUT", &path("members/nobody-yet@e2e.test"), Some(&json!({ "role": "viewer" })))?;
+    s.ok("and one no one signs in as is 404 (an invite waits on it)", r.status == 404, &r);
 
     // revoking closes the member's change feed
     let mut feed = api::watch(api, &name, "", Some(&dave))?;
@@ -125,28 +141,25 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     );
 
     // the member cap holds for invites as it does for grants
-    let r = api.signed(&owner, "POST", &path("invites"), Some(&json!({ "role": "viewer", "uses": 5 })))?;
-    let (open, open_id) = (r.body["token"].as_str().unwrap_or("").to_string(), r.body["id"].as_str().unwrap_or("").to_string());
+    let (at_cap, over) = (Keys::generate(), Keys::generate());
+    invite(&Api::email_of(&at_cap), "viewer")?;
+    invite(&Api::email_of(&over), "viewer")?;
     let below = limits::MEMBERS_MAX as u64 - 1;
     let r = api.signed(&owner, "POST", &path("test/members"), Some(&json!({ "fill": below })))?;
     s.ok("(a fragment's test levers are the router's /api/test/fragment alone: no signed route)", r.status == 404, &r);
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "members", "fill": below })))?;
     s.ok("(a test hook fills the fragment to one below the member cap)", r.status == 200 && r.body["members"] == below, &r);
-    let r = join(&erin, &open)?;
-    s.ok("an invite admits the member that reaches the cap", r.status == 200 && r.body["joined"] == true, &r);
-    let frank = api.person()?;
-    let r = join(&frank, &open)?;
+    first_sign_in(&at_cap)?;
+    s.ok("an invite admits the member that reaches the cap", listed(api, &at_cap, &name)?.as_deref() == Some("viewer"), "");
+    first_sign_in(&over)?;
     s.ok(
-        "at the member cap an invite is refused",
-        r.status == 400 && r.message() == format!("a fragment has at most {} members", limits::MEMBERS_MAX),
-        &r,
+        "at the member cap a sign-in meets the invite and is refused, and the invite waits on for their next sign-in",
+        listed(api, &over, &name)?.is_none() && waiting(&Api::email_of(&over))?,
+        "",
     );
-    let r = api.signed(&owner, "GET", &path("invites"), None)?;
-    let uses_left = r.body["invites"].as_array().and_then(|a| a.iter().find(|i| i["id"] == open_id.as_str())).map(|i| i["usesLeft"].clone());
-    s.ok("and the refusal spends no use of it", uses_left == Some(json!(4)), &r);
     let r = api.signed(&owner, "GET", &path("members"), None)?;
     s.ok("the fragment holds exactly the cap", r.body["members"].as_array().map(Vec::len) == Some(limits::MEMBERS_MAX), r.status);
-    let r = api.status(&frank, &name)?;
+    let r = api.status(&over, &name)?;
     s.ok("the refused person is not a member", r.status == 403, &r);
 
     // a delete answers promptly, whatever its members: it tells one round
@@ -165,14 +178,14 @@ pub fn members(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("and it is gone at once, for its members too (404)", r.status == 404, &r);
     // the name is free at once, while the ended life's cleanup goes on
     s.create(api, &owner, &name)?;
-    let r = api.signed(&owner, "PUT", &path(&format!("members/{}", npub_of(&erin))), Some(&json!({ "role": "viewer" })))?;
+    let r = api.signed(&owner, "PUT", &path(&format!("members/{}", npub_of(&at_cap))), Some(&json!({ "role": "viewer" })))?;
     s.ok("the name is made again at once, and shared with a member of the ended life", r.status == 200, &r);
     let (cleaned, last) = s.ended_cleaned(api, &name);
     s.ok("the ended life's cleanup completes: every member's list told, the app's database and the blobs gone", cleaned, last);
     s.ok("a member of the ended life alone has lost it from their list", listed(api, &carol, &name)?.is_none(), "");
     s.ok(
         "and the one shared with again keeps the new life's row: the ended life's change never undoes it",
-        listed(api, &erin, &name)?.as_deref() == Some("viewer"),
+        listed(api, &at_cap, &name)?.as_deref() == Some("viewer"),
         "",
     );
     Ok(())

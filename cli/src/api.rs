@@ -114,9 +114,9 @@ impl Code {
             Code::InvalidUsage => "see `fragment --help`",
             Code::InvalidRequest => "the host refused the request for the reason in the message: fix it, then send it again",
             Code::AuthFailed => "run `fragment login`, or point at another host with --host / `fragment host <url>`",
-            Code::Forbidden => "the message says why: your identity lacks a role here (ask the owner for an invite, `fragment invite create`, or to add you, `fragment members add`), or your plan does not allow it (a guest makes no fragments: `fragment ledger` shows your plan)",
+            Code::Forbidden => "the message says why: your identity lacks a role here (ask the owner to add you: `fragment members add <name> <your email>`), or your plan does not allow it (a guest makes no fragments: `fragment ledger` shows your plan)",
             Code::NotFound => "check the fragment's name with `fragment list`, and a call's operation with `fragment status <name>` (code.operations)",
-            Code::NameTaken => "it exists already, as the message says: choose another name (a fragment's or a username), or remove the existing fragment with `fragment rm <name>`; a key someone holds, or one revoked, cannot be added again",
+            Code::NameTaken => "it exists already, as the message says: choose another name, or remove the existing fragment with `fragment rm <name>`; a key someone holds, or one revoked, cannot be added again",
             Code::Conflict => "re-sync (`fragment sync`) and reapply your change",
             Code::ConflictingBody => "that operation id already ran with another input: use a new --id for a new action (the same id and input replay)",
             Code::TooLarge => "see the limit in the message; files of 1 MiB and up sync as blobs",
@@ -283,6 +283,8 @@ pub struct Client {
     /// `-v`: one stderr line per signed request
     pub verbose: bool,
     http: reqwest::blocking::Client,
+    /// The full names bare labels resolved to (`fragment`), this run's.
+    names: std::sync::Mutex<std::collections::HashMap<String, String>>,
 }
 
 pub struct Resp {
@@ -322,7 +324,33 @@ impl Client {
                 .connect_timeout(CONNECT_TIMEOUT)
                 .build()
                 .expect("the HTTP client builds (its TLS backend is compiled in)"),
+            names: Default::default(),
         }
+    }
+
+    /// The fragment `name` names: itself, named in full (`todo--k3x9`), or
+    /// for a bare label (`todo`), the one fragment of the caller's list
+    /// with it (their own, among several), asked once a run. The platform
+    /// names fragments in full only (decision 47).
+    pub fn fragment(&self, name: &str) -> Result<String> {
+        if fragment_proto::valid_fragment_name(name) || !fragment_proto::valid_label(name) {
+            return Ok(name.to_string());
+        }
+        if let Some(full) = self.names.lock().expect("the names cache").get(name) {
+            return Ok(full.clone());
+        }
+        let list: fragment_proto::FragmentList = self.call_as(self.get("/api/fragments")?)?;
+        let full = resolve_label(name, &list.fragments).map_err(|msg| anyhow::Error::new(CodedError { code: Code::NotFound, msg }))?;
+        self.names.lock().expect("the names cache").insert(name.to_string(), full.clone());
+        Ok(full)
+    }
+
+    /// `path` with the fragment it names (`/api/f/<name>/…`) in full.
+    fn resolved(&self, path: &str) -> Result<String> {
+        let Some(rest) = path.strip_prefix("/api/f/") else { return Ok(path.to_string()) };
+        let end = rest.find(['/', '?']).unwrap_or(rest.len());
+        let full = self.fragment(&rest[..end])?;
+        Ok(format!("/api/f/{full}{}", &rest[end..]))
     }
 
     /// This machine's key, or a usage error: an agent holds none (its
@@ -371,6 +399,7 @@ impl Client {
     /// it has one.
     #[allow(clippy::too_many_arguments)]
     fn send(&self, method: &str, path: &str, body: Vec<u8>, replay: Replay, signed: Signed, timeout: Duration, content_type: Option<&str>) -> Result<Resp> {
+        let path = &self.resolved(path)?;
         let url = self.url(path);
         let verb: reqwest::Method = method.parse()?;
         let what = format!("{method} {path}");
@@ -471,6 +500,18 @@ pub enum Failed {
 /// the host restarts, and without retries a watcher wedges until its
 /// process is restarted (observed live on relay-vault). `log` names the
 /// request in a stderr line per try (`-v`).
+/// The fragment a bare `label` names on a list: the one with it, or of
+/// several, the one the caller owns; anything else says what to name.
+pub fn resolve_label(label: &str, listed: &[fragment_proto::ListedFragment]) -> std::result::Result<String, String> {
+    let with: Vec<&fragment_proto::ListedFragment> = listed.iter().filter(|f| fragment_proto::split_fragment_name(&f.name).is_some_and(|(l, _)| l == label)).collect();
+    let owned: Vec<&fragment_proto::ListedFragment> = with.iter().copied().filter(|f| f.role == fragment_proto::Role::Owner).collect();
+    match (with.as_slice(), owned.as_slice()) {
+        ([one], _) | (_, [one]) => Ok(one.name.clone()),
+        ([], _) => Err(format!("no fragment labelled {label} on your list (`fragment list` names each in full)")),
+        _ => Err(format!("{label} could be any of {}: name one in full", with.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "))),
+    }
+}
+
 pub fn send_retrying(build: impl Fn() -> reqwest::blocking::RequestBuilder, replay: Replay, log: Option<&str>) -> std::result::Result<(u16, Vec<u8>), Failed> {
     let (mut last, mut reached) = (None, false);
     for attempt in 0..REQUEST_ATTEMPTS {
@@ -560,9 +601,9 @@ mod tests {
         let (_server, seen, c) = silent_host();
         assert_eq!(code_of(c.post_json("/api/fragments", &serde_json::json!({ "name": "x" }))), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), 1, "the POST arrived once");
-        assert_eq!(code_of(c.delete("/api/f/x")), "outcome_unknown");
+        assert_eq!(code_of(c.delete("/api/f/x--k3x9")), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), 2, "the DELETE arrived once");
-        assert_eq!(code_of(c.put_bytes("/api/f/x/secrets/K", b"v".to_vec())), "outcome_unknown");
+        assert_eq!(code_of(c.put_bytes("/api/f/x--k3x9/secrets/K", b"v".to_vec())), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), 3, "a PUT that is not content-addressed arrived once");
     }
 
@@ -571,9 +612,9 @@ mod tests {
     #[test]
     fn reads_and_blob_uploads_are_retried() {
         let (_server, seen, c) = silent_host();
-        assert_eq!(code_of(c.get("/api/f/x/status")), "unavailable");
+        assert_eq!(code_of(c.get("/api/f/x--k3x9/status")), "unavailable");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS);
-        assert_eq!(code_of(c.put_blob("/api/f/x/blobs/abc", vec![1, 2, 3], None)), "unavailable");
+        assert_eq!(code_of(c.put_blob("/api/f/x--k3x9/blobs/abc", vec![1, 2, 3], None)), "unavailable");
         assert_eq!(seen.load(Ordering::SeqCst), 2 * REQUEST_ATTEMPTS);
     }
 
@@ -586,11 +627,11 @@ mod tests {
     fn an_op_call_is_retried_by_its_id() {
         let (_server, seen, c) = silent_host();
         let call = serde_json::json!({ "id": "cli-1", "input": {} });
-        assert_eq!(code_of(c.post_json_by_id("/api/f/x/ops/add", &call)), "outcome_unknown");
+        assert_eq!(code_of(c.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "outcome_unknown");
         assert_eq!(seen.load(Ordering::SeqCst), REQUEST_ATTEMPTS, "each try arrived");
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let nowhere = Client::new(&format!("http://127.0.0.1:{port}"), crate::auth::fixed(7));
-        assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x/ops/add", &call)), "unavailable", "no try reached a host");
+        assert_eq!(code_of(nowhere.post_json_by_id("/api/f/x--k3x9/ops/add", &call)), "unavailable", "no try reached a host");
     }
 
     /// A connection that never opened carried nothing, so even a POST is
@@ -724,7 +765,7 @@ mod tests {
 
     #[test]
     fn for_is_named_on_a_fragments_routes_and_the_list_only() {
-        for yes in ["/api/f/x.paul/status", "/api/f/x.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
+        for yes in ["/api/f/x--k3x9.paul/status", "/api/f/x--k3x9.paul/ops/add", "/f/x.paul/__live", "/api/fragments", "/api/fragments?x=1"] {
             assert!(honors_for(yes), "{yes}");
         }
         for no in ["/api/identities/me", "/api/ledger", "/api/search?q=a", "/api/fragments/x.paul/archived", "/api/computers", "/api/fx"] {

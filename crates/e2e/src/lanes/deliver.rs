@@ -70,7 +70,7 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     let r = site("__push-sub", Some(json!({ "who": "x", "endpoint": format!("{}/push/z", s.push.url), "p256dh": "nope", "auth": "nope" })))?;
     s.ok("a subscription with bad keys is refused", r.status == 400, &r);
     let sub = s.push.subscribe(&s.name("push-for-someone"), 9);
-    let r = site("__push-sub", Some(json!({ "who": "id:00112233445566778899aabbccddeeff", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth })))?;
+    let r = site("__push-sub", Some(json!({ "who": "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth })))?;
     s.ok("a who that names an identity is that identity's own: a link holder subscribes for no one (403)", r.status == 403, &r);
 
     // a mutation pushes to everyone, once it commits, once

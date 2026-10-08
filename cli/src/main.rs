@@ -20,7 +20,7 @@ use clap::{Parser, Subcommand};
 use fragment_core::price::{dollars, USD};
 use fragment_proto::ledger::{LedgerStatus, Standing};
 use fragment_proto::{
-    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, Invite, InviteList, Member, MemberList, OpResult, Posted, Rotated, Run, RunList,
+    ChannelPage, Created, FragmentList, FragmentStatus, IdentityView, InviteList, Member, MemberList, Shared, OpResult, Posted, Rotated, Run, RunList,
     Visibility,
 };
 use serde::Serialize;
@@ -66,17 +66,8 @@ enum Cmd {
         #[arg(long)]
         no_browser: bool,
     },
-    /// Who the host says you are: your identity, username, this key, your other keys
+    /// Who the host says you are: your identity, email, this key, your other keys
     Whoami,
-    /// Your username, chosen once: your fragments live at
-    /// <label>--<username>.<host>
-    Username {
-        username: Option<String>,
-        /// Release this username instead (the fleet's operators: undoes one
-        /// taken by mistake, so its person chooses again)
-        #[arg(long, requires = "username")]
-        release: bool,
-    },
     /// Your keys: list them, rotate this one (a new key replaces it and
     /// keeps every grant), or revoke one
     Keys {
@@ -190,7 +181,9 @@ enum Cmd {
     },
     /// List a fragment's triggers (cron, channel, files) and what is paused
     Triggers { name: String },
-    /// The deployment's operators: an operator key, and wiping a person
+    /// The deployment's operators: an operator key, wiping a person, and
+    /// the admin (people, orgs, comped seats, trial codes, billing's
+    /// health, the log of what operators did)
     Operator {
         #[command(subcommand)]
         sub: OperatorCmd,
@@ -235,13 +228,11 @@ enum Cmd {
         #[command(subcommand)]
         sub: MembersCmd,
     },
-    /// Invites: a token that makes whoever redeems it a member
+    /// Invites waiting on an email (`members add` makes them)
     Invite {
         #[command(subcommand)]
         sub: InviteCmd,
     },
-    /// Join a fragment with an invite token
-    Join { name: String, token: String },
     /// Call an operation; prints its result (a retry with the same --id is a replay)
     Call {
         name: String,
@@ -278,7 +269,7 @@ enum Cmd {
     /// and the question's record. Its answer comes in that chat; --wait
     /// prints it
     Ask {
-        /// The agent: its label or fragment (`fred`, `fred.paul`), or its identity
+        /// The agent: its label or fragment (`fred`, `fred--k3x9`), or its identity
         agent: String,
         /// What to ask it
         text: String,
@@ -359,8 +350,8 @@ enum OperatorCmd {
     /// deployment's `operators`. It is held by no person, so a wipe never
     /// removes it
     Key { path: PathBuf },
-    /// Wipe a person (a username, or id:…): everything theirs and their
-    /// agents' is deleted, and their username and sign-in freed, so their
+    /// Wipe a person (an email, or an npub): everything theirs and their
+    /// agents' is deleted, and their email and sign-in freed, so their
     /// next sign-in is a new person. --dry-run says what it deletes and
     /// changes nothing; --yes deletes it (again: it goes on where it
     /// stopped)
@@ -375,12 +366,108 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// List people, a page at a time; --q finds them by the start of their email
+    People {
+        #[arg(long)]
+        q: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// One person: their seat, org, ledger and computer
+    Person {
+        npub: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// List orgs, a page at a time: seats, admins, Stripe status
+    Orgs {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Comp a seat for an email: in --org, else the org its person is in,
+    /// else a new org of one (the email is mailed)
+    Comp {
+        email: String,
+        /// seat ($100: a computer that sleeps) or always-on ($200)
+        #[arg(long, default_value = "seat")]
+        kind: String,
+        #[arg(long)]
+        org: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// End a comped seat (its row's id, as `comp` and `orgs` print it)
+    Uncomp {
+        seat: String,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Trial codes: list them, or make one (--name …), or mail one (--send <id> --to <email>)
+    Trials {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "seat")]
+        kind: String,
+        #[arg(long, default_value = "7")]
+        days: u32,
+        #[arg(long, default_value = "10")]
+        capacity: u64,
+        #[arg(long)]
+        send: Option<String>,
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Billing's health: orgs paying, seats, the push queues, what is failing
+    Health {
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// What operators did, newest first
+    Log {
+        #[arg(long)]
+        before: Option<u64>,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+/// A seat's kind as the CLI takes it.
+fn seat_kind(kind: &str) -> Result<&'static str> {
+    match kind {
+        "seat" => Ok("seat"),
+        "always-on" | "seat_always_on" => Ok("seat_always_on"),
+        other => Err(usage(format!("a seat's kind is seat or always-on, not {other:?}"))),
+    }
+}
+
+/// The client an operator's command signs with: the operator key's file
+/// (the flag, else FRAGMENT_OPERATOR_KEY_FILE), else this machine's key.
+fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::path::Path>) -> Result<api::Client> {
+    match operator::key_file(key_file, std::env::var(operator::KEY_FILE_ENV).ok()) {
+        Some(file) => {
+            let mut c = api::Client::new(&resolve_host(host, &load_config()), operator::read_key(&file)?);
+            c.verbose = verbose;
+            Ok(c)
+        }
+        None => require_client(host, verbose),
+    }
+}
+
+/// An admin call's answer as JSON, or its refusal.
+fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
+    c.call_as::<Value>(resp)
 }
 
 #[derive(Subcommand)]
 enum LedgerCmd {
-    /// Grant someone credit (the deployment's operators): a username, an
-    /// identity (id:…), or `me`
+    /// Grant someone credit (the deployment's operators): an email, an
+    /// identity (an npub), or `me`
     Grant {
         who: String,
         usd: f64,
@@ -436,10 +523,12 @@ enum BlobCmd {
 enum MembersCmd {
     /// List members and their roles
     List { name: String },
-    /// Add a member, or change their role (the owner, or their agent for them)
+    /// Add a member, or change their role (the owner, or their agent for
+    /// them). An email no one signs in as yet is mailed an invite: they
+    /// are in once they sign in as it
     Add {
         name: String,
-        /// identity (id:…), npub, 64-hex key, or NIP-05 name (name@domain)
+        /// an email, or an identity or key (an npub, or 64 hex)
         who: String,
         /// viewer | editor
         #[arg(long, default_value = "viewer")]
@@ -448,7 +537,7 @@ enum MembersCmd {
         #[arg(long)]
         people_only: bool,
     },
-    /// Remove a member (the owner, or their agent for them)
+    /// Remove a member (the owner, or their agent for them): an email, or an npub
     Rm { name: String, who: String },
     /// Leave a fragment you are a member of
     Leave { name: String },
@@ -456,23 +545,10 @@ enum MembersCmd {
 
 #[derive(Subcommand)]
 enum InviteCmd {
-    /// Make an invite (the owner, or their agent for them); prints the token once
-    Create {
-        name: String,
-        /// viewer | editor
-        #[arg(long, default_value = "viewer")]
-        role: String,
-        /// how many people may join with it
-        #[arg(long, default_value = "1")]
-        uses: u32,
-        /// lifetime in seconds (default 7 days, at most 30)
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// List open invites (the owner, or their agent for them; tokens are never shown again)
+    /// List the invites waiting (the owner, or their agent for them)
     List { name: String },
-    /// Revoke an invite by id (the owner, or their agent for them)
-    Revoke { name: String, id: String },
+    /// Revoke the invite waiting on an email (the owner, or their agent for them)
+    Revoke { name: String, email: String },
 }
 
 #[derive(Subcommand)]
@@ -522,10 +598,8 @@ fn save_config(key: &str, value: &str) -> Result<PathBuf> {
 
 fn print_identity(v: &IdentityView, this_key: &str) {
     println!("identity: {} ({})", v.id, v.kind.as_str());
-    match &v.username {
-        Some(u) => println!("username: {u} (your fragments are <name>.{u})"),
-        None if v.kind == fragment_proto::IdentityKind::Person => println!("username: none yet (fragment username <name>, or on the host's page)"),
-        None => {}
+    if let Some(email) = &v.email {
+        println!("email: {email}");
     }
     for k in &v.keys {
         let state = match (k.npub == this_key, k.revoked_at) {
@@ -538,15 +612,6 @@ fn print_identity(v: &IdentityView, this_key: &str) {
     for a in &v.agents {
         println!("  agent {a}");
     }
-}
-
-/// Whom `members add|rm` names: an identity (`id:…`), or a key (an npub,
-/// 64 hex, or a NIP-05 name).
-fn member_named(who: String) -> Result<String> {
-    if who.starts_with("id:") {
-        return Ok(who);
-    }
-    auth::resolve_npub(&who)
 }
 
 fn load_config() -> Config {
@@ -567,6 +632,19 @@ fn resolve_host(cli_host: &Option<String>, cfg: &Config) -> String {
 /// agent"): `FRAGMENT_AS_AGENT` names the agent fragment the computer's
 /// egress signs each request as, and `FRAGMENT_FOR` the person it acts for.
 /// Neither set: this machine's key signs, as ever.
+/// A create of what a command names: a name in full as it is, or a label
+/// the platform names (decision 47: `todo` makes `todo--k3x9`).
+fn to_create(name: &str) -> fragment_proto::CreateFragment {
+    let full = fragment_proto::valid_fragment_name(name);
+    fragment_proto::CreateFragment {
+        name: if full { name.to_string() } else { String::new() },
+        label: (!full).then(|| name.to_string()),
+        visibility: None,
+        template: None,
+        title: None,
+    }
+}
+
 fn agent_mode() -> Result<Option<api::AgentMode>> {
     agent_mode_of(std::env::var("FRAGMENT_AS_AGENT").ok(), std::env::var("FRAGMENT_FOR").ok())
 }
@@ -581,14 +659,14 @@ fn agent_mode_of(agent: Option<String>, acting_for: Option<String>) -> Result<Op
         };
     };
     if !fragment_proto::valid_fragment_name(&agent) {
-        return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>.<username>), not {agent:?}")));
+        return Err(usage(format!("FRAGMENT_AS_AGENT names an agent fragment (<label>--<suffix>), not {agent:?}")));
     }
-    // an identity as the platform names one (`id:` and its opaque id: the
-    // platform checks it exactly, and only an agent's owner is honored)
-    let identity = |s: &str| s.strip_prefix("id:").is_some_and(|rest| (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric()));
+    // an identity as the platform names one (an npub: the platform checks
+    // it exactly, and only an agent's owner is honored)
+    let identity = |s: &str| s.strip_prefix("npub1").is_some_and(|rest| (1..=96).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
     if let Some(who) = &acting_for {
         if !identity(who) {
-            return Err(usage(format!("FRAGMENT_FOR names an identity (id:…), not {who:?}")));
+            return Err(usage(format!("FRAGMENT_FOR names an identity (an npub), not {who:?}")));
         }
     }
     Ok(Some(api::AgentMode { agent, acting_for }))
@@ -892,6 +970,132 @@ fn run(cli: Cli) -> Result<()> {
             println!("wiped in {calls} call(s): nothing of theirs is left; their next sign-in is a new person");
             return Ok(());
         }
+        Cmd::Operator { sub: OperatorCmd::People { q, after, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let mut path = "/api/admin/people?".to_string();
+            if let Some(q) = &q {
+                path.push_str(&format!("q={}&", api::encode_q(q)));
+            }
+            if let Some(a) = &after {
+                path.push_str(&format!("after={}", api::encode_q(a)));
+            }
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for p in v["people"].as_array().into_iter().flatten() {
+                let seat = match &p["seat"] {
+                    Value::Null => "no seat".to_string(),
+                    s => format!("{} {}{}", s["kind"].as_str().unwrap_or("?"), if s["comped"] == true { "comped" } else { "paid" }, if s["good"] == true { "" } else { " (lapsed)" }),
+                };
+                println!("{}  {}  {seat}  {}", p["npub"].as_str().unwrap_or("?"), p["email"].as_str().unwrap_or("-"), p["org"]["name"].as_str().unwrap_or(""));
+            }
+            if let Some(next) = v["next"].as_str() {
+                println!("more: --after {next}");
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Person { npub, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.get(&format!("/api/admin/people/{npub}"))?)?;
+            json_exit(j, &v);
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Orgs { after, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = match &after {
+                Some(a) => format!("/api/admin/orgs?after={}", api::encode_q(a)),
+                None => "/api/admin/orgs".into(),
+            };
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for o in v["orgs"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {}  {} paid, {} comped, {} pending  {}",
+                    o["id"].as_str().unwrap_or("?"),
+                    o["name"].as_str().unwrap_or("?"),
+                    o["paidSeats"],
+                    o["compedSeats"],
+                    o["pending"],
+                    o["status"].as_str().unwrap_or("never paid")
+                );
+            }
+            if let Some(next) = v["next"].as_str() {
+                println!("more: --after {next}");
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Comp { email, kind, org, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.post_json("/api/admin/seats", &json!({ "email": email, "kind": seat_kind(&kind)?, "org": org }))?)?;
+            json_exit(j, &v);
+            let held = if v["seat"]["person"].is_null() { "waiting on the email" } else { "held" };
+            println!("{} {} for {} in {} ({held}{})", if v["created"] == true { "comped" } else { "already comped:" }, v["seat"]["seat"].as_str().unwrap_or("?"), email, v["org"]["name"].as_str().unwrap_or("?"), if v["mailed"] == true { ", mailed" } else { "" });
+            println!("seat {}", v["seat"]["id"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Uncomp { seat, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.delete(&format!("/api/admin/seats/{seat}"))?)?;
+            json_exit(j, &v);
+            println!("ended the comp of {}", v["email"].as_str().unwrap_or("?"));
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Trials { name, kind, days, capacity, send, to, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            if let Some(id) = send {
+                let to = to.ok_or_else(|| usage("--send <id> mails to --to <email>"))?;
+                let v = admin_answer(&c, c.post_json(&format!("/api/admin/trials/{id}/send"), &json!({ "email": to }))?)?;
+                json_exit(j, &v);
+                println!("mailed {}", v["to"].as_str().unwrap_or("?"));
+                return Ok(());
+            }
+            if let Some(name) = name {
+                let v = admin_answer(&c, c.post_json("/api/admin/trials", &json!({ "name": name, "kind": seat_kind(&kind)?, "days": days, "capacity": capacity }))?)?;
+                json_exit(j, &v);
+                println!("{}  {} ({} days of {}, {} places)  id {}", v["code"].as_str().unwrap_or("?"), v["name"].as_str().unwrap_or("?"), v["days"], v["kind"].as_str().unwrap_or("?"), v["capacity"], v["id"].as_str().unwrap_or("?"));
+                return Ok(());
+            }
+            let v = admin_answer(&c, c.get("/api/admin/trials")?)?;
+            json_exit(j, &v);
+            for t in v["codes"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {}  {} days of {}  {}/{} used, {} open{}  id {}",
+                    t["code"].as_str().unwrap_or("?"),
+                    t["name"].as_str().unwrap_or("?"),
+                    t["days"],
+                    t["kind"].as_str().unwrap_or("?"),
+                    t["subscribed"],
+                    t["capacity"],
+                    t["open"],
+                    if t["active"] == true { "" } else { ", off" },
+                    t["id"].as_str().unwrap_or("?")
+                );
+            }
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Health { key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let v = admin_answer(&c, c.get("/api/admin/health")?)?;
+            json_exit(j, &v);
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::Log { before, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = match before {
+                Some(b) => format!("/api/admin/log?before={b}"),
+                None => "/api/admin/log".into(),
+            };
+            let v = admin_answer(&c, c.get(&path)?)?;
+            json_exit(j, &v);
+            for e in v["entries"].as_array().into_iter().flatten() {
+                println!("{}  {}  {}  {}  {}", e["n"], e["operator"].as_str().unwrap_or("?"), e["action"].as_str().unwrap_or("?"), e["target"].as_str().unwrap_or("?"), e["detail"].as_str().unwrap_or(""));
+            }
+            if let Some(next) = v["next"].as_u64() {
+                println!("more: --before {next}");
+            }
+            return Ok(());
+        }
         Cmd::New { dir, template, list } => {
             if list {
                 for (name, files) in TEMPLATES {
@@ -917,24 +1121,6 @@ fn run(cli: Cli) -> Result<()> {
     let c = require_client(&cli.host, cli.verbose)?;
 
     match cli.cmd {
-        Cmd::Username { username, release } => {
-            if release {
-                let u = username.unwrap_or_default();
-                let v = c.call(c.delete(&format!("/api/users/{u}"))?)?;
-                json_exit(j, &v);
-                println!("released {u} ({}): its person chooses a username again", v["identity"].as_str().unwrap_or(""));
-                return Ok(());
-            }
-            let v = match username {
-                Some(u) => c.call(c.put_json("/api/identities/me/username", &json!({ "username": u }))?)?,
-                None => c.call(c.get("/api/identities/me")?)?,
-            };
-            json_exit(j, &v);
-            match v["username"].as_str() {
-                Some(u) => println!("username: {u}"),
-                None => println!("no username yet: fragment username <name>"),
-            }
-        }
         Cmd::Whoami | Cmd::Keys { sub: None | Some(KeysCmd::List) } => {
             let v: IdentityView = c.call_as(c.get("/api/identities/me")?)?;
             if let Some(mode) = c.agent() {
@@ -988,7 +1174,7 @@ fn run(cli: Cli) -> Result<()> {
                 Some(v) => Some(Visibility::parse(v).ok_or_else(|| usage(format!("--visibility is public, link, or members, not {v:?}")))?),
                 None => None,
             };
-            let body = fragment_proto::CreateFragment { name: name.clone(), visibility, template, title };
+            let body = fragment_proto::CreateFragment { visibility, template, title, ..to_create(&name) };
             let v: Created = c.call_as(c.post_json("/api/fragments", &body)?)?;
             if j {
                 // its tokens are credentials: on request only (a transcript keeps what is printed)
@@ -1198,11 +1384,22 @@ fn run(cli: Cli) -> Result<()> {
             if !j {
                 println!("scaffolded '{tpl_name}' into {}", dir.display());
             }
-            let created = c.post_json("/api/fragments", &json!({ "name": name })).and_then(|r| c.call(r));
-            if let Err(e) = created {
-                // nothing was created, so leave nothing here either: the same init can be retried
-                let _ = std::fs::remove_dir_all(&dir);
-                return Err(e);
+            let created = c.post_json("/api/fragments", &to_create(&name)).and_then(|r| c.call_as::<Created>(r));
+            let name = match created {
+                Ok(made) => made.name,
+                Err(e) => {
+                    // nothing was created, so leave nothing here either: the same init can be retried
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            };
+            // the name the platform made it under, in full (`todo--k3x9`)
+            if mf.exists() {
+                let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&mf)?)?;
+                if let Value::Object(o) = &mut m {
+                    o.insert("name".into(), Value::String(name.clone()));
+                }
+                std::fs::write(&mf, serde_json::to_vec_pretty(&m)?)?;
             }
             // push the scaffold, then point live at it — the first deploy
             // is the real site, not an empty one
@@ -1425,9 +1622,24 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Add { name, who, role, people_only } => {
-                let who = member_named(who)?;
                 let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let v: Member = c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{who}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?;
+                let v: Member = match auth::member_of(&who)? {
+                    auth::Member::Email(_) if people_only => return Err(usage("--people-only names an npub: an invite by email lends what the person's role does")),
+                    auth::Member::Email(email) => {
+                        let body = fragment_proto::CreateInvite { email: email.clone(), role };
+                        match c.call_as::<Shared>(c.post_json(&format!("/api/f/{name}/invites"), &body)?)? {
+                            Shared::Member(m) => m,
+                            Shared::Invited(i) => {
+                                json_exit(j, &Shared::Invited(i.clone()));
+                                let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
+                                println!("invited {email} as {} on {name}: they were mailed a link, and are in once they sign in as {email}", i.role.as_str());
+                                println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
+                                return Ok(());
+                            }
+                        }
+                    }
+                    auth::Member::Npub(npub) => c.call_as(c.put_bytes(&format!("/api/f/{name}/members/{npub}"), serde_json::to_vec(&fragment_proto::SetRole { role, people_only })?)?)?,
+                };
                 json_exit(j, &v);
                 println!("{} is now {} on {name}", v.principal, v.role.as_str());
                 if let Some(owner) = &v.owner {
@@ -1435,7 +1647,7 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             MembersCmd::Rm { name, who } => {
-                let who = member_named(who)?;
+                let who = auth::member_of(&who)?;
                 let v = c.call(c.delete(&format!("/api/f/{name}/members/{who}"))?)?;
                 json_exit(j, &v);
                 println!("removed {who} from {name}");
@@ -1447,48 +1659,21 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Invite { sub } => match sub {
-            InviteCmd::Create { name, role, uses, ttl } => {
-                let role = fragment_proto::Role::parse(&role).ok_or_else(|| usage(format!("--role is viewer or editor, not {role:?}")))?;
-                let body = fragment_proto::CreateInvite { role, uses: Some(uses), ttl_s: ttl, invitee: None };
-                let v: Invite = c.call_as(c.post_json(&format!("/api/f/{name}/invites"), &body)?)?;
-                // the create is the one answer that carries the token
-                let token = v.token.clone().ok_or_else(|| anyhow!("the host made invite {} but did not answer its token", v.id))?;
-                // the link a person opens in a browser: the platform's join
-                // page (they sign in, see what it grants, then join)
-                let status: FragmentStatus = c.call_as(c.get(&format!("/api/f/{name}/status"))?)?;
-                let link = format!("{}/join/{}?token={token}", platform_of(&c, &status), status.name);
-                if j {
-                    let mut out = serde_json::to_value(&v)?;
-                    out["link"] = json!(link);
-                    ok_exit(&out);
-                }
-                println!("invite {} ({}, {uses} use{})", v.id, v.role.as_str(), if uses == 1 { "" } else { "s" });
-                println!("open in a browser: {link}");
-                println!("or from a CLI: fragment join {name} {token}");
-            }
             InviteCmd::List { name } => {
                 let v: InviteList = c.call_as(c.get(&format!("/api/f/{name}/invites"))?)?;
                 json_exit(j, &v);
                 for i in &v.invites {
                     let expires_s = u64::try_from(i.expires_at / 1000).unwrap_or(0);
-                    println!("{}\t{}\t{} left\texpires {}", i.id, i.role.as_str(), i.uses_left, chrono_like(expires_s));
+                    println!("{}\t{}\texpires {}", i.email, i.role.as_str(), chrono_like(expires_s));
                 }
             }
-            InviteCmd::Revoke { name, id } => {
-                let v = c.call(c.delete(&format!("/api/f/{name}/invites/{id}"))?)?;
+            InviteCmd::Revoke { name, email } => {
+                let email = email.trim().to_ascii_lowercase();
+                let v = c.call(c.delete(&format!("/api/f/{name}/invites/{email}"))?)?;
                 json_exit(j, &v);
-                println!("revoked invite {id}");
+                println!("revoked the invite waiting on {email}");
             }
         },
-        Cmd::Join { name, token } => {
-            let v = c.call(c.post_json(&format!("/api/f/{name}/join"), &json!({ "token": token }))?)?;
-            json_exit(j, &v);
-            if v["joined"].as_bool().unwrap_or(false) {
-                println!("joined {name} as {}", v["role"].as_str().unwrap_or(""));
-            } else {
-                println!("already a member of {name} ({})", v["role"].as_str().unwrap_or(""));
-            }
-        }
         Cmd::Call { name, op, input, id } => {
             let input = match (input.as_str(), input.strip_prefix('@')) {
                 ("-", _) => std::io::read_to_string(std::io::stdin()).map_err(|e| usage(format!("--input -: reading stdin: {e}")))?,
@@ -1577,9 +1762,8 @@ fn run(cli: Cli) -> Result<()> {
                 if j {
                     return Err(usage("--follow streams JSON lines; --json does not apply"));
                 }
-                // the live socket takes a full name (`<label>.<username>`); the
-                // signed API resolves a bare label to one of yours, so ask it
-                let name = if name.contains('.') { name } else { c.call_as::<FragmentStatus>(c.get(&format!("/api/f/{name}/status"))?)?.name };
+                // the live socket takes a name in full (`todo--k3x9`)
+                let name = c.fragment(&name)?;
                 watch::follow_channel(&c, &name, &channel, after)?;
                 return Ok(());
             }
@@ -1718,14 +1902,14 @@ mod tests {
         let s = |v: &str| Some(v.to_string());
         assert_eq!(agent_mode_of(None, None).unwrap(), None, "no agent: this machine's key signs");
         assert_eq!(agent_mode_of(s(""), s("  ")).unwrap(), None, "empty is unset");
-        assert_eq!(agent_mode_of(s("juniper.paul"), None).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: None }));
-        let id = "id:0123456789abcdef0123456789abcdef";
-        assert_eq!(agent_mode_of(s(" juniper.paul "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper.paul".into(), acting_for: s(id) }));
-        for bad in ["juniper", "Juniper.Paul", "a/b.paul", "juniper.paul?for=x"] {
+        assert_eq!(agent_mode_of(s("juniper--k3x9"), None).unwrap(), Some(api::AgentMode { agent: "juniper--k3x9".into(), acting_for: None }));
+        let id = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        assert_eq!(agent_mode_of(s(" juniper--k3x9 "), s(id)).unwrap(), Some(api::AgentMode { agent: "juniper--k3x9".into(), acting_for: s(id) }));
+        for bad in ["juniper", "Juniper--K3X9", "a/b--k3x9", "juniper--k3x9?for=x", "juniper.paul"] {
             assert_eq!(code_of(agent_mode_of(s(bad), None)), Code::InvalidUsage, "{bad}");
         }
-        for bad in ["paul", "id:", "id:a b", "npub1xyz", "id:paul&x=1"] {
-            assert_eq!(code_of(agent_mode_of(s("juniper.paul"), s(bad))), Code::InvalidUsage, "{bad}");
+        for bad in ["paul", "npub1", "id:0123456789abcdef0123456789abcdef", "NPUB180CVV07TJDRRGPA0J7J7TMNYL2YR6YR7L8J4S3EVF6U64TH6GKWSYJH6W6", "npub1paul&x=1", "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"] {
+            assert_eq!(code_of(agent_mode_of(s("juniper--k3x9"), s(bad))), Code::InvalidUsage, "{bad}");
         }
         assert_eq!(code_of(agent_mode_of(None, s(id))), Code::InvalidUsage, "for whom, with no agent?");
     }
@@ -1748,14 +1932,14 @@ mod tests {
     fn links_for_people_name_the_platform() {
         let status = |platform: &str| -> FragmentStatus {
             serde_json::from_value(json!({
-                "name": "g.paul", "npub": "n", "owner": "id:p", "role": "owner", "visibility": "link", "repo": "r",
+                "name": "g--k3x9", "npub": "n", "owner": "npub1p", "role": "owner", "visibility": "link", "repo": "r",
                 "pins": { "main": null, "live": null }, "counts": { "files": 0, "events": 0, "members": 1 },
                 "code": { "sha": null, "operations": {}, "error": null }, "viewToken": null, "inboxToken": null,
-                "urls": { "canonical": "https://g--paul.fragment.boats/", "platform": platform },
+                "urls": { "canonical": "https://g--k3x9.fragment.boats/", "platform": platform },
             }))
             .expect("a status")
         };
-        let agent = api::Client::new("http://api.fragment.internal", api::Signer::Agent(api::AgentMode { agent: "j.paul".into(), acting_for: None }));
+        let agent = api::Client::new("http://api.fragment.internal", api::Signer::Agent(api::AgentMode { agent: "j--k3x9".into(), acting_for: None }));
         assert_eq!(platform_of(&agent, &status("https://fragment.club/")), "https://fragment.club");
         assert_eq!(platform_of(&agent, &status("")), "http://api.fragment.internal", "an older host names none");
     }
@@ -1768,7 +1952,7 @@ mod tests {
     #[test]
     fn a_deploy_mints_one_token_and_refreshes_once() {
         let mock = crate::mockcs::start();
-        mock.seed_repo("t", &[]);
+        mock.seed_repo("t--k3x9", &[]);
         let c = api::Client::new(&mock.url, auth::fixed(7));
         let dir = std::env::temp_dir().join(format!("fragment-deploy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1777,8 +1961,8 @@ mod tests {
         mock.take_requests("");
         let count = |routes: &[(&str, u32)]| -> std::collections::BTreeMap<String, u32> { routes.iter().map(|(r, n)| (r.to_string(), *n)).collect() };
 
-        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), None).unwrap() else { panic!("a live deploy") };
-        assert_eq!((mock.branch("t", "live"), mock.branch("t", "main")), (Some(live_tip.clone()), Some(live_tip)), "live at main's tip");
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t--k3x9", Some(&dir), None).unwrap() else { panic!("a live deploy") };
+        assert_eq!((mock.branch("t--k3x9", "live"), mock.branch("t--k3x9", "main")), (Some(live_tip.clone()), Some(live_tip)), "live at main's tip");
         assert_eq!(
             mock.take_requests(""),
             count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)]),
@@ -1786,9 +1970,9 @@ mod tests {
         );
 
         std::fs::write(dir.join("site/index.html"), "<h1>two</h1>").unwrap();
-        let Deployed::Live { live_tip, .. } = deploy(&c, "t", Some(&dir), Some("two")).unwrap() else { panic!("a live deploy") };
-        assert_eq!(mock.file_at("t", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
-        assert_eq!(Some(live_tip), mock.branch("t", "live"));
+        let Deployed::Live { live_tip, .. } = deploy(&c, "t--k3x9", Some(&dir), Some("two")).unwrap() else { panic!("a live deploy") };
+        assert_eq!(mock.file_at("t--k3x9", "live", "site/index.html").unwrap(), b"<h1>two</h1>");
+        assert_eq!(Some(live_tip), mock.branch("t--k3x9", "live"));
         assert_eq!(
             mock.take_requests(""),
             count(&[("GET storage-token", 1), ("GET branch", 1), ("GET files/metadata", 1), ("POST commit-pack", 1), ("POST deploy", 1), ("POST refresh", 1)])

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::tree::{self, Indexed, TreeDiff};
 use fragment_core::{manifest, npub, site};
-use fragment_proto::{limits, valid_repo_path, ChannelDecl, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
+use fragment_proto::{limits, valid_repo_path, ChannelDecl, ChannelRecord, ErrorCode, IdentityKind, OpDecl, OpKind, Role, TriggerDecl, TriggerOn};
 use fragment_templates::blessed;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -840,22 +840,23 @@ impl FragmentCell {
         Ok(out)
     }
 
-    /// The operations a record on `channel` posted by `poster` starts: each
+    /// The operations a record (on its channel, by its poster) starts: each
     /// once (two triggers that run one operation start it once), in their
     /// first trigger's order. A trigger that names its posters' kind
     /// (`from`) starts one only for a member of that kind: one statement.
-    pub(crate) fn channel_triggers(&self, channel: &str, poster: &str) -> CellResult<Vec<String>> {
+    pub(crate) fn channel_triggers(&self, record: &ChannelRecord) -> CellResult<Vec<String>> {
         #[derive(Deserialize)]
         struct Run {
             run: String,
         }
-        let on = TriggerOn::Channel(channel.to_string());
+        let on = TriggerOn::Channel(record.channel.clone());
         let (kind, target) = on.parts();
+        // its poster as stored (subscriptions.rs `outbox_record` says why)
         let rows: Vec<Run> = self.typed(
             "SELECT run FROM code_triggers WHERE kind = ? AND target = ?
-               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = ?))
+               AND (from_kind IS NULL OR from_kind = (SELECT kind FROM members WHERE principal = (SELECT principal FROM records WHERE channel = ? AND seq = ?)))
              GROUP BY run ORDER BY MIN(idx)",
-            vec![kind.into(), target.into(), poster.into()],
+            vec![kind.into(), target.into(), record.channel.as_str().into(), SqlStorageValue::Integer(record.seq)],
         )?;
         Ok(rows.into_iter().map(|r| r.run).collect())
     }

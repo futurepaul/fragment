@@ -1,0 +1,22 @@
+/* The operators' admin page (cell/shell/admin.html): plain and dense. */
+:root { color-scheme: light dark; font: 14px/1.4 system-ui, sans-serif; }
+body { margin: 0; padding: 0 1rem 2rem; }
+header { display: flex; align-items: center; gap: 1rem; padding: .75rem 0; border-bottom: 1px solid #8884; }
+h1 { font-size: 1.1rem; margin: 0; }
+nav button { border: 0; background: none; padding: .3rem .6rem; border-radius: .4rem; cursor: pointer; font: inherit; color: inherit; }
+nav button.on { background: #8883; }
+#me { margin-left: auto; opacity: .7; }
+#status { min-height: 1.4em; margin: .5rem 0; }
+#status.bad { color: #c33; }
+form { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin: .5rem 0; }
+input, select, button { font: inherit; padding: .25rem .4rem; }
+table { border-collapse: collapse; width: 100%; margin: .5rem 0; }
+th, td { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #8882; vertical-align: top; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: #8881; }
+aside { border: 1px solid #8884; border-radius: .5rem; padding: .75rem; margin: .75rem 0; }
+aside h2 { font-size: 1rem; margin: 0 0 .5rem; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; }
+dt { opacity: .7; }
+code, .mono { font-family: ui-monospace, monospace; font-size: .9em; }
+.lapsed { color: #c33; }

@@ -45,6 +45,23 @@
     "client_id": "fragment-workos-client-id",
     "api_key": "fragment-workos-api-key"
   },
+  // Seats sold through Stripe (docs/billing.md). Leave it out and seats are
+  // comped by operators only. The key is a restricted key of the account's
+  // (Customers, Checkout Sessions, Subscriptions and portal sessions
+  // written; Products and Prices read); the webhook secret is this
+  // deployment's own endpoint's, which takes exactly
+  // `fragment_core::stripe::EVENTS`. `portal` is the deployment's own
+  // portal configuration, never the account's default (finite-mono's).
+  // `key_file` is the same key in a file of this machine's (as the DNS
+  // token is), for xtask's own calls: `cargo xtask stripe check|setup`,
+  // and a branch's own endpoint at each deploy (decision 58).
+  // "stripe": {
+  //   "key": "fragment-stripe-key",
+  //   "webhook_secret": "fragment-stripe-webhook-secret",
+  //   "portal": "bpc_...",
+  //   "tax": true,
+  //   "key_file": "~/.config/fragment/secrets/stripe-restricted-key"
+  // },
   // The AI Gateway the model route and image steps call through: one of
   // your own, named (never "default", which makes one that logs), with
   // Unified Billing, zero data retention on and its logs off. Without it,
@@ -61,6 +78,10 @@
   // or a mailto address, linked from the shell's notice. Without it, the
   // shell shows them what to tell whoever runs the deployment.
   // "support_url": "mailto:help@example.dev",
+  // The address the platform's mail (invites, seats) comes from, on a
+  // domain onboarded to Cloudflare Email Sending (`wrangler email sending
+  // enable <domain>`). Without it, the deployment sends no mail.
+  // "mail_from": "fragment <mail@example.com>",
   // The operators (npubs or identities): they grant credit, set plans,
   // release usernames, and wipe a person (docs/api.md, Operators). Wipe
   // with an operator key no person holds (`fragment operator key <file>`

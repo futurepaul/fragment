@@ -27,15 +27,14 @@ whose ending the page and the terminal both show. On a machine without a
 browser, it prints the link to open anywhere you are signed in
 (`--no-wait` returns at once; run it again after approving). The host is
 https://fragment.club unless `--host`, `FRAGMENT_HOST`, or `fragment
-host <url>` names another. The host knows which identity (`id:…`) each
+host <url>` names another. The host knows which identity (an npub) each
 key belongs to: memberships name you, not the key. `fragment keys
 rotate` replaces the key and keeps everything you have.
 
-A person chooses a username once (`fragment username <name>`, or the
-host's page after the first sign-in) and can create nothing before. A
-fragment's name is `<label>.<username>`, served at
-`<label>--<username>.<suffix>`; in a command, a bare label names one of
-yours (`fragment status todo` is `todo.<your username>`).
+A fragment's name is its label and a random suffix the platform adds
+(`fragment create todo` makes `todo--k3x9`), served at `<name>.<suffix>`;
+in a command, a bare label names the one of yours with it (`fragment
+status todo`), and a name in full names any fragment.
 
 ## As an agent, on a computer
 
@@ -43,11 +42,11 @@ An agent on a computer (docs/computers.md) holds no key and logs in to
 nothing: its computer's API signs each request as the agent. The CLI
 does what that needs when the computer sets:
 
-- `FRAGMENT_AS_AGENT=<agent fragment>` (`juniper.paul`): every request
+- `FRAGMENT_AS_AGENT=<agent fragment>` (`juniper--k3x9`): every request
   names the agent (`x-fragment-agent`) and carries no signature of its
   own; the computer's egress signs it as that agent, which then holds
   exactly its grants.
-- `FRAGMENT_FOR=<id:…>`, optional: the person the agent acts for (its
+- `FRAGMENT_FOR=<npub>`, optional: the person the agent acts for (its
   owner), named as `for` on a fragment's routes and the fragment list,
   the routes that honor it. The agent then holds that person's role,
   never above it (and never above an editor): `fragment list` lists their
@@ -58,7 +57,7 @@ does what that needs when the computer sets:
   the default: an unsigned request means nothing anywhere else.
 
 ```
-FRAGMENT_AS_AGENT=juniper.paul FRAGMENT_FOR=id:… fragment list
+FRAGMENT_AS_AGENT=juniper--k3x9 FRAGMENT_FOR=npub1… fragment list
 ```
 
 Our Hermes image sets all three in each agent's terminal. `fragment
@@ -67,7 +66,7 @@ whoami` says which agent it is and for whom it acts; `fragment login` and
 manage.
 
 An agent acting for its owner shares its owner's fragments as its owner
-would: `fragment members add|rm`, `fragment invite create|list|revoke`,
+would: `fragment members add|rm`, `fragment invite list|revoke`,
 `fragment visibility`, and `fragment rotate`, on a fragment its owner
 owns. Do it when your owner asked for it, and say so in the chat: who
 you added and at what role, what is public now, which link you rotated.
@@ -77,7 +76,7 @@ summary says "(an agent, for …)" (`by` and `for` in `fragment events
 list --json`). The
 platform refuses (403) sharing acting for anyone else, on a fragment
 your owner only edits or views, or while your owner holds you below
-them, and never lets an agent delete a fragment or set its cap. Links meant for people (an invite, a webhook URL) name the
+them, and never lets an agent delete a fragment or set its cap. Links meant for people (a share link, a webhook URL) name the
 platform's public origin, which a fragment's status reports
 (`urls.platform`), not the computer's internal host. `fragment write`
 (one text file to main, through the platform) and `fragment deploy`
@@ -457,15 +456,20 @@ fragment channel my-thing activity --follow                     # the backlog a 
 ```
 fragment visibility my-thing [public|link|members]
 fragment members list my-thing
-fragment members add my-thing <id:… | npub | name@domain> --role editor   # a key names its holder
-fragment members rm my-thing <id:… | npub>
+fragment members add my-thing bea@example.com --role editor   # a person, by email
+fragment members add my-thing <npub> --role viewer            # an identity (an agent's too), or any key of one
+fragment members rm my-thing <email | npub>
 fragment members leave my-thing
-fragment invite create my-thing --role viewer --uses 5    # prints a link to open in a browser (once)
-fragment join my-thing <token>                            # or join from a CLI
+fragment invite list my-thing                             # emails no one signs in as yet, mailed and waiting
+fragment invite revoke my-thing bea@example.com
 fragment rotate my-thing --view                            # a new share link
 ```
 
-Only the owner manages members, invites, visibility, and tokens.
+Anything with an `@` is an email. Someone who signs in as it is a member
+at once; when no one does yet, the platform mails them a link to it, and
+they are in once they sign in as that email (within 30 days). The mails
+you can have sent are capped by the day. Only the owner manages members,
+invites, visibility, and tokens.
 `fragment.json` grants nothing.
 
 ## Your ledger
@@ -493,6 +497,8 @@ fragment ledger                    # your credit, your plan, what is stopped, th
 fragment cap my-thing 10           # my-thing's cap: $10 a month (or `default`)
 fragment runs my-thing             # each run shows what it cost
 fragment ledger grant ann 20 --why "a top-up"   # operators only
+fragment operator people --q ann@                 # operators: people, orgs, comps,
+fragment operator comp ann@example.com --kind always-on   # trial codes, health, the log
 ```
 
 ## You and your keys
@@ -543,7 +549,6 @@ header at the way out. Never write secret values into files.
 ```
 fragment login [--force] [--no-wait]     fragment call <name> <op> [--input JSON|@file|-] [--id ID]
 fragment whoami                          fragment channel <name> [<channel>] [--after N] [--follow]
-fragment username [<name>]
 fragment keys [list|rotate|revoke <npub>]
 fragment ledger [grant <who> <usd> --why W]
 fragment cap <name> <usd>|default
@@ -557,8 +562,7 @@ fragment list                            fragment rotate <name> [--inbox] [--vie
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|add|rm|leave ...
 fragment events <name> [--since N | --tail N]
-fragment manifest <name>                 fragment invite create|list|revoke ...
-fragment join <name> <token>
+fragment manifest <name>                 fragment invite list|revoke ...
 fragment sync <name> [--dir D] [--watch] [--mode M | --live]
 fragment verify <name> [--dir D]         fragment secret set|list|rm ...
 fragment deploy <name> [--dir D] [--note N]

@@ -11,25 +11,29 @@ and are at the tag `celld-final`. Entries about the hosted fleet (Fly,
 the node image, its secrets) are the `celld` branch's, which runs
 fragment.club until cutover (decisions 34–35).
 
-## `fragment ask` sizes its chats' labels for a deployment without a branch
+## A direct chat's label is its agent's, which a branch may lack room for
 
-- **Observed:** 2026-10-07, the host label limit (docs/api.md, Names).
-  The CLI cuts a pair chat's label (`cli/src/ask.rs`, `label_max`) to
-  the room under its owner's username where hosts carry no mark: it does
-  not know a branch deployment's `--<branch>`, which the cell counts.
-- **Risk:** on a branch, two agents whose labels together come within the
-  mark's length of that room are refused their chat (400, saying why),
-  where on production they get one. Never a fragment no host reaches.
-- **First proof:** `fragment ask` on a preview answering "… is too
-  long: a fragment's address …" for a pair of long agent names.
-- **Delete when:** the CLI learns the room its owner's labels have (say
-  from `GET /api/identities/me`) and cuts to the lesser, so production's
-  labels, and the chats they name, stay as they are.
+- **Observed:** 2026-10-08, no usernames (decision 47) on the host label
+  limit (docs/api.md, Names). A person's direct chat with an agent is
+  labeled `<the agent's label>-chat`, by the shell and by `fragment ask`
+  alike (`cli/src/ask.rs`, `direct_label`), so both find the same chat.
+  An agent made by the CLI may have a label of 57 bytes (the shell's are
+  at most 31). A pair chat's label is cut to the room every deployment
+  leaves (`limits::LABEL_ROOM_MIN_BYTES`), so it fits anywhere.
+- **Risk:** on a branch, an agent whose label comes within `-chat` of the
+  room there (49 bytes or more on `p5`) is refused its direct chat (400,
+  saying why), where on production it gets one. Never a fragment no host
+  reaches.
+- **First proof:** a direct chat's create on a preview answering "… is
+  too long: a fragment's address …".
+- **Delete when:** an agent's label is held, where it is made, to the
+  room every deployment leaves less `-chat`, or a direct chat is found by
+  its members rather than its label.
 
 ## A wipe finds a person's fragments through their lists
 
 - **Observed:** 2026-10-07, the operator's wipe (docs/api.md, Operators).
-  No index names every fragment under a username: a wipe finds the ones a
+  No index names every fragment a person owns: a wipe finds the ones a
   person owns on their and their agents' lists (each fragment's own
   outbox delivers its rows) and the agent fragments the registry names.
 - **Risk:** a fragment whose create its owner's list never took (the
@@ -38,7 +42,7 @@ fragment.club until cutover (decisions 34–35).
   wiped, a late delivery is taken and kept nowhere.
 - **First proof:** a wiped person's fragment answering after their wipe
   said nothing was left.
-- **Delete when:** the registry (or a per-username index) records each
+- **Delete when:** the registry (or a per-person index) records each
   fragment as it is made, and the wipe reads it beside the lists.
 
 ## Objects made before a column of their table refuse what writes it
@@ -335,7 +339,7 @@ fragment.club until cutover (decisions 34–35).
   chat away; then, if still near the line, sessions and keys move to
   objects named by what they resolve (a session by its token's hash, a
   key by itself), written by the registry as they change, which keeps
-  only what must be unique (usernames, sign-in subjects, identities).
+  only what must be unique (emails, sign-in subjects, identities).
   Each lookup stays one live round trip: no cache outlives a revocation
   (rule 7).
 
@@ -371,6 +375,21 @@ fragment.club until cutover (decisions 34–35).
   deployment's config (a versioned file) into a Worker variable that
   `configured_book` reads, and each ledger takes the newer version at its
   next call (`take_book` already does), with a test of a book's change.
+
+## A plan has two writers: the registry, and an operator's ledger commands
+
+- **Observed:** orgs and seats (docs/billing.md). The registry pushes a
+  seat holder's plan and seat to their ledger (registry/orgs.rs), and an
+  operator may still set either straight on the ledger (`POST
+  /api/ledger/{person}/plan|seat`), which the e2e uses to make a guest or
+  cancel a seat. The registry's next push for that person wins.
+- **Risk:** an operator's override of a seat holder's plan is silently
+  undone at their seat's next change; a `seat` command whose `seq` runs
+  ahead of the clock holds the registry's pushes back until it catches up.
+- **First proof:** an operator who set a plan by hand and finds it reverted.
+- **Delete when:** the ledger's monthly allowance (approved 2026-10-07)
+  replaces plans' and seats' rules: the two commands go, operators comp
+  or end seats instead, and the e2e makes guests and lapses through seats.
 
 ## A fragment's git repository is not metered, and storage is sampled daily
 
@@ -767,20 +786,23 @@ fragment.club until cutover (decisions 34–35).
   script's temp file in the gateway's scratch, which then holds it to the
   work with the rest.
 
-## An agent's Bot Chat is found by its chat's name
+## An agent's Bot Chat is found by its chat's label
 
 - **Observed:** 2026-10-08, Bot Mode in our Hermes image
   (docs/computers.md, "Bot Mode in our Hermes image"). Which chat is an
-  agent's own, and so its Hermes Bot Chat, the image reads from names
-  alone: `<label>-chat` beside the agent's `<label>`, as the shell's
-  `makeAgent` makes it (`bots::bot_chat`; `fragment ask`'s `direct_label`
-  reads the same). Nothing on the platform says which chat is an agent's.
+  agent's own, and so its Hermes Bot Chat, the image finds by label: in
+  the agent's list for its owner, the chat its owner owns labelled
+  `<label>-chat` beside the agent's `<label>`, as the shell's `makeAgent`
+  makes it (`bots::bot_chat`; `fragment ask`'s `direct_label` finds the
+  same). A chat's name has a suffix of its own, so it is looked up at a
+  boot, as agents come, and every few seconds while one is missing.
+  Nothing on the platform says which chat is an agent's.
 - **Risk:** an agent made another way (the CLI, the API) has no Bot Chat
   of ours, and Hermes makes one of its own that the person never sees; a
-  rename of fragments (the identity work's `<label>--<suffix>`) that the
-  three places do not follow together leaves every agent with none.
+  person with two chats of that label (one made by hand) may get either.
 - **First proof:** a bot whose roster and `message_agent` never appear in
-  its own chat (no `botmode.titled` event for it).
+  its own chat (no `botmode.titled` event for it, or no
+  `botmode.chat_found`).
 - **Delete when:** the agent fragment names its own chat (its
   `agent.json`, written by whatever makes the two), and the image, the
   shell and the CLI read that.

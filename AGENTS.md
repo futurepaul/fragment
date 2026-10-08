@@ -35,6 +35,8 @@ image's agent runtime.
    sleep, a crash or a rolled-back disk: the design of record;
    `docs/ledger.md` — the usage ledger: what is metered, at what price,
    and who pays;
+   `docs/billing.md` — seats, orgs, Stripe, trials and the operator's
+   admin (decisions 51 to 59);
    `docs/finite-integration.md` — how fragment will move into
    finite.computer (Finite V3): every Core concern, its stand-in here,
    and the swap; update its row with any change that touches one;
@@ -89,7 +91,8 @@ prebuilt bundle is in the debt ledger).
   delegation, files, deploy, templates, share, isolation, frames, ops, public,
   effects, facet-cap, app-lockdown, site, watch, schemas, channels,
   live, routes, cli, browser, jobs, triggers, appfiles, blobs, notes,
-  brain, push, ai, ledger, transcribe, shell, computers, chat, shell-ui, wipe,
+  brain, push, ai, ledger, transcribe, orgs, billing, billing-page,
+  trials, admin, admin-page, shell, computers, chat, shell-ui, wipe,
   hermes, agent-smoke, sync, restart; `crates/e2e/src/lanes/mod.rs`).
   `wipe` wipes a person it made (docs/api.md, Operators) with an
   operator key no person holds: the local node's own, or, hosted, the
@@ -183,7 +186,7 @@ prebuilt bundle is in the debt ledger).
   Paul's or the coordinating session's to run.
 - `cargo xtask dev [--clean]`: the dev stack in the foreground under
   `wrangler dev`: the cell on :8790 with fragments at
-  `http://<label>--<username>.fragment.localhost:8790/`, which rebuilds
+  `http://<name>.fragment.localhost:8790/`, which rebuilds
   when `cell/src` or `crates/` change, the model route and AI steps on
   the Workers AI fake on :8796 (echoes, and draws placeholder JPEGs for
   image steps; dev never calls a real model), which spend their payer's
@@ -192,7 +195,9 @@ prebuilt bundle is in the debt ledger).
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Its secrets are seeded into
+  `WORKOS_API_KEY_FILE` name its files, and the platform's mail to the
+  mail fake on :8798, which prints each message (dev never sends real
+  mail). Its secrets are seeded into
   wrangler's local Secrets Store in `cell/.wrangler/state` and bound by
   name as a deploy binds them (`--clean` clears them with the state;
   docs/secrets.md). Each boot's log is
@@ -221,6 +226,16 @@ prebuilt bundle is in the debt ledger).
   lacks. `set` and `gen` make the account's one store when there is none.
   No `rm`. `--local <state dir>` acts on wrangler's local store instead.
   Setting a remote secret is Paul's (or the coordinating session's).
+- `cargo xtask stripe check|setup --config <file> [--branch <name>]
+  [--webhook-secret-file <path>]`: the deployment's Stripe as
+  docs/billing.md wants it, on the account its config's `stripe.key_file`
+  names (xtask/src/stripe.rs): `check` reads its prices (by lookup key),
+  its own portal configuration and its webhook endpoint, and says what is
+  wrong; `setup` makes what is missing (an endpoint's signing secret to
+  the file, 0600, never printed, for `secret set`). Live mode is Paul's
+  to run. A branch deploy whose config names `stripe.key_file` makes the
+  branch's own endpoint each time and uploads its secret as a Worker
+  secret beside the test secret (decision 58).
 - `cargo xtask deploy --config <file> [--branch <name>]`: builds and
   deploys to Cloudflare from a deployment's config, kept outside the repo
   (`deploy/example.jsonc`; xtask/src/deploy.rs). It lists the store first
@@ -228,12 +243,12 @@ prebuilt bundle is in the debt ledger).
   is missing (naming the `secret set` for each); it binds them by name
   and uploads no secret but a branch's test secret. A branch is a complete
   copy at `<branch>.<zone>`, its fragments at
-  `<label>--<username>--<branch>.<zone>`. `cargo xtask teardown --config
+  `<name>--<branch>.<zone>`. `cargo xtask teardown --config
   <file> --branch <name>` removes one (irreversible: ask Paul).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, Workers AI, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, WorkOS, Email Sending, a push service),
 
   `crates/devstack`, `crates/e2e`.
 - `images/` (the computer images: the bridge, the stub, our Hermes image;

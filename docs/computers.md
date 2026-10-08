@@ -20,8 +20,8 @@ runtime. A change that would have to is a design bug (the rule).
   agent's identity, registered to the fragment's owner, and it signs the
   guest's requests only while it is assigned there.
 - Agents are fragments of kind `agent` that name the computer that runs
-  them (decision 14). An agent's identity is its own (`id:` of the agent
-  fragment's identity), and its owner is a person. The computer's guest
+  them (decision 14). An agent's identity is its own: its agent
+  fragment's npub (decision 45), and its owner is a person. The computer's guest
   acts *as* its agents, never as its owner.
 - The Computer DO is the only thing that talks to its container. It
   starts and stops it, saves and restores `/data`, runs the egress
@@ -477,8 +477,8 @@ expires within 30 days. The container application is the deployment's
   bridge), or every 3 s (our Hermes image, below).
 - **An agent added to a fragment wakes its computer** (Paul, 2026-10-03:
   agents are woken eagerly, to hide a wake's latency). Whatever adds an
-  agent as a member (`PUT /api/f/{name}/members/{agent}`, an invite it
-  accepts, a fragment an agent makes for its owner), the platform tells
+  agent as a member (`PUT /api/f/{name}/members/{agent}`, a fragment an
+  agent makes for its owner), the platform tells
   its computer: the agent fragment itself posts `{kind: "joined",
   fragment}` on its `tasks` (when it declares a postable `tasks`), once
   for that membership, and the computer wakes (`joined`, held as a
@@ -784,7 +784,7 @@ settings and state):
   3.14.7 in a venv its own package manager (PM) builds, its tools (its
   Python, Node 26.7, npm 12, uv, ffmpeg, ripgrep, Chromium 145) in PM's
   store at `/opt/hermes/tools`. One Hermes
-  profile per agent (`juniper.paul` is `juniper-paul`), its agent
+  profile per agent (named as its agent fragment, `juniper--k3x9`), its agent
   fragment's `SOUL.md`, `memories/` and `skills/` checked out into it and
   committed back. Each start clears Hermes' cross-process leases (a
   session's turn, a compression) before the gateway takes a turn: a
@@ -1046,9 +1046,12 @@ actually makes a chat a Bot Chat"), so the image does both
   runs no agent's turns, and its `profile.yaml` says so ("this computer's
   gateway, not an agent: never message it").
 - An agent's Bot Chat is its own chat with its owner: the chat the shell
-  makes with it, `<label>-chat` beside its `<label>` (`bots::bot_chat`,
-  the one place the image names it; the shell's `makeAgent` and
-  `fragment ask`'s `direct_label` make and find the same). Hermes'
+  makes with it, labelled `<label>-chat` beside its `<label>`, its suffix
+  its own (`bots::bot_chat`, which finds it in the agent's list for its
+  owner: at a boot, as agents come, and every few seconds while one is
+  missing, since the shell makes the chat after it assigns the agent; the
+  shell's `makeAgent` and `fragment ask`'s `direct_label` make and find
+  the same). Hermes'
   gateway makes that chat's session at its first message, and builds a
   session's prompt once, at its first turn, keeping it with the turn's
   agent for the next ones; so the title has to be there before. The image's
@@ -1123,7 +1126,7 @@ and how a runtime finds them, is the image's.
   the platform release's managed set as its files (templates/skills/README.md),
   beneath any file of its own. `hermes-boot` finds it as the computer's
   first agent acting for the computer's owner (`GET /api/fragments?for=`:
-  of kind `skills`, named under the owner's username, `skills.<username>`
+  of kind `skills` the owner owns (the `?for=` list's `owned`), one labelled `skills`
   first), lists it (`GET /api/f/{skills}/files?for=`) and fetches what is
   new or changed (`…/file?path=&for=`, eight at once), each file by its
   listed version. It installs them read-only (the boot's, mode 0644) at

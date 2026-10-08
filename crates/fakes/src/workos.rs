@@ -28,6 +28,8 @@ use crate::http::{Handler, Request, Response, Server};
 pub struct User {
     pub id: String,
     pub email: String,
+    /// Whether WorkOS verified the email (made verified).
+    pub verified: bool,
 }
 
 #[derive(Default)]
@@ -58,7 +60,7 @@ impl State {
         if let Some(u) = self.users.iter().find(|u| u.email.eq_ignore_ascii_case(email)) {
             return u.clone();
         }
-        let user = User { id: self.next("user"), email: email.to_string() };
+        let user = User { id: self.next("user"), email: email.to_string(), verified: true };
         self.users.push(user.clone());
         user
     }
@@ -167,7 +169,7 @@ impl WorkOs {
                         200,
                         &json!({
                             "user": {
-                                "object": "user", "id": user.id, "email": user.email, "email_verified": true,
+                                "object": "user", "id": user.id, "email": user.email, "email_verified": user.verified,
                                 "first_name": null, "last_name": null, "profile_picture_url": null,
                                 "created_at": "2026-09-24T00:00:00.000Z", "updated_at": "2026-09-24T00:00:00.000Z",
                             },
@@ -272,6 +274,14 @@ impl WorkOs {
         let mut s = self.state.lock().expect("workos state");
         if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
             u.email = email.to_string();
+        }
+    }
+
+    /// Whether WorkOS has verified a user's email.
+    pub fn set_verified(&self, id: &str, verified: bool) {
+        let mut s = self.state.lock().expect("workos state");
+        if let Some(u) = s.users.iter_mut().find(|u| u.id == id) {
+            u.verified = verified;
         }
     }
 

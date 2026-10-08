@@ -47,6 +47,11 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
         r.status == 200 && r.body["id"] == stray_id.as_str() && r.body["kind"] == "person" && r.body["subjects"][0]["email"] == "stray@e2e.test",
         &r,
     );
+    s.ok(
+        "they are named by a key the registry made for them, theirs beside the CLI's",
+        keys_of(&r.body) == [(stray_id.clone(), true), (npub::encode(stray.pubkey_hex()), true)],
+        &r,
+    );
     let r = api.signed(&stray, "POST", "/api/identities", Some(&json!({ "kind": "robot" })))?;
     s.ok("an unknown kind is 400", r.status == 400, &r);
 
@@ -81,7 +86,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&friend, "POST", add, &paul) })))?;
     s.ok("a key someone else holds cannot be added", r.status == 409, &r);
     let (r, add_calls) = calls_of(api, || api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) }))))?;
-    s.ok("with a proof by the new key, it is added", r.status == 200 && r.body["created"] == true && keys_of(&r.body).iter().filter(|k| k.1).count() == 2, &r);
+    s.ok("with a proof by the new key, it is added", r.status == 200 && r.body["created"] == true && keys_of(&r.body).iter().filter(|k| k.1).count() == 3, &r);
     let r = api.signed(&paul, "POST", add, Some(&json!({ "proof": api.proof(&new, "POST", add, &paul) })))?;
     s.ok("adding it again changes nothing", r.status == 200 && r.body["created"] == false, &r);
 
@@ -92,7 +97,7 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("the new key acts as the owner", r.status == 200, &r);
     let old_hex = paul.pubkey_hex().to_string();
     let (r, revoke_calls) = calls_of(api, || api.signed(&new, "DELETE", &format!("/api/identities/me/keys/{}", npub::encode(&old_hex)), None))?;
-    s.ok("the new key revokes the old one", r.status == 200 && keys_of(&r.body).iter().filter(|k| k.1).count() == 1, &r);
+    s.ok("the new key revokes the old one", r.status == 200 && keys_of(&r.body).iter().filter(|k| k.1).count() == 2, &r);
     let after = api.signed(&friend, "GET", &format!("/api/f/{theirs}/members"), None)?;
     s.ok("no grant was rewritten: the members are the same identities", after.body["members"] == before.body["members"], &after);
     let r = api.signed(&paul, "GET", "/api/fragments", None)?;
@@ -178,12 +183,11 @@ pub fn identities(s: &mut Suite, api: &Api) -> Result<()> {
     // the CLI: login registers, whoami says who, rotate keeps every grant
     let home = s.dir("identities-home");
     let out = s.login(api, &home);
-    s.ok("fragment login, approved in a browser, adds the key to the person", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("id:"), String::from_utf8_lossy(&out.stderr));
+    s.ok("fragment login, approved in a browser, adds the key to the person", out.status.success() && String::from_utf8_lossy(&out.stdout).contains("logged in as npub1"), String::from_utf8_lossy(&out.stderr));
     let me = s.cli_json(api, &home, &["whoami", "--json"])?;
     let cli_id = me["identity"]["id"].as_str().unwrap_or("").to_string();
     let first = s.cli_keys(&home).expect("the CLI logged in");
-    let made = s.name("rotating");
-    s.cli_json(api, &home, &["create", &made, "--json"])?;
+    let made = s.cli_json(api, &home, &["create", &s.name("rotating"), "--json"])?["name"].as_str().unwrap_or("").to_string();
     let rotated = s.cli_json(api, &home, &["keys", "rotate", "--json"]);
     let second = s.cli_keys(&home).expect("the CLI has a key");
     s.ok("fragment keys rotate switches the machine to a new key", rotated.is_ok() && second.pubkey_hex() != first.pubkey_hex(), format!("{rotated:?}"));

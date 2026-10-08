@@ -16,9 +16,14 @@ use crate::Suite;
 /// A person with a CLI key and a platform session.
 pub(super) fn person(api: &Api) -> Result<(Keys, String)> {
     let keys = Keys::generate();
-    let session = api.sign_in(&format!("t-{}@e2e.test", &keys.pubkey_hex()[..12]))?;
+    let session = api.sign_in(&email_of(&keys))?;
     api.approve(&session, &keys)?;
     Ok((keys, session))
+}
+
+/// The email `person` signs in with.
+pub(super) fn email_of(keys: &Keys) -> String {
+    format!("t-{}@e2e.test", &keys.pubkey_hex()[..12])
 }
 
 pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
@@ -47,16 +52,15 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its site serves the template's page", page.status == 200 && page.text.contains("<title>Todo"), &page);
     let owner_id = api.identity(&owner)?;
     let people = api.page(&todo, &format!("__people?id={owner_id}&id=anon:00"), Some(&todo_cookie))?;
-    let username = api.username(&owner)?;
     let profiles = &people.body["profiles"];
     s.ok(
-        "its page can name who is in it: a person by username, no one for an anonymous visitor",
-        profiles[owner_id.as_str()]["username"] == username.as_str() && profiles.get("anon:00").is_none(),
+        "its page can name who is in it: a person, whose email only a member is shown (a link holder is none), and no one for an anonymous visitor",
+        profiles[owner_id.as_str()]["kind"] == "person" && profiles[owner_id.as_str()].get("email").is_none() && profiles.get("anon:00").is_none(),
         &people,
     );
 
     let none = s.name("tnone");
-    let r = api.create_with(&owner, json!({ "name": none, "template": "nope" }))?;
+    let r = api.create_with(&owner, json!({ "label": none, "template": "nope" }))?;
     s.ok("an unknown template is refused, naming the templates", r.status == 400 && r.message().contains("blank, todo, inbox, calories"), &r);
     let r = api.status(&owner, &api.qualified(&owner, &none)?)?;
     s.ok("and nothing is made", r.status == 404, &r);
@@ -121,18 +125,17 @@ pub fn templates(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let theirs = listed(&editor_session)?;
     s.ok("and says which are shared with them, and as what", row(&theirs, &blank)["role"] == "editor", &theirs);
-    let label = s.name("tnew");
-    let make = |origin: String| shell(api, &owner_session, "POST", "/api/fragments", Some(&json!({ "name": label, "template": "todo" })), &[("origin", origin)]);
+    let name = s.named(api, &owner, "tnew")?;
+    let make = |origin: String| shell(api, &owner_session, "POST", "/api/fragments", Some(&json!({ "name": name, "template": "todo" })), &[("origin", origin)]);
     let r = make(api.site_origin(&todo))?;
-    let st = api.status(&owner, &api.qualified(&owner, &label)?)?;
+    let st = api.status(&owner, &name)?;
     s.ok("a create from another origin (a fragment's page) is no one's (401), and makes nothing", r.status == 401 && st.status == 404, format!("{r} / {st}"));
     let r = make(api.base.clone())?;
-    let name = api.qualified(&owner, &label)?;
     s.ok("the shell makes it from a template", r.status == 200 && r.body["name"] == name.as_str(), &r);
     let r = api.page(&name, "", Some(&format!("fragment_site={}", site_cookie(api, &owner_session, &name)?)))?;
     s.ok("the new fragment serves its template to its owner", r.status == 200 && r.text.contains("<title>Todo"), &r);
     let r = make(api.base.clone())?;
-    s.ok("a label already taken says so", r.status == 409 && r.code() == Some(ErrorCode::AlreadyExists), &r);
+    s.ok("a name already taken says so", r.status == 409 && r.code() == Some(ErrorCode::AlreadyExists), &r);
     let st = api.status(&owner, &name)?;
     s.ok("(a todo made there opens to anyone with its link, as before)", st.body["visibility"] == "link", &st);
     skills(s, api, &owner)
@@ -161,7 +164,7 @@ fn skills(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
     if !s.hosted() {
         s.fake.set_latency(std::time::Duration::from_millis(CODE_STORAGE_LATENCY_MS));
     }
-    let r = api.create_with(owner, json!({ "name": label, "template": "skills" }));
+    let r = api.create_with(owner, json!({ "label": label, "template": "skills" }));
     if !s.hosted() {
         s.fake.set_latency(std::time::Duration::ZERO);
     }

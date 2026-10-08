@@ -406,6 +406,11 @@ pub struct Bound {
     pub codestorage_key: String,
     /// WorkOS's client id and API key: sign-in (a local fleet may run without).
     pub workos: Option<(String, String)>,
+    /// Stripe's restricted key and the deployment's webhook signing secret:
+    /// seats sold (docs/billing.md; without them, seats are comped only).
+    /// A branch deployment whose deploy makes its endpoint binds no store
+    /// secret for it: its deploy uploads the endpoint's (decision 58).
+    pub stripe: Option<(String, Option<String>)>,
     /// Each operator key's provider and its secret's name.
     pub operator_keys: Vec<(String, String)>,
 }
@@ -413,12 +418,13 @@ pub struct Bound {
 impl Bound {
     /// The names `deploy/example.jsonc` uses, which dev and the e2e bind in
     /// wrangler's local store.
-    pub fn conventional(workos: bool, operator_keys: &[&str]) -> Bound {
+    pub fn conventional(workos: bool, stripe: bool, operator_keys: &[&str]) -> Bound {
         Bound {
             host_secret: "fragment-host-secret".into(),
             host_secret_previous: None,
             codestorage_key: "fragment-codestorage-private-key".into(),
             workos: workos.then(|| ("fragment-workos-client-id".into(), "fragment-workos-api-key".into())),
+            stripe: stripe.then(|| ("fragment-stripe-key".into(), Some("fragment-stripe-webhook-secret".into()))),
             operator_keys: operator_keys.iter().map(|p| (p.to_string(), format!("fragment-{p}-api-key"))).collect(),
         }
     }
@@ -433,6 +439,12 @@ impl Bound {
         if let Some((client, key)) = &self.workos {
             bound.push((bindings::WORKOS_CLIENT.to_string(), client.as_str()));
             bound.push((bindings::WORKOS_KEY.to_string(), key.as_str()));
+        }
+        if let Some((key, webhook)) = &self.stripe {
+            bound.push((bindings::STRIPE_KEY.to_string(), key.as_str()));
+            if let Some(w) = webhook {
+                bound.push((bindings::STRIPE_WEBHOOK.to_string(), w.as_str()));
+            }
         }
         for (provider, name) in &self.operator_keys {
             bound.push((bindings::operator_key(provider), name.as_str()));
@@ -594,7 +606,7 @@ mod tests {
     /// name in one store; and what a store lacks is named with its binding.
     #[test]
     fn bindings_name_each_secret_once() {
-        let mut bound = Bound::conventional(true, &["perplexity", "google-places"]);
+        let mut bound = Bound::conventional(true, false, &["perplexity", "google-places"]);
         bound.host_secret_previous = Some("fragment-host-secret-2025".into());
         let cell = bound.cell();
         let json = bindings_json("0f0e", &cell);

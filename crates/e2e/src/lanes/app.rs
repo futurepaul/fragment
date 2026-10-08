@@ -230,7 +230,7 @@ pub fn effects(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let name = s.name("effects");
+    let name = s.named(api, &owner, "effects")?;
     let c = s.create(api, &owner, &name)?;
     ship(s, &c, EFFECTS_APP, EFFECTS_JSON);
     let repo = c["repo"].as_str().unwrap_or("").to_string();

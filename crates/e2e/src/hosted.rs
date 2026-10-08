@@ -298,6 +298,8 @@ fn suite(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted, shared
         fake: Fake::absent("code.storage"),
         ai: Fake::absent("Workers AI"),
         push: Fake::absent("push service"),
+        mail: Fake::absent("mail"),
+        stripe: Fake::absent("Stripe"),
         org_key: String::new(),
         host_secret: String::new(),
         test_secret: String::new(),
@@ -345,7 +347,7 @@ pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> Strin
     let width = planned.iter().map(|p| p.section.len()).max().unwrap_or(0);
     let mut out = format!("the hosted plan for {} (a dry run: nothing is called, no secret is read)\n", hosted.preview.branch);
     out += &format!("  platform     {}\n", hosted.preview.platform());
-    out += &format!("  fragments    https://<label>--<username>--{}.{}/ (labels e2e-<run>-…, the run's id printed as it starts)\n", hosted.preview.branch, hosted.preview.zone);
+    out += &format!("  fragments    https://<name>--{}.{}/ (labels e2e-<run>-…, the run's id printed as it starts)\n", hosted.preview.branch, hosted.preview.zone);
     out += &match &hosted.secret_file {
         Some(file) => format!("  sign-in      e2e people (<name>@e2e.test) through the levers, the test secret read from {} when the run starts\n", file.display()),
         None => "  sign-in      none: no --secret-file, so no one can sign in and nothing needing the levers runs\n".to_string(),

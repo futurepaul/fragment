@@ -108,8 +108,9 @@ pub fn levers(s: &mut Suite, api: &Api) -> Result<()> {
     if s.hosted() {
         scoped(s, api, &email, &identity)?;
     } else {
-        not_a_workos_person(s, api, &email, &identity)?;
+        not_a_workos_person(s, api, &email)?;
         paid_calls(s, api)?;
+        mail(s, api)?;
     }
     Ok(())
 }
@@ -131,6 +132,8 @@ fn shell_get(api: &Api, session: &str, path: &str) -> Result<Reply> {
 fn scoped(s: &mut Suite, api: &Api, email: &str, identity: &str) -> Result<()> {
     let r = api.unsigned("POST", "/api/test/registry", Some(&json!({ "calls": null })))?;
     s.ok("on a preview the registry's levers (the whole deployment's) are no route (404)", r.status == 404, &r);
+    let r = api.unsigned("POST", "/api/test/mail", Some(&json!({ "to": "someone@e2e.test", "subject": "s", "text": "t" })))?;
+    s.ok("nor the mail lever: a preview's mail is real (404)", r.status == 404, &r);
     let keys = Keys::generate();
     let session = api.sign_in(email)?;
     api.approve(&session, &keys)?;
@@ -146,19 +149,49 @@ fn scoped(s: &mut Suite, api: &Api, email: &str, identity: &str) -> Result<()> {
     let made = api.create(&keys, &own)?;
     let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": own, "op": "alarm" })))?;
     s.ok("while one labelled e2e- is the e2e's own", made.status == 200 && r.status == 200, &r);
-    let stranger = format!("id:{}", "0".repeat(32));
+    let stranger = fragment_core::npub::identity_of(&"0".repeat(64));
     let theirs = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": stranger, "op": "totals" })))?;
     let mine = api.unsigned("POST", "/api/test/ledger", Some(&json!({ "identity": identity, "op": "totals" })))?;
     s.ok("and a ledger lever reaches e2e people alone (403 for anyone else)", theirs.status == 403 && mine.status == 200, format!("{theirs} / {mine}"));
     Ok(())
 }
 
-/// Locally: an e2e person is never anyone a real sign-in reaches; the same
-/// email through WorkOS (the fake) is another person.
-fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str, identity: &str) -> Result<()> {
-    let through_workos = api.sign_in(email)?;
-    let them = who(api, &through_workos)?;
-    s.ok("the same email through WorkOS is someone else: an e2e person is under an issuer of their own", them["kind"] == "person" && them["id"] != identity, &them);
+/// Locally: the platform's mail (cell/src/mail.rs) reaches the mail fake,
+/// from the deployment's address, as the Email Sending binding would take
+/// it; a message it cannot send, or a service that refuses one, says why.
+fn mail(s: &mut Suite, api: &Api) -> Result<()> {
+    let to = format!("{}@example.com", s.name("mail"));
+    let send = |to: &str, subject: &str| api.unsigned("POST", "/api/test/mail", Some(&json!({ "to": to, "subject": subject, "text": "Open it: https://example.com/x" })));
+    let r = send(&to, "Paul shared a thing with you")?;
+    let sent = s.mail.sent_to(&to);
+    s.ok(
+        "the platform's mail reaches Email Sending (the fake) from the deployment's address, as it was asked",
+        r.status == 200 && r.body["messageId"].as_str().is_some_and(|id| !id.is_empty()) && sent.len() == 1 && sent[0].from == crate::MAIL_FROM && sent[0].subject == "Paul shared a thing with you",
+        &r,
+    );
+    let before = s.mail.sent().len();
+    let refused = [send("not an address", "s")?, send(&format!("{to}, eve@example.com"), "s")?, send(&to, "two\nlines")?];
+    s.ok(
+        "a message to anything but one plain address, or with a subject of two lines, is refused (400), and nothing is sent",
+        refused.iter().all(|r| r.status == 400) && s.mail.sent().len() == before && s.mail.sent_to(&to).len() == 1,
+        refused.iter().map(ToString::to_string).collect::<Vec<_>>().join(" / "),
+    );
+    s.mail.fail_next("E_RATE_LIMIT_EXCEEDED");
+    let r = send(&to, "s")?;
+    s.ok("the service's refusal says so: too many sent is 429", r.status == 429 && r.message().contains("E_RATE_LIMIT_EXCEEDED"), &r);
+    Ok(())
+}
+
+/// Locally: an e2e person is never anyone a real sign-in reaches. The same
+/// email through WorkOS (the fake) is refused: an e2e person is under an
+/// issuer of their own, and an email names one person (decision 45).
+fn not_a_workos_person(s: &mut Suite, api: &Api, email: &str) -> Result<()> {
+    let r = api.workos_callback(email)?;
+    s.ok(
+        "the same email through WorkOS reaches no one: it is the e2e person's, and an email names one person (409, on a page)",
+        r.status == 409 && r.header("content-type").starts_with("text/html") && String::from_utf8_lossy(&r.bytes).contains("another account"),
+        &r,
+    );
     Ok(())
 }
 

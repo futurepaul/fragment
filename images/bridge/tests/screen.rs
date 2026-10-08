@@ -112,52 +112,52 @@ async fn until(what: &str, done: impl Fn() -> bool) {
 async fn each_agent_has_its_own_screen() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred", "oak"]).await;
     let dir = support::dir("screens-own");
-    let juniper = Display::start(0, "hermes:juniper-paul").await;
+    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
     let fred_port = Display::free_port().await;
-    write_screens(&dir, &[("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", format!("tcp:127.0.0.1:{fred_port}"))]);
-    write_ready(&dir, &["juniper.paul", "fred.paul", "oak.paul"]);
+    write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", format!("tcp:127.0.0.1:{fred_port}"))]);
+    write_ready(&dir, &["juniper--k3x9", "fred--k3x9", "oak--k3x9"]);
     // juniper's desktop last used an hour ago
-    let activity = desktop(&dir, "juniper-paul").join("activity");
+    let activity = desktop(&dir, "juniper--k3x9").join("activity");
     std::fs::write(&activity, b"").unwrap();
     let hour_ago = SystemTime::now() - Duration::from_secs(3600);
     std::fs::File::options().write(true).open(&activity).unwrap().set_modified(hour_ago).unwrap();
     let (running, base) = bridge(&fake, &dir).await;
 
-    let mut c = control(&base, "w", "juniper.paul").await;
-    assert_eq!(next(&mut c).await, json!({ "type": "control", "agent": "juniper.paul", "name": "juniper", "holder": null }), "a control socket names its agent");
+    let mut c = control(&base, "w", "juniper--k3x9").await;
+    assert_eq!(next(&mut c).await, json!({ "type": "control", "agent": "juniper--k3x9", "name": "juniper", "holder": null }), "a control socket names its agent");
 
     // refused: never another agent's screen
     let refused = |path: String| {
         let base = base.clone();
         async move { fragment_bridge::net::connect_ws(&base, &path, &[]).await.err().unwrap_or_default() }
     };
-    let nobody = refused("/control?viewer=w&agent=nobody.paul".into()).await;
+    let nobody = refused("/control?viewer=w&agent=nobody--k3x9".into()).await;
     assert!(nobody.contains("404"), "an agent the computer does not run: {nobody}");
-    let unnamed = refused("/websockify?viewer=w&agent=oak.paul".into()).await;
+    let unnamed = refused("/websockify?viewer=w&agent=oak--k3x9".into()).await;
     assert!(unnamed.contains("404"), "an agent the image names no screen for: {unnamed}");
-    let unnamed = refused("/control?viewer=w&agent=oak.paul".into()).await;
+    let unnamed = refused("/control?viewer=w&agent=oak--k3x9".into()).await;
     assert!(unnamed.contains("404"), "nor its control: {unnamed}");
-    for bad in ["/control?viewer=w&agent=Juniper.paul", "/control?viewer=w&agent=juniper", "/websockify?viewer=w", "/control?agent=juniper.paul", "/control?viewer=w&agent=juniper.paul&agent=fred.paul"] {
+    for bad in ["/control?viewer=w&agent=Juniper--k3x9", "/control?viewer=w&agent=juniper", "/websockify?viewer=w", "/control?agent=juniper--k3x9", "/control?viewer=w&agent=juniper--k3x9&agent=fred--k3x9"] {
         let why = refused(bad.into()).await;
         assert!(why.contains("400"), "{bad}: {why}");
     }
 
-    let j = Viewer::open(&base, "w", "juniper.paul", WAIT).await.unwrap();
-    assert_eq!(j.name, "hermes:juniper-paul", "juniper's socket shows juniper's desktop");
+    let j = Viewer::open(&base, "w", "juniper--k3x9", WAIT).await.unwrap();
+    assert_eq!(j.name, "hermes:juniper--k3x9", "juniper's socket shows juniper's desktop");
     let touched = std::fs::metadata(&activity).unwrap().modified().unwrap();
     assert!(touched > SystemTime::now() - Duration::from_secs(60), "a viewer's stream is a use of the desktop: {touched:?}");
 
     // fred's desktop is down: its first viewer starts it, naming fred
     let opening = {
         let base = base.clone();
-        tokio::spawn(async move { Viewer::open(&base, "w", "fred.paul", Duration::from_secs(20)).await })
+        tokio::spawn(async move { Viewer::open(&base, "w", "fred--k3x9", Duration::from_secs(20)).await })
     };
     let started = dir.join("started");
-    until("fred's desktop started", || std::fs::read_to_string(&started).is_ok_and(|s| s.contains("fred.paul"))).await;
-    let fred = Display::start(fred_port, "hermes:fred-paul").await;
+    until("fred's desktop started", || std::fs::read_to_string(&started).is_ok_and(|s| s.contains("fred--k3x9"))).await;
+    let fred = Display::start(fred_port, "hermes:fred--k3x9").await;
     let f = opening.await.unwrap().unwrap_or_else(|e| panic!("fred's screen: {e}"));
-    assert_eq!(f.name, "hermes:fred-paul", "fred's socket shows fred's desktop");
-    assert_eq!(std::fs::read_to_string(&started).unwrap().trim(), "fred.paul", "the start named fred alone: juniper's was up");
+    assert_eq!(f.name, "hermes:fred--k3x9", "fred's socket shows fred's desktop");
+    assert_eq!(std::fs::read_to_string(&started).unwrap().trim(), "fred--k3x9", "the start named fred alone: juniper's was up");
     drop((j, f, juniper, fred));
     running.stop().await;
 }
@@ -175,19 +175,19 @@ async fn each_agent_has_its_own_screen() {
 async fn take_over_is_the_agents_lease() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred"]).await;
     let dir = support::dir("screens-lease");
-    let juniper = Display::start(0, "hermes:juniper-paul").await;
-    let fred = Display::start(0, "hermes:fred-paul").await;
-    write_screens(&dir, &[("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", fred.target())]);
-    write_ready(&dir, &["juniper.paul", "fred.paul"]);
+    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
+    let fred = Display::start(0, "hermes:fred--k3x9").await;
+    write_screens(&dir, &[("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", fred.target())]);
+    write_ready(&dir, &["juniper--k3x9", "fred--k3x9"]);
     let (running, base) = bridge(&fake, &dir).await;
-    let (jl, fl) = (lease_of(&dir, "juniper-paul"), lease_of(&dir, "fred-paul"));
+    let (jl, fl) = (lease_of(&dir, "juniper--k3x9"), lease_of(&dir, "fred--k3x9"));
 
-    let mut dc = control(&base, "d", "juniper.paul").await;
-    let mut wc = control(&base, "w", "juniper.paul").await;
+    let mut dc = control(&base, "d", "juniper--k3x9").await;
+    let mut wc = control(&base, "w", "juniper--k3x9").await;
     assert_eq!(next(&mut dc).await["holder"], Value::Null);
     assert_eq!(next(&mut wc).await["holder"], Value::Null);
-    let mut d = Viewer::open(&base, "d", "juniper.paul", WAIT).await.unwrap();
-    let mut w = Viewer::open(&base, "w", "juniper.paul", WAIT).await.unwrap();
+    let mut d = Viewer::open(&base, "d", "juniper--k3x9", WAIT).await.unwrap();
+    let mut w = Viewer::open(&base, "w", "juniper--k3x9", WAIT).await.unwrap();
     // a few of the screen's looks pass: none tells its viewers what they
     // heard as their first word (the Docker rung once heard `null` again here)
     tokio::time::sleep(Duration::from_millis(4 * fragment_bridge::screen::TICK_MS)).await;
@@ -251,12 +251,12 @@ async fn take_over_is_the_agents_lease() {
 async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() {
     let fake = Fake::start("127.0.0.1:0", &["juniper", "fred"]).await;
     let dir = support::dir("screens-life");
-    let juniper = Display::start(0, "hermes:juniper-paul").await;
-    let fred = Display::start(0, "hermes:fred-paul").await;
-    let screens = [("juniper.paul", "juniper-paul", juniper.target()), ("fred.paul", "fred-paul", fred.target())];
+    let juniper = Display::start(0, "hermes:juniper--k3x9").await;
+    let fred = Display::start(0, "hermes:fred--k3x9").await;
+    let screens = [("juniper--k3x9", "juniper--k3x9", juniper.target()), ("fred--k3x9", "fred--k3x9", fred.target())];
     write_screens(&dir, &screens);
-    write_ready(&dir, &["juniper.paul", "fred.paul"]);
-    let (jl, fl) = (lease_of(&dir, "juniper-paul"), lease_of(&dir, "fred-paul"));
+    write_ready(&dir, &["juniper--k3x9", "fred--k3x9"]);
+    let (jl, fl) = (lease_of(&dir, "juniper--k3x9"), lease_of(&dir, "fred--k3x9"));
     for _ in 0..4 {
         jl.change(|l| if l.holder == Holder::Agent { lease::take(l, "gone", 1.0) } else { lease::give(l, None, 2.0) }).unwrap();
     }
@@ -270,16 +270,16 @@ async fn an_earlier_lives_lease_is_given_back_and_a_gone_agents_screen_closes() 
     assert_eq!(jl.read().epoch, 6, "given back once, one epoch on");
     assert_eq!(fl.read(), fred_before, "the agent's own lease: left alone");
 
-    let mut fc = control(&base, "w", "fred.paul").await;
-    assert_eq!(next(&mut fc).await["agent"], "fred.paul");
+    let mut fc = control(&base, "w", "fred--k3x9").await;
+    assert_eq!(next(&mut fc).await["agent"], "fred--k3x9");
     fake.remove_agent("fred");
     write_screens(&dir, &screens[..1]);
-    write_ready(&dir, &["juniper.paul"]);
+    write_ready(&dir, &["juniper--k3x9"]);
     let closed = fc.next().await;
     assert!(closed.is_err(), "fred gone, its screen's socket closes: {closed:?}");
-    let why = fragment_bridge::net::connect_ws(&base, "/control?viewer=w&agent=fred.paul", &[]).await.err().unwrap_or_default();
+    let why = fragment_bridge::net::connect_ws(&base, "/control?viewer=w&agent=fred--k3x9", &[]).await.err().unwrap_or_default();
     assert!(why.contains("404"), "and it is refused after: {why}");
-    let mut jc = control(&base, "w", "juniper.paul").await;
+    let mut jc = control(&base, "w", "juniper--k3x9").await;
     assert_eq!(next(&mut jc).await["holder"], Value::Null, "juniper's screen stays");
     drop((juniper, fred));
     running.stop().await;

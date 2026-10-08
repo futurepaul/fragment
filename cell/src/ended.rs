@@ -552,7 +552,7 @@ impl FragmentCell {
                 // the browsers they asked pushes for here, member or not
                 let pushes = self.rows("DELETE FROM push_subs WHERE principal = ? RETURNING id", vec![b.principal.as_str().into()])?.len();
                 // as themselves: leaving is any member's own (members.rs)
-                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, username: None, held: None };
+                let identity = Identity { id: b.principal.clone(), kind: b.kind, owner: None, held: None };
                 let url = url::Url::parse("https://fragment.internal/wipe/leave").expect("a constant URL parses");
                 let caller = Caller { signed: Some(Signed::new(identity, None)), unresolved: None, url, site: false };
                 let left = match self.remove_member(&caller, "me").await {

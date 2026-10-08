@@ -486,23 +486,23 @@ mod tests {
             let handler = move |req: hyper::Request<hyper::body::Incoming>, _: SocketAddr| {
                 let repo = repo.clone();
                 async move {
-                    assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper.paul"), "as the agent");
+                    assert_eq!(req.headers().get("x-fragment-agent").and_then(|v| v.to_str().ok()), Some("juniper--k3x9"), "as the agent");
                     let (method, path, q) = (req.method().clone(), req.uri().path().to_string(), req.uri().query().unwrap_or("").to_string());
                     let body = req.into_body().collect().await.unwrap().to_bytes();
                     let mut r = repo.lock().unwrap();
                     match (method, path.as_str()) {
-                        (Method::GET, "/api/f/juniper.paul/files") => {
+                        (Method::GET, "/api/f/juniper--k3x9/files") => {
                             let list: Vec<Value> = r.files.iter().map(|(p, (c, b))| json!({ "path": p, "size": b.len(), "lastCommitSha": c })).collect();
                             net::json_answer(StatusCode::OK, &json!({ "files": list }))
                         }
-                        (Method::GET, "/api/f/juniper.paul/file") => {
+                        (Method::GET, "/api/f/juniper--k3x9/file") => {
                             let p = q.strip_prefix("path=").unwrap_or("").replace("%2F", "/");
                             match r.files.get(&p) {
                                 Some((_, b)) => net::respond(StatusCode::OK, "application/octet-stream", b.clone()),
                                 None => net::refusal(StatusCode::NOT_FOUND, "not_found", "no such file"),
                             }
                         }
-                        (Method::POST, "/api/f/juniper.paul/files") => {
+                        (Method::POST, "/api/f/juniper--k3x9/files") => {
                             let v: Value = serde_json::from_slice(&body).unwrap();
                             r.keys.push(v["key"].as_str().unwrap().to_string());
                             r.commits += 1;
@@ -624,7 +624,7 @@ mod tests {
             }
             let (addr, _stop) = fake::start(repo.clone()).await;
             let api = Api::new(&format!("http://{addr}")).unwrap();
-            let agent = Agent { fragment: "juniper.paul".into(), identity: "id:j".into(), name: "Juniper".into(), owner: "id:paul".into(), credentials: vec![] };
+            let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1j".into(), name: "Juniper".into(), owner: "npub1paul".into(), credentials: vec![] };
             let root = std::env::temp_dir().join(format!("hermes-boot-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             // the boot makes the profile before its first round (main.rs, `write_profile`)

@@ -76,7 +76,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
     fn names(agents: &[Agent]) -> Vec<&str> {
@@ -89,14 +89,14 @@ mod tests {
     #[test]
     fn a_change_is_what_was_added_and_removed() {
         let c = diff(&[agent("juniper")], &[agent("juniper"), agent("maple")]);
-        assert_eq!((names(&c.added), names(&c.removed)), (vec!["maple.paul"], vec![]));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec!["maple--k3x9"], vec![]));
         let c = diff(&[agent("juniper"), agent("maple")], &[agent("maple")]);
-        assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper.paul"]));
+        assert_eq!((names(&c.added), names(&c.removed)), (vec![], vec!["juniper--k3x9"]));
         // the first run: a computer started before its first agent was made
         let c = diff(&[], &[agent("juniper")]);
-        assert_eq!(names(&c.added), vec!["juniper.paul"]);
+        assert_eq!(names(&c.added), vec!["juniper--k3x9"]);
         let c = diff(&[agent("juniper")], &[]);
-        assert_eq!(names(&c.removed), vec!["juniper.paul"]);
+        assert_eq!(names(&c.removed), vec!["juniper--k3x9"]);
     }
 
     /// Replay: the same set read again is no change, nor is an agent the
@@ -127,12 +127,12 @@ mod tests {
             a
         };
         let c = diff(&[agent("juniper"), agent("maple")], &[with("juniper", "fcx_google_a"), agent("maple")]);
-        assert_eq!((names(&c.credentials), c.added.is_empty(), c.removed.is_empty()), (vec!["juniper.paul"], true, true), "connected");
+        assert_eq!((names(&c.credentials), c.added.is_empty(), c.removed.is_empty()), (vec!["juniper--k3x9"], true, true), "connected");
         let c = diff(&[with("juniper", "fcx_google_a")], &[agent("juniper")]);
-        assert_eq!(names(&c.credentials), vec!["juniper.paul"], "disconnected");
+        assert_eq!(names(&c.credentials), vec!["juniper--k3x9"], "disconnected");
         assert!(diff(&[with("juniper", "fcx_google_a")], &[with("juniper", "fcx_google_a")]).is_empty());
         let c = diff(&[agent("juniper")], &[agent("juniper"), with("oak", "fcx_google_b")]);
-        assert!(c.credentials.is_empty() && names(&c.added) == vec!["oak.paul"], "a new agent's profile is written whole anyway");
+        assert!(c.credentials.is_empty() && names(&c.added) == vec!["oak--k3x9"], "a new agent's profile is written whole anyway");
     }
 
     #[test]
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn the_ready_file_names_every_agent_in_order() {
-        assert_eq!(ready_file(&[agent("maple"), agent("juniper")]), r#"{"agents":["maple.paul","juniper.paul"]}"#);
+        assert_eq!(ready_file(&[agent("maple"), agent("juniper")]), r#"{"agents":["maple--k3x9","juniper--k3x9"]}"#);
         assert_eq!(ready_file(&[]), r#"{"agents":[]}"#);
     }
 
@@ -151,10 +151,10 @@ mod tests {
     /// answer without the list (pending, or not multiplexed) says nothing.
     #[test]
     fn a_rescan_answer_names_what_it_does_not_serve() {
-        let answer = json!({ "multiplex": true, "added": ["maple-paul"], "removed": [], "served_profiles": ["default", "juniper-paul", "maple-paul"] });
+        let answer = json!({ "multiplex": true, "added": ["maple--k3x9"], "removed": [], "served_profiles": ["default", "juniper--k3x9", "maple--k3x9"] });
         assert!(unserved(&[agent("juniper"), agent("maple")], &answer).is_empty());
-        let answer = json!({ "multiplex": true, "served_profiles": ["default", "juniper-paul"] });
-        assert_eq!(unserved(&[agent("juniper"), agent("maple")], &answer), vec!["maple-paul"]);
+        let answer = json!({ "multiplex": true, "served_profiles": ["default", "juniper--k3x9"] });
+        assert_eq!(unserved(&[agent("juniper"), agent("maple")], &answer), vec!["maple--k3x9"]);
         assert!(unserved(&[agent("maple")], &json!({ "multiplex": true, "pending": true, "served_profiles": ["default"] })).is_empty());
         assert!(unserved(&[agent("maple")], &json!({ "multiplex": true })).is_empty());
     }

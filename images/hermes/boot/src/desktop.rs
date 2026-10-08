@@ -96,7 +96,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into(), owner: "id:paul".into(), credentials: vec![] }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into(), owner: "npub1paul".into(), credentials: vec![] }
     }
 
     /// Valid: each agent's screen is its own profile's desktop, as the
@@ -106,11 +106,11 @@ mod tests {
         let file = screens_file(&[agent("juniper"), agent("fred")], Path::new("/data/hermes"));
         let screens = fragment_bridge::screens::parse(file.as_bytes()).expect("the bridge reads it");
         assert_eq!(screens.len(), 2);
-        let j = &screens["juniper.paul"];
-        assert_eq!(j.rfb, fragment_bridge::screen::Target::Unix("/data/hermes/profiles/juniper-paul/bot-desktop/rfb.sock".into()));
-        assert_eq!(j.lease.as_deref(), Some(Path::new("/data/hermes/profiles/juniper-paul/bot-desktop/lease.json")));
-        assert_eq!(j.activity.as_deref(), Some(Path::new("/data/hermes/profiles/juniper-paul/bot-desktop/activity")));
-        assert_eq!(screens["fred.paul"].rfb, fragment_bridge::screen::Target::Unix("/data/hermes/profiles/fred-paul/bot-desktop/rfb.sock".into()));
+        let j = &screens["juniper--k3x9"];
+        assert_eq!(j.rfb, fragment_bridge::screen::Target::Unix("/data/hermes/profiles/juniper--k3x9/bot-desktop/rfb.sock".into()));
+        assert_eq!(j.lease.as_deref(), Some(Path::new("/data/hermes/profiles/juniper--k3x9/bot-desktop/lease.json")));
+        assert_eq!(j.activity.as_deref(), Some(Path::new("/data/hermes/profiles/juniper--k3x9/bot-desktop/activity")));
+        assert_eq!(screens["fred--k3x9"].rfb, fragment_bridge::screen::Target::Unix("/data/hermes/profiles/fred--k3x9/bot-desktop/rfb.sock".into()));
         assert!(fragment_bridge::screens::parse(screens_file(&[], Path::new("/data/hermes")).as_bytes()).unwrap().is_empty(), "no agent, no screen");
     }
 

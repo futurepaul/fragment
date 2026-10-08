@@ -442,7 +442,7 @@ mod tests {
             ("DELETE", &["members", "npub1x"][..]),
             ("POST", &["invites"][..]),
             ("GET", &["invites"][..]),
-            ("DELETE", &["invites", "ab12"][..]),
+            ("DELETE", &["invites", "ann@example.com"][..]),
             ("PUT", &["visibility"][..]),
             ("POST", &["rotate"][..]),
         ] {

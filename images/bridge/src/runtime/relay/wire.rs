@@ -242,9 +242,9 @@ pub fn going_idle_ack() -> String {
 }
 
 /// A Hermes profile id for an agent fragment (`^[a-z0-9][a-z0-9_-]{0,63}$`,
-/// Hermes' `PROFILE_ID_RE`): its name with `.` as `-`, so `juniper.paul` is
-/// `juniper-paul`. A name that does not fit is cut and keeps a hash of the
-/// whole, so two agents never share a profile.
+/// Hermes' `PROFILE_ID_RE`): its name, which is one already (`juniper--k3x9`),
+/// any other character as `-`. A name that does not fit is cut and keeps a
+/// hash of the whole, so two agents never share a profile.
 pub fn profile(agent_fragment: &str) -> String {
     let mut out: String = agent_fragment.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c.to_ascii_lowercase() } else { '-' }).collect();
     if !out.starts_with(|c: char| c.is_ascii_alphanumeric()) {
@@ -534,11 +534,11 @@ mod tests {
         }
         assert_eq!(v["descriptor"]["supported_ops"], json!(SUPPORTED_OPS));
         let media = vec![("http://127.0.0.1:1/relay/media/m1".to_string(), "image/png".to_string())];
-        let m = Inbound { chat: "talk.paul/juniper.paul", chat_name: "talk", profile: "juniper-paul", message_id: "12", user_id: "id:bob", user_name: "bob", text: "/new please", media: &media, context: None };
+        let m = Inbound { chat: "talk--k3x9/juniper--k3x9", chat_name: "talk", profile: "juniper--k3x9", message_id: "12", user_id: "npub1bob", user_name: "bob", text: "/new please", media: &media, context: None };
         let i: Value = serde_json::from_str(inbound(&m, "b4").trim_end()).unwrap();
         assert_eq!(i["bufferId"], "b4");
         assert_eq!(i["event"]["message_id"], "12");
-        assert_eq!(i["event"]["source"]["profile"], "juniper-paul");
+        assert_eq!(i["event"]["source"]["profile"], "juniper--k3x9");
         assert_eq!(i["event"]["source"]["chat_type"], "group");
         assert_eq!(i["event"]["text"], "\u{200b}/new please", "a leading slash is kept from reading as a command");
         assert_eq!(i["event"]["media"][0]["mime"], "image/png");
@@ -549,23 +549,23 @@ mod tests {
         let a: Value = serde_json::from_str(prompt_answer(&Inbound { media: &[], ..m.clone() }, "a1", "ab.12", "once").trim_end()).unwrap();
         assert_eq!(a["event"]["prompt_response"], json!({ "prompt_id": "ab.12", "option_id": "once" }));
         assert_eq!(a["event"]["text"], "/once");
-        let s: Value = serde_json::from_str(interrupt("juniper-paul", "talk.paul/juniper.paul").trim_end()).unwrap();
-        assert_eq!(s, json!({ "type": "interrupt_inbound", "session_key": "agent:juniper-paul:relay:group:talk.paul/juniper.paul", "chat_id": "talk.paul/juniper.paul" }));
+        let s: Value = serde_json::from_str(interrupt("juniper--k3x9", "talk--k3x9/juniper--k3x9").trim_end()).unwrap();
+        assert_eq!(s, json!({ "type": "interrupt_inbound", "session_key": "agent:juniper--k3x9:relay:group:talk--k3x9/juniper--k3x9", "chat_id": "talk--k3x9/juniper--k3x9" }));
         assert_eq!(session_key("default", "c"), "agent:main:relay:group:c");
         assert_eq!(session_key("main", "c"), "agent:main~:relay:group:c");
     }
 
     #[test]
     fn profiles_are_hermes_ids() {
-        assert_eq!(profile("juniper.paul"), "juniper-paul");
+        assert_eq!(profile("juniper--k3x9"), "juniper--k3x9", "a fragment's name is one as it is");
         assert_eq!(profile("Juniper.Paul"), "juniper-paul");
         assert_eq!(profile("-x.y"), "a-x-y");
         assert_eq!(profile("default"), "default-agent");
-        let long = format!("{}.paul", "a".repeat(80));
+        let long = format!("{}--k3x9", "a".repeat(80));
         let p = profile(&long);
         assert!(p.len() <= 64 && valid_profile(&p), "{p}");
-        assert_ne!(p, profile(&format!("{}.paul", "a".repeat(81))), "two long names, two profiles");
-        assert_eq!(split_chat_id(&chat_id("talk.paul", "juniper.paul")), Some(("talk.paul", "juniper.paul")));
+        assert_ne!(p, profile(&format!("{}--k3x9", "a".repeat(81))), "two long names, two profiles");
+        assert_eq!(split_chat_id(&chat_id("talk--k3x9", "juniper--k3x9")), Some(("talk--k3x9", "juniper--k3x9")));
         assert_eq!(split_chat_id("nochat"), None);
     }
 

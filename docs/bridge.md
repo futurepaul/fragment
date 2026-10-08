@@ -72,7 +72,7 @@ Bodies are JSON. `api.rs` has one method for each.
 | `GET /api/fragments` | | `{fragments: [{name, role}]}` |
 | `GET /api/f/{f}/channels` | | `{channels: [{name, post, seq}]}`: a postable `chat` is a chat; the agent's own `tasks` |
 | `GET /api/f/{f}/members` | | `{members: [{principal, kind, addedAt}]}`: the lead (first `kind: agent` by `addedAt`), and when this agent joined; read again after 30 s, and at once after a `joined` of one of the computer's agents to that fragment (so its lead never answers an `@mention` of an agent that just joined) |
-| `GET /f/{f}/__people?id=…` | | `{profiles: {id: {username}}}`: what to call a writer |
+| `GET /f/{f}/__people?id=…` | | `{profiles: {id: {email}}}`: what to call a writer (a member's email, which its agent, a member, is shown) |
 | `GET /api/f/{f}/subscriptions` | | `{subscriptions: [{id, principal, channel, wake}]}` |
 | `POST /api/f/{f}/subscriptions` | `{channel, wake: true}` | `{id, channel, wake}`; only when the list has none |
 | `GET /api/f/{f}/channels/{c}?after=&limit=1000` | | `{records: [{channel, seq, at, principal, kind, body}], next}`: the catch-up, at most 20 pages; and a turn's note, read back from its claim on `work` (and from `chat`'s tail) in pages of 100, at most 1000 records each |

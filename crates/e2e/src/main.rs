@@ -82,6 +82,13 @@ pub const UNSAVED_MAX_MS: u64 = 45_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
+/// The Stripe fake's account key, the node's webhook endpoint's signing
+/// secret, and its portal configuration (docs/billing.md).
+pub const STRIPE_KEY: &str = "sk_test_fragment_e2e_stripe";
+pub const STRIPE_WEBHOOK: &str = "whsec_fragment_e2e";
+pub const STRIPE_PORTAL: &str = "bpc_fragment_e2e";
+/// Where the platform's mail says it comes from on the e2e's node.
+pub const MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The branch a rehearsal of the hosted lane shapes the local node as.
 pub const REHEARSAL_BRANCH: &str = "rh";
 /// What the fleet's computers may swap in (docs/computers.md): the
@@ -216,6 +223,10 @@ pub struct Suite {
     /// The model route's vendor boundary, text and images: Workers AI, scripted.
     pub ai: Fake<fragment_fakes::workers_ai::WorkersAi>,
     pub push: Fake<fragment_fakes::push::PushService>,
+    /// The platform's mail: Email Sending, faked; what was sent is read here.
+    pub mail: Fake<fragment_fakes::mail::Mailer>,
+    /// Stripe: seats sold, faked; its events go to the node's webhook.
+    pub stripe: Fake<fragment_fakes::stripe::Stripe>,
     org_key: String,
     host_secret: String,
     /// The node's test levers' secret (`FRAGMENT_TEST_SECRET`), made per run.
@@ -415,8 +426,8 @@ impl Suite {
         self.chrome.lease()
     }
 
-    /// A label for this run (a fragment's full name adds its owner's
-    /// username). Hosted, it is `e2e-<run>-<base>`, so the run's sweep
+    /// A label for this run (a fragment's full name adds a suffix:
+    /// `named`). Hosted, it is `e2e-<run>-<base>`, so the run's sweep
     /// finds it, and leaves every other run's (hosted/sweep.rs).
     pub fn name(&self, base: &str) -> String {
         match self.hosted_rules {
@@ -425,7 +436,7 @@ impl Suite {
         }
     }
 
-    /// `base`'s full name for this run, under `owner`'s username.
+    /// `base`'s full name for this run, for `owner` (`Api::qualified`).
     pub fn named(&self, api: &Api, owner: &Keys, base: &str) -> Result<String> {
         api.qualified(owner, &self.name(base))
     }
@@ -470,12 +481,21 @@ impl Suite {
             // the lower rung: the model route's calls go to the Workers AI fake
             ai_url: Some(self.ai.node().url.clone()),
             ai_gateway: None,
+            mail_url: Some(self.mail.node().url.clone()),
+            mail_from: Some(MAIL_FROM.into()),
             default_plan: Some(DEFAULT_PLAN.into()),
             delivery_retry_s: Some(1),
             workos: Some(devstack::WorkOsVars {
                 client_id: self.workos.node().client_id.clone(),
                 api_key: WORKOS_KEY.into(),
                 api_url: Some(self.workos.node().url.clone()),
+            }),
+            stripe: Some(devstack::StripeVars {
+                key: STRIPE_KEY.into(),
+                webhook_secret: STRIPE_WEBHOOK.into(),
+                api_url: Some(self.stripe.node().url.clone()),
+                portal: Some(STRIPE_PORTAL.into()),
+                tax: true,
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
@@ -509,6 +529,8 @@ impl Suite {
         };
         let (node, _) = devstack::Node::start(tools, &opts)?;
         self.node = Some(node);
+        // Stripe's events go to the platform's host, as its endpoint would
+        self.stripe.node().set_endpoint(&format!("{}/api/stripe/webhook", fleet.platform_url), STRIPE_WEBHOOK);
         Ok(Api::new(self.port, self.suffix(), &self.shared))
     }
 
@@ -681,7 +703,7 @@ impl Suite {
 
     /// `fragment login` in `home`, with a person approving its key in a
     /// browser: the CLI's pending login, a sign-in through the WorkOS fake,
-    /// the approval, then the CLI's login finishing, and a username taken.
+    /// the approval, then the CLI's login finishing.
     /// A login that fails is a FAIL of its own, so the lane's checks that
     /// fail after it have their cause printed first.
     pub fn login(&mut self, api: &Api, home: &Path) -> Output {
@@ -693,26 +715,10 @@ impl Suite {
             return pending;
         }
         let out = self.cli(api, home, &["login", "--no-browser"]);
-        let done = match out.status.success() {
-            true => self.take_username(api, home),
-            false => Err(anyhow!("{}", String::from_utf8_lossy(&out.stderr))),
-        };
-        if let Err(e) = done {
-            self.fail("fragment login", format!("{e:#}"));
+        if !out.status.success() {
+            self.fail("fragment login", String::from_utf8_lossy(&out.stderr).to_string());
         }
         out
-    }
-
-    /// A username through the CLI, as a person takes one once.
-    fn take_username(&self, api: &Api, home: &Path) -> Result<()> {
-        let me = self.cli_json(api, home, &["whoami", "--json"])?;
-        if !me["identity"]["username"].is_null() {
-            return Ok(());
-        }
-        let npub = me["npub"].as_str().context("whoami answers the key's npub")?;
-        let username = format!("c{}", npub.get(5..15).context("an npub is longer than 15 characters")?);
-        self.cli_json(api, home, &["username", &username, "--json"])?;
-        Ok(())
     }
 
     /// The `data` of a `--json` CLI answer.
@@ -871,6 +877,8 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         fake: Fake::of(hidden, "code.storage", fake),
         ai: Fake::of(hidden, "Workers AI", fragment_fakes::workers_ai::WorkersAi::start(0)?),
         push: Fake::of(hidden, "push service", fragment_fakes::push::PushService::start()?),
+        mail: Fake::of(hidden, "mail", fragment_fakes::mail::Mailer::start(0, false)?),
+        stripe: Fake::of(hidden, "Stripe", fragment_fakes::stripe::Stripe::start(0, STRIPE_KEY)?),
         org_key,
         host_secret: devstack::random_hex(32),
         test_secret,

@@ -43,20 +43,16 @@ pub const REPLAY_BACK_RECORDS: i64 = 2_000;
 /// An agent that may be asked: one its owner's computer runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
-    /// Its agent fragment (`fred.paul`).
+    /// Its agent fragment (`fred--k3x9`).
     pub fragment: String,
-    /// Its identity (`id:…`), which a message's `to` names.
+    /// Its identity (an npub), which a message's `to` names.
     pub identity: String,
     /// Its label (`fred`): how it is @mentioned.
     pub name: String,
 }
 
 fn label(name: &str) -> &str {
-    name.split('.').next().unwrap_or(name)
-}
-
-fn username(name: &str) -> Option<&str> {
-    name.split_once('.').map(|(_, u)| u)
+    fragment_proto::split_fragment_name(name).map_or(name, |(label, _)| label)
 }
 
 /// The agent `who` names: its fragment's name or label, its name, or its
@@ -73,33 +69,35 @@ fn cut_label(s: &str, max: usize) -> String {
     cut.trim_end_matches('-').to_string()
 }
 
-/// How long a label of `owner`'s may be: its host, `<label>--<owner>`, is
-/// one DNS label. A branch deployment's mark (`--<branch>`), which the CLI
-/// does not know, takes more: there the cell refuses a chat whose host
-/// would pass 63 bytes, saying why (docs/api.md, Names).
-fn label_max(owner: &str) -> usize {
-    fragment_proto::label_room(owner, "")
-}
-
 /// The chat of two agents (fragment names, one owner's) and their owner:
-/// their labels in order, joined by `-`, each cut so its host is one DNS
-/// label. Either asking the other names the same chat.
+/// their labels in order, joined by `-`, each cut so the chat's host is one
+/// DNS label on any deployment, a branch's mark included (docs/api.md,
+/// Names). Either asking the other names the same chat.
 pub fn pair_label(a: &str, b: &str) -> String {
-    let max = label_max(username(a).unwrap_or(""));
+    let max = fragment_proto::limits::LABEL_ROOM_MIN_BYTES;
     let (a, b) = (label(a), label(b));
     let (first, second) = if a <= b { (a, b) } else { (b, a) };
     let half = (max - 1) / 2;
     let out = if first.len() + 1 + second.len() <= max { format!("{first}-{second}") } else { format!("{}-{}", cut_label(first, half), cut_label(second, half)) };
-    assert!(out.len() <= max && fragment_proto::valid_label(&out), "a pair's label is a label whose host fits: {out}");
+    assert!(out.len() <= max && fragment_proto::valid_label(&out), "a pair's label is a label whose name fits: {out}");
     out
 }
 
+/// The chat of two agents, named in full: their pair's label, and a suffix
+/// drawn from a digest of their identities, so either asking finds the
+/// same one, and two asking at once make one (the second's create is 409).
+pub fn pair_name(a: &Agent, b: &Agent) -> String {
+    let (x, y) = if a.identity <= b.identity { (&a.identity, &b.identity) } else { (&b.identity, &a.identity) };
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(format!("fragment pair chat\0{x}\0{y}").as_bytes());
+    fragment_proto::fragment_name(&pair_label(&a.fragment, &b.fragment), [digest[0], digest[1], digest[2]])
+}
+
 /// A person's direct chat with an agent (its fragment's name), as the shell
-/// names it: `<label>-chat`.
+/// labels it: `<label>-chat`.
 pub fn direct_label(agent: &str) -> String {
-    let max = label_max(username(agent).unwrap_or(""));
+    let max = fragment_proto::limits::LABEL_MAX_BYTES;
     let out = format!("{}-chat", cut_label(label(agent), max - "-chat".len()));
-    assert!(out.len() <= max && fragment_proto::valid_label(&out), "a direct chat's label is a label whose host fits: {out}");
+    assert!(out.len() <= max && fragment_proto::valid_label(&out), "a direct chat's label is a label whose name fits: {out}");
     out
 }
 
@@ -243,37 +241,48 @@ pub fn ask(c: &Client, who: &str, text: &str, chat: Option<&str>, wait: Option<u
     if asker.as_ref().is_some_and(|a| a.identity == asked.identity) {
         return Err(coded(Code::InvalidUsage, "an agent asks another agent, not itself"));
     }
-    let owner_name = username(&asked.fragment).ok_or_else(|| coded(Code::ServerError, format!("the computer named the agent fragment {:?}", asked.fragment)))?.to_string();
-    let (named, ours) = match chat {
-        Some(c) => (c.trim().to_string(), false),
-        None => match &asker {
-            Some(a) => (pair_label(&a.fragment, &asked.fragment), true),
-            None => (direct_label(&asked.fragment), true),
-        },
+    // the chat: one named (--chat), the two agents' (named in full), or a
+    // person's direct chat with the agent (by its label, as the shell's)
+    let (found, make) = match (chat, &asker) {
+        (Some(named), _) => (Some(c.fragment(named.trim())?), None),
+        (None, Some(a)) => {
+            let full = pair_name(a, &asked);
+            (Some(full.clone()), Some(json!({ "name": full })))
+        }
+        (None, None) => {
+            let label = direct_label(&asked.fragment);
+            (c.fragment(&label).ok(), Some(json!({ "label": label })))
+        }
     };
-    let full = if named.contains('.') { named.clone() } else { format!("{named}.{owner_name}") };
 
-    // the chat: found, or (ours to name) made
+    // found, or (ours to name) made
     let mut created = false;
-    let mut list = match members(c, &full)? {
-        Some(m) => m,
-        None if ours => {
+    let existing = match &found {
+        Some(full) => members(c, full)?.map(|m| (full.clone(), m)),
+        None => None,
+    };
+    let (full, mut list) = match (existing, make) {
+        (Some(found), _) => found,
+        (None, Some(mut make)) => {
             let all = titles(c);
             let title = match &asker {
                 Some(a) => format!("{} and {}", title_of(&all, a), title_of(&all, &asked)),
                 None => title_of(&all, &asked),
             };
-            let made = c.post_json("/api/fragments", &json!({ "name": label(&full), "template": "chat", "title": title }))?;
-            if made.status == 409 {
+            make["template"] = json!("chat");
+            make["title"] = json!(title);
+            let made = c.post_json("/api/fragments", &make)?;
+            let full = if made.status == 409 {
                 // made meanwhile (the other agent asking at once): the same chat
+                found.clone().ok_or_else(|| coded(Code::ServerError, "a chat made under a label was 409"))?
             } else {
-                let made: Created = c.call_as(made)?;
-                assert_eq!(made.name, full, "a chat made under its owner's name");
                 created = true;
-            }
-            members(c, &full)?.ok_or_else(|| coded(Code::ServerError, format!("{full} was made, and has no members")))?
+                c.call_as::<Created>(made)?.name
+            };
+            let list = members(c, &full)?.ok_or_else(|| coded(Code::ServerError, format!("{full} was made, and has no members")))?;
+            (full, list)
         }
-        None => return Err(coded(Code::NotFound, format!("no chat named {full}"))),
+        (None, None) => return Err(coded(Code::NotFound, format!("no chat named {}", found.unwrap_or_default()))),
     };
     let channels = c.call(c.get(&format!("/api/f/{full}/channels"))?)?;
     let listed = channels["channels"].as_array().cloned().unwrap_or_default();
@@ -381,7 +390,7 @@ mod tests {
     use super::*;
 
     fn agent(label: &str) -> Agent {
-        Agent { fragment: format!("{label}.paul"), identity: format!("id:{label}"), name: label.into() }
+        Agent { fragment: format!("{label}--k3x9"), identity: format!("npub1{label}"), name: label.into() }
     }
 
     /// Goal: an agent is named as a person would name it. Invalid: a name
@@ -389,36 +398,40 @@ mod tests {
     #[test]
     fn an_agent_is_picked_by_any_of_its_names() {
         let agents = [agent("juniper"), agent("fred")];
-        for who in ["fred", "Fred", "fred.paul", "FRED.paul", " fred ", "id:fred"] {
+        for who in ["fred", "Fred", "fred--k3x9", "FRED--K3X9", " fred ", "npub1fred"] {
             assert_eq!(pick(&agents, who).map(|a| a.name.as_str()), Some("fred"), "{who}");
         }
-        for who in ["fre", "fred.skyler", "id:FRED", "", "juniper-chat"] {
+        for who in ["fre", "fred--p2m4", "NPUB1FRED", "", "juniper-chat"] {
             assert_eq!(pick(&agents, who), None, "{who}");
         }
     }
 
-    /// Goal: two agents name one chat, whichever asks, and it is a label
-    /// whose host (`<label>--<username>`) is one DNS label, however long
-    /// their names and the owner's. Invalid: a cut that would end in `-` or
-    /// make a `--` is trimmed.
+    /// Goal: two agents name one chat, whichever asks: a label that leaves
+    /// a name its suffix, however long their names, and a suffix from their
+    /// identities, the same either way round and another for another pair.
+    /// Invalid: a cut that would end in `-` or make a `--` is trimmed.
     #[test]
     fn two_agents_name_one_chat() {
-        assert_eq!(pair_label("juniper.paul", "fred.paul"), "fred-juniper");
-        assert_eq!(pair_label("fred.paul", "juniper.paul"), "fred-juniper", "either way round");
-        let host_fits = |l: &str, owner: &str| fragment_proto::valid_label(l) && l.len() + 2 + owner.len() <= fragment_proto::limits::HOST_LABEL_MAX_BYTES;
-        let owner = "a-rather-long-username-of-thirty";
+        assert_eq!(pair_label("juniper--k3x9", "fred--p2m4"), "fred-juniper");
+        assert_eq!(pair_label("fred--p2m4", "juniper--k3x9"), "fred-juniper", "either way round");
+        let fits = |l: &str, max: usize| fragment_proto::valid_label(l) && l.len() <= max;
         for (a, b) in [
-            ("a".repeat(32), format!("{}-b", "b".repeat(29))),
-            (format!("{}-x", "c".repeat(12)), "d".repeat(32)),
-            (format!("{}-z", "e".repeat(13)), format!("{}-y", "f".repeat(13))),
+            ("a".repeat(57), format!("{}-b", "b".repeat(55))),
+            (format!("{}-x", "c".repeat(12)), "d".repeat(57)),
+            (format!("{}-z", "e".repeat(18)), format!("{}-y", "f".repeat(18))),
         ] {
-            let l = pair_label(&format!("{a}.{owner}"), &format!("{b}.{owner}"));
-            assert!(host_fits(&l, owner), "{l}");
-            assert_eq!(l, pair_label(&format!("{b}.{owner}"), &format!("{a}.{owner}")), "either way round");
+            let l = pair_label(&format!("{a}--k3x9"), &format!("{b}--k3x9"));
+            assert!(fits(&l, fragment_proto::limits::LABEL_ROOM_MIN_BYTES), "a pair's chat fits the longest branch's hosts: {l}");
+            assert_eq!(l, pair_label(&format!("{b}--k3x9"), &format!("{a}--k3x9")), "either way round");
         }
-        assert_eq!(direct_label("fred.paul"), "fred-chat");
-        let d = direct_label(&format!("{}.{owner}", "z".repeat(63)));
-        assert!(host_fits(&d, owner) && d.ends_with("-chat"), "{d}");
+        let (juniper, fred, maple) = (agent("juniper"), agent("fred"), agent("maple"));
+        let name = pair_name(&juniper, &fred);
+        assert!(name.starts_with("fred-juniper-") && fragment_proto::valid_fragment_name(&name), "{name}");
+        assert_eq!(name, pair_name(&fred, &juniper), "either way round");
+        assert_ne!(pair_name(&juniper, &maple).rsplit('-').next(), name.rsplit('-').next(), "another pair, another suffix");
+        assert_eq!(direct_label("fred--k3x9"), "fred-chat");
+        let d = direct_label(&format!("{}--k3x9", "z".repeat(57)));
+        assert!(fits(&d, fragment_proto::limits::LABEL_MAX_BYTES) && d.ends_with("-chat"), "{d}");
     }
 
     fn rec(seq: i64, principal: &str, body: Value) -> Value {

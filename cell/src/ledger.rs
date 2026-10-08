@@ -1,5 +1,5 @@
 //! The `Ledger` cell (docs/ledger.md): one Durable Object per person,
-//! named by their identity (`id:<hex>`), running the usage ledger's state
+//! named by their identity (an npub), running the usage ledger's state
 //! machine (`fragment_core::ledger`) over its own SQLite. The caller
 //! decides who pays a row and asks that person's ledger, which keys on
 //! nothing else (docs/cloudflare-v1.md, decision 36).

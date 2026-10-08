@@ -112,7 +112,7 @@ pub(crate) async fn site_session(env: &Env, token: String, fragment: &str, frame
 
 /// A request the router hands a fragment's supervisor.
 pub struct Routed {
-    /// The fragment's full name (`<label>.<username>`).
+    /// The fragment's name (`<label>--<suffix>`).
     pub name: String,
     /// The URL it arrived on: canonical URLs, cookies, and the query string
     /// all come from here.
@@ -192,6 +192,8 @@ fn marker(path: &str) -> CellResult<Option<(&'static str, &'static str)>> {
         Ok(Some((crate::computer::INTERNAL_HEADER, "1")))
     } else if path == "meter/acked" || path == "meter/whose" {
         Ok(Some((crate::meter::METER_HEADER, "1")))
+    } else if path == "invites/claim" {
+        Ok(Some((crate::members::CLAIM_HEADER, "1")))
     } else if path.starts_with("wipe/") {
         Ok(Some((crate::wipe::WIPE_HEADER, "1")))
     } else if path.starts_with("test/") {

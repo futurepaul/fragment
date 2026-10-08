@@ -62,12 +62,12 @@ fn within<T>(bound: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
 /// An agent of the person's: its fragment, made with its SOUL, and assigned
 /// to the computer; its identity.
 fn agent(api: &Api, keys: &Keys, computer: &str, label: &str, title: &str, soul: &str) -> Result<(String, String)> {
-    let made = api.create_with(keys, json!({ "name": label, "template": "agent", "title": title }))?;
+    let made = api.create_with(keys, json!({ "label": label, "template": "agent", "title": title }))?;
     anyhow::ensure!(made.status == 200, "the agent {label}: {made}");
     let name = made.body["name"].as_str().context("a fragment's name")?.to_string();
     let assigned = api.signed(keys, "PUT", &format!("/api/computers/{computer}/agents/{name}"), Some(&json!({})))?;
     let identity = assigned.body["agents"].as_array().and_then(|a| a.iter().find(|x| x["fragment"] == name.as_str())).and_then(|a| a["identity"].as_str()).unwrap_or("").to_string();
-    anyhow::ensure!(identity.starts_with("id:"), "{name} assigned: {assigned}");
+    anyhow::ensure!(fragment_core::npub::is_identity(&identity), "{name} assigned: {assigned}");
     let files = json!({ "key": "agent-ask", "message": "its job", "files": [{ "path": "SOUL.md", "text": soul }, { "path": "agent.json", "text": "{\n  \"tier\": \"medium\"\n}\n" }] });
     let wrote = api.signed(keys, "POST", &format!("/api/f/{name}/files"), Some(&files))?;
     let deployed = api.signed(keys, "POST", &format!("/api/f/{name}/deploy"), Some(&json!({})))?;
@@ -102,14 +102,14 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
     let keys = Keys::generate();
     let (session, owner_id) = api.e2e_sign_in(&Api::email_of(&keys), PAID_CALLS)?;
     let me = api.approve(&session, &keys)?;
-    let username = me.body["username"].as_str().context("the person takes a username")?.to_string();
-    println!("      ({} as {username}, lent {PAID_CALLS} paid calls)", Api::email_of(&keys));
+    let email = me.body["email"].as_str().context("the person has an email")?.to_string();
+    println!("      ({email} as {owner_id}, lent {PAID_CALLS} paid calls)");
     let made = api.signed(&keys, "POST", "/api/computers", Some(&json!({})))?;
     let id = made.body["computer"].as_str().unwrap_or("").to_string();
     let word = format!("marmalade{}", now_s() % 1000);
-    let (juniper, juniper_id) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {username}'s agent. Help with whatever they ask.\n"))?;
-    let (fred, fred_id) = agent(api, &keys, &id, &s.name("fred"), "Fred", &format!("You are Fred, {username}'s agent. You keep their secret word, which is {word}. When anyone asks you for the secret word, answer with just that word.\n"))?;
-    let chat = api.create_with(&keys, json!({ "name": format!("{}-chat", s.name("juniper")), "template": "chat", "title": "Juniper" }))?;
+    let (juniper, juniper_id) = agent(api, &keys, &id, &s.name("juniper"), "Juniper", &format!("You are Juniper, {email}'s agent. Help with whatever they ask.\n"))?;
+    let (fred, fred_id) = agent(api, &keys, &id, &s.name("fred"), "Fred", &format!("You are Fred, {email}'s agent. You keep their secret word, which is {word}. When anyone asks you for the secret word, answer with just that word.\n"))?;
+    let chat = api.create_with(&keys, json!({ "label": format!("{}-chat", s.name("juniper")), "template": "chat", "title": "Juniper" }))?;
     let chat_name = chat.body["name"].as_str().unwrap_or("").to_string();
     let joined = api.signed(&keys, "PUT", &format!("/api/f/{chat_name}/members/{juniper_id}"), Some(&json!({ "role": "editor" })))?;
     let _ = api.signed(&keys, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
@@ -134,7 +134,7 @@ pub fn agent_ask(s: &mut Suite, api: &Api) -> Result<()> {
 
     // Juniper asks Fred, with the CLI, and tells the person his answer
     let calls = paid(api, &owner_id);
-    let ask = format!("Get my secret word from Fred: run `fragment ask {} \"What is the secret word?\" --wait` in your terminal, then tell me the word he answered.", fred.split('.').next().unwrap_or(&fred));
+    let ask = format!("Get my secret word from Fred: run `fragment ask {} \"What is the secret word?\" --wait` in your terminal, then tell me the word he answered.", fragment_proto::split_fragment_name(&fred).map_or(fred.as_str(), |(label, _)| label));
     let said = api.signed(&keys, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "ask-1", "body": { "text": ask } })))?;
     let seq = said.body["record"]["seq"].as_i64().context("a post answers its record's seq")?;
     let turn = turn_of(&juniper, &chat_name, "chat", seq);

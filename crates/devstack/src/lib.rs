@@ -42,7 +42,8 @@ pub const CACHE_DIR: &str = "target/cache";
 /// What a branch deployment's name may be (`cargo xtask deploy --branch`,
 /// and the hosted e2e's): the wire contract's, which the cell checks its
 /// mark (`--<branch>`) against as it starts, and whose length every
-/// username's room for labels allows for (`fragment_proto::username_max`).
+/// deployment's room for labels allows for
+/// (`fragment_proto::limits::LABEL_ROOM_MIN_BYTES`).
 pub use fragment_proto::valid_branch;
 
 pub fn repo_root() -> PathBuf {
@@ -264,10 +265,10 @@ pub struct Fleet {
     pub codestorage_org: String,
     pub codestorage_key_pem: String,
     pub codestorage_url: String,
-    /// Fragments are served from `<label>--<username>.<suffix>`.
+    /// Fragments are served from `<name>.<suffix>`.
     pub host_suffix: String,
     /// A branch deployment's mark on its fragments' hosts (`--<branch>`:
-    /// `<label>--<username>--<branch>.<suffix>`), which also scopes its
+    /// `<name>--<branch>.<suffix>`), which also scopes its
     /// test levers to the e2e's own things (the hosted lane's rehearsal).
     pub host_label_suffix: Option<String>,
     pub poll_interval_s: u32,
@@ -282,6 +283,11 @@ pub struct Fleet {
     /// the AI binding, through `ai_gateway`).
     pub ai_url: Option<String>,
     pub ai_gateway: Option<String>,
+    /// Where the platform's mail goes (`FRAGMENT_MAIL_URL`: the mail fake in
+    /// dev and the e2e; `None`: the Email Sending binding), and the address
+    /// it comes from (`FRAGMENT_MAIL_FROM`).
+    pub mail_url: Option<String>,
+    pub mail_from: Option<String>,
     /// A new person's plan (`FRAGMENT_DEFAULT_PLAN`; `None`: the cell's, guest).
     pub default_plan: Option<String>,
     /// The wait before a delivery is retried, every time (`None`: the
@@ -289,6 +295,8 @@ pub struct Fleet {
     pub delivery_retry_s: Option<u32>,
     /// Sign-in: WorkOS AuthKit (the real one, or the fake in `crates/fakes`).
     pub workos: Option<WorkOsVars>,
+    /// Seats sold: Stripe (the fake in `crates/fakes`; docs/billing.md).
+    pub stripe: Option<StripeVars>,
     /// The platform's origin (sign-in, the platform session;
     /// `FRAGMENT_PLATFORM_URL`, which every fleet names).
     pub platform_url: String,
@@ -321,6 +329,18 @@ pub struct Fleet {
     pub swap_upstream: Option<String>,
 }
 
+/// A Stripe account as the cell reads it.
+pub struct StripeVars {
+    pub key: String,
+    pub webhook_secret: String,
+    /// `None`: Stripe itself.
+    pub api_url: Option<String>,
+    /// The deployment's portal configuration (`FRAGMENT_STRIPE_PORTAL`).
+    pub portal: Option<String>,
+    /// Automatic tax on a Checkout (`FRAGMENT_STRIPE_TAX`).
+    pub tax: bool,
+}
+
 /// A WorkOS environment as the cell reads it.
 pub struct WorkOsVars {
     pub client_id: String,
@@ -333,7 +353,7 @@ impl Fleet {
     /// The store secrets its Worker is bound to, by name.
     fn bound(&self) -> store::Bound {
         let providers: Vec<&str> = self.operator_key_values.iter().map(|(p, _)| p.as_str()).collect();
-        store::Bound::conventional(self.workos.is_some(), &providers)
+        store::Bound::conventional(self.workos.is_some(), self.stripe.is_some(), &providers)
     }
 
     /// Renders the deployment for a node on `project`: its settings into
@@ -347,6 +367,12 @@ impl Fleet {
         if let (Some((client, key)), Some(w)) = (&bound.workos, &self.workos) {
             values.push((client.as_str(), w.client_id.as_str()));
             values.push((key.as_str(), w.api_key.as_str()));
+        }
+        if let (Some((key, webhook)), Some(s)) = (&bound.stripe, &self.stripe) {
+            values.push((key.as_str(), s.key.as_str()));
+            if let Some(w) = webhook {
+                values.push((w.as_str(), s.webhook_secret.as_str()));
+            }
         }
         for ((_, name), (_, value)) in bound.operator_keys.iter().zip(&self.operator_key_values) {
             values.push((name.as_str(), value.as_str()));
@@ -370,6 +396,12 @@ impl Fleet {
         if let Some(g) = &grace {
             vars.push(("FRAGMENT_BLOB_GRACE_S", g.as_str()));
         }
+        if let Some(u) = &self.mail_url {
+            vars.push(("FRAGMENT_MAIL_URL", u.as_str()));
+        }
+        if let Some(f) = &self.mail_from {
+            vars.push(("FRAGMENT_MAIL_FROM", f.as_str()));
+        }
         if let Some(u) = &self.ai_url {
             vars.push(("FRAGMENT_AI_URL", u.as_str()));
         }
@@ -389,6 +421,17 @@ impl Fleet {
         }
         if let Some(u) = self.workos.as_ref().and_then(|w| w.api_url.as_ref()) {
             vars.push(("WORKOS_API_URL", u.as_str()));
+        }
+        if let Some(s) = &self.stripe {
+            if let Some(u) = &s.api_url {
+                vars.push(("STRIPE_API_URL", u.as_str()));
+            }
+            if let Some(p) = &s.portal {
+                vars.push(("FRAGMENT_STRIPE_PORTAL", p.as_str()));
+            }
+            if !s.tax {
+                vars.push(("FRAGMENT_STRIPE_TAX", "off"));
+            }
         }
         if let Some(o) = &self.operators {
             vars.push(("FRAGMENT_OPERATORS", o.as_str()));

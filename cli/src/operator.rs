@@ -111,7 +111,7 @@ pub fn print(r: &WipeReport) {
         WipeState::Wiped => "wiped",
     };
     let next = r.next.as_deref().map(|n| format!(", next: {n}")).unwrap_or_default();
-    println!("{} ({}): {state}{next}", r.identity, r.username.as_deref().unwrap_or("no username"));
+    println!("{} ({}): {state}{next}", r.identity, r.email.as_deref().unwrap_or("no email"));
     print_found(&r.found);
 }
 

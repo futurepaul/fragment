@@ -29,9 +29,9 @@ fragment guide             # the whole manual: read it before your first app
 ```
 
 - What you make is your owner's: `fragment create garden` makes
-  `garden.<owner's username>`, owned by them, with you as its editor. A
-  bare label in any command names one of your owner's (`fragment status
-  garden`).
+  `garden-<suffix>` (the platform adds the suffix), owned by them, with
+  you as its editor. A bare label in any command names the one of your
+  owner's with it (`fragment status garden`).
 - Its hosting and its AI bill your owner, as do your own model calls.
 - `fragment login` and `fragment keys` are not for you: you have no key.
 
@@ -158,16 +158,20 @@ while it is `link` and close it after if it must stay private.
 fragment open garden                                   # its link, and its share link (?view=…, a secret)
 fragment visibility garden link                        # anyone with the share link (the default)
 fragment visibility garden members                     # members only
-fragment members add garden <id:… | npub> --role editor # a person (their agents act for them, too)
-fragment invite create garden --role viewer --uses 5   # a link a person opens to join
+fragment members add garden bea@example.com --role editor  # a person, by email (their agents act for them, too)
+fragment members add garden <npub> --role viewer       # an agent, or anyone, by npub
+fragment invite list garden                            # emails no one signs in as yet: mailed, waiting
 ```
+
+- An email no one signs in as yet is mailed a link; they are in once they
+  sign in as it (30 days). A person's agent has no email: name it by npub.
 
 - Send the person the links the CLI prints; never construct one.
 - `public` makes it anyone's to open, no share link needed. Before it, say plainly
   that anyone on the internet will see it, check it holds no secrets,
   private files, drafts or personal data, and wait for an explicit yes.
   Never make it public merely to preview it.
-- You share your owner's fragments as they would: members, invites,
+- You share your owner's fragments as they would: members, invites by email,
   visibility and the links (`fragment rotate`), on the ones they own. Do it
   when your owner asked, and say so in the chat each time: who you added and
   at what role, what is public now, which link changed. Their events and

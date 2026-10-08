@@ -49,15 +49,15 @@ fn is_shell(r: &Reply) -> bool {
 
 /// `/settings` is the shell's page for everyone, as `/` is: its script
 /// asks who is signed in (`who`) and so asks the signed-out to sign in,
-/// and someone with no username yet to choose one (the shell-ui section
-/// shows both in a browser).
+/// and shows someone new their first agent being made (the shell-ui
+/// section shows both in a browser).
 fn settings_cases(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.unsigned("GET", "/settings", None)?;
     s.ok("signed out, settings is the shell, which asks them to sign in (the platform knows no one)", is_shell(&r) && who(api, "f".repeat(64).as_str())?.is_null(), &r);
     let fresh = api.sign_in("home-fresh@e2e.test")?;
     let r = with_session(api, "GET", "/settings", &fresh)?;
     let asked = who(api, &fresh)?;
-    s.ok("with no username yet, settings is the shell, which asks for one", is_shell(&r) && asked["kind"] == "person" && asked["username"].is_null(), &r);
+    s.ok("someone new's settings is the shell, which knows them: a person, by their email", is_shell(&r) && asked["kind"] == "person" && asked["email"] == "home-fresh@e2e.test", &r);
     Ok(())
 }
 
@@ -78,7 +78,7 @@ fn from_shell(api: &Api, session: &str, method: &'static str, path: &str, body: 
 
 /// An origin a fragment's page posts from: one site with the platform (a
 /// SameSite=Lax session cookie rides along), but not its origin.
-const A_FRAGMENTS_PAGE: &str = "http://page--mallory.fragment.localhost";
+const A_FRAGMENTS_PAGE: &str = "http://page--k3x9.fragment.localhost";
 
 /// Whether a page refuses every frame (`frame-ancestors 'none'`, and
 /// `X-Frame-Options: DENY` for browsers without it). Every fragment's
@@ -290,32 +290,24 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("signing in again is the same person", r.body["id"] == paul_id.as_str(), &r);
     let (r, calls) = calls_of(api, || who(api, &paul))?;
     s.ok("the shell asks the registry once who is signed in, and gets their email with it", r.to_string().contains("paul@e2e.test") && calls == 1, format!("{calls} calls: {r}"));
-    // a username chosen on the platform's page: the session is checked in the registry's same turn
+    // someone new is someone at once: nothing to choose before the shell
     let chooser = api.sign_in("chooser@e2e.test")?;
-    let chosen = format!("u{}", &Keys::generate().pubkey_hex()[..12]);
-    let choose = |session: &str, username: &str| {
-        api.call(Call {
-            method: "POST",
-            url: format!("{}/auth/username", api.base),
-            body: Some(format!("username={username}").into_bytes()),
-            content_type: Some("application/x-www-form-urlencoded"),
-            cookie: Some(format!("fragment_session={session}")),
-            ..Call::default()
-        })
-    };
     let asked = who(api, &chooser)?;
-    s.ok("a person new to the platform has no username yet (the shell asks for one)", asked["kind"] == "person" && asked["username"].is_null(), &asked);
-    let (r, calls) = calls_of(api, || choose(&chooser, &chosen))?;
-    s.ok("a person chooses their username on the platform's page, asking the registry once, and goes home", r.status == 302 && calls == 1 && r.header("location") == "/", format!("{calls} calls: {r}"));
+    let chooser_id = asked["id"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "a person new to the platform is someone at once: named by their own key, shown by their email",
+        asked["kind"] == "person" && fragment_core::npub::is_identity(&chooser_id) && asked["email"] == "chooser@e2e.test",
+        &asked,
+    );
     let home = with_session(api, "GET", "/", &chooser)?;
-    s.ok("home, with a username, is the shell", is_shell(&home) && who(api, &chooser)?["username"] == chosen.as_str(), &home);
+    s.ok("home is the shell", is_shell(&home), &home);
     let settings = with_session(api, "GET", "/settings", &chooser)?;
     let theirs = from_shell(api, &chooser, "GET", "/api/fragments", None, &api.base, "same-origin")?;
     let script = api.unsigned("GET", "/__shell/shell.js", None)?;
     s.ok(
         "their settings are the shell's: it knows who they are, that they have no fragments yet, and says how to pair a CLI and a coding agent",
         is_shell(&settings)
-            && who(api, &chooser)?["username"] == chosen.as_str()
+            && who(api, &chooser)?["email"] == "chooser@e2e.test"
             && theirs.status == 200
             && theirs.body["fragments"].as_array().is_some_and(|f| f.is_empty())
             && script.text.contains("releases/latest/download/fragment-$(uname -s)-$(uname -m).tar.gz")
@@ -324,38 +316,17 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{settings} / {theirs}"),
     );
     settings_cases(s, api)?;
-    let r = choose(&chooser, &format!("{chosen}x"))?;
-    s.ok("and only once", r.status == 400 && r.text.contains("chosen once"), &r);
-    let r = choose(&"0".repeat(64), &format!("{chosen}y"))?;
-    s.ok("a browser whose session is not live is sent to sign in", r.status == 302 && r.header("location").contains("/auth/login"), &r);
-    // a fragment's page is one site with the platform: its form, or its
-    // fetch, carries the session, and only the Origin says where it came from
     let newcomer = api.sign_in("newcomer@e2e.test")?;
-    let r = api.call(Call {
-        method: "POST",
-        url: format!("{}/auth/username", api.base),
-        body: Some(format!("username={chosen}z").into_bytes()),
-        content_type: Some("application/x-www-form-urlencoded"),
-        cookie: Some(format!("fragment_session={newcomer}")),
-        extra: vec![("origin", A_FRAGMENTS_PAGE.into())],
-        ..Call::default()
-    })?;
-    let home = who(api, &newcomer)?;
-    s.ok(
-        "a username posted from a fragment's page is refused (403): the person still chooses their own",
-        r.status == 403 && home["username"].is_null(),
-        format!("{r} / {home}"),
-    );
     // a picture, as the shell sets it (the API, with the platform session)
     let picture = |origin: &str, site: &str| {
         let png = b"\x89PNG\r\n\x1a\n-a-tiny-picture".to_vec();
         from_shell(api, &chooser, "PUT", "/api/identities/me/picture", Some((png, "image/png")), origin, site)
     };
     let r = picture(A_FRAGMENTS_PAGE, "same-site")?;
-    let unset = api.unsigned("GET", &format!("/api/users/{chosen}/picture"), None)?;
+    let unset = api.unsigned("GET", &format!("/api/identities/{chooser_id}/picture"), None)?;
     s.ok("so is a picture: a fragment's page is not the shell, and its session is no one's there (401)", r.status == 401 && unset.status == 404, format!("{r} / {unset}"));
     let r = picture(&api.base, "same-origin")?;
-    let shown = api.unsigned("GET", &format!("/api/users/{chosen}/picture"), None)?;
+    let shown = api.unsigned("GET", &format!("/api/identities/{chooser_id}/picture"), None)?;
     s.ok("(from the platform's own page, the shell, the picture is set)", r.status == 200 && shown.status == 200, format!("{r} / {shown}"));
     let user = s.workos.user("paul@e2e.test");
     s.workos.set_email(&user.id, "paul@renamed.test");
@@ -368,6 +339,22 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let k4 = Keys::generate();
     let r = api.approve(&other, &k4)?;
     s.ok("another WorkOS user is another person, whatever their email looks like", r.status == 200 && r.body["id"] != paul_id.as_str(), &r);
+    // an email names one person (decision 45), and WorkOS must have verified it
+    let twin = s.workos.user("paul-twin@e2e.test");
+    let start = api.unsigned("GET", "/auth/login?return=/&login_hint=paul-twin%40e2e.test", None)?;
+    let bound = start.cookies().into_iter().find(|c| c.starts_with("fragment_login="));
+    let back = api.external(&start.header("location"))?;
+    s.workos.set_email(&twin.id, "paul@renamed.test");
+    let r = api.call(Call { method: "GET", url: back.header("location"), cookie: bound, ..Call::default() })?;
+    let page = |r: &Reply, says: &str| r.header("content-type").starts_with("text/html") && String::from_utf8_lossy(&r.bytes).contains(says);
+    s.ok("another WorkOS user with a person's email is refused, never merged into them (409, on a page)", r.status == 409 && page(&r, "another account"), &r);
+    s.workos.set_email(&twin.id, "paul-twin@e2e.test");
+    s.workos.set_verified(&twin.id, false);
+    let r = api.workos_callback("paul-twin@e2e.test")?;
+    s.ok("an email WorkOS has not verified signs no one in (403, on a page)", r.status == 403 && page(&r, "not verified"), &r);
+    s.workos.set_verified(&twin.id, true);
+    let r = api.workos_callback("paul-twin@e2e.test")?;
+    s.ok("verified, it signs in: a new person", r.status == 302, &r);
 
     // linking a second sign-in: explicit, from a signed-in session
     let r = with_session(api, "GET", "/auth/link", &renamed)?;
@@ -435,7 +422,7 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     // redirect shows nothing)
     let pages = [
         ("the shell's settings", "/__shell/shell.js", with_session(api, "GET", "/settings", &paul)?),
-        ("the shell, for someone with no username yet", "/__shell/shell.js", with_session(api, "GET", "/", &newcomer)?),
+        ("the shell, for someone new", "/__shell/shell.js", with_session(api, "GET", "/", &newcomer)?),
         ("the shell, signed out", "/__shell/shell.js", api.unsigned("GET", "/", None)?),
         ("the sign-out button", "Sign out", with_session(api, "GET", "/auth/logout", &paul)?),
         ("an expired approval link", "fragment login", with_session(api, "GET", stale.trim_start_matches(&api.base), &paul)?),
@@ -760,8 +747,6 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let r = who(api, &member_session)?;
     s.ok("the platform no longer knows the browser", r.is_null(), &r);
 
-    // invites are accepted on the platform's origin (`/join/<name>`: the share lane)
-
     // sign-in's rows: bounded, and swept on the registry's alarm, never on a request
     // (paul is not in f: he says yes to it once, and its redemptions follow)
     let r = consent(api, &paul, &f, &api.base)?;
@@ -890,15 +875,16 @@ pub fn signin(s: &mut Suite, api: &Api) -> Result<()> {
     let agent = Keys::generate();
     let reg = "/api/identities";
     let registered = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&agent, "POST", reg, &owner) })))?;
-    let r = api.create(&agent, &s.name("by-an-agent"))?;
+    let label = s.name("by-an-agent");
+    let r = api.create_with(&agent, json!({ "label": label }))?;
     let owner_id = api.identity(&owner)?;
     let name = r.body["name"].as_str().unwrap_or("").to_string();
     let members = api.signed(&owner, "GET", &format!("/api/f/{name}/members"), None)?;
     s.ok(
-        "an agent makes a fragment for its owner: theirs, under their username, with the agent an editor",
+        "an agent makes a fragment for its owner: theirs, named from its label, with the agent an editor",
         r.status == 200
             && r.body["owner"] == owner_id.as_str()
-            && name == api.qualified(&owner, &s.name("by-an-agent"))?
+            && fragment_proto::split_fragment_name(&name).is_some_and(|(l, _)| l == label)
             && members.body["members"].as_array().is_some_and(|a| a.iter().any(|m| m["principal"] == registered.body["id"] && m["role"] == "editor")),
         format!("{r} {members}"),
     );

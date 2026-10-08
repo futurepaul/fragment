@@ -8,7 +8,7 @@
 use std::sync::OnceLock;
 
 use fragment_proto::ledger::Plan;
-use fragment_proto::{flat_name, from_flat_name, ErrorCode};
+use fragment_proto::{valid_fragment_name, ErrorCode};
 use worker::Env;
 
 use crate::error::{CellError, CellResult};
@@ -31,15 +31,30 @@ pub struct WorkOsConfig {
     pub api: String,
 }
 
+/// Stripe (docs/billing.md): configured when its key is bound
+/// (`secrets_store::STRIPE_KEY`; keys.rs reads it, and the webhook's
+/// signing secret). Without it seats are comped only.
+pub struct StripeConfig {
+    /// `STRIPE_API_URL` (default https://api.stripe.com; dev and the e2e: the fake).
+    pub api: String,
+    /// `FRAGMENT_STRIPE_PORTAL`: the deployment's own portal configuration
+    /// (never the account's default, which finite-mono's is).
+    pub portal: Option<String>,
+    /// `FRAGMENT_STRIPE_TAX` (default on): Stripe's automatic tax on a
+    /// Checkout, prices before tax (decision 54); `off` where the account
+    /// has no tax settings (a sandbox).
+    pub tax: bool,
+}
+
 pub struct Config {
     /// `CODESTORAGE_ORG` (required) and the settings beside it.
     codestorage: CodeStorageConfig,
-    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from
-    /// `<label>--<username>.<suffix>`. Every deployment names one.
+    /// `FRAGMENT_HOST_SUFFIX`: fragments are served from `<name>.<suffix>`.
+    /// Every deployment names one.
     pub host_suffix: String,
     /// `FRAGMENT_HOST_LABEL_SUFFIX` (`--<branch>`): a branch deployment's
-    /// fragments are `<label>--<username>--<branch>.<suffix>`, beside the
-    /// other branches' in one zone.
+    /// fragments are `<name>--<branch>.<suffix>`, beside the other
+    /// branches' in one zone.
     host_label_suffix: Option<String>,
     /// `FRAGMENT_COMPUTER_IMAGE`: the image a new computer is pinned to (a
     /// name in wrangler.jsonc's `containers` images). Unset, the deployment
@@ -83,7 +98,16 @@ pub struct Config {
     /// AI binding's input to `<url>/run/<model>` instead (a fake at the
     /// vendor boundary, labeled so: models.rs) and needs no gateway.
     pub ai_url: Option<String>,
+    /// `FRAGMENT_MAIL_FROM`: the address the platform's mail comes from
+    /// (the deploy config's `mail_from`), on a domain onboarded to Email
+    /// Sending; none: the deployment sends no mail (mail.rs).
+    pub mail_from: Option<String>,
+    /// `FRAGMENT_MAIL_URL`: dev and the e2e only. Mail is POSTed to
+    /// `<url>/send` (the binding's input) instead: a fake at the vendor
+    /// boundary, which never sends it.
+    pub mail_url: Option<String>,
     workos: Option<WorkOsConfig>,
+    stripe: Option<StripeConfig>,
     /// `FRAGMENT_PLATFORM_URL` (required): the platform's own origin, where
     /// sign-in and the platform session live (e.g. https://fragment.club).
     /// It is also the contact a push's VAPID token names (`sub`, RFC 8292):
@@ -94,8 +118,9 @@ pub struct Config {
     /// `guest`, the default and production's, or `seat` or
     /// `seat_always_on` (dev and the e2e: `seat`).
     pub default_plan: Plan,
-    /// `FRAGMENT_OPERATORS`: identities and keys (as `parse_list` reads
-    /// them) that grant credit and set plans, seats and overdrafts.
+    /// `FRAGMENT_OPERATORS`: keys and identities, as npubs or 64 hex
+    /// (`parse_list` reads each as 64 hex), that grant credit and set
+    /// plans, seats and overdrafts.
     operators: Option<Result<Vec<String>, String>>,
     /// `FRAGMENT_SIGNINS_PENDING_MAX`: sign-ins begun and not finished that
     /// the Registry keeps before it lets the oldest go (default
@@ -248,12 +273,23 @@ impl Config {
             workos: crate::keys::bound(env, fragment_core::secrets_store::WORKOS_CLIENT).then(|| WorkOsConfig {
                 api: var(env, "WORKOS_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.workos.com".into()),
             }),
+            stripe: crate::keys::bound(env, fragment_core::secrets_store::STRIPE_KEY).then(|| StripeConfig {
+                api: var(env, "STRIPE_API_URL").map(|u| u.trim_end_matches('/').to_string()).unwrap_or_else(|| "https://api.stripe.com".into()),
+                portal: var(env, "FRAGMENT_STRIPE_PORTAL").filter(|p| !p.is_empty()),
+                tax: match var(env, "FRAGMENT_STRIPE_TAX").as_deref() {
+                    None | Some("on") => true,
+                    Some("off") => false,
+                    Some(other) => panic!("FRAGMENT_STRIPE_TAX is on or off, not {other:?}"),
+                },
+            }),
             platform_url,
             default_plan: default_plan(env),
             ai_gateway_id: var(env, "AI_GATEWAY_ID").inspect(|id| {
                 assert!(id != "default", "AI_GATEWAY_ID names the deployment's own gateway: `default` makes one that logs (spike S4)");
             }),
             ai_url: var(env, "FRAGMENT_AI_URL").map(|u| u.trim_end_matches('/').to_string()),
+            mail_from: var(env, "FRAGMENT_MAIL_FROM").map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+            mail_url: var(env, "FRAGMENT_MAIL_URL").map(|u| u.trim_end_matches('/').to_string()),
             operators: var(env, "FRAGMENT_OPERATORS").map(|l| fragment_core::npub::parse_list(&l)),
             signins_pending_max: var(env, "FRAGMENT_SIGNINS_PENDING_MAX")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -281,7 +317,7 @@ impl Config {
         match &self.operators {
             None => Ok(false),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
-            Some(Ok(listed)) => Ok(listed.iter().any(|l| l == identity || Some(l.as_str()) == key)),
+            Some(Ok(listed)) => Ok(listed.iter().any(|l| Some(l.as_str()) == key || fragment_core::npub::identity_of(l) == identity)),
         }
     }
 
@@ -289,6 +325,18 @@ impl Config {
     /// or nothing.
     pub fn host_label_suffix(&self) -> &str {
         self.host_label_suffix.as_deref().unwrap_or("")
+    }
+
+    /// Stripe, when this deployment sells seats: else a 400 that says so.
+    pub fn stripe(&self) -> CellResult<&StripeConfig> {
+        self.stripe
+            .as_ref()
+            .ok_or_else(|| CellError::invalid(format!("this deployment sells no seats (no {} binding): an operator comps them", fragment_core::secrets_store::STRIPE_KEY)))
+    }
+
+    /// The deployment as Stripe's metadata names it: its platform's origin.
+    pub fn stripe_deployment(&self) -> &str {
+        &self.platform_url
     }
 
     pub fn workos(&self) -> CellResult<&WorkOsConfig> {
@@ -318,17 +366,18 @@ impl Config {
         &self.codestorage
     }
 
-    /// The fragment a hostname names, when it is `<label>--<username>.<suffix>`
-    /// (one DNS label, so the suffix's one wildcard certificate covers every
-    /// fragment). This is the only way a host becomes a fragment: an exact
-    /// single label under the suffix (with a branch's mark, its own).
+    /// The fragment a hostname names, when it is `<name>.<suffix>` (a
+    /// name is one DNS label, so the suffix's one wildcard certificate
+    /// covers every fragment). This is the only way a host becomes a
+    /// fragment: an exact single label under the suffix (with a branch's
+    /// mark, its own).
     pub fn fragment_of_host(&self, host: &str) -> Option<String> {
         let label = label_under(host, &self.host_suffix)?;
-        let flat = match &self.host_label_suffix {
+        let name = match &self.host_label_suffix {
             Some(branch) => label.strip_suffix(branch.as_str())?,
             None => &label,
         };
-        from_flat_name(flat)
+        valid_fragment_name(name).then(|| name.to_string())
     }
 
     /// The computer a hostname names (`<24 hex>--computer.<suffix>`, a
@@ -376,7 +425,7 @@ impl Config {
     /// `Origin` (`scheme://host[:port]`).
     pub fn origin(&self, arrived: &url::Url, name: &str) -> String {
         let port = arrived.port().map(|p| format!(":{p}")).unwrap_or_default();
-        let host = flat_name(name).unwrap_or_else(|| name.to_string());
+        let host = name;
         let branch = self.host_label_suffix.as_deref().unwrap_or("");
         format!("{}://{host}{branch}.{}{port}", arrived.scheme(), self.host_suffix)
     }
@@ -394,10 +443,10 @@ fn default_plan(env: &Env) -> Plan {
 }
 
 /// A branch's mark on its fragments' labels: `--` and its name (a branch
-/// `xtask deploy` makes), so `<label>--<username>--<branch>.<suffix>`
-/// stays one DNS label under the zone's one wildcard certificate
-/// (docs/cloudflare-v1.md, decision 20), and a computer's
-/// `<24 hex>--computer--<branch>` fits in one.
+/// `xtask deploy` makes), so `<name>--<branch>.<suffix>` stays one DNS
+/// label under the zone's one wildcard certificate (docs/cloudflare-v1.md,
+/// decision 20; a create past it is refused: `fragment_core::names`), and
+/// a computer's `<24 hex>--computer--<branch>` fits in one.
 fn valid_label_suffix(s: &str) -> bool {
     s.strip_prefix("--").is_some_and(fragment_proto::valid_branch)
 }
