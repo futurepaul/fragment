@@ -19,6 +19,8 @@ const EXPORT_PAGE = 1000;
 const EXPORT_PAGES_MAX = 10_000;
 /// The tallest the shell is told the page is.
 const HEIGHT_MAX = 20_000;
+/// How often the framed page looks again at what it shows and its height.
+const SETTLE_MS = 1000;
 
 /// The fragment's label (its host's first label's first part).
 const label = () => (location.hostname.includes("--") ? location.hostname.split(".")[0].split("--")[0] : "mind");
@@ -143,13 +145,22 @@ export function mountSettings(root, fragment) {
     if (d && d.fragment === "theme" && (d.mode === "light" || d.mode === "dark")) document.documentElement.dataset.theme = d.mode;
   });
   let told = 0;
-  new ResizeObserver(() => {
+  const tell = () => {
     const height = Math.min(HEIGHT_MAX, Math.ceil(screen.el.getBoundingClientRect().height));
     if (height === told) return;
     told = height;
     window.parent.postMessage({ fragment: "mind", height }, platformOrigin());
-  }).observe(screen.el);
+  };
+  new ResizeObserver(tell).observe(screen.el);
   onChange(() => screen.render());
+  // a frame of another origin scrolled out of view is not drawn (no
+  // animation frames, no resize observations), and the shell's Settings
+  // often holds this one there: what it shows, and its height, are also
+  // checked each second
+  setInterval(() => {
+    screen.render();
+    tell();
+  }, SETTLE_MS);
   startSettings(fragment);
   changed();
 }
