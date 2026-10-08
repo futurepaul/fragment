@@ -148,6 +148,9 @@ struct State {
     /// Repo deletes still to answer 503 (`fail_repo_deletes`).
     #[serde(skip)]
     deletes_failing: u32,
+    /// Repo deletes answer 403 while set (`refuse_repo_deletes`).
+    #[serde(skip)]
+    deletes_refused: bool,
     /// Requests answered, by (the bearer token's subject, the repo url a
     /// repo route names or "", route): what a test counts, by repo
     /// (`requests`) or by caller (`take_requests`). Bounded by subjects
@@ -558,6 +561,9 @@ impl Inner {
             }
             if st.deleted.contains_key(url) {
                 return deleted_repo();
+            }
+            if st.deletes_refused {
+                return problem(403, "repo deletes are refused (the fake's lever: a key without the right)");
             }
             if st.deletes_failing > 0 {
                 st.deletes_failing -= 1;
@@ -1047,6 +1053,12 @@ impl CodeStorage {
     /// The next `n` repo deletes answer 503 (an outage the platform retries).
     pub fn fail_repo_deletes(&self, n: u32) {
         self.with(|st| st.deletes_failing = n);
+    }
+
+    /// While `on`, every repo delete answers 403: a refusal no retry passes
+    /// until something changes (a key given the right).
+    pub fn refuse_repo_deletes(&self, on: bool) {
+        self.with(|st| st.deletes_refused = on);
     }
 
     /// Whether the repo `url` was deleted (`DELETE /api/repos/{repo}`).

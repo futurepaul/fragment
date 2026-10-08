@@ -33,6 +33,7 @@
 //! else. Without one, whoever holds its token may.
 
 use fragment_core::access;
+use fragment_core::ended::Failure;
 use fragment_core::npub;
 use fragment_proto::{
     FragmentKind,
@@ -179,17 +180,30 @@ impl FragmentCell {
 
     /// Sends one index change to `principal`'s list: whether it took it.
     pub(crate) async fn send_index(&self, principal: &str, body: &Value) -> bool {
+        self.tell_index(principal, body).await.is_ok()
+    }
+
+    /// Sends one index change to `principal`'s list, and tells apart why
+    /// it was not taken (`fragment_core::ended::list_told`): the list's
+    /// refusal, or a failure a later try may pass.
+    pub(crate) async fn tell_index(&self, principal: &str, body: &Value) -> Result<(), Failure> {
         let sent = async {
             let headers = Headers::new();
             headers.set("content-type", "application/json")?;
             let mut init = RequestInit::new();
             init.with_method(Method::Post).with_headers(headers).with_body(Some(body.to_string().into()));
             let req = Request::new_with_init("https://principal.internal/index", &init)?;
-            let resp = self.env.durable_object("PRINCIPAL")?.get_by_name(principal)?.fetch_with_request(req).await?;
-            Ok::<bool, worker::Error>(resp.status_code() == 200)
+            let mut resp = self.env.durable_object("PRINCIPAL")?.get_by_name(principal)?.fetch_with_request(req).await?;
+            let status = resp.status_code();
+            // what a list says of a change it did not take (its error's message)
+            let detail = if status == 200 { String::new() } else { resp.text().await.unwrap_or_default() };
+            Ok::<(u16, String), worker::Error>((status, detail))
         }
         .await;
-        matches!(sent, Ok(true))
+        match sent {
+            Ok((status, detail)) => fragment_core::ended::list_told(Some(status), &detail),
+            Err(e) => fragment_core::ended::list_told(None, &e.to_string()),
+        }
     }
 
     /// Delivers due index changes to the people's `Principal` cells, at

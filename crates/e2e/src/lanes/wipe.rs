@@ -2,10 +2,15 @@
 //! trip: a person with a username, an agent and its computer (the stub
 //! locally, the deployment's own image hosted), a saved `/data`, an app, a
 //! picture, a membership in someone else's fragment, and a CLI key; the
-//! dry run, which changes nothing; the refusals; a wipe stopped after its
-//! first step (the person locked meanwhile, locally across a node's crash
-//! and a code.storage outage), then finished from the CLI with an operator
-//! key no one holds; and the same sign-in again, a new person: onboarding
+//! dry run, which changes nothing; the refusals; the person made as p5's
+//! were (2026-10-08): their list and their agent's from before a list's
+//! table named the channels searched, so they refuse every change, and
+//! (locally) their app's repo named as before repos were their owner's; a
+//! wipe stopped after its first step (the person locked meanwhile, locally
+//! across a node's crash, a code.storage refusal its report names, and an
+//! outage), then finished from the CLI with an operator key no one holds,
+//! never waiting on the lists it empties; and the same sign-in again, a new
+//! person: onboarding
 //! asks for a username, the old one is free, and a new agent and computer
 //! start empty, the agent's repo a fresh one under the same name.
 //!
@@ -137,7 +142,7 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     ];
     s.ok("they and their agent are in someone else's fragment, and that one's agent in their app", joined.iter().all(|r| r.status == 200), json!(joined.iter().map(|r| r.status).collect::<Vec<_>>()));
     let ours = [&agent_name, &chat_name, &app_name];
-    let repos: Vec<String> = [&agent, &chat, &app].iter().map(|c| c["repo"].as_str().unwrap_or("").to_string()).collect();
+    let mut repos: Vec<String> = [&agent, &chat, &app].iter().map(|c| c["repo"].as_str().unwrap_or("").to_string()).collect();
 
     // ---- the dry run: what a wipe deletes, and nothing changes
     let dry = cli_wipe(s, api, &file, &[&username, "--dry-run"]);
@@ -185,6 +190,38 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let me = api.signed(&paul, "GET", "/api/identities/me", None)?;
     s.ok("and the person is as they were", me.status == 200, &me);
 
+    // ---- made as p5's were (2026-10-08): their list and their agent's
+    // from before a list's table named the channels searched (#186, its
+    // migration gone with #197), so every newer change to them is refused,
+    // the ended fragments' changes included; and (locally) their app's
+    // repo named as before repos were their owner's. Their wipe still
+    // finishes: it never waits on the lists it empties
+    let made_old: Vec<crate::api::Reply> =
+        [&paul_id, &agent_id].iter().map(|who| api.unsigned("POST", "/api/test/list", Some(&json!({ "identity": who, "op": "before-searched" })))).collect::<Result<_>>()?;
+    s.ok(
+        "their list and their agent's are lists from before `searched` (a lever)",
+        made_old.iter().all(|r| r.status == 200 && r.body["columns"].as_array().is_some_and(|c| !c.contains(&json!("searched")))),
+        json!(made_old.iter().map(|r| r.to_string()).collect::<Vec<_>>()),
+    );
+    let r = api.signed(&bob, "PUT", &format!("/api/f/{shared}/members/{paul_id}"), Some(&json!({ "role": "viewer" })))?;
+    let role = |r: &crate::api::Reply| r.body["fragments"].as_array().and_then(|l| l.iter().find(|f| f["name"] == shared.as_str())).map(|f| f["role"].clone());
+    let theirs_now = api.signed(&paul, "GET", "/api/fragments", None)?;
+    s.ok(
+        "such a list takes no change (their role elsewhere changed, their list still says the old one), as on p5",
+        r.status == 200 && role(&theirs_now) == Some(json!("editor")),
+        format!("{r} / {theirs_now}"),
+    );
+    if scripted {
+        // the repo a fragment made before 2026-10-07 kept: `<label>--<username>`
+        let old = fragment_proto::flat_name(&app_name).context("a fragment's flat name")?;
+        s.fake.seed_repo(&old, &[("index.html", b"<p>the old app</p>\n")]);
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "repo", "repo": old })))?;
+        s.ok("their app's repo is one named as before repos were their owner's (a lever)", r.status == 200 && r.body["repo"] == old.as_str(), &r);
+        repos[2] = old;
+    } else {
+        s.skip("their app's repo is one named as before repos were their owner's (a lever)", "it seeds the old repo at code.storage, the fake's");
+    }
+
     // ---- a wipe stopped after one step: the person is locked meanwhile
     let r = wipe_call(api, &wiper, &username, &json!({ "confirm": paul_id, "steps": 1 }))?;
     s.ok(
@@ -204,28 +241,59 @@ pub fn wipe(s: &mut Suite, api: &Api) -> Result<()> {
     let r = lever(api, &computer, "saves")?;
     s.ok("their computer is no computer from its step", r.status == 404, &r);
 
-    // locally: the node crashes between two calls, and code.storage fails
-    // the next repo delete: the wipe goes on, and finishes
+    // locally: the node crashes between two calls, code.storage refuses
+    // the repo deletes for a call, then fails the next one: the wipe goes
+    // on, and finishes
     let restarted;
     let api = match scripted {
         true => {
             s.crash()?;
             restarted = s.start(false)?;
-            s.fake.fail_repo_deletes(1);
             &restarted
         }
         false => api,
     };
 
-    // ---- the wipe, from the CLI, with an operator key no one holds
     api.wiped(&paul_id);
+    // locally: code.storage refuses every repo delete (a key without the
+    // right): the cleanup holds each at its first refusal, and the report
+    // names each fragment, what it has left, and why, never an endless
+    // "still cleaning"
+    if scripted {
+        s.fake.refuse_repo_deletes(true);
+        let r = wipe_call(api, &wiper, &username, &json!({ "confirm": paul_id }))?;
+        let cleanup = r.body["ran"].as_array().and_then(|l| l.iter().find(|x| x["step"] == "cleanup")).cloned().unwrap_or(Value::Null);
+        let cleaning = cleanup["cleaning"].as_array().cloned().unwrap_or_default();
+        let named: Vec<&str> = cleaning.iter().filter_map(|c| c["fragment"].as_str()).collect();
+        s.ok(
+            "a repo delete code.storage refuses holds the cleanup, and the report says so: each fragment held, its repo left, the 403",
+            r.status == 200
+                && r.body["next"] == "cleanup"
+                && cleanup["done"] == false
+                && cleanup["note"].as_str().is_some_and(|n| n.starts_with("failed:") && n.contains("403"))
+                && ours.iter().all(|n| named.contains(&n.as_str()))
+                && cleaning.iter().all(|c| c["held"] == true && c["repo"] == true && c["lists"] == 0 && c["stored"] == false && c["error"].as_str().is_some_and(|e| e.starts_with("repo: ") && e.contains("403"))),
+            &r,
+        );
+        let ended = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": app_name, "op": "ended" })))?;
+        let life = &ended.body["ended"][0];
+        s.ok(
+            "the ended life says the same (the `ended` lever): its repo held, its lists told or never waited on",
+            life["repos"] == 1 && life["lists"] == 0 && life["held"] == true && life["error"].as_str().is_some_and(|e| e.contains("403")),
+            &ended,
+        );
+        s.fake.refuse_repo_deletes(false);
+        s.fake.fail_repo_deletes(1);
+    }
+
+    // ---- the wipe, from the CLI, with an operator key no one holds
     let wiped = cli_wipe(s, api, &file, &[&username, "--yes"]);
     let w = wiped.as_ref().map(Value::clone).unwrap_or(Value::Null);
     // locally the outage holds one repo's delete back a call or more: the
     // cleanup waits for it, and the CLI calls until it is done
     let calls_min = if scripted { 2 } else { 1 };
     s.ok(
-        "the CLI's wipe goes on where it stopped (through a crash and an outage, locally), and finishes with nothing left",
+        "the CLI's wipe goes on where it stopped (through a crash, a refusal and an outage, locally; their lists from before `searched` hold nothing), and finishes with nothing left",
         w["report"]["done"] == true && w["report"]["state"] == "wiped" && w["report"]["identity"] == paul_id.as_str() && w["calls"].as_u64().is_some_and(|c| c >= calls_min),
         format!("{wiped:?}"),
     );

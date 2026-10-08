@@ -106,6 +106,8 @@ pub struct PrincipalCell {
     /// Its person was wiped (`wiped`'s row, read as it starts): it takes
     /// nothing more.
     wiped: Cell<bool>,
+    /// The fleet has test levers (`FRAGMENT_TEST_SECRET`): `test/…` answers.
+    test_hooks: bool,
 }
 
 /// `wipe/view`'s body: the page of rows after `after` (a fragment's name).
@@ -214,13 +216,14 @@ struct Hit {
 }
 
 impl DurableObject for PrincipalCell {
-    fn new(state: State, _env: Env) -> Self {
+    fn new(state: State, env: Env) -> Self {
         let sql = state.storage().sql();
         sql.exec(SCHEMA, None).expect("the Principal schema applies");
         sql.exec(WIPED_SCHEMA, None).expect("the wiped row's schema applies");
         let marks: Vec<Value> = sql.exec("SELECT COUNT(*) AS n FROM wiped", None).and_then(|c| c.to_array()).expect("the wiped row reads");
         let wiped = marks.first().and_then(|r| r["n"].as_i64()).expect("COUNT answers a row") > 0;
-        PrincipalCell { state, wiped: Cell::new(wiped) }
+        let test_hooks = crate::config::Config::from_env(&env).test_hooks;
+        PrincipalCell { state, wiped: Cell::new(wiped), test_hooks }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -277,6 +280,10 @@ impl PrincipalCell {
             let body = req.bytes().await?;
             return Ok(Response::from_json(&self.wipe(&route, &body)?)?);
         }
+        // the router's levers (`/api/test/list`), on fleets with them only
+        if let Some(op) = req.path().strip_prefix("/test/").filter(|_| self.test_hooks) {
+            return Ok(Response::from_json(&self.test_lever(op)?)?);
+        }
         if self.wiped.get() {
             return self.wiped_answer(&req);
         }
@@ -312,6 +319,31 @@ impl PrincipalCell {
             }
             (Method::Get, "/watch") => self.watch(&req),
             (m, p) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {p}", m.as_ref()))),
+        }
+    }
+
+    /// The test levers on a list (`POST /api/test/list {identity, op}`):
+    /// `before-searched` makes it a list from before its rows named the
+    /// channels searched (#186), whose table never gained the column (the
+    /// lists on p5, 2026-10-08: every newer change to one is refused, 500).
+    /// Answers its columns.
+    fn test_lever(&self, op: &str) -> CellResult<Value> {
+        assert!(self.test_hooks, "a list's levers answer on fleets with them only");
+        let columns = |sql: &SqlStorage| -> CellResult<Vec<String>> {
+            let cols: Vec<Value> = sql.exec("PRAGMA table_info(memberships)", None)?.to_array()?;
+            Ok(cols.iter().filter_map(|c| c["name"].as_str().map(str::to_string)).collect())
+        };
+        let sql = self.sql();
+        match op {
+            "before-searched" => {
+                if columns(&sql)?.iter().any(|c| c == "searched") {
+                    sql.exec("ALTER TABLE memberships DROP COLUMN searched", None)?;
+                }
+                let now = columns(&sql)?;
+                assert!(!now.iter().any(|c| c == "searched"), "the list is one from before the column");
+                Ok(json!({ "columns": now }))
+            }
+            other => Err(CellError::new(ErrorCode::NotFound, format!("no list lever {other}"))),
         }
     }
 
