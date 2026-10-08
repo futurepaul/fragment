@@ -96,6 +96,8 @@ const RECORD_JSON_MAX = 60 * 1024;
 const TASK_TEXT_MAX = 30 * 1024;
 const TASK_RECORD_TEXT_MAX = 4096;
 const TASK_RECORD_REPORT_MAX = 16 * 1024;
+// A turn's timing on its `turn` record, at most.
+const TIMING_MAX_BYTES = 16 * 1024;
 // A hand-off with no reply this long after it opened is `lost`.
 const TASK_LOST_MS = 30 * 60_000;
 // Replies whose task is not recorded yet (its `task_open` a step behind),
@@ -754,6 +756,8 @@ export class App extends DurableObject {
       .map((r) => r.i)
       .reverse();
     const chat = { id: thread, title: t?.title ?? "", started: t?.started ?? now, recent };
+    // when its first message was logged: the turn's timing counts from there
+    const asked = taken.length ? (sql.exec("SELECT at FROM log WHERE i = ?", taken[0].i).toArray()[0]?.at ?? null) : null;
     this.#setJson("turn", { run, thread, since: now, touched: now, stop: false });
     const settled = this.#firstUnbuilt(m) >= tail;
     call.publish("log", { type: "turn", thread, state: settled ? "thinking" : "settling" });
@@ -762,7 +766,7 @@ export class App extends DurableObject {
       sql.exec("UPDATE task SET state = 'lost' WHERE id = ?", id);
       this.#publishTask(call, this.#task(id));
     }
-    return { took: true, thread, chat, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments, now };
+    return { took: true, thread, chat, persona, about: this.#get("about") ?? "", texts, taken, tail, settled, attachments, now, asked };
   }
 
   // The lock kept by its run; answers whether Stop was asked.
@@ -783,7 +787,7 @@ export class App extends DurableObject {
     return this.#changing((m) => {
       M.fit(m);
       const r = M.render(m, Math.min(upto, m.T));
-      return { text: r.text, bytes: r.bytes, parts: r.parts, T: m.T, settled: r.settled };
+      return { text: r.text, bytes: r.bytes, parts: r.parts, T: m.T, settled: r.settled, at: Date.now() };
     });
   }
 
@@ -809,13 +813,13 @@ export class App extends DurableObject {
       const heard = take && touched.held && !touched.stopped ? this.#take(thread) : { taken: [], texts: [], attachments: [] };
       // the nodes these messages readied, written before asking whether any is
       this.#flush(m);
-      return { ids, ...touched, heard, pump: this.#kick(Date.now()) };
+      return { ids, ...touched, heard, pump: this.#kick(Date.now()), at: Date.now() };
     });
   }
 
   // The lock let go, and what ended published. `requeue` puts a turn's
   // messages ({i, n}) back first in line (a turn handed on to a fresh run).
-  turn_end({ run, thread, state, error = null, requeue = [] }, call) {
+  turn_end({ run, thread, state, error = null, requeue = [], timing = null }, call) {
     need(["done", "stopped", "error", "settling"].includes(state), "turn_end: state is done, stopped, error or settling");
     let queue = this.#json("queue", []);
     if (Array.isArray(requeue) && requeue.length) {
@@ -829,7 +833,9 @@ export class App extends DurableObject {
     }
     const l = this.#json("turn", null);
     if (l && l.run === run) this.#del("turn");
-    call.publish("log", { type: "turn", thread, state, ...(error ? { error: String(error).slice(0, 2000) } : {}) });
+    // how long the turn took (docs/optchat.md, "Latency"), its end now
+    const timed = timing && typeof timing === "object" && sizeOf(timing) <= TIMING_MAX_BYTES ? { timing: { ...timing, end: Date.now() } } : {};
+    call.publish("log", { type: "turn", thread, state, ...(error ? { error: String(error).slice(0, 2000) } : {}), ...timed });
     const topics = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM topic").one().n;
     return { queued: queue.length, topics };
   }
@@ -1368,6 +1374,8 @@ export class App extends DurableObject {
         thread: t.thread,
         i: t.i,
         turn: t.turn,
+        // its record on `chat` (where goose's reply and claim name it)
+        seq: t.seq,
         text: M.cutBytes(t.text, TASK_RECORD_TEXT_MAX),
         state: t.state === "running" && now - t.started > TASK_LOST_MS ? "lost" : t.state,
         report: t.report === null ? null : M.cutBytes(t.report, TASK_RECORD_REPORT_MAX),
@@ -1566,8 +1574,10 @@ export class App extends DurableObject {
         return { turns, why: b.why };
       }
       turns++;
-      const end = await this.#turn(job, s, b, h);
-      const e = await s.call("turn_end", { run: job.run, thread: b.thread, state: end.state, error: end.error ?? null, requeue: end.requeue ?? [] });
+      // what the turn's steps took (docs/optchat.md, "Latency"), filled by #turn
+      const timing = { asked: b.asked ?? null, begun: b.now, view: null, calls: [] };
+      const end = await this.#turn(job, s, b, h, timing);
+      const e = await s.call("turn_end", { run: job.run, thread: b.thread, state: end.state, error: end.error ?? null, requeue: end.requeue ?? [], timing });
       if (end.handOn) {
         await s.call("heard", { resume: true });
         return { turns, continued: true };
@@ -1586,7 +1596,7 @@ export class App extends DurableObject {
   // [the turn's state, then its messages], the tools and the system prompt
   // the same for every persona and thread (and every compaction), so the
   // cached prefix runs through the view.
-  async #turn(job, s, b, h) {
+  async #turn(job, s, b, h, timing) {
     const thread = b.thread;
     try {
       if (!b.settled) {
@@ -1595,6 +1605,7 @@ export class App extends DurableObject {
         await s.publish("log", { type: "turn", thread, state: "thinking" });
       }
       const v = await s.call("turn_view", { upto: b.tail });
+      timing.view = typeof v.at === "number" ? v.at : null;
       if (!v.settled) return { state: "error", error: "the memory is not summarized up to this message" };
       // the web's steps (applib/web.mjs), and the providers it passes over
       // this turn (a secret found missing, DuckDuckGo found refusing)
@@ -1672,6 +1683,11 @@ export class App extends DurableObject {
           results.push({ role: "tool", tool_call_id: String(tc?.id ?? `call_${calls}_${k}`), content: echo });
         }
         const lg = await s.call("logged", { run: job.run, thread, persona: b.persona.id, entries, take: asked.length > 0 });
+        // the call's own timing (the platform's), its tools, and when its log landed
+        const t = a?.timing && typeof a.timing === "object" ? a.timing : {};
+        if (timing.calls.length < CALLS_MAX) {
+          timing.calls.push({ first: t.first_ms ?? null, ms: t.ms ?? null, tries: t.tries ?? null, since: t.since_ms ?? null, at: t.at ?? null, hedged: t.hedged ?? null, won: t.won ?? null, tools: asked.map((tc) => String(tc?.function?.name ?? "").slice(0, 32)), logged: lg.at ?? null });
+        }
         if (lg.pump) await s.call("pump", {});
         if (!asked.length) return { state: "done" };
         if (lg.stopped) return { state: "stopped" };
