@@ -62,6 +62,9 @@ Inspiration:
 
 ## Where we differ from the gist
 
+(docs/optchat-lineage.md says the same for a reader: what is Victor's,
+what we adapted, and what is ours.)
+
 The mind follows UniiChat's design (2026-10-08) exactly but for these,
 each with its reason. Everything else in the gist holds as it says.
 
