@@ -696,11 +696,9 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
     // after the config
     write_credentials(a, home, ids);
     let synced = sync::round(api, a, &dir, &own).await;
-    // its Bot Mode identity, its job's first line from its SOUL.md as the
-    // sync left it, and the hook that titles its own chat's session Bot Chat
-    // (bots.rs)
-    let soul = std::fs::read_to_string(dir.join("SOUL.md")).ok();
-    write_whole(&dir.join("profile.yaml"), &bots::profile_yaml(a, soul.as_deref()), ids);
+    // its Bot Mode identity (its title, its job's first line), and the hook
+    // that titles its own chat's session Bot Chat (bots.rs)
+    write_identity(api, a, &dir, ids).await;
     match bots::link_hook(&dir, Path::new(&format!("{OPT}/{}", bots::HOOK))) {
         Ok(()) => chown(&dir.join("hooks"), ids),
         Err(e) => ev!("profile.hook_failed", { "agent": a.fragment, "error": e.to_string() }),
@@ -709,6 +707,22 @@ async fn write_profile(api: &Api, a: &Agent, home: &Path, ids: Option<(u32, u32)
         Ok(d) => ev!("profile.written", { "agent": a.fragment, "profile": wire::profile(&a.fragment), "fresh": fresh, "tier": tier.map(hermes::Tier::name), "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "ms": t.elapsed().as_millis() as u64 }),
         Err(e) => ev!("profile.written", { "agent": a.fragment, "fresh": fresh, "syncError": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
     }
+}
+
+/// An agent's Bot Mode identity (bots.rs, `profile_yaml`): its agent
+/// fragment's title, read from its list (a title unread is its name on the
+/// computer), and its job's first line from its SOUL.md as the sync left
+/// it.
+async fn write_identity(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>) {
+    let title = match api.fragments(&a.fragment).await {
+        Ok(list) => list.into_iter().find(|f| f.name == a.fragment).map(|f| f.title),
+        Err(e) => {
+            ev!("profile.title_unread", { "agent": a.fragment, "error": e.to_string() });
+            None
+        }
+    };
+    let soul = std::fs::read_to_string(dir.join("SOUL.md")).ok();
+    write_whole(&dir.join("profile.yaml"), &bots::profile_yaml(a, title.as_deref(), soul.as_deref()), ids);
 }
 
 /// Each agent's profile at a boot, and the profiles of agents that left
@@ -1290,8 +1304,7 @@ async fn boot_main() {
                         Ok(d) if d != sync::Done::default() => {
                             // its job may have changed: its Bot Mode description with it
                             if d.pulled > 0 {
-                                let soul = std::fs::read_to_string(dir.join("SOUL.md")).ok();
-                                write_whole(&dir.join("profile.yaml"), &bots::profile_yaml(a, soul.as_deref()), ids);
+                                write_identity(&api, a, &dir, ids).await;
                             }
                             ev!("sync.round", { "agent": a.fragment, "pulled": d.pulled, "pushed": d.pushed, "conflicts": d.conflicts, "deleted": d.deleted })
                         }

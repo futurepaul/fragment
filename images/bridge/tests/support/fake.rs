@@ -46,6 +46,9 @@ pub struct Chan {
 pub struct Frag {
     /// What it is (`chat`, `agent`, `skills`, …), as its list says.
     pub kind: String,
+    /// Its title, as its list says (an agent fragment's: its label,
+    /// capitalized, as the shell titles one by the agent's name).
+    pub title: String,
     pub members: Vec<Member>,
     pub channels: BTreeMap<String, Chan>,
     pub subscriptions: Vec<Value>,
@@ -173,7 +176,9 @@ impl Drop for Fake {
 /// An agent's own fragment: its owner paul, the agent an editor of it,
 /// and its `tasks`.
 fn agent_fragment(identity: &str) -> Frag {
-    let mut f = Frag { kind: "agent".into(), ..Frag::default() };
+    let label = identity.trim_start_matches("npub1");
+    let title = label.get(..1).map(|c| c.to_uppercase() + &label[1..]).unwrap_or_default();
+    let mut f = Frag { kind: "agent".into(), title, ..Frag::default() };
     f.members.push(Member { principal: "npub1paul".into(), role: "owner".into(), kind: "person".into(), added_at: 1 });
     f.members.push(Member { principal: identity.into(), role: "editor".into(), kind: "agent".into(), added_at: 2 });
     f.channels.insert("tasks".into(), Chan { post: Some("editor".into()), ..Chan::default() });
@@ -464,7 +469,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         let list: Vec<Value> = w
             .fragments
             .iter()
-            .filter_map(|(n, f)| World::role_in(f, &me, acting_for.as_deref()).map(|role| json!({ "name": n, "role": role, "kind": f.kind, "owned": owns(f) })))
+            .filter_map(|(n, f)| World::role_in(f, &me, acting_for.as_deref()).map(|role| json!({ "name": n, "role": role, "kind": f.kind, "owned": owns(f), "title": f.title })))
             .collect();
         return answer(StatusCode::OK, json!({ "fragments": list }));
     }

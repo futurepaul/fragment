@@ -2080,7 +2080,7 @@ async fn bots_message_each_other() {
     let c = Container::run(&tag, fake.addr.port(), model.addr.port(), &[]);
     fake.until(180_000, "Hermes' bridge to follow both agents' chats", |w| w.live_sockets() >= 4).await;
     let yaml = c.exec_out(&["cat", "/data/hermes/profiles/maple--k3x9/profile.yaml"]);
-    assert!(yaml.contains("display_name: \"maple\"\n") && yaml.contains("ui_meta:\n  hermes-bots:\n    title: \"maple\"\n"), "maple is a bot: {yaml}");
+    assert!(yaml.contains("display_name: \"Maple\"\n") && yaml.contains("ui_meta:\n  hermes-bots:\n    title: \"Maple\"\n"), "maple is a bot, named by her fragment's title: {yaml}");
     // each bot's first message in its own chat makes its session there
     for (chat, agent) in [(&jchat, "juniper--k3x9"), (&mchat, "maple--k3x9")] {
         let said = fake.say(chat, &person("paul"), json!({ "text": "hello" }));
@@ -2119,7 +2119,7 @@ async fn bots_message_each_other() {
     let record = fake.with(|w| asked_maple(w)).unwrap();
     eprintln!("bots: juniper's message in maple's chat {} ms after her turn: {}", t.elapsed().as_millis(), record["body"]);
     let text = record["body"]["text"].as_str().unwrap_or_default();
-    assert!(text.starts_with("Message from 🤖 juniper (@juniper--k3x9): ") && text.ends_with("ping from juniper"), "as Hermes attributes it: {text}");
+    assert!(text.starts_with("Message from 🤖 Juniper (@juniper--k3x9): ") && text.ends_with("ping from juniper"), "as Hermes attributes it, by her title: {text}");
     // maple's answer is a turn of the bridge's there, as maple
     let mturn = fragment_bridge::records::turn_id("maple--k3x9", &mchat, "chat", record["seq"].as_u64().unwrap());
     within(&fake, &mchat, &c, 180_000, "maple's turn", |w| w.bodies(&mchat, "work", "turn.end").iter().any(|e| e["turn"] == mturn)).await;

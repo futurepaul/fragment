@@ -1039,9 +1039,13 @@ actually makes a chat a Bot Chat"), so the image does both
 (`images/hermes/boot/src/bots.rs`):
 
 - Each agent's `profile.yaml`, written by the boot with its profile (and
-  again when a sync pulls its `SOUL.md`): its name as its display name
-  and its bot's title, its job's first line (its `SOUL.md`'s, at most 120
-  characters) as its description. Hermes' roster reads both. Its roster
+  again when a sync pulls its `SOUL.md`): its agent fragment's title as
+  its display name and its bot's title (the shell titles an agent fragment
+  by the agent's name; with none, its name on the computer, its label),
+  its job's first line (its `SOUL.md`'s, at most 120 characters) as its
+  description. Hermes' roster reads both, and signs a bot's messages to
+  its teammates with its title (`Message from 🤖 Juniper
+  (@juniper--k3x9): …`). Its roster
   always lists the gateway's own profile too, as `@hermes`; that profile
   runs no agent's turns, and its `profile.yaml` says so ("this computer's
   gateway, not an agent: never message it").
@@ -1089,7 +1093,7 @@ actually makes a chat a Bot Chat"), so the image does both
   sender, whose turn says the answer in the sender's own chat (a message
   of its runtime's own: docs/chat-records.md). The message's text is
   Hermes' own, its attribution first (`Message from 🤖 Juniper
-  (@juniper-paul): …`). At most four messages per agent are delivered at
+  (@juniper--k3x9): …`). At most four messages per agent are delivered at
   once; the rest wait in its mailbox. While the platform holds the
   computer the keeper writes nothing. Events: `botmode.owned`,
   `botmode.taken`, `botmode.delivered` (its status, sender and `ms`).

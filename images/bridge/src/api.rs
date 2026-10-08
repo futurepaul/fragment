@@ -102,6 +102,10 @@ pub struct FragmentEntry {
     /// Listed `for` someone: whether they own it.
     #[serde(default)]
     pub owned: bool,
+    /// Its title, as its owner named it (an agent's is its name: the shell
+    /// titles an agent fragment so); empty when it has none.
+    #[serde(default)]
+    pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
