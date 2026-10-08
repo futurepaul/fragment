@@ -71,6 +71,11 @@ const DEV_WORKOS_PORT: u16 = 8794;
 /// The Workers AI fake behind the model route (`FRAGMENT_AI_URL`): dev
 /// never calls real models.
 const DEV_AI_PORT: u16 = 8796;
+/// The mail fake (`FRAGMENT_MAIL_URL`): dev never sends real mail, and
+/// prints each message instead.
+const DEV_MAIL_PORT: u16 = 8798;
+/// Where dev's mail says it comes from.
+const DEV_MAIL_FROM: &str = "fragment <mail@fragment.localhost>";
 /// The WorkOS fake's environment in dev.
 const DEV_WORKOS_CLIENT: &str = "client_fragment_dev";
 const DEV_WORKOS_KEY: &str = "sk_test_fragment_dev";
@@ -133,6 +138,7 @@ fn dev(args: &[String]) -> Result<()> {
         }
     };
     let ai = fragment_fakes::workers_ai::WorkersAi::start(DEV_AI_PORT)?;
+    let mailer = fragment_fakes::mail::Mailer::start(DEV_MAIL_PORT, true)?;
     let workos_label = match &workos.api_url {
         Some(u) => format!("{u} (the fake)"),
         None => format!("WorkOS {}", workos.client_id),
@@ -152,6 +158,9 @@ fn dev(args: &[String]) -> Result<()> {
         // text and images: the Workers AI fake (dev never calls a real model)
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
+        // the mail fake, which prints each message (dev never sends real mail)
+        mail_url: Some(mailer.url.clone()),
+        mail_from: Some(DEV_MAIL_FROM.into()),
         // a dev person is a seat, with the month's included credit
         default_plan: Some("seat".into()),
         delivery_retry_s: None,

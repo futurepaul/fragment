@@ -21,6 +21,7 @@ pub mod glob;
 pub mod ledger;
 pub mod levers;
 pub mod live;
+pub mod mail;
 pub mod manifest;
 pub mod media;
 pub mod models;

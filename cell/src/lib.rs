@@ -47,6 +47,7 @@ mod keys;
 mod ledger;
 mod levers;
 mod live;
+mod mail;
 mod members;
 mod meter;
 mod models;

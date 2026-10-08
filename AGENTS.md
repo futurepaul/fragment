@@ -188,7 +188,9 @@ prebuilt bundle is in the debt ledger).
   key and the host secret are made there on first run), and sign-in at
   http://127.0.0.1:8790/ through the WorkOS fake on :8794 (any email), or
   a real WorkOS environment when `WORKOS_CLIENT_ID_FILE` and
-  `WORKOS_API_KEY_FILE` name its files. Its secrets are seeded into
+  `WORKOS_API_KEY_FILE` name its files, and the platform's mail to the
+  mail fake on :8798, which prints each message (dev never sends real
+  mail). Its secrets are seeded into
   wrangler's local Secrets Store in `cell/.wrangler/state` and bound by
   name as a deploy binds them (`--clean` clears them with the state;
   docs/secrets.md). Each boot's log is
@@ -229,7 +231,7 @@ prebuilt bundle is in the debt ledger).
 - Crates: `crates/proto` (wire types), `crates/core` (the cell's pure
   logic, host-tested; sealing at rest is `seal.rs`), `crates/nip98`,
   `crates/templates` (`templates/`, embedded),
-  `crates/fakes` (code.storage, Workers AI, WorkOS, a push service),
+  `crates/fakes` (code.storage, Workers AI, WorkOS, Email Sending, a push service),
 
   `crates/devstack`, `crates/e2e`.
 - `images/` (the computer images: the bridge, the stub, our Hermes image;

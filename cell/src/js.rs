@@ -547,6 +547,24 @@ pub async fn ai_run(env: &JsValue, model: &str, input: &serde_json::Value, optio
     Ok(worker::Response::from(resp))
 }
 
+/// Sends one message through Cloudflare Email Sending (`EMAIL`, the
+/// `send_email` binding; its input is `fragment_core::mail::message`):
+/// its message id, or the service's error code (`E_…`) and message.
+pub async fn email_send(env: &JsValue, message: &serde_json::Value) -> Result<String, (String, String)> {
+    let email = binding(env, "EMAIL", "send_email").map_err(|e| (String::new(), e.message))?;
+    let sent = match call(&email, "send", &[to_js(message)]) {
+        Ok(pending) => settle(pending).await,
+        Err(e) => Err(e),
+    };
+    match sent {
+        Ok(answer) => get(&answer, "messageId")
+            .ok()
+            .and_then(|id| id.as_string())
+            .ok_or_else(|| (String::new(), "EMAIL.send answered no messageId".to_string())),
+        Err(e) => Err((get(&e, "code").ok().and_then(|c| c.as_string()).unwrap_or_default(), js_message(&e))),
+    }
+}
+
 /// A stream as two that read the same bytes (`ReadableStream.tee`): one
 /// may be read while the other is dropped.
 pub fn tee(stream: &ReadableStream) -> CellResult<(ReadableStream, ReadableStream)> {
